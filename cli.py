@@ -7425,22 +7425,26 @@ class HermesCLI:
     def _prompt_text_input(self, prompt_text: str) -> str | None:
         """Prompt for free-text input safely inside or outside prompt_toolkit.
 
-        Mirrors the thread-aware guard in ``_run_curses_picker``: ``run_in_terminal``
-        returns a coroutine that must be awaited by the prompt_toolkit event loop,
-        which only exists on the main thread.  Slash commands are dispatched from
-        the ``process_loop`` daemon thread (see issue #23185), so calling
-        ``run_in_terminal`` from there orphans the coroutine — ``_ask`` never runs,
-        and user keystrokes leak into the composer instead.  Fall back to a direct
-        ``input()`` when we're off the main thread.
+        ``run_in_terminal`` requires a running asyncio loop on the calling
+        thread. Slash commands like ``/reload-mcp`` are dispatched from
+        ``process_loop`` (a daemon background thread), so calling
+        ``run_in_terminal`` directly from there can orphan the coroutine and
+        leak keystrokes into the composer. A bare ``input()`` from that
+        background thread is not safe either. When possible, schedule the
+        prompt onto the app's loop and block this thread until it returns;
+        otherwise fall back to a direct ``input()``.
         """
         import threading
         result = [None]
+        done = threading.Event()
 
         def _ask():
             try:
                 result[0] = input(prompt_text).strip() or None
             except (KeyboardInterrupt, EOFError):
                 pass
+            finally:
+                done.set()
 
         in_main_thread = threading.current_thread() is threading.main_thread()
 
@@ -7462,8 +7466,24 @@ class HermesCLI:
             finally:
                 self._status_bar_visible = was_visible
                 self._app.invalidate()
-        else:
-            _ask()
+            return result[0]
+
+        if self._app:
+            from prompt_toolkit.application import run_in_terminal
+            loop = getattr(self._app, "loop", None)
+            if loop is not None and loop.is_running():
+                was_visible = self._status_bar_visible
+                self._status_bar_visible = False
+                self._app.invalidate()
+                try:
+                    loop.call_soon_threadsafe(lambda: run_in_terminal(_ask))
+                    done.wait()
+                finally:
+                    self._status_bar_visible = was_visible
+                    self._app.invalidate()
+                return result[0]
+
+        _ask()
         return result[0]
 
     def _prompt_text_input_modal(
@@ -10798,8 +10818,9 @@ class HermesCLI:
                 self._reload_mcp()
             return
 
-        # Render warning + prompt.  Use the same prompt_toolkit-native composer
-        # modal as destructive slash confirmations so choices stay visible.
+        # Render warning + prompt. Use the prompt_toolkit-native composer modal
+        # so choices stay visible and the confirmation flow uses the same
+        # machinery as other slash-command approvals.
         choices = [
             ("once", "Approve Once", "reload now"),
             ("always", "Always Approve", "reload now and silence this prompt permanently"),
@@ -10878,16 +10899,56 @@ class HermesCLI:
             else:
                 print(f"  🔧 {len(new_tools)} tool(s) available from {len(connected_servers)} server(s)")
 
-            # Refresh the agent's tool list so the model can call new tools
+            # Refresh the agent's tool list so the model can call new tools.
+            #
+            # Source of truth is HermesCLI.enabled_toolsets, not
+            # self.agent.enabled_toolsets — the latter is a snapshot from
+            # AIAgent init that goes stale after `/tools enable/disable` (or
+            # after the user fixes a broken config the agent was created
+            # against), which leaves the agent unable to see any tools.
+            #
+            # ``get_tool_definitions`` returns only built-in + plugin tools.
+            # Memory provider schemas (hindsight_*) and context engine
+            # schemas (lcm_*) are appended in AIAgent.__init__ AFTER that
+            # call; without re-applying the same dedup-and-append dance
+            # here, /reload-mcp wipes them off ``self.agent.tools``. Mirrors
+            # the logic at run_agent.py:1820-1840 and run_agent.py:2118-2135.
             if self.agent is not None:
-                self.agent.tools = get_tool_definitions(
-                    enabled_toolsets=self.agent.enabled_toolsets
-                    if hasattr(self.agent, "enabled_toolsets") else None,
+                refreshed_tools = get_tool_definitions(
+                    enabled_toolsets=self.enabled_toolsets,
+                    disabled_toolsets=self.disabled_toolsets or None,
                     quiet_mode=True,
-                )
-                self.agent.valid_tool_names = {
-                    tool["function"]["name"] for tool in self.agent.tools
-                } if self.agent.tools else set()
+                ) or []
+
+                _existing = {
+                    t.get("function", {}).get("name")
+                    for t in refreshed_tools
+                    if isinstance(t, dict)
+                }
+                _mem_mgr = getattr(self.agent, "_memory_manager", None)
+                if _mem_mgr is not None:
+                    for _schema in _mem_mgr.get_all_tool_schemas():
+                        _tname = _schema.get("name", "")
+                        if not _tname or _tname in _existing:
+                            continue
+                        refreshed_tools.append({"type": "function", "function": _schema})
+                        _existing.add(_tname)
+
+                _ctx_compressor = getattr(self.agent, "context_compressor", None)
+                if _ctx_compressor is not None:
+                    for _schema in _ctx_compressor.get_tool_schemas():
+                        _tname = _schema.get("name", "")
+                        if not _tname or _tname in _existing:
+                            continue
+                        refreshed_tools.append({"type": "function", "function": _schema})
+                        _existing.add(_tname)
+
+                self.agent.tools = refreshed_tools
+                self.agent.valid_tool_names = {n for n in _existing if n}
+                # Keep AIAgent.enabled_toolsets in sync with HermesCLI so
+                # any later code reading it sees the current selection.
+                if hasattr(self.agent, "enabled_toolsets"):
+                    self.agent.enabled_toolsets = self.enabled_toolsets
 
             # Inject a message at the END of conversation history so the
             # model knows tools changed.  Appended after all existing

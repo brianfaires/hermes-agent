@@ -30,15 +30,15 @@ def check_mark(ok: bool) -> str:
     return color("✗", Colors.RED)
 
 def redact_key(key: str) -> str:
-    """Redact an API key for display.
+    """Redact an API key for status display.
 
-    Thin wrapper over :func:`agent.redact.mask_secret`. Preserves the
-    "(not set)" placeholder in dim color to match ``hermes config``'s
-    output (previously this variant was missing the DIM color —
-    consolidated via PR that also introduced ``mask_secret``).
+    ``hermes status`` is often pasted into chats, logs, and bug reports, so it
+    should reveal only whether a key is configured — not prefixes/suffixes that
+    can become credential breadcrumbs.
     """
-    from agent.redact import mask_secret
-    return mask_secret(key, empty=color("(not set)", Colors.DIM))
+    if not key:
+        return color("(not set)", Colors.DIM)
+    return "***"
 
 
 def _format_iso_timestamp(value) -> str:
@@ -165,12 +165,12 @@ def show_status(args):
             continue
         value = _resolve_env(env_ref)
         has_key = bool(value)
-        display = redact_key(value) if not show_all else value
+        display = redact_key(value)
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
 
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value) if not show_all else anthropic_value
+    anthropic_display = redact_key(anthropic_value)
     print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
 
     # =========================================================================

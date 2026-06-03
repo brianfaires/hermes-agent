@@ -282,6 +282,62 @@ def _web_requires_env() -> list[str]:
 # the top of this module for backward-compat with integration tests and
 # unit-test patches.
 
+def _normalize_result_list(values: Any) -> List[Dict[str, Any]]:
+    """Normalize mixed SDK/list payloads into a list of dicts."""
+    if not isinstance(values, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in values:
+        plain = _to_plain_object(item)
+        if isinstance(plain, dict):
+            normalized.append(plain)
+    return normalized
+
+
+def _extract_web_search_results(response: Any) -> List[Dict[str, Any]]:
+    """Extract Firecrawl search results across SDK/direct/gateway response shapes."""
+    response_plain = _to_plain_object(response)
+
+    if isinstance(response_plain, dict):
+        data = response_plain.get("data")
+        if isinstance(data, list):
+            return _normalize_result_list(data)
+
+        if isinstance(data, dict):
+            data_web = _normalize_result_list(data.get("web"))
+            if data_web:
+                return data_web
+            data_results = _normalize_result_list(data.get("results"))
+            if data_results:
+                return data_results
+
+        top_web = _normalize_result_list(response_plain.get("web"))
+        if top_web:
+            return top_web
+
+        top_results = _normalize_result_list(response_plain.get("results"))
+        if top_results:
+            return top_results
+
+    if hasattr(response, "web"):
+        return _normalize_result_list(getattr(response, "web", []))
+
+    return []
+
+
+def _extract_scrape_payload(scrape_result: Any) -> Dict[str, Any]:
+    """Normalize Firecrawl scrape payload shape across SDK and gateway variants."""
+    result_plain = _to_plain_object(scrape_result)
+    if not isinstance(result_plain, dict):
+        return {}
+
+    nested = result_plain.get("data")
+    if isinstance(nested, dict):
+        return nested
+
+    return result_plain
+
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
 
