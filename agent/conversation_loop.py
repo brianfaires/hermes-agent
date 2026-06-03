@@ -809,7 +809,61 @@ def run_conversation(
             if not agent.quiet_mode:
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
-        
+
+        # Mid-turn preflight compression.
+        # The original preflight check only runs once before the tool loop,
+        # so a turn that accumulates huge tool outputs can still balloon
+        # into a giant next model call and trip the non-stream stale-call
+        # detector. Re-check at the top of every iteration before spending
+        # another API call.
+        if (
+            agent.compression_enabled
+            and len(messages) > agent.context_compressor.protect_first_n
+            + agent.context_compressor.protect_last_n + 1
+        ):
+            _iter_tokens = estimate_request_tokens_rough(
+                messages,
+                system_prompt=active_system_prompt or "",
+                tools=agent.tools or None,
+            )
+            if _iter_tokens >= agent.context_compressor.threshold_tokens:
+                if compression_attempts >= max_compression_attempts:
+                    agent._vprint(
+                        f"{agent.log_prefix}❌ Preflight compression needed but max compression attempts ({max_compression_attempts}) reached.",
+                        force=True,
+                    )
+                    agent._persist_session(messages, conversation_history)
+                    return {
+                        "messages": messages,
+                        "completed": False,
+                        "api_calls": api_call_count,
+                        "error": f"Preflight compression required but max compression attempts ({max_compression_attempts}) reached.",
+                        "partial": True,
+                        "failed": True,
+                        "compression_exhausted": True,
+                    }
+
+                compression_attempts += 1
+                agent._emit_status(
+                    f"📦 Mid-turn compression: ~{_iter_tokens:,} tokens >= {agent.context_compressor.threshold_tokens:,} threshold "
+                    f"(attempt {compression_attempts}/{max_compression_attempts})"
+                )
+                _orig_len = len(messages)
+                messages, active_system_prompt = agent._compress_context(
+                    messages,
+                    system_message,
+                    approx_tokens=_iter_tokens,
+                    task_id=effective_task_id,
+                )
+                conversation_history = None
+                agent._empty_content_retries = 0
+                agent._thinking_prefill_retries = 0
+                agent._last_content_with_tools = None
+                agent._last_content_tools_all_housekeeping = False
+                agent._mute_post_response = False
+                if len(messages) < _orig_len:
+                    continue
+
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
@@ -4007,47 +4061,36 @@ def run_conversation(
                 if _tc_names == {"execute_code"}:
                     agent.iteration_budget.refund()
                 
-                # Use real token counts from the API response to decide
-                # compression.  prompt_tokens + completion_tokens is the
-                # actual context size the provider reported plus the
-                # assistant turn — a tight lower bound for the next prompt.
-                # Tool results appended above aren't counted yet, but the
-                # threshold (default 50%) leaves ample headroom; if tool
-                # results push past it, the next API call will report the
-                # real total and trigger compression then.
-                #
-                # If last_prompt_tokens is 0 (stale after API disconnect
-                # or provider returned no usage data), fall back to rough
-                # estimate to avoid missing compression.  Without this,
-                # a session can grow unbounded after disconnects because
-                # should_compress(0) never fires.  (#2153)
+                # Use provider-reported prompt tokens when available, but
+                # also estimate the CURRENT message list after appending tool
+                # results. Big tool outputs can push the next prompt over the
+                # threshold inside the same turn, before a provider reports a
+                # fresh prompt count.
                 _compressor = agent.context_compressor
+                _estimated_next_tokens = estimate_request_tokens_rough(
+                    messages,
+                    tools=agent.tools or None,
+                )
                 if _compressor.last_prompt_tokens > 0:
-                    # Only use prompt_tokens — completion/reasoning
-                    # tokens don't consume context window space.
-                    # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
-                    # inflate completion_tokens with reasoning,
-                    # causing premature compression.  (#12026)
-                    _real_tokens = _compressor.last_prompt_tokens
+                    # Only prompt tokens consume context window space; combine
+                    # them with the fresh estimate so newly appended tool output
+                    # cannot sneak past compression.
+                    _real_tokens = max(_compressor.last_prompt_tokens, _estimated_next_tokens)
                 elif _compressor.last_prompt_tokens == -1:
                     # Compression just ran and no API-reported prompt count
                     # has arrived yet. Avoid treating a schema-heavy rough
                     # post-compression estimate as real context pressure.
                     _real_tokens = 0
                 else:
-                    # Include tool schemas — with 50+ tools enabled
-                    # these add 20-30K tokens the messages-only
-                    # estimate misses, which can skip compression
-                    # past the configured threshold (#14695).
-                    _real_tokens = estimate_request_tokens_rough(
-                        messages, tools=agent.tools or None
-                    )
+                    # Include tool schemas — with 50+ tools enabled these add
+                    # 20-30K tokens the messages-only estimate misses.
+                    _real_tokens = _estimated_next_tokens
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message,
-                        approx_tokens=agent.context_compressor.last_prompt_tokens,
+                        approx_tokens=_real_tokens,
                         task_id=effective_task_id,
                     )
                     # Compression created a new session — clear history so
