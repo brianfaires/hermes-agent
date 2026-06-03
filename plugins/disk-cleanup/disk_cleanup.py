@@ -26,7 +26,7 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     from hermes_constants import get_hermes_home
@@ -57,6 +57,97 @@ def get_tracked_file() -> Path:
 def get_log_file() -> Path:
     """Audit log — intentionally NOT under ``$HERMES_HOME/logs/``."""
     return get_state_dir() / "cleanup.log"
+
+
+def _is_wildcard_path_str(path_str: str) -> bool:
+    return path_str.endswith("/*")
+
+
+def _canonicalize_path_str(path_str: str) -> str:
+    """Canonicalize tracked paths while preserving trailing ``/*`` wildcards."""
+    if _is_wildcard_path_str(path_str):
+        parent = Path(path_str[:-2]).expanduser().resolve()
+        return f"{parent}/*"
+    return str(Path(path_str).expanduser().resolve())
+
+
+def _wildcard_parent_from_str(path_str: str) -> Path:
+    return Path(path_str[:-2]).expanduser().resolve()
+
+
+def _tracked_path_exists(path_str: str) -> bool:
+    if _is_wildcard_path_str(path_str):
+        return _wildcard_parent_from_str(path_str).is_dir()
+    return Path(path_str).exists()
+
+
+def _is_legacy_auto_delete_dir(path_str: str, category: str) -> bool:
+    """Guard against whole-directory deletion for old non-wildcard entries."""
+    if _is_wildcard_path_str(path_str):
+        return False
+    p = Path(path_str)
+    return p.is_dir() and category in {"test", "temp", "cron-output"}
+
+
+def _age_days_from_timestamp(ts: str, now: datetime) -> int:
+    return (now - datetime.fromisoformat(ts)).days
+
+
+def _age_days_from_mtime(path: Path, now: datetime) -> int:
+    return (now - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)).days
+
+
+def _auto_delete_threshold_days(category: str) -> Optional[int]:
+    if category == "test":
+        return 0
+    if category == "temp":
+        return 7
+    if category == "cron-output":
+        return 14
+    return None
+
+
+def _iter_descendants(parent: Path) -> Iterable[Path]:
+    return parent.rglob("*")
+
+
+def _wildcard_cleanup_plan(item: Dict[str, Any], now: datetime) -> Tuple[List[Dict[str, Any]], List[Path]]:
+    """Return synthetic file items + empty dirs removable for a wildcard entry."""
+    parent = _wildcard_parent_from_str(item["path"])
+    if not parent.is_dir():
+        return [], []
+
+    threshold = _auto_delete_threshold_days(item["category"])
+    if threshold is None:
+        return [], []
+
+    auto_files: List[Dict[str, Any]] = []
+    removable_files: Set[Path] = set()
+    for child in _iter_descendants(parent):
+        if not child.is_file():
+            continue
+        age = _age_days_from_mtime(child, now)
+        if item["category"] == "test" or age > threshold:
+            removable_files.add(child)
+            auto_files.append({
+                "path": str(child),
+                "timestamp": datetime.fromtimestamp(child.stat().st_mtime, tz=timezone.utc).isoformat(),
+                "category": item["category"],
+                "size": child.stat().st_size,
+                "source": item["path"],
+            })
+
+    removable_dirs: Set[Path] = set()
+    dirs = [p for p in _iter_descendants(parent) if p.is_dir()]
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        if children and all(child in removable_files or child in removable_dirs for child in children):
+            removable_dirs.add(d)
+
+    return auto_files, sorted(removable_dirs, key=lambda p: len(p.parts), reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -158,51 +249,52 @@ def fmt_size(n: float) -> str:
 # ---------------------------------------------------------------------------
 
 def track(path_str: str, category: str, silent: bool = False) -> bool:
-    """Register a file for tracking. Returns True if newly tracked."""
+    """Register a file or trailing-``/*`` folder wildcard for tracking."""
     if category not in ALLOWED_CATEGORIES:
         _log(f"WARN: unknown category '{category}', using 'other'")
         category = "other"
 
-    path = Path(path_str).resolve()
+    canonical = _canonicalize_path_str(path_str)
+    path = _wildcard_parent_from_str(canonical) if _is_wildcard_path_str(canonical) else Path(canonical)
 
-    if not path.exists():
-        _log(f"SKIP: {path} (does not exist)")
+    if not _tracked_path_exists(canonical):
+        _log(f"SKIP: {canonical} (does not exist)")
         return False
 
     if not is_safe_path(path):
-        _log(f"REJECT: {path} (outside HERMES_HOME)")
+        _log(f"REJECT: {canonical} (outside HERMES_HOME)")
         return False
 
-    size = path.stat().st_size if path.is_file() else 0
+    size = path.stat().st_size if path.is_file() and not _is_wildcard_path_str(canonical) else 0
     tracked = load_tracked()
 
     # Deduplicate
-    if any(item["path"] == str(path) for item in tracked):
+    if any(item["path"] == canonical for item in tracked):
         return False
 
     tracked.append({
-        "path": str(path),
+        "path": canonical,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "category": category,
         "size": size,
     })
     save_tracked(tracked)
-    _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
+    _log(f"TRACKED: {canonical} ({category}, {fmt_size(size)})")
     if not silent:
-        print(f"Tracked: {path} ({category}, {fmt_size(size)})")
+        print(f"Tracked: {canonical} ({category}, {fmt_size(size)})")
     return True
 
 
 def forget(path_str: str) -> int:
     """Remove a path from tracking without deleting the file."""
-    p = Path(path_str).resolve()
+    canonical = _canonicalize_path_str(path_str)
     tracked = load_tracked()
     before = len(tracked)
-    tracked = [i for i in tracked if Path(i["path"]).resolve() != p]
+    tracked = [i for i in tracked if i["path"] != canonical]
     removed = before - len(tracked)
     if removed:
         save_tracked(tracked)
-        _log(f"FORGOT: {p} ({removed} entries)")
+        _log(f"FORGOT: {canonical} ({removed} entries)")
     return removed
 
 
@@ -219,10 +311,22 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
     prompt: List[Dict] = []
 
     for item in tracked:
+        if _is_wildcard_path_str(item["path"]):
+            auto_files, removable_dirs = _wildcard_cleanup_plan(item, now)
+            auto.extend(auto_files)
+            auto.extend({
+                "path": str(d),
+                "timestamp": item["timestamp"],
+                "category": item["category"],
+                "size": 0,
+                "source": item["path"],
+            } for d in removable_dirs)
+            continue
+
         p = Path(item["path"])
         if not p.exists():
             continue
-        age = (now - datetime.fromisoformat(item["timestamp"])).days
+        age = _age_days_from_timestamp(item["timestamp"], now)
         cat = item["category"]
         size = item["size"]
 
@@ -258,8 +362,39 @@ def quick() -> Dict[str, Any]:
     freed = 0
     new_tracked: List[Dict] = []
     errors: List[str] = []
+    empty_removed = 0
 
     for item in tracked:
+        if _is_wildcard_path_str(item["path"]):
+            parent = _wildcard_parent_from_str(item["path"])
+            if not parent.exists():
+                _log(f"STALE: {item['path']} (removed from tracking)")
+                continue
+
+            auto_files, removable_dirs = _wildcard_cleanup_plan(item, now)
+            for file_item in auto_files:
+                p = Path(file_item["path"])
+                try:
+                    p.unlink()
+                    freed += file_item["size"]
+                    deleted += 1
+                    _log(
+                        f"DELETED: {p} ({item['category']}, {fmt_size(file_item['size'])}) "
+                        f"via wildcard {item['path']}"
+                    )
+                except OSError as e:
+                    _log(f"ERROR deleting {p}: {e}")
+                    errors.append(f"{p}: {e}")
+            for d in removable_dirs:
+                try:
+                    d.rmdir()
+                    empty_removed += 1
+                    _log(f"DELETED: {d} (empty dir via wildcard {item['path']})")
+                except OSError:
+                    pass
+            new_tracked.append(item)
+            continue
+
         p = Path(item["path"])
         cat = item["category"]
 
@@ -267,7 +402,15 @@ def quick() -> Dict[str, Any]:
             _log(f"STALE: {p} (removed from tracking)")
             continue
 
-        age = (now - datetime.fromisoformat(item["timestamp"])).days
+        if _is_legacy_auto_delete_dir(item["path"], cat):
+            _log(
+                f"SKIP: {p} (legacy non-wildcard directory tracked as {cat}; "
+                f"refusing whole-directory deletion, use {p}/* instead)"
+            )
+            new_tracked.append(item)
+            continue
+
+        age = _age_days_from_timestamp(item["timestamp"], now)
 
         should_delete = (
             cat == "test"
@@ -300,7 +443,6 @@ def quick() -> Dict[str, Any]:
         "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
         "hermes-agent", "backups", "profiles", ".worktrees",
     }
-    empty_removed = 0
     try:
         for dirpath in sorted(hermes_home.rglob("*"), reverse=True):
             if not dirpath.is_dir() or dirpath == hermes_home:
@@ -422,7 +564,7 @@ def status() -> Dict[str, Any]:
 
     existing = [
         (i["path"], i["size"], i["category"])
-        for i in tracked if Path(i["path"]).exists()
+        for i in tracked if _tracked_path_exists(i["path"])
     ]
     existing.sort(key=lambda x: x[1], reverse=True)
 
@@ -474,6 +616,8 @@ def guess_category(path: Path) -> Optional[str]:
     try:
         rel = path.resolve().relative_to(hermes_home)
         top = rel.parts[0] if rel.parts else ""
+        if rel.parts[:2] == ("cron", "output"):
+            return "cron-output"
         if top in {
             "disk-cleanup", "logs", "memories", "sessions", "config.yaml",
             "skills", "plugins", ".env", "USER.md", "MEMORY.md", "SOUL.md",
@@ -481,7 +625,7 @@ def guess_category(path: Path) -> Optional[str]:
         }:
             return None
         if top == "cron" or top == "cronjobs":
-            # Only files under the disposable ``output/`` subtree are
+# Only files under the disposable ``output/`` subtree are
             # cleanup candidates. Top-level cron control-plane state
             # (e.g. ``jobs.json``, ``.tick.lock``) must never be
             # auto-tracked — deleting it wipes the live scheduler
