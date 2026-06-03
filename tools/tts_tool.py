@@ -22,8 +22,8 @@ Custom command providers:
   See the Local Command section of ``website/docs/user-guide/features/tts.md``.
 
 Output formats:
-- Opus (.ogg) for Telegram voice bubbles (requires ffmpeg for Edge TTS)
-- MP3 (.mp3) for everything else (CLI, Discord, WhatsApp)
+- Opus (.ogg) by default for generated TTS artifacts
+- Native voice delivery marker for Telegram and Discord voice messages
 
 Configuration is loaded from ~/.hermes/config.yaml under the 'tts:' key.
 The user chooses the provider and voice; the model just sends text.
@@ -53,6 +53,7 @@ from typing import Callable, Dict, Any, Optional
 from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home
+from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 def get_env_value(name, default=None):
@@ -200,6 +201,9 @@ def _get_default_output_dir() -> str:
     return str(get_hermes_dir("cache/audio", "audio_cache"))
 
 DEFAULT_OUTPUT_DIR = _get_default_output_dir()
+NATIVE_VOICE_PLATFORMS = frozenset({"telegram", "discord"})
+NATIVE_OPUS_OUTPUT_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"})
+TRANSCODE_TO_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittentts", "piper"})
 
 # ---------------------------------------------------------------------------
 # Per-provider input-character limits (from official provider docs).
@@ -238,6 +242,58 @@ FALLBACK_MAX_TEXT_LENGTH = 4000
 
 # Back-compat alias. Prefer ``_resolve_max_text_length()`` for new code.
 MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
+
+
+def _normalize_tts_enabled() -> bool:
+    """Return whether voice.normalize_tts is enabled in config.yaml."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except Exception as exc:
+        logger.debug("Failed to load voice.normalize_tts config: %s", exc)
+        return False
+    voice_cfg = config.get("voice") if isinstance(config, dict) else {}
+    if not isinstance(voice_cfg, dict):
+        return False
+    return is_truthy_value(voice_cfg.get("normalize_tts"), default=False)
+
+
+def normalize_text_for_tts(text: str | None) -> str:
+    """Normalize text before any TTS provider sees it.
+
+    Disabled by default for backwards compatibility. When
+    ``voice.normalize_tts`` is missing or false, this preserves the old
+    markdown-only cleanup path.
+    """
+    raw = str(text or "")
+    if not _normalize_tts_enabled():
+        return _strip_markdown_for_tts(raw).strip()
+
+    raw = re.sub(r"\[\[[^\]]+\]\]", " ", raw)
+    raw = re.sub(r"MEDIA:\s*\S+", " ", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\bFILE:\s*\S+", " ", raw, flags=re.IGNORECASE)
+    raw = raw.replace("```", " ")
+    raw = raw.replace("`", "")
+
+    lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+        numbered = re.match(r"^\d+[.)]\s+(.*)$", stripped)
+        if bullet:
+            lines.append(bullet.group(1).strip())
+        elif numbered:
+            lines.append(numbered.group(1).strip())
+        else:
+            lines.append(stripped)
+
+    normalized = ". ".join(lines)
+    normalized = re.sub(r"[*_#>~]", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+    return normalized
 
 
 def _resolve_max_text_length(
@@ -1879,7 +1935,8 @@ def text_to_speech_tool(
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
     """
-    if not text or not text.strip():
+    text = normalize_text_for_tts(text)
+    if not text:
         return tool_error("Text is required", success=False)
 
     tts_config = _load_tts_config()
@@ -1901,13 +1958,16 @@ def text_to_speech_tool(
         )
         text = text[:max_len]
 
-    # Detect platform from gateway env var to choose the best output format.
-    # Telegram voice bubbles require Opus (.ogg); OpenAI and ElevenLabs can
-    # produce Opus natively (no ffmpeg needed).  Edge TTS always outputs MP3
-    # and needs ffmpeg for conversion.
+    # Detect platform from gateway env var to choose the delivery marker.
+    # TTS artifacts default to Ogg/Opus everywhere; Telegram and Discord also
+    # get the native voice-message marker so the gateway sends a voice bubble.
+    # Providers with native Opus support write .ogg directly. Providers that
+    # naturally emit MP3/WAV generate a native-format artifact and are
+    # transcoded to .ogg after synthesis.
     from gateway.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
-    want_opus = (platform == "telegram")
+    prefer_opus = True
+    wants_native_voice = platform in NATIVE_VOICE_PLATFORMS
 
     # Determine output path
     if output_path:
@@ -1937,6 +1997,8 @@ def text_to_speech_tool(
             file_path = _configured_command_tts_output_path(
                 file_path, command_provider_config
             )
+        elif prefer_opus and provider in NATIVE_OPUS_OUTPUT_PROVIDERS:
+            file_path = file_path.with_suffix(".ogg")
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = Path(DEFAULT_OUTPUT_DIR)
@@ -1944,9 +2006,10 @@ def text_to_speech_tool(
         if command_provider_config is not None:
             fmt = _get_command_tts_output_format(command_provider_config)
             file_path = out_dir / f"tts_{timestamp}.{fmt}"
-        # Use .ogg for Telegram with providers that support native Opus output,
-        # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
-        elif want_opus and provider in {"openai", "elevenlabs", "mistral", "gemini"}:
+        # Native-Opus providers can write the final artifact directly. Providers
+        # that naturally emit MP3/WAV use a native-format temporary path below,
+        # then get transcoded to Ogg/Opus before the tool returns.
+        elif prefer_opus and provider in NATIVE_OPUS_OUTPUT_PROVIDERS:
             file_path = out_dir / f"tts_{timestamp}.ogg"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
@@ -1954,6 +2017,17 @@ def text_to_speech_tool(
     # Ensure parent directory exists
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_str = str(file_path)
+    if (
+        prefer_opus
+        and command_provider_config is None
+        and provider in TRANSCODE_TO_OPUS_PROVIDERS
+        and file_path.suffix.lower() == ".ogg"
+    ):
+        # Edge and the local WAV-ish providers cannot be trusted to write real
+        # Opus just because the caller gave them an .ogg extension. Generate in
+        # their native-ish container first, then transcode. Codec cosplay is how
+        # Telegram ends up chewing on mislabeled MP3s like a Roomba eating socks.
+        file_str = str(file_path.with_suffix(".mp3"))
 
     try:
         # Generate audio with the configured provider
@@ -2098,10 +2172,10 @@ def text_to_speech_tool(
                 "error": f"TTS generation produced no output (provider: {provider})"
             }, ensure_ascii=False)
 
-        # Try Opus conversion for Telegram compatibility.
-        # Edge TTS outputs MP3, NeuTTS/KittenTTS output WAV. Keep those native
-        # formats for local/CLI playback and only convert when the current
-        # platform actually needs Opus voice delivery.
+        # Produce Ogg/Opus final artifacts. Edge TTS outputs MP3;
+        # NeuTTS/KittenTTS/Piper may output WAV-ish files; MiniMax/xAI default
+        # to MP3. Convert them after synthesis unless the provider already wrote
+        # native Opus.
         voice_compatible = False
         if command_provider_config is not None:
             # Command providers are documents by default. Voice-bubble
@@ -2125,17 +2199,15 @@ def text_to_speech_tool(
                     if opus_path:
                         file_str = opus_path
                 voice_compatible = file_str.endswith(".ogg")
-        elif (
-            want_opus
-            and provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"}
-            and not file_str.endswith(".ogg")
-        ):
+        elif prefer_opus and provider in TRANSCODE_TO_OPUS_PROVIDERS and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
-                voice_compatible = True
-        elif provider in {"elevenlabs", "openai", "mistral", "gemini"}:
-            voice_compatible = want_opus and file_str.endswith(".ogg")
+        elif provider in NATIVE_OPUS_OUTPUT_PROVIDERS:
+            voice_compatible = wants_native_voice and file_str.endswith(".ogg")
+
+        if prefer_opus and file_str.endswith(".ogg") and wants_native_voice:
+            voice_compatible = True
 
         file_size = os.path.getsize(file_str)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
@@ -2376,7 +2448,7 @@ def stream_tts_to_speaker(
             """Display sentence and optionally generate + play audio."""
             if stop_event.is_set():
                 return
-            cleaned = _strip_markdown_for_tts(sentence).strip()
+            cleaned = normalize_text_for_tts(sentence)
             if not cleaned:
                 return
             # Skip duplicate/near-duplicate sentences (LLM repetition)

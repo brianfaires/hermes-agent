@@ -46,6 +46,8 @@ class HookRegistry:
         # event_type -> [handler_fn, ...]
         self._handlers: Dict[str, List[Callable]] = {}
         self._loaded_hooks: List[dict] = []  # metadata for listing
+        self.gateway_runner: Any = None
+        self._builtin_voice_summary_handler: Optional[Callable] = None
 
     @property
     def loaded_hooks(self) -> List[dict]:
@@ -53,13 +55,24 @@ class HookRegistry:
         return list(self._loaded_hooks)
 
     def _register_builtin_hooks(self) -> None:
-        """Register built-in hooks that are always active.
-
-        Currently empty — no shipped built-in hooks. Kept as the extension
-        point for future always-on gateway hooks so they drop in without
-        re-plumbing discover_and_load().
-        """
-        return
+        """Register built-in hooks that are always active."""
+        try:
+            from gateway.voice_summary import make_agent_end_handler
+        except Exception:
+            return
+        if self._builtin_voice_summary_handler is None:
+            self._builtin_voice_summary_handler = make_agent_end_handler(self)
+        handle_agent_end = self._builtin_voice_summary_handler
+        handlers = self._handlers.setdefault("agent:end", [])
+        if handle_agent_end in handlers:
+            return
+        handlers.append(handle_agent_end)
+        self._loaded_hooks.append({
+            "name": "voice-summary",
+            "description": "Optional post-send TTS summaries for gateway text replies",
+            "events": ["agent:end"],
+            "path": "builtin:gateway.voice_summary",
+        })
 
     def discover_and_load(self) -> None:
         """

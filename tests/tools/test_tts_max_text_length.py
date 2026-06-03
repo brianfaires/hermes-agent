@@ -11,6 +11,7 @@ import json
 from tools.tts_tool import (
     FALLBACK_MAX_TEXT_LENGTH,
     PROVIDER_MAX_TEXT_LENGTH,
+    normalize_text_for_tts,
     _resolve_max_text_length,
 )
 
@@ -192,3 +193,41 @@ class TestTextToSpeechToolTruncation:
 
         assert result["success"] is True
         assert len(captured_text["text"]) == 100
+
+
+class TestNormalizeTextForTts:
+    def test_normalize_text_for_tts_missing_toggle_uses_markdown_only_cleanup(self, monkeypatch):
+        monkeypatch.setattr("tools.tts_tool._normalize_tts_enabled", lambda: False)
+
+        raw = "[[audio_as_voice]]\n- **first** item\nMEDIA:/tmp/f.mp3"
+
+        assert normalize_text_for_tts(raw) == "[[audio_as_voice]]\nfirst item\nMEDIA:/tmp/f.mp3"
+
+    def test_normalize_text_for_tts_enabled_removes_internal_markers_and_flattens_lists(self, monkeypatch):
+        monkeypatch.setattr("tools.tts_tool._normalize_tts_enabled", lambda: True)
+
+        raw = "[[audio_as_voice]]\n- **first** item\n- second item\nMEDIA:/tmp/f.mp3"
+        assert normalize_text_for_tts(raw) == "first item. second item"
+
+    def test_text_to_speech_tool_normalizes_before_provider_call_when_enabled(self, tmp_path, monkeypatch):
+        captured_text = {}
+
+        def fake_openai(t, out, cfg):
+            captured_text["text"] = t
+            with open(out, "wb") as f:
+                f.write(b"\x00")
+            return out
+
+        monkeypatch.setattr("tools.tts_tool._generate_openai_tts", fake_openai)
+        monkeypatch.setattr("tools.tts_tool._load_tts_config", lambda: {"provider": "openai"})
+        monkeypatch.setattr("tools.tts_tool._normalize_tts_enabled", lambda: True)
+
+        from tools.tts_tool import text_to_speech_tool
+        out = str(tmp_path / "out.mp3")
+        result = json.loads(text_to_speech_tool(
+            text="[[audio_as_voice]]\n1. `ship` it\nMEDIA:/tmp/nope.mp3",
+            output_path=out,
+        ))
+
+        assert result["success"] is True
+        assert captured_text["text"] == "ship it"

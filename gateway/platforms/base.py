@@ -3164,13 +3164,19 @@ class BasePlatformAdapter(ABC):
                 _prev = existing_cb
                 _new = callback
 
-                def _chained() -> None:
+                def _chained(*, delivery_succeeded: bool = False) -> None:
                     try:
-                        _prev()
+                        self._invoke_post_delivery_callback(
+                            _prev,
+                            delivery_succeeded=delivery_succeeded,
+                        )
                     except Exception:
                         logger.debug("Post-delivery callback failed", exc_info=True)
                     try:
-                        _new()
+                        self._invoke_post_delivery_callback(
+                            _new,
+                            delivery_succeeded=delivery_succeeded,
+                        )
                     except Exception:
                         logger.debug("Post-delivery callback failed", exc_info=True)
 
@@ -3203,6 +3209,35 @@ class BasePlatformAdapter(ABC):
             return None
         self._post_delivery_callbacks.pop(session_key, None)
         return entry if callable(entry) else None
+
+    @staticmethod
+    def _invoke_post_delivery_callback(
+        callback: Callable,
+        *,
+        delivery_succeeded: bool,
+    ) -> None:
+        """Invoke a post-delivery callback with optional delivery status.
+
+        Existing callbacks take no arguments. Newer callbacks can declare a
+        keyword-only ``delivery_succeeded`` parameter to avoid doing follow-up
+        work when the primary text send failed.
+        """
+        if not callable(callback):
+            return
+        try:
+            signature = inspect.signature(callback)
+        except (TypeError, ValueError):
+            callback()
+            return
+
+        params = signature.parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        if accepts_kwargs or "delivery_succeeded" in params:
+            callback(delivery_succeeded=delivery_succeeded)
+        else:
+            callback()
 
     # ── Processing lifecycle hooks ──────────────────────────────────────────
     # Subclasses override these to react to message processing events
@@ -4440,9 +4475,10 @@ class BasePlatformAdapter(ABC):
                 _post_cb = getattr(self, "_post_delivery_callbacks", {}).pop(session_key, None)
             if callable(_post_cb):
                 try:
-                    _post_result = _post_cb()
-                    if inspect.isawaitable(_post_result):
-                        await _post_result
+                    self._invoke_post_delivery_callback(
+                        _post_cb,
+                        delivery_succeeded=delivery_succeeded,
+                    )
                 except Exception:
                     pass
             # Stop typing indicator

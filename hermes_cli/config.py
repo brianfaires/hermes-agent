@@ -1522,9 +1522,21 @@ DEFAULT_CONFIG = {
         "record_key": "ctrl+b",
         "max_recording_seconds": 120,
         "auto_tts": False,
+        "normalize_tts": False,      # Normalize internal markers/lists before TTS conversion
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
+    },
+
+    "voice_summary": {
+        # Gateway post-send spoken summaries. Separate from voice.auto_tts:
+        # normal text is sent first; if enabled, the gateway then sends a
+        # second audio message for configured platforms.
+        "enabled": False,
+        "platforms": ["telegram", "discord"],
+        "model": "",              # Optional summary model override; empty = current default model
+        "provider": "",           # Optional summary provider override; empty = current runtime provider
+        "max_chars": 4000,
     },
     
     "human_delay": {
@@ -1870,6 +1882,16 @@ DEFAULT_CONFIG = {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
         "wrap_response": True,
+        # Optional LLM pass that rewrites delivered cron output into a short,
+        # human notification while preserving full saved output on disk.
+        "delivery_summary": {
+            "enabled": False,
+            "max_words": 32,
+            "max_input_chars": 12000,
+            # Optional overrides; unset means use the active default provider/model.
+            "provider": None,
+            "model": None,
+        },
         # Maximum number of due jobs to run in parallel per tick.
         # null/0 = unbounded (limited only by thread count).
         # 1 = serial (pre-v0.9 behaviour).
