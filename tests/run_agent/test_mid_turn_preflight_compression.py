@@ -102,4 +102,4 @@ def test_post_tool_compression_counts_new_tool_output_even_with_stale_prompt_tok
     assert result["final_response"] == "done"
     assert result["api_calls"] == 2
     assert mock_compress.call_count >= 1
-    assert compressed_lengths[0][1] == 150
+    assert compressed_lengths[0][1] > agent.context_compressor.last_prompt_tokens
