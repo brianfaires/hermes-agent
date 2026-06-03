@@ -400,7 +400,42 @@ class DeliveryRouter:
                 send_metadata["telegram_dm_topic_reply_fallback"] = True
             elif "thread_id" not in send_metadata and "message_thread_id" not in send_metadata and not has_explicit_direct_topic:
                 send_metadata["thread_id"] = target_thread_id
-        result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)
+        from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+
+        media_files, text_content = BasePlatformAdapter.extract_media(content)
+        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+        async def _send_payload(current_metadata: Dict[str, Any]) -> Any:
+            result = None
+            if text_content.strip() or not media_files:
+                result = await adapter.send(target.chat_id, text_content, metadata=current_metadata or None)
+                if _send_result_failed(result):
+                    return result
+            for media_path, is_voice in media_files:
+                ext = Path(media_path).suffix.lower()
+                if should_send_media_as_audio(target.platform, ext, is_voice=is_voice):
+                    result = await adapter.send_voice(
+                        target.chat_id,
+                        media_path,
+                        metadata=current_metadata or None,
+                    )
+                elif ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'} and hasattr(adapter, "send_video"):
+                    result = await adapter.send_video(
+                        target.chat_id,
+                        media_path,
+                        metadata=current_metadata or None,
+                    )
+                else:
+                    result = await adapter.send_document(
+                        target.chat_id,
+                        media_path,
+                        metadata=current_metadata or None,
+                    )
+                if _send_result_failed(result):
+                    return result
+            return result
+
+        result = await _send_payload(send_metadata)
         if _send_result_failed(result):
             if (
                 is_named_telegram_private_topic
@@ -423,7 +458,7 @@ class DeliveryRouter:
                     )
                 send_metadata["thread_id"] = str(refreshed_thread_id)
                 send_metadata["telegram_dm_topic_created_for_send"] = True
-                result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)
+                result = await _send_payload(send_metadata)
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
