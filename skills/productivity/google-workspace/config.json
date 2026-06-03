@@ -1,0 +1,14 @@
+{
+  "gmail_blocked_commands": [
+    "reply",
+    "send",
+    "forward",
+    "draft",
+    "archive",
+    "delete"
+  ],
+  "calendar_blocked_commands": [
+    "create",
+    "delete"
+  ]
+}

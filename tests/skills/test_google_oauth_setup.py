@@ -29,8 +29,8 @@ class FakeCredentials:
             "client_secret": "client-secret",
             "scopes": [
                 "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.send",
                 "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.send",
                 "https://www.googleapis.com/auth/calendar",
                 "https://www.googleapis.com/auth/drive.readonly",
                 "https://www.googleapis.com/auth/contacts.readonly",
@@ -132,9 +132,25 @@ def setup_module(monkeypatch, tmp_path):
     return module
 
 
+class TestScopeResolution:
+    def test_resolve_scopes_supports_service_sets(self, setup_module):
+        assert setup_module.resolve_scopes("email") == [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+        ]
+        assert setup_module.resolve_scopes("email,calendar") == [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar",
+        ]
+        assert setup_module.resolve_scopes("all") == setup_module.SCOPES
+
+
 class TestGetAuthUrl:
-    def test_persists_state_and_code_verifier_for_later_exchange(self, setup_module, capsys):
-        setup_module.get_auth_url()
+    def test_persists_state_and_requested_scopes_for_later_exchange(self, setup_module, capsys):
+        setup_module.get_auth_url("email,calendar")
 
         out = capsys.readouterr().out.strip()
         assert out == "https://auth.example/authorize?state=generated-state"
@@ -142,8 +158,15 @@ class TestGetAuthUrl:
         saved = json.loads(setup_module.PENDING_AUTH_PATH.read_text())
         assert saved["state"] == "generated-state"
         assert saved["code_verifier"] == "generated-code-verifier"
+        assert saved["requested_scopes"] == [
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar",
+        ]
 
         flow = FakeFlow.created[-1]
+        assert flow.scopes == saved["requested_scopes"]
         assert flow.autogenerate_code_verifier is True
         assert flow.authorization_kwargs == {"access_type": "offline", "prompt": "consent"}
 

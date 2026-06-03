@@ -21,9 +21,39 @@ metadata:
 
 Gmail, Calendar, Drive, Contacts, Sheets, and Docs — through Hermes-managed OAuth and a thin CLI wrapper. When `gws` is installed, the skill uses it as the execution backend for broader Google Workspace coverage; otherwise it falls back to the bundled Python client implementation.
 
+This skill also supports scoped policy config lists for write actions:
+
+- `gmail_blocked_commands` for Gmail write actions. Valid entries are: `reply`, `send`, `forward`, `draft`, `archive`, `delete`.
+- `calendar_blocked_commands` for Calendar write actions. Valid entries are: `create`, `delete`.
+
+Policy file path:
+
+```text
+~/.hermes/skills/productivity/google-workspace/config.json
+```
+
+Recommended default for assistant use:
+
+```json
+{
+  "gmail_blocked_commands": ["reply", "send", "forward", "draft", "archive", "delete"],
+  "calendar_blocked_commands": ["create", "delete"]
+}
+```
+
+Fail-closed behavior:
+
+- If the policy file is missing, or `gmail_blocked_commands` is missing, all six Gmail write actions are treated as blocked.
+- If the policy file is missing, or `calendar_blocked_commands` is missing, all Calendar write actions are treated as blocked.
+- Unknown values in `gmail_blocked_commands` are a hard error; do not ignore them.
+- Unknown values in `calendar_blocked_commands` are a hard error; do not ignore them.
+- If a command is listed in either blocked list, treat it as disallowed even if the underlying API or wrapper technically supports it.
+
 ## References
 
 - `references/gmail-search-syntax.md` — Gmail search operators (is:unread, from:, newer_than:, etc.)
+- `references/gmail-organization-only-verification.md` — verify the organization-only Gmail mode and catch repo-vs-installed skill drift.
+- `references/gmail-policy-config.md` — Gmail write-action policy config semantics, fail-closed behavior, and local-skill-vs-repo-copy path pitfalls.
 
 ## Scripts
 
@@ -183,19 +213,21 @@ $GAPI gmail search "has:attachment filename:pdf newer_than:7d"
 # Read full message (returns JSON with body text)
 $GAPI gmail get MESSAGE_ID
 
-# Send
-$GAPI gmail send --to user@example.com --subject "Hello" --body "Message text"
-$GAPI gmail send --to user@example.com --subject "Report" --body "<h1>Q4</h1><p>Details...</p>" --html
-$GAPI gmail send --to user@example.com --subject "Hello" --from '"Research Agent" <user@example.com>' --body "Message text"
-
-# Reply (automatically threads and sets In-Reply-To)
-$GAPI gmail reply MESSAGE_ID --body "Thanks, that works for me."
-$GAPI gmail reply MESSAGE_ID --from '"Support Bot" <user@example.com>' --body "Thanks"
-
 # Labels
 $GAPI gmail labels
+$GAPI gmail labels create --name "Follow Up"
+$GAPI gmail labels update LABEL_ID --name "Renamed"
+$GAPI gmail labels delete LABEL_ID
 $GAPI gmail modify MESSAGE_ID --add-labels LABEL_ID
 $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
+
+# Policy gate for Gmail write actions:
+# ~/.hermes/skills/productivity/google-workspace/config.json controls gmail_blocked_commands
+# gmail_blocked_commands may contain any of: reply, send, forward, draft, archive, delete
+# If a requested action is blocked, refuse it even if the wrapper/API could perform it.
+# Missing config fails closed: all six are blocked by default.
+# Unknown config values are a hard error.
+# See references/gmail-organization-only-verification.md
 ```
 
 ### Calendar
@@ -212,6 +244,13 @@ $GAPI calendar create --summary "Review" --start 2026-03-01T14:00:00Z --end 2026
 
 # Delete event
 $GAPI calendar delete EVENT_ID
+
+# Policy gate for Calendar write actions:
+# ~/.hermes/skills/productivity/google-workspace/config.json controls calendar_blocked_commands
+# calendar_blocked_commands may contain any of: create, delete
+# If a requested action is blocked, refuse it even if the wrapper/API could perform it.
+# Missing config fails closed: all Calendar write actions are blocked by default.
+# Unknown config values are a hard error.
 ```
 
 ### Drive
@@ -292,7 +331,6 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 - **Gmail search**: `[{id, threadId, from, to, subject, date, snippet, labels}]`
 - **Gmail get**: `{id, threadId, from, to, subject, date, labels, body}`
-- **Gmail send/reply**: `{status: "sent", id, threadId}`
 - **Calendar list**: `[{id, summary, start, end, location, description, htmlLink}]`
 - **Calendar create**: `{status: "created", id, summary, htmlLink}`
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
@@ -310,11 +348,21 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 
 ## Rules
 
-1. **Never send email, create/delete calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
-2. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
-3. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
-4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
-5. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
+1. **Honor `gmail_blocked_commands` first.** Read it from `~/.hermes/skills/productivity/google-workspace/config.json`. If the requested Gmail action appears in the list, do not perform it. Valid values: `reply`, `send`, `forward`, `draft`, `archive`, `delete`.
+2. **Honor `calendar_blocked_commands` too.** Read it from the same config file. If the requested Calendar write action appears in the list, do not perform it. Valid values: `create`, `delete`.
+3. **Default to the safest stance.** If the policy file or either blocked-commands key is missing, assume all corresponding write actions are blocked.
+4. **Fail on bad config.** If `gmail_blocked_commands` or `calendar_blocked_commands` contains unknown values or is not a list, stop and surface the error rather than guessing.
+5. **Never send email, create/delete calendar events, delete Drive files, share files, or modify Docs/Sheets without confirming with the user first.** Show what will be done (recipients, file IDs, content, share role) and ask for approval. For `drive delete`, prefer the default trash (reversible) over `--permanent`.
+6. **Check auth before first use** — run `setup.py --check`. If it fails, guide the user through setup.
+7. **Use the Gmail search syntax reference** for complex queries — load it with `skill_view("google-workspace", file_path="references/gmail-search-syntax.md")`.
+8. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
+9. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
+
+## Common Pitfalls
+
+1. **Confusing support for a config file with existence of a config file.** If code reads `~/.hermes/google_workspace_policy.json`, that does not mean the file exists. Verify or create it before claiming it is present.
+2. **Patching the wrong copy of the skill.** Check whether you are editing the user-local active skill under `~/.hermes/skills/...` or the in-repo checkout under `~/.hermes/hermes-agent/skills/...`. Report the exact path changed.
+3. **Letting bad policy config slide.** `gmail_blocked_commands` and `calendar_blocked_commands` must fail closed and hard-error on unknown values; do not silently ignore typos.
 
 ## Troubleshooting
 

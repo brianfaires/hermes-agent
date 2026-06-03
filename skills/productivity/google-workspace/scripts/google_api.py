@@ -8,8 +8,10 @@ libraries if `gws` is not installed.
 Usage:
   python google_api.py gmail search "is:unread" [--max 10]
   python google_api.py gmail get MESSAGE_ID
-  python google_api.py gmail send --to user@example.com --subject "Hi" --body "Hello"
-  python google_api.py gmail reply MESSAGE_ID --body "Thanks"
+  python google_api.py gmail labels
+  python google_api.py gmail labels create --name "Follow Up"
+  python google_api.py gmail labels update LABEL_ID --name "Renamed"
+  python google_api.py gmail labels delete LABEL_ID
   python google_api.py calendar list [--from DATE] [--to DATE] [--calendar primary]
   python google_api.py calendar create --summary "Meeting" --start DATETIME --end DATETIME
   python google_api.py drive search "budget report" [--max 10]
@@ -44,8 +46,8 @@ CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.labels",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/contacts.readonly",
@@ -90,6 +92,11 @@ def _gws_env() -> dict[str, str]:
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
     return env
+
+
+def _blocked_gmail_action(action: str) -> None:
+    print(f"Gmail {action} is disabled by policy in this assistant.", file=sys.stderr)
+    sys.exit(1)
 
 
 def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None = None):
@@ -316,123 +323,89 @@ def gmail_get(args):
 
 
 def gmail_send(args):
-    if _gws_binary():
-        message = MIMEText(args.body, "html" if args.html else "plain")
-        message["To"] = args.to
-        message["Subject"] = args.subject
-        if args.cc:
-            message["Cc"] = args.cc
-        if args.from_header:
-            message["From"] = args.from_header
-
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        body = {"raw": raw}
-        if args.thread_id:
-            body["threadId"] = args.thread_id
-
-        result = _run_gws(
-            ["gmail", "users", "messages", "send"],
-            params={"userId": "me"},
-            body=body,
-        )
-        print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
-        return
-
-    service = build_service("gmail", "v1")
-    message = MIMEText(args.body, "html" if args.html else "plain")
-    message["To"] = args.to
-    message["Subject"] = args.subject
-    if args.cc:
-        message["Cc"] = args.cc
-    if args.from_header:
-        message["From"] = args.from_header
-
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    body = {"raw": raw}
-
-    if args.thread_id:
-        body["threadId"] = args.thread_id
-
-    result = service.users().messages().send(userId="me", body=body).execute()
-    print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
-
+    _blocked_gmail_action("sending")
 
 
 def gmail_reply(args):
-    if _gws_binary():
-        original = _run_gws(
-            ["gmail", "users", "messages", "get"],
-            params={
-                "userId": "me",
-                "id": args.message_id,
-                "format": "metadata",
-                "metadataHeaders": ["From", "Subject", "Message-ID"],
-            },
-        )
-        headers = _headers_dict(original)
-
-        subject = headers.get("subject", "")
-        if not subject.startswith("Re:"):
-            subject = f"Re: {subject}"
-
-        message = MIMEText(args.body)
-        message["To"] = headers.get("from", "")
-        message["Subject"] = subject
-        if args.from_header:
-            message["From"] = args.from_header
-        if headers.get("message-id"):
-            message["In-Reply-To"] = headers["message-id"]
-            message["References"] = headers["message-id"]
-
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        result = _run_gws(
-            ["gmail", "users", "messages", "send"],
-            params={"userId": "me"},
-            body={"raw": raw, "threadId": original["threadId"]},
-        )
-        print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
-        return
-
-    service = build_service("gmail", "v1")
-    original = service.users().messages().get(
-        userId="me", id=args.message_id, format="metadata",
-        metadataHeaders=["From", "Subject", "Message-ID"],
-    ).execute()
-    headers = _headers_dict(original)
-
-    subject = headers.get("subject", "")
-    if not subject.startswith("Re:"):
-        subject = f"Re: {subject}"
-
-    message = MIMEText(args.body)
-    message["To"] = headers.get("from", "")
-    message["Subject"] = subject
-    if args.from_header:
-        message["From"] = args.from_header
-    if headers.get("message-id"):
-        message["In-Reply-To"] = headers["message-id"]
-        message["References"] = headers["message-id"]
-
-    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-    body = {"raw": raw, "threadId": original["threadId"]}
-
-    result = service.users().messages().send(userId="me", body=body).execute()
-    print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
+    _blocked_gmail_action("replying")
 
 
+def _label_result_payload(result: dict) -> dict:
+    return {
+        "id": result.get("id", ""),
+        "name": result.get("name", ""),
+        "type": result.get("type", ""),
+        "messageListVisibility": result.get("messageListVisibility", ""),
+        "labelListVisibility": result.get("labelListVisibility", ""),
+    }
 
-def gmail_labels(args):
+
+def gmail_labels_list(args):
     if _gws_binary():
         results = _run_gws(["gmail", "users", "labels", "list"], params={"userId": "me"})
-        labels = [{"id": l["id"], "name": l["name"], "type": l.get("type", "")} for l in results.get("labels", [])]
+        labels = [_label_result_payload(l) for l in results.get("labels", results.get("items", []))]
         print(json.dumps(labels, indent=2))
         return
 
     service = build_service("gmail", "v1")
     results = service.users().labels().list(userId="me").execute()
-    labels = [{"id": l["id"], "name": l["name"], "type": l.get("type", "")} for l in results.get("labels", [])]
+    labels = [_label_result_payload(l) for l in results.get("labels", [])]
     print(json.dumps(labels, indent=2))
 
+
+def gmail_labels_create(args):
+    body = {"name": args.name}
+    if args.message_list_visibility:
+        body["messageListVisibility"] = args.message_list_visibility
+    if args.label_list_visibility:
+        body["labelListVisibility"] = args.label_list_visibility
+
+    if _gws_binary():
+        result = _run_gws(["gmail", "users", "labels", "create"], params={"userId": "me"}, body=body)
+        print(json.dumps(_label_result_payload(result), indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    result = service.users().labels().create(userId="me", body=body).execute()
+    print(json.dumps(_label_result_payload(result), indent=2))
+
+
+def gmail_labels_update(args):
+    body = {}
+    if args.name:
+        body["name"] = args.name
+    if args.message_list_visibility:
+        body["messageListVisibility"] = args.message_list_visibility
+    if args.label_list_visibility:
+        body["labelListVisibility"] = args.label_list_visibility
+
+    if _gws_binary():
+        result = _run_gws(
+            ["gmail", "users", "labels", "update"],
+            params={"userId": "me", "id": args.label_id},
+            body=body,
+        )
+        print(json.dumps(_label_result_payload(result), indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    result = service.users().labels().update(userId="me", id=args.label_id, body=body).execute()
+    print(json.dumps(_label_result_payload(result), indent=2))
+
+
+def gmail_labels_delete(args):
+    if _gws_binary():
+        _run_gws(["gmail", "users", "labels", "delete"], params={"userId": "me", "id": args.label_id})
+        print(json.dumps({"status": "deleted", "id": args.label_id}, indent=2))
+        return
+
+    service = build_service("gmail", "v1")
+    service.users().labels().delete(userId="me", id=args.label_id).execute()
+    print(json.dumps({"status": "deleted", "id": args.label_id}, indent=2))
+
+
+def gmail_labels(args):
+    gmail_labels_list(args)
 
 
 def gmail_modify(args):
@@ -454,7 +427,6 @@ def gmail_modify(args):
     service = build_service("gmail", "v1")
     result = service.users().messages().modify(userId="me", id=args.message_id, body=body).execute()
     print(json.dumps({"id": result["id"], "labels": result.get("labelIds", [])}, indent=2))
-
 
 # =========================================================================
 # Calendar
@@ -1068,24 +1040,29 @@ def main():
     p.add_argument("message_id")
     p.set_defaults(func=gmail_get)
 
-    p = gmail_sub.add_parser("send")
-    p.add_argument("--to", required=True)
-    p.add_argument("--subject", required=True)
-    p.add_argument("--body", required=True)
-    p.add_argument("--cc", default="")
-    p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
-    p.add_argument("--html", action="store_true", help="Send body as HTML")
-    p.add_argument("--thread-id", default="", help="Thread ID for threading")
-    p.set_defaults(func=gmail_send)
-
-    p = gmail_sub.add_parser("reply")
-    p.add_argument("message_id", help="Message ID to reply to")
-    p.add_argument("--body", required=True)
-    p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
-    p.set_defaults(func=gmail_reply)
-
     p = gmail_sub.add_parser("labels")
+    labels_sub = p.add_subparsers(dest="label_action")
     p.set_defaults(func=gmail_labels)
+
+    p_list = labels_sub.add_parser("list")
+    p_list.set_defaults(func=gmail_labels_list)
+
+    p = labels_sub.add_parser("create")
+    p.add_argument("--name", required=True)
+    p.add_argument("--message-list-visibility", default="")
+    p.add_argument("--label-list-visibility", default="")
+    p.set_defaults(func=gmail_labels_create)
+
+    p = labels_sub.add_parser("update")
+    p.add_argument("label_id")
+    p.add_argument("--name", default="")
+    p.add_argument("--message-list-visibility", default="")
+    p.add_argument("--label-list-visibility", default="")
+    p.set_defaults(func=gmail_labels_update)
+
+    p = labels_sub.add_parser("delete")
+    p.add_argument("label_id")
+    p.set_defaults(func=gmail_labels_delete)
 
     p = gmail_sub.add_parser("modify")
     p.add_argument("message_id")
