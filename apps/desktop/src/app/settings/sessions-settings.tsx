@@ -192,7 +192,7 @@ function DefaultProjectDirSetting() {
     let alive = true
 
     void settings.getDefaultProjectDir().then(result => {
-      if (!alive) return
+      if (!alive) {return}
       setDir(result.dir)
       setFallback(result.defaultLabel)
     })
@@ -205,7 +205,7 @@ function DefaultProjectDirSetting() {
   const choose = useCallback(async () => {
     const settings = window.hermesDesktop?.settings
 
-    if (!settings) return
+    if (!settings) {return}
 
     setBusy(true)
 
@@ -229,7 +229,7 @@ function DefaultProjectDirSetting() {
   const clear = useCallback(async () => {
     const settings = window.hermesDesktop?.settings
 
-    if (!settings) return
+    if (!settings) {return}
 
     setBusy(true)
 

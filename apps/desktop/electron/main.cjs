@@ -1394,7 +1394,7 @@ function shellQuote(value) {
 // (`hermes desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
 // restart to load the new GUI" if the swap can't be performed.
-async function applyUpdatesPosixInApp(opts = {}) {
+async function applyUpdatesPosixInApp() {
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
   if (!hermes) {
@@ -1919,7 +1919,9 @@ async function ensureRuntime(backend) {
         stages: [],
         protocolVersion: null
       })
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
 
     bootstrapAbortController = new AbortController()
 
@@ -1937,10 +1939,14 @@ async function ensureRuntime(backend) {
         // bootstrap and a log-write failure doesn't suppress the UI signal.
         try {
           rememberLog(`[bootstrap] ${JSON.stringify(ev)}`)
-        } catch {}
+        } catch {
+      // Intentionally ignored.
+    }
         try {
           broadcastBootstrapEvent(ev)
-        } catch {}
+        } catch {
+      // Intentionally ignored.
+    }
       },
       writeMarker: writeBootstrapMarker
     })
@@ -3580,7 +3586,9 @@ ipcMain.handle('hermes:bootstrap:cancel', async () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
     return { ok: true, cancelled: true }
   }
   return { ok: false, cancelled: false }
@@ -4222,7 +4230,9 @@ app.on('before-quit', () => {
   if (bootstrapAbortController) {
     try {
       bootstrapAbortController.abort()
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
   }
 
   if (desktopLogFlushTimer) {

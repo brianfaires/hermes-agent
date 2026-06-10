@@ -1,5 +1,3 @@
-import type { ComponentType, SVGProps } from 'react'
-
 import {
   SiApple,
   SiBilibili,
@@ -14,6 +12,7 @@ import {
   SiWechat,
   SiWhatsapp
 } from '@icons-pack/react-simple-icons'
+import type { ComponentType, SVGProps } from 'react'
 
 import { Globe, Link as LinkIcon, MessageSquareText } from '@/lib/icons'
 import { cn } from '@/lib/utils'

@@ -121,7 +121,9 @@ function downloadInstallScript(commit, destPath) {
           out.close()
           try {
             fs.unlinkSync(tmpPath)
-          } catch {}
+          } catch {
+      // Intentionally ignored.
+    }
           reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${url}`))
           return
         }
@@ -134,14 +136,18 @@ function downloadInstallScript(commit, destPath) {
         out.on('error', err => {
           try {
             fs.unlinkSync(tmpPath)
-          } catch {}
+          } catch {
+      // Intentionally ignored.
+    }
           reject(err)
         })
       })
       .on('error', err => {
         try {
           fs.unlinkSync(tmpPath)
-        } catch {}
+        } catch {
+      // Intentionally ignored.
+    }
         reject(err)
       })
   })
@@ -207,7 +213,9 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
       killed = true
       try {
         child.kill('SIGTERM')
-      } catch {}
+      } catch {
+      // Intentionally ignored.
+    }
     }
     if (abortSignal) {
       if (abortSignal.aborted) {
@@ -278,7 +286,9 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
       killed = true
       try {
         child.kill('SIGTERM')
-      } catch {}
+      } catch {
+      // Intentionally ignored.
+    }
     }
     if (abortSignal) {
       if (abortSignal.aborted) {
@@ -381,7 +391,9 @@ async function fetchManifest({ scriptPath, installerKind, emit, hermesHome, acti
       if (parsed && Array.isArray(parsed.stages)) {
         return parsed
       }
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
   }
   throw new Error(`${isPosix ? 'install.sh --manifest' : 'install.ps1 -Manifest'} produced no parseable JSON payload\n${result.stdout}`)
 }
@@ -397,7 +409,9 @@ function parseStageResult(stdout) {
       if (parsed && typeof parsed.ok === 'boolean' && typeof parsed.stage === 'string') {
         return parsed
       }
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
   }
   return null
 }
@@ -489,7 +503,9 @@ async function runBootstrap(opts) {
     if (typeof onEvent === 'function') {
       try {
         onEvent({ type: 'failed', error: 'bootstrap cancelled by user' })
-      } catch {}
+      } catch {
+      // Intentionally ignored.
+    }
     }
     return { ok: false, cancelled: true }
   }
@@ -501,7 +517,9 @@ async function runBootstrap(opts) {
   const emit = ev => {
     try {
       runLog.stream.write(JSON.stringify(ev) + '\n')
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
     try {
       if (typeof onEvent === 'function') onEvent(ev)
     } catch (err) {
@@ -578,7 +596,9 @@ async function runBootstrap(opts) {
   } finally {
     try {
       runLog.stream.end()
-    } catch {}
+    } catch {
+      // Intentionally ignored.
+    }
   }
 }
 

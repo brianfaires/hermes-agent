@@ -267,9 +267,9 @@ function ManualView({ command, onDone }: { command: string; onDone: () => void }
       </div>
 
       <button
-        type="button"
-        onClick={handleCopy}
         className="group flex w-full items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-left transition-colors hover:border-border hover:bg-muted/50"
+        onClick={handleCopy}
+        type="button"
       >
         <code className="select-all font-mono text-sm text-foreground">
           <span className="text-muted-foreground">$ </span>

@@ -33,8 +33,8 @@ import {
   setMessages,
   setSelectedStoredSessionId,
   setSessions,
-  setSessionsTotal,
   setSessionStartedAt,
+  setSessionsTotal,
   setTurnStartedAt
 } from '@/store/session'
 import { reportBackendContract } from '@/store/updates'
