@@ -103,6 +103,83 @@ class TestDoctorEnvFileEncoding:
 
 
 class TestDoctorToolAvailabilityOverrides:
+    def test_filters_unavailable_toolsets_not_enabled_for_doctor(self):
+        available, unavailable = doctor._filter_doctor_tool_availability_by_enabled_toolsets(
+            ["web", "browser-cdp"],
+            [
+                {"name": "x_search", "env_vars": ["XAI_API_KEY"], "tools": ["x_search"]},
+                {"name": "video_gen", "env_vars": [], "tools": ["video_generate"]},
+            ],
+            {"web", "x_search"},
+        )
+
+        assert available == ["web"]
+        assert unavailable == [
+            {"name": "x_search", "env_vars": ["XAI_API_KEY"], "tools": ["x_search"]}
+        ]
+
+    def test_tool_availability_filter_preserves_legacy_output_without_config(self):
+        unavailable_entry = {"name": "video_gen", "env_vars": [], "tools": ["video_generate"]}
+
+        available, unavailable = doctor._filter_doctor_tool_availability_by_enabled_toolsets(
+            ["web", "browser-cdp"],
+            [unavailable_entry],
+            None,
+        )
+
+        assert available == ["web", "browser-cdp"]
+        assert unavailable == [unavailable_entry]
+
+    def test_relevant_auth_providers_follow_active_provider_config(self):
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "openai-codex", "default": "gpt-5.5"}},
+            enabled_toolsets=set(),
+        ) == {"codex"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "xai-oauth", "default": "grok-4"}},
+            enabled_toolsets=set(),
+        ) == {"xai_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "openrouter", "default": "gpt-5.5"}},
+            enabled_toolsets=set(),
+        ) == set()
+
+    def test_relevant_auth_providers_include_model_provider_prefixes(self):
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"default": "minimax-oauth/minimax-m1"}},
+            enabled_toolsets=set(),
+        ) == {"minimax_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "google-gemini-cli", "default": "gemini-2.5-pro"}},
+            enabled_toolsets=set(),
+        ) == {"gemini_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "openai_codex", "default": "gpt-5.5"}},
+            enabled_toolsets=set(),
+        ) == {"codex"}
+
+    def test_relevant_auth_providers_include_fallback_provider_shapes(self):
+        assert doctor._doctor_relevant_auth_providers(
+            {"fallback_providers": [{"provider": "minimax_oauth", "model": "minimax-m1"}]},
+            enabled_toolsets=set(),
+        ) == {"minimax_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"fallback_model": {"provider": "openai-codex", "model": "gpt-5.5"}},
+            enabled_toolsets=set(),
+        ) == {"codex"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"fallback_model": [{"provider": "minimax-oauth-io", "model": "minimax-m1"}]},
+            enabled_toolsets=set(),
+        ) == {"minimax_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "grok-oauth", "default": "grok-4"}},
+            enabled_toolsets=set(),
+        ) == {"xai_oauth"}
+        assert doctor._doctor_relevant_auth_providers(
+            {"model": {"provider": "minimax-portal", "default": "minimax-m1"}},
+            enabled_toolsets=set(),
+        ) == {"minimax_oauth"}
+
     def test_marks_honcho_available_when_configured(self, monkeypatch):
         monkeypatch.setattr(doctor, "_honcho_is_configured_for_doctor", lambda: True)
 
@@ -1041,7 +1118,10 @@ class TestDoctorXaiOAuthStatus:
         """Run doctor with a controlled xAI auth callable; return stdout."""
         home = tmp_path / ".hermes"
         home.mkdir(parents=True, exist_ok=True)
-        (home / "config.yaml").write_text("memory: {}\n", encoding="utf-8")
+        (home / "config.yaml").write_text(
+            "memory: {}\nmodel:\n  provider: xai-oauth\n  default: grok-4\n",
+            encoding="utf-8",
+        )
         project = tmp_path / "project"
         project.mkdir(exist_ok=True)
 
@@ -1209,7 +1289,14 @@ class TestDoctorCodexCliHintPlacement:
     def _run(self, monkeypatch, tmp_path, *, codex_logged_in: bool, codex_cli_present: bool) -> str:
         home = tmp_path / ".hermes"
         home.mkdir(parents=True, exist_ok=True)
-        (home / "config.yaml").write_text("memory: {}\n", encoding="utf-8")
+        (home / "config.yaml").write_text(
+            "memory: {}\n"
+            "model:\n"
+            "  provider: openai-codex\n"
+            "  default: gpt-5.5\n"
+            "fallback_model: minimax-oauth/minimax-m1\n",
+            encoding="utf-8",
+        )
         project = tmp_path / "project"
         project.mkdir(exist_ok=True)
 
@@ -1266,14 +1353,12 @@ class TestDoctorCodexCliHintPlacement:
         assert "(logged in)" in out
         assert self._hint_line() not in out
 
-    def test_hint_never_attaches_to_minimax_row(self, monkeypatch, tmp_path):
+    def test_hint_never_attaches_after_minimax_row(self, monkeypatch, tmp_path):
         out = self._run(monkeypatch, tmp_path, codex_logged_in=False, codex_cli_present=False)
-        # The MiniMax OAuth row and the hint must not be adjacent — the hint
-        # belongs to the Codex auth row directly above it.
         lines = [l for l in out.splitlines() if l.strip()]
+        hint_idx = next(i for i, l in enumerate(lines) if self._hint_line() in l)
         minimax_idx = next(i for i, l in enumerate(lines) if "MiniMax OAuth" in l)
-        assert self._hint_line() not in lines[minimax_idx - 1]
-        assert minimax_idx + 1 >= len(lines) or self._hint_line() not in lines[minimax_idx + 1]
+        assert hint_idx < minimax_idx
 
 
 class TestDoctorStaleMaxIterationsDrift:
