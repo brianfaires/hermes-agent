@@ -841,6 +841,14 @@ DEFAULT_CONFIG = {
         # remains available as a tool regardless of this setting — the routing
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
+        # Front desk routing is opt-in and profile/config scoped. Keep disabled
+        # by default so normal Hermes behavior is unchanged.
+        "front_desk": {
+            "enabled": False,
+            "passthrough_delegation": True,
+            "progress_ping_seconds": 120,
+            "routing": {"enabled": True},
+        },
         "disabled_toolsets": [],
     },
     

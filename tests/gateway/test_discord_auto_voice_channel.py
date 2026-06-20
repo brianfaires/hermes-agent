@@ -57,7 +57,7 @@ def _runner_adapter():
 
 
 @pytest.mark.asyncio
-async def test_discord_auto_voice_join_enables_all_and_links_text_channel():
+async def test_discord_auto_voice_join_enables_voice_only_and_links_text_channel():
     runner, adapter = _runner_adapter()
     guild = _guild()
     member = _member(guild=guild)
@@ -71,7 +71,7 @@ async def test_discord_auto_voice_join_enables_all_and_links_text_channel():
     assert adapter._voice_sources[42]["platform"] == "discord"
     assert adapter._voice_sources[42]["chat_id"] == "789"
     assert adapter._voice_sources[42]["user_id"] == "123"
-    assert runner._voice_mode["discord:789"] == "all"
+    assert runner._voice_mode["discord:789"] == "voice_only"
     runner._save_voice_modes.assert_called_once()
     assert "789" in adapter._auto_tts_enabled_chats
     assert "789" not in adapter._auto_tts_disabled_chats

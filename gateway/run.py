@@ -9378,6 +9378,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                event=event,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -11963,7 +11964,7 @@ class GatewayRunner:
                 user_name=getattr(member, "display_name", None),
                 guild_id=str(guild_id),
             ).to_dict()
-        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "all"
+        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "voice_only"
         self._save_voice_modes()
         self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
         logger.info(
@@ -12053,7 +12054,7 @@ class GatewayRunner:
             adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
             if hasattr(adapter, "_voice_sources"):
                 adapter._voice_sources[guild_id] = event.source.to_dict()
-            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "all"
+            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "voice_only"
             self._save_voice_modes()
             self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
             return (
@@ -12309,6 +12310,20 @@ class GatewayRunner:
                 return
 
             adapter = self.adapters.get(event.source.platform)
+
+            if adapter and event.source.platform == Platform.DISCORD and hasattr(adapter, "play_tts"):
+                thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
+                if thread_meta is not None:
+                    thread_meta = dict(thread_meta)
+                    thread_meta["notify"] = True
+                else:
+                    thread_meta = {"notify": True}
+                await adapter.play_tts(
+                    chat_id=event.source.chat_id,
+                    audio_path=actual_path,
+                    metadata=thread_meta,
+                )
+                return
 
             # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)
@@ -16909,6 +16924,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        event: Optional[MessageEvent] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -18535,13 +18551,21 @@ class GatewayRunner:
         
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
 
-        # Periodic "still working" notifications for long-running tasks.
-        # Fires every N seconds so the user knows the agent hasn't died.
-        # Config: agent.gateway_notify_interval in config.yaml, or
-        # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 180s (3 min).
-        # 0 = disable notifications.
-        _NOTIFY_INTERVAL_RAW = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
-        _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
+        # Periodic "still working" notifications for long-running turns.
+        # This is wall-clock based, not tool-progress based, so it still fires
+        # when the model is stuck after tools have finished. In Discord voice
+        # turns it also speaks via the normal VC playback path.
+        from gateway.long_running_progress import (
+            heartbeat_interval_seconds,
+            heartbeat_text,
+            should_send_voice_heartbeat,
+        )
+
+        _NOTIFY_INTERVAL = heartbeat_interval_seconds(
+            user_config,
+            platform_key=platform_key,
+            env_value=os.getenv("HERMES_AGENT_NOTIFY_INTERVAL"),
+        )
         if not bool(
             resolve_display_setting(
                 user_config,
@@ -18555,23 +18579,18 @@ class GatewayRunner:
 
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
-                return  # Notifications disabled (gateway_notify_interval: 0)
+                return
             _notify_adapter = self.adapters.get(source.platform)
             if not _notify_adapter:
                 return
-            # Track the heartbeat message id so we can edit-in-place on
-            # platforms that support it (Telegram, Discord, Slack, etc.)
-            # instead of spamming a new "Still working" bubble every
-            # interval. Falls back to send-new when edit fails or isn't
-            # supported by the adapter.
+
+            # Track the heartbeat message id so platforms with edit support can
+            # update one status bubble instead of posting a new one each interval.
             _heartbeat_msg_id: Optional[str] = None
+
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
-                _elapsed_mins = int((time.time() - _notify_start) // 60)
-                # Include agent activity context if available. Default
-                # heartbeat is terse: elapsed + current tool. Verbose
-                # iteration counter is gated on busy_ack_detail so users
-                # who want it can opt in per platform.
+                elapsed = time.time() - _notify_start
                 _agent_ref = agent_holder[0]
                 _status_detail = ""
                 _want_iteration_detail = bool(
@@ -18594,10 +18613,13 @@ class GatewayRunner:
                         if _action:
                             _parts.append(str(_action))
                         if _parts:
-                            _status_detail = " — " + ", ".join(_parts)
+                            _status_detail = ", ".join(_parts)
                     except Exception:
                         pass
-                _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                _heartbeat_text = heartbeat_text(
+                    elapsed_seconds=elapsed,
+                    status_detail=_status_detail,
+                )
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:
@@ -18622,6 +18644,9 @@ class GatewayRunner:
                             _heartbeat_msg_id = str(_notify_res.message_id)
                             if _cleanup_progress:
                                 _cleanup_msg_ids.append(_heartbeat_msg_id)
+
+                    if event is not None and should_send_voice_heartbeat(event):
+                        await self._send_voice_reply(event, _heartbeat_text)
                 except Exception as _ne:
                     logger.debug("Long-running notification error: %s", _ne)
 
