@@ -1104,19 +1104,22 @@ class TestMemoryToolToolsetGate:
     These tests mirror the gate logic in agent/agent_init.py around the
     memory provider tool injection block. The gate condition is:
 
-        enabled_toolsets is None        → no filter, inject (backward compat)
-        "memory" in enabled_toolsets    → user opted in, inject
-        otherwise (incl. [])            → skip injection
+        enabled_toolsets is None              → no filter, inject (backward compat)
+        "memory" in enabled_toolsets          → legacy compat, inject
+        provider name in enabled_toolsets     → inject that provider's tools
+        otherwise (incl. [])                  → skip injection
     """
 
     @staticmethod
-    def _run_memory_injection(enabled_toolsets, memory_manager):
+    def _run_memory_injection(enabled_toolsets, memory_manager, provider_name=""):
         """Simulate the gated memory-tool injection block from agent_init.py."""
         tools = []
         valid_tool_names = set()
 
         if memory_manager and tools is not None and (
-            enabled_toolsets is None or "memory" in enabled_toolsets
+            enabled_toolsets is None
+            or "memory" in enabled_toolsets
+            or (provider_name and provider_name in enabled_toolsets)
         ):
             _existing = {
                 t.get("function", {}).get("name")
@@ -1157,6 +1160,13 @@ class TestMemoryToolToolsetGate:
         tools, names = self._run_memory_injection(["terminal", "memory", "web"], mgr)
         assert "fact_store" in names
 
+    def test_provider_toolset_injects(self):
+        """enabled_toolsets including the configured provider injects provider tools."""
+        mgr = self._mgr_with_tools("hindsight_recall", "hindsight_retain")
+        tools, names = self._run_memory_injection(["hindsight"], mgr, provider_name="hindsight")
+        assert names == {"hindsight_recall", "hindsight_retain"}
+        assert [t["function"]["name"] for t in tools] == ["hindsight_recall", "hindsight_retain"]
+
     def test_empty_toolsets_blocks_injection(self):
         """`platform_toolsets: telegram: []` must suppress memory tools. (#5544)"""
         mgr = self._mgr_with_tools("fact_store")
@@ -1164,10 +1174,10 @@ class TestMemoryToolToolsetGate:
         assert tools == []
         assert names == set()
 
-    def test_toolsets_without_memory_blocks_injection(self):
-        """Toolset list that doesn't name 'memory' must suppress injection."""
+    def test_toolsets_without_memory_or_provider_blocks_injection(self):
+        """A toolset list omitting both legacy memory and the provider suppresses injection."""
         mgr = self._mgr_with_tools("fact_store")
-        tools, names = self._run_memory_injection(["terminal", "web"], mgr)
+        tools, names = self._run_memory_injection(["skills"], mgr, provider_name="hindsight")
         assert tools == []
         assert names == set()
 

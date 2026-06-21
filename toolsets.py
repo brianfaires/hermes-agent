@@ -216,6 +216,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hindsight": {
+        "description": "Hindsight long-term memory provider tools (retain, recall, reflect)",
+        "tools": [],
+        "includes": []
+    },
+
     "context_engine": {
         "description": "Runtime tools exposed by the active context engine",
         "tools": [],

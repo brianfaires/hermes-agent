@@ -1070,6 +1070,8 @@ def init_agent(
     if not skip_memory:
         try:
             mem_config = _agent_cfg.get("memory", {})
+            if not isinstance(mem_config, dict):
+                mem_config = {}
             agent._memory_enabled = mem_config.get("memory_enabled", False)
             agent._user_profile_enabled = mem_config.get("user_profile_enabled", False)
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
@@ -1088,11 +1090,13 @@ def init_agent(
     # Memory provider plugin (external — one at a time, alongside built-in)
     # Reads memory.provider from config to select which plugin to activate.
     agent._memory_manager = None
+    _mem_provider_name = ""
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            _mem_provider_name = str(_mem_provider_name).strip()
 
-            if _mem_provider_name and _mem_provider_name.strip():
+            if _mem_provider_name:
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem
                 agent._memory_manager = _MemoryManager()
@@ -1157,16 +1161,20 @@ def init_agent(
     # 400 errors on providers that enforce unique names (e.g. Xiaomi
     # MiMo via Nous Portal).
     #
-    # Respect the platform's enabled_toolsets configuration (#5544):
-    #   enabled_toolsets is None        → no filter, inject (backward compat)
-    #   "memory" in enabled_toolsets    → user opted in, inject
-    #   otherwise (incl. [])            → user excluded memory, skip injection
+    # Respect the platform's enabled_toolsets configuration (#5544), while
+    # separating built-in file-backed memory from provider-backed memory.
     #
-    # Without this gate, `platform_toolsets: telegram: []` still leaks memory
-    # provider tools (fact_store, etc.) into the tool surface — a 10x latency
-    # penalty on local models and a frequent trigger of tool-call loops.
+    #   enabled_toolsets is None             → no filter, inject (backward compat)
+    #   "memory" in enabled_toolsets         → legacy compat: inject provider tools
+    #   provider name in enabled_toolsets    → inject that provider's tools
+    #   otherwise (incl. [])                 → skip injection
+    #
+    # This lets `memory` mean the built-in MEMORY.md/USER.md tool, while
+    # `hindsight` can independently expose hindsight_retain/recall/reflect.
     if agent._memory_manager and agent.tools is not None and (
-        agent.enabled_toolsets is None or "memory" in agent.enabled_toolsets
+        agent.enabled_toolsets is None
+        or "memory" in agent.enabled_toolsets
+        or (_mem_provider_name and _mem_provider_name in agent.enabled_toolsets)
     ):
         _existing_tool_names = {
             t.get("function", {}).get("name")
