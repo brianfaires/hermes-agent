@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 from hermes_time import now as _hermes_now
 from utils import atomic_replace
 
+# Submodule import (not ``from cron import hooks``) so it resolves while the
+# cron package is still initializing. cron.hooks has no cron dependencies.
+import cron.hooks as cron_hooks
+
 try:
     from croniter import croniter
     HAS_CRONITER = True
@@ -709,6 +713,7 @@ def create_job(
     jobs.append(job)
     save_jobs(jobs)
 
+    cron_hooks.emit(cron_hooks.CREATE, job=_normalize_job_record(job))
     return job
 
 
@@ -829,7 +834,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
         jobs[i] = updated
         save_jobs(jobs)
-        return _normalize_job_record(jobs[i])
+        normalized = _normalize_job_record(jobs[i])
+        cron_hooks.emit(cron_hooks.UPDATE, job=normalized)
+        return normalized
     return None
 
 
@@ -903,6 +910,7 @@ def remove_job(job_id: str) -> bool:
         # Clean up output directory to prevent orphaned dirs accumulating
         if job_output_dir.exists():
             shutil.rmtree(job_output_dir)
+        cron_hooks.emit(cron_hooks.REMOVE, job=_normalize_job_record(job))
         return True
     return False
 
@@ -918,30 +926,34 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
     """
+    removed_job = None
     with _jobs_file_lock:
         jobs = load_jobs()
+        found = False
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                found = True
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
-                
+
                 # Increment completed count
                 if job.get("repeat"):
                     job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
+
                     # Check if we've hit the repeat limit
                     times = job["repeat"].get("times")
                     completed = job["repeat"]["completed"]
                     if times is not None and times > 0 and completed >= times:
-                        # Remove the job (limit reached)
-                        jobs.pop(i)
+                        # Remove the job (limit reached). Defer the REMOVE hook
+                        # until the file lock is released.
+                        removed_job = jobs.pop(i)
                         save_jobs(jobs)
-                        return
-                
+                        break
+
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
 
@@ -975,9 +987,13 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                     job["state"] = "scheduled"
 
                 save_jobs(jobs)
-                return
+                break
 
-        logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
+        if not found:
+            logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
+
+    if removed_job is not None:
+        cron_hooks.emit(cron_hooks.REMOVE, job=_normalize_job_record(removed_job))
 
 
 def advance_next_run(job_id: str) -> bool:
