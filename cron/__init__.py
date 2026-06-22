@@ -28,6 +28,15 @@ from cron.jobs import (
 )
 from cron.scheduler import tick
 
+# Register the cron_calendar_sync hooks. Best-effort: a failure here must never
+# stop the cron system from importing.
+try:
+    from cron.calendar_sync import register as _register_calendar_sync
+    _register_calendar_sync()
+except Exception as _e:  # pragma: no cover - defensive
+    import logging
+    logging.getLogger(__name__).warning("Could not register cron_calendar_sync hooks: %s", _e)
+
 __all__ = [
     "create_job",
     "get_job", 
