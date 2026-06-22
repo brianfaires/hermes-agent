@@ -592,7 +592,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._text_batch_split_delay_seconds = float(os.getenv("HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0"))
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
-        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
+        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> session/control channel_id
+        self._voice_transcript_channels: Dict[int, int] = {}  # guild_id -> optional transcript channel_id
+        self._auto_voice_session_channels: set[str] = set()  # channels bound by presence-triggered auto voice
+        self._voice_text_suppressed_channels: set[str] = set()  # auto-voice sessions with no text transcript
         self._voice_sources: Dict[int, Dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         # Phase 2: voice listening
@@ -1422,14 +1425,18 @@ class DiscordAdapter(BasePlatformAdapter):
         Forum channels (type 15) reject direct messages — a thread post is
         created automatically.
         """
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
         try:
             # Determine target channel: thread_id in metadata takes precedence.
             thread_id = None
             if metadata and metadata.get("thread_id"):
                 thread_id = metadata["thread_id"]
+
+            if not thread_id and str(chat_id) in getattr(self, "_voice_text_suppressed_channels", set()):
+                logger.info("[%s] Suppressing text reply for no-transcript Discord voice session %s", self.name, chat_id)
+                return SendResult(success=True)
+
+            if not self._client:
+                return SendResult(success=False, error="Not connected")
 
             if thread_id:
                 # Fetch the thread directly — threads are addressed by their own ID.
@@ -1966,11 +1973,8 @@ class DiscordAdapter(BasePlatformAdapter):
         return channel_id if channel_id > 0 else None
 
     def _auto_voice_text_channel_id(self) -> Optional[int]:
-        """Text channel used for routing transcripts/replies from auto voice mode."""
+        """Configured channel used for auto voice transcripts, when enabled."""
         raw = self.config.extra.get("auto_voice_text_channel_id")
-        if raw in (None, ""):
-            home = getattr(self.config, "home_channel", None)
-            raw = getattr(home, "chat_id", None)
         if raw in (None, ""):
             return None
         try:
@@ -2154,7 +2158,16 @@ class DiscordAdapter(BasePlatformAdapter):
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
                 task.cancel()
-            self._voice_text_channels.pop(guild_id, None)
+            session_channel_id = self._voice_text_channels.pop(guild_id, None)
+            auto_voice_session_channels = getattr(self, "_auto_voice_session_channels", None)
+            if isinstance(auto_voice_session_channels, set) and session_channel_id is not None:
+                auto_voice_session_channels.discard(str(session_channel_id))
+            voice_text_suppressed_channels = getattr(self, "_voice_text_suppressed_channels", None)
+            if isinstance(voice_text_suppressed_channels, set) and session_channel_id is not None:
+                voice_text_suppressed_channels.discard(str(session_channel_id))
+            voice_transcript_channels = getattr(self, "_voice_transcript_channels", None)
+            if isinstance(voice_transcript_channels, dict):
+                voice_transcript_channels.pop(guild_id, None)
             self._voice_sources.pop(guild_id, None)
 
     # Maximum seconds to wait for voice playback before giving up

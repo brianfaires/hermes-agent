@@ -11930,12 +11930,9 @@ class GatewayRunner:
         guild_id = getattr(guild, "id", None)
         if guild_id is None:
             return False
-        text_channel_id = None
+        transcript_channel_id = None
         if hasattr(adapter, "_auto_voice_text_channel_id"):
-            text_channel_id = adapter._auto_voice_text_channel_id()
-        if text_channel_id is None:
-            logger.warning("Discord auto voice channel is configured without a text channel/home channel")
-            return False
+            transcript_channel_id = adapter._auto_voice_text_channel_id()
 
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = self._handle_voice_channel_input
@@ -11952,8 +11949,20 @@ class GatewayRunner:
             self._clear_discord_voice_callbacks_if_idle(adapter)
             return False
 
-        chat_id = str(text_channel_id)
-        adapter._voice_text_channels[int(guild_id)] = int(text_channel_id)
+        session_channel_id = int(transcript_channel_id or getattr(voice_channel, "id"))
+        chat_id = str(session_channel_id)
+        adapter._voice_text_channels[int(guild_id)] = session_channel_id
+        if hasattr(adapter, "_auto_voice_session_channels"):
+            adapter._auto_voice_session_channels.add(chat_id)
+        if transcript_channel_id is not None and hasattr(adapter, "_voice_transcript_channels"):
+            adapter._voice_transcript_channels[int(guild_id)] = int(transcript_channel_id)
+        elif hasattr(adapter, "_voice_transcript_channels"):
+            adapter._voice_transcript_channels.pop(int(guild_id), None)
+        if hasattr(adapter, "_voice_text_suppressed_channels"):
+            if transcript_channel_id is None:
+                adapter._voice_text_suppressed_channels.add(chat_id)
+            else:
+                adapter._voice_text_suppressed_channels.discard(chat_id)
         if hasattr(adapter, "_voice_sources"):
             adapter._voice_sources[int(guild_id)] = SessionSource(
                 platform=Platform.DISCORD,
@@ -11995,6 +12004,10 @@ class GatewayRunner:
             self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
             self._save_voice_modes()
             self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            if hasattr(adapter, "_auto_voice_session_channels"):
+                adapter._auto_voice_session_channels.discard(chat_id)
+            if hasattr(adapter, "_voice_text_suppressed_channels"):
+                adapter._voice_text_suppressed_channels.discard(chat_id)
         self._clear_discord_voice_callbacks_if_idle(adapter)
         logger.info(
             "Auto-left Discord voice channel %s (%s) after user %s left",
@@ -12151,8 +12164,8 @@ class GatewayRunner:
         if not adapter:
             return
 
-        text_ch_id = adapter._voice_text_channels.get(guild_id)
-        if not text_ch_id:
+        session_ch_id = adapter._voice_text_channels.get(guild_id)
+        if not session_ch_id:
             return
 
         # Build source — reuse the linked text channel's metadata when available
@@ -12165,7 +12178,7 @@ class GatewayRunner:
         else:
             source = SessionSource(
                 platform=Platform.DISCORD,
-                chat_id=str(text_ch_id),
+                chat_id=str(session_ch_id),
                 user_id=str(user_id),
                 user_name=str(user_id),
                 chat_type="channel",
@@ -12173,12 +12186,10 @@ class GatewayRunner:
 
         auto_voice_authorized = False
         if source.platform == Platform.DISCORD and hasattr(adapter, "_is_auto_voice_user_id_allowed"):
-            auto_text_channel_id = None
-            if hasattr(adapter, "_auto_voice_text_channel_id"):
-                auto_text_channel_id = adapter._auto_voice_text_channel_id()
+            auto_session_channels = getattr(adapter, "_auto_voice_session_channels", set())
             auto_voice_authorized = (
-                auto_text_channel_id is not None
-                and str(auto_text_channel_id) == str(source.chat_id)
+                isinstance(auto_session_channels, set)
+                and str(source.chat_id) in auto_session_channels
                 and adapter._is_auto_voice_user_id_allowed(source.user_id)
             )
 
@@ -12198,14 +12209,17 @@ class GatewayRunner:
             )
             return
 
-        # Show transcript in text channel (after auth, with mention sanitization)
-        try:
-            channel = adapter._client.get_channel(text_ch_id)
-            if channel:
-                safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
-                await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
-        except Exception:
-            pass
+        # Show transcript only when a transcript channel is explicitly configured.
+        transcript_channels = getattr(adapter, "_voice_transcript_channels", {})
+        transcript_ch_id = transcript_channels.get(guild_id) if isinstance(transcript_channels, dict) else None
+        if transcript_ch_id:
+            try:
+                channel = adapter._client.get_channel(transcript_ch_id)
+                if channel:
+                    safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+                    await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
+            except Exception:
+                pass
 
         # Build a synthetic MessageEvent and feed through the normal pipeline
         # Use SimpleNamespace as raw_message so _get_guild_id() can extract
@@ -15747,7 +15761,7 @@ class GatewayRunner:
                 if result["success"]:
                     transcript = result["transcript"]
                     enriched_parts.append(
-                        f'[The user sent a voice message~ '
+                        f'**[Voice]** [The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
                     )
                 else:

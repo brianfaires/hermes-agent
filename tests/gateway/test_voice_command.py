@@ -521,6 +521,7 @@ class TestDiscordPlayTtsSkip:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
+        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
@@ -816,7 +817,7 @@ class TestVoiceChannelCommands:
         result = await runner._handle_voice_channel_join(event)
         assert "joined" in result.lower()
         assert "General" in result
-        assert runner._voice_mode["discord:123"] == "all"
+        assert runner._voice_mode["discord:123"] == "voice_only"
         assert mock_adapter._voice_sources[111]["chat_id"] == "123"
         assert mock_adapter._voice_sources[111]["chat_type"] == "group"
 
@@ -914,6 +915,7 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._client = MagicMock()
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello")
@@ -924,6 +926,7 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -932,6 +935,7 @@ class TestVoiceChannelCommands:
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello from VC")
         mock_adapter.handle_message.assert_called_once()
+        mock_channel.send.assert_not_called()
         event = mock_adapter.handle_message.call_args[0][0]
         assert event.text == "Hello from VC"
         assert event.message_type == MessageType.VOICE
@@ -954,6 +958,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {111: bound_source.to_dict()}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -972,10 +977,11 @@ class TestVoiceChannelCommands:
 
     @pytest.mark.asyncio
     async def test_input_posts_transcript_in_text_channel(self, runner):
-        """Voice input sends transcript message to text channel."""
+        """Voice input sends transcript message to the configured transcript channel."""
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -995,6 +1001,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1015,6 +1022,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1076,6 +1084,7 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
+        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
@@ -1111,6 +1120,7 @@ class TestDiscordVoiceChannelMethods:
         mock_vc.disconnect = AsyncMock()
         adapter._voice_clients[111] = mock_vc
         adapter._voice_text_channels[111] = 123
+        adapter._voice_transcript_channels[111] = 123
         adapter._voice_sources[111] = {"chat_id": "123", "chat_type": "group"}
 
         mock_receiver = MagicMock()
@@ -1130,6 +1140,7 @@ class TestDiscordVoiceChannelMethods:
         mock_timeout.cancel.assert_called_once()
         assert 111 not in adapter._voice_clients
         assert 111 not in adapter._voice_text_channels
+        assert 111 not in adapter._voice_transcript_channels
         assert 111 not in adapter._voice_sources
         assert 111 not in adapter._voice_receivers
 

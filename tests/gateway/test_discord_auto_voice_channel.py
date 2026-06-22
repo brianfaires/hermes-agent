@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import HomeChannel, Platform, PlatformConfig
+from gateway.config import Platform, PlatformConfig
 from gateway.run import GatewayRunner
 from plugins.platforms.discord.adapter import DiscordAdapter
 
@@ -47,6 +47,9 @@ def _runner_adapter():
     adapter.leave_voice_channel = AsyncMock()
     adapter._auto_voice_text_channel_id = MagicMock(return_value=789)
     adapter._voice_text_channels = {}
+    adapter._voice_transcript_channels = {}
+    adapter._auto_voice_session_channels = set()
+    adapter._voice_text_suppressed_channels = set()
     adapter._voice_sources = {}
     adapter._auto_tts_enabled_chats = set()
     adapter._auto_tts_disabled_chats = set()
@@ -68,6 +71,9 @@ async def test_discord_auto_voice_join_enables_voice_only_and_links_text_channel
     assert result is True
     adapter.join_voice_channel.assert_awaited_once_with(channel)
     assert adapter._voice_text_channels[42] == 789
+    assert adapter._voice_transcript_channels[42] == 789
+    assert adapter._auto_voice_session_channels == {"789"}
+    assert adapter._voice_text_suppressed_channels == set()
     assert adapter._voice_sources[42]["platform"] == "discord"
     assert adapter._voice_sources[42]["chat_id"] == "789"
     assert adapter._voice_sources[42]["user_id"] == "123"
@@ -86,6 +92,9 @@ async def test_discord_auto_voice_leave_disables_voice_mode():
     member = _member(guild=guild)
     channel = _channel(guild=guild)
     adapter._voice_text_channels[42] = 789
+    adapter._voice_transcript_channels[42] = 789
+    adapter._auto_voice_session_channels.add("789")
+    adapter._voice_text_suppressed_channels.add("789")
     runner._voice_mode["discord:789"] = "all"
     adapter._auto_tts_enabled_chats.add("789")
 
@@ -94,6 +103,8 @@ async def test_discord_auto_voice_leave_disables_voice_mode():
     assert result is True
     adapter.leave_voice_channel.assert_awaited_once_with(42)
     assert runner._voice_mode["discord:789"] == "off"
+    assert adapter._auto_voice_session_channels == set()
+    assert adapter._voice_text_suppressed_channels == set()
     assert "789" in adapter._auto_tts_disabled_chats
     assert "789" not in adapter._auto_tts_enabled_chats
     assert adapter._voice_input_callback is None
@@ -189,15 +200,46 @@ async def test_adapter_voice_state_leave_waits_until_last_allowed_human_exits():
     adapter.gateway_runner._handle_discord_auto_voice_leave.assert_awaited_once_with(adapter, member, channel)
 
 
-def test_adapter_auto_voice_text_channel_falls_back_to_home_channel():
+def test_adapter_auto_voice_text_channel_requires_explicit_config():
     adapter = DiscordAdapter(
         PlatformConfig(
             extra={"auto_voice_channel_id": "456"},
-            home_channel=HomeChannel(platform=Platform.DISCORD, chat_id="789", name="Home"),
         )
     )
 
-    assert adapter._auto_voice_text_channel_id() == 789
+    assert adapter._auto_voice_text_channel_id() is None
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_voice_join_without_text_channel_still_joins_without_transcript():
+    runner, adapter = _runner_adapter()
+    adapter._auto_voice_text_channel_id = MagicMock(return_value=None)
+    guild = _guild()
+    member = _member(guild=guild)
+    channel = _channel(guild=guild, members=[member])
+
+    result = await runner._handle_discord_auto_voice_join(adapter, member, channel)
+
+    assert result is True
+    adapter.join_voice_channel.assert_awaited_once_with(channel)
+    assert adapter._voice_text_channels[42] == 456
+    assert adapter._voice_transcript_channels == {}
+    assert adapter._auto_voice_session_channels == {"456"}
+    assert adapter._voice_text_suppressed_channels == {"456"}
+    assert adapter._voice_sources[42]["chat_id"] == "456"
+    assert runner._voice_mode["discord:456"] == "voice_only"
+
+
+@pytest.mark.asyncio
+async def test_discord_send_suppresses_text_for_no_transcript_auto_voice_session():
+    adapter = object.__new__(DiscordAdapter)
+    adapter.platform = Platform.DISCORD
+    adapter._client = None
+    adapter._voice_text_suppressed_channels = {"456"}
+
+    result = await adapter.send("456", "spoken reply text")
+
+    assert result.success is True
 
 
 def test_adapter_auto_voice_user_ids_restrict_voice_speakers():
