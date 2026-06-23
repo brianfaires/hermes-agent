@@ -1660,6 +1660,31 @@ class TestStreamTtsToSpeaker:
         assert done_evt.is_set()
         assert len(spoken) >= 1
 
+    def test_missing_optional_sdk_display_only(self):
+        """Without the optional ElevenLabs SDK, text still reaches display."""
+        from tools.tts_tool import stream_tts_to_speaker
+        text_q = queue.Queue()
+        stop_evt = threading.Event()
+        done_evt = threading.Event()
+        spoken = []
+
+        text_q.put("Display survives missing SDK. ")
+        text_q.put(None)
+
+        with (
+            patch("tools.tts_tool.get_env_value", return_value="test-api-key"),
+            patch("tools.tts_tool._import_elevenlabs", side_effect=ImportError),
+        ):
+            stream_tts_to_speaker(
+                text_q,
+                stop_evt,
+                done_evt,
+                display_callback=lambda text: spoken.append(text),
+            )
+
+        assert done_evt.is_set()
+        assert any("Display survives" in text for text in spoken)
+
     def test_long_buffer_flushed_on_timeout(self):
         """Buffer longer than long_flush_len is flushed on queue timeout."""
         from tools.tts_tool import stream_tts_to_speaker
