@@ -2632,6 +2632,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Event hook system
         from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
+        self.hooks.gateway_runner = self
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
@@ -9576,7 +9577,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
+                "chat_id": source.chat_id,
+                "thread_id": source.thread_id,
+                "session_key": session_key,
                 "response": (response or "")[:500],
+                "response_full": response or "",
             })
             
             # Check for pending process watchers (check_interval on background processes)

@@ -1841,9 +1841,21 @@ DEFAULT_CONFIG = {
         "record_key": "ctrl+b",
         "max_recording_seconds": 120,
         "auto_tts": False,
+        "normalize_tts": False,      # Normalize internal markers/lists before TTS conversion
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
+    },
+
+    "voice_summary": {
+        # Gateway post-send spoken summaries. Separate from voice.auto_tts:
+        # normal text is sent first; if enabled, the gateway then sends a
+        # second audio message for configured platforms.
+        "enabled": False,
+        "platforms": ["telegram", "discord"],
+        "model": "",              # Optional summary model override; empty = current default model
+        "provider": "",           # Optional summary provider override; empty = current runtime provider
+        "max_chars": 4000,
     },
     
     "human_delay": {
