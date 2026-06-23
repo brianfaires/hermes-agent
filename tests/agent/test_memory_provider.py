@@ -1371,6 +1371,31 @@ class TestMemoryToolToolsetGate:
         assert "hindsight_recall" in names
         assert any(t["function"]["name"] == "hindsight_recall" for t in tools)
 
+    def test_provider_named_toolset_injects_without_memory(self):
+        """A provider's own toolset name (e.g. 'hindsight') opts its tools in
+        independently of the file-backed 'memory' toolset, so a user can run
+        Hindsight while `disabled_toolsets: [memory]`."""
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider(
+            "hindsight",
+            tools=[{"name": "hindsight_recall", "description": "r", "parameters": {}}],
+        ))
+        # 'memory' deliberately absent; 'hindsight' present.
+        tools, names = self._run_memory_injection(["terminal", "hindsight"], mgr)
+        assert "hindsight_recall" in names
+        assert any(t["function"]["name"] == "hindsight_recall" for t in tools)
+
+    def test_provider_name_absent_still_blocks(self):
+        """Without 'memory' or the provider's own name enabled, no injection."""
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider(
+            "hindsight",
+            tools=[{"name": "hindsight_recall", "description": "r", "parameters": {}}],
+        ))
+        tools, names = self._run_memory_injection(["terminal", "web"], mgr)
+        assert tools == []
+        assert names == set()
+
     def test_empty_toolsets_blocks_injection(self):
         """`platform_toolsets: telegram: []` must suppress memory tools. (#5544)"""
         mgr = self._mgr_with_tools("fact_store")
