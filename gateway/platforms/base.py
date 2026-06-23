@@ -1229,12 +1229,17 @@ _MEDIA_EXT_ALTERNATION = "|".join(
 # consumer so both behave identically.
 # Path anchors: ``~/`` (Unix home-relative), ``/`` (Unix absolute),
 # ``X:\\`` or ``X:/`` (Windows drive-letter absolute — #34632).
+# Line-anchored: only a *standalone* tag line (optionally indented,
+# blockquoted, or led by ``[[audio_as_voice]]``) is a delivery directive. A
+# ``MEDIA:`` mention inside prose or inline code stays visible text — partial
+# matches there used to eat a single backtick of a code span and break
+# markdown rendering downstream.
 MEDIA_TAG_CLEANUP_RE = re.compile(
-    r'''[`"']?MEDIA:\s*'''
+    r'''^[ \t>*-]*(?:\[\[audio_as_voice\]\][ \t]*)?[`"']?MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
-    r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
-    re.IGNORECASE,
+    r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r''')(?=[\s`"',;:)\]}]|$))'''
+    r'''[`"']?[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

@@ -14,6 +14,7 @@ from gateway.platforms.base import (
     utf16_len,
     _log_safe_path,
     _prefix_within_utf16_limit,
+    _strip_media_directives,
 )
 
 
@@ -453,7 +454,7 @@ class TestExtractMedia:
     def test_inline_code_survives_when_real_media_present(self):
         """When a real MEDIA: tag is delivered, an inline-code example in the
         same reply must not be blanked to whitespace."""
-        content = "See MEDIA:/r/a.png and `MEDIA:/ex/b.png` inline"
+        content = "MEDIA:/r/a.png\nSee `MEDIA:/ex/b.png` inline"
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert [p for p, _ in media] == ["/r/a.png"]
         assert "`MEDIA:/ex/b.png`" in cleaned
@@ -501,11 +502,13 @@ class TestMediaInsideSerializedJson:
         media, _ = BasePlatformAdapter.extract_media("MEDIA:/real/file.png")
         assert len(media) == 1 and media[0][0] == "/real/file.png"
 
-    def test_media_after_prose_same_line_still_extracted(self):
-        media, _ = BasePlatformAdapter.extract_media(
-            "Here is your file: MEDIA:/out/report.pdf"
-        )
-        assert len(media) == 1 and media[0][0] == "/out/report.pdf"
+    def test_media_after_prose_same_line_stays_text(self):
+        """A MEDIA: mention mid-prose is not a directive — only standalone
+        tag lines are extracted/stripped."""
+        content = "Here is your file: MEDIA:/out/report.pdf"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == content
 
     def test_media_indented_still_extracted(self):
         media, _ = BasePlatformAdapter.extract_media("  MEDIA:/tmp/x.png")
@@ -536,14 +539,11 @@ class TestMediaInsideSerializedJson:
         # The JSON-embedded path must survive verbatim — not blanked to spaces.
         assert '{"old":"MEDIA:/stale/s.png"}' in cleaned
 
-    def test_cleaned_text_after_directive_not_truncated(self):
-        """Stripping a tag preceded by a [[as_document]] directive must not
-        shift offsets and chop the path or trailing text."""
-        content = "See [[as_document]] MEDIA:/d/report.pdf now"
+    def test_audio_voice_directive_on_same_line_is_extracted_and_stripped(self):
+        content = "Morning briefing ready.\n[[audio_as_voice]] MEDIA:/tmp/briefing.ogg"
         media, cleaned = BasePlatformAdapter.extract_media(content)
-        assert [p for p, _ in media] == ["/d/report.pdf"]
-        assert "MEDIA:" not in cleaned          # real tag removed
-        assert cleaned.endswith("now")          # trailing text intact (not chopped)
+        assert media == [("/tmp/briefing.ogg", True)]
+        assert cleaned == "Morning briefing ready."
 
 
 class TestMediaExtensionAllowlistParity:
@@ -564,7 +564,7 @@ class TestMediaExtensionAllowlistParity:
     def test_previously_dropped_extensions_now_extract(self):
         for ext in self.DROPPED_BEFORE:
             path = f"/tmp/report.{ext}"
-            media, _ = BasePlatformAdapter.extract_media(f"Here: MEDIA:{path}")
+            media, _ = BasePlatformAdapter.extract_media(f"MEDIA:{path}")
             assert media == [(path, False)], f".{ext} should extract via MEDIA:"
 
     def test_extract_media_and_local_files_share_one_extension_set(self):
@@ -587,11 +587,28 @@ class TestMediaExtensionAllowlistParity:
 
     def test_known_extension_tag_is_stripped_from_body(self):
         from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE
-        text = "Here is your report: MEDIA:/tmp/report.md"
+        text = "Here is your report:\nMEDIA:/tmp/report.md"
         stripped = MEDIA_TAG_CLEANUP_RE.sub("", text).strip()
         assert "MEDIA:" not in stripped
         assert "/tmp/report.md" not in stripped
         assert "Here is your report:" in stripped
+
+
+class TestStripMediaDirectives:
+    def test_preserves_inline_code_media_literal_with_known_extension(self):
+        """A MEDIA: example inside an inline code span must survive verbatim —
+        a partial strip here eats one backtick of the pair and breaks markdown
+        rendering for the rest of the message."""
+        text = "it does not extract and deliver `MEDIA:/tmp/example.ogg` attachments there"
+        assert _strip_media_directives(text) == text
+
+    def test_strips_standalone_media_directive_with_known_extension(self):
+        text = "Here is your file:\nMEDIA:/tmp/example.ogg\nDone"
+        stripped = _strip_media_directives(text)
+        assert "MEDIA:" not in stripped
+        assert "/tmp/example.ogg" not in stripped
+        assert "Here is your file:" in stripped
+        assert "Done" in stripped
 
 
 class TestMediaDeliveryPathValidation:
