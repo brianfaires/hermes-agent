@@ -14,6 +14,7 @@ Covers the bundled plugin at ``plugins/disk-cleanup/``:
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -68,6 +69,11 @@ def _load_plugin_init():
     sys.modules["hermes_plugins.disk_cleanup"] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _set_age_in_days(path: Path, days: int):
+    ts = path.stat().st_mtime - (days * 24 * 60 * 60)
+    os.utime(path, (ts, ts))
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +133,7 @@ class TestGuessCategory:
         # Even though it matches test_* pattern, logs/ is excluded.
         assert dg.guess_category(p) is None
 
-    def test_cron_subtree_categorised(self, _isolate_env):
+    def test_cron_output_subtree_categorised(self, _isolate_env):
         dg = _load_lib()
         # Only files under ``cron/output/`` are disposable run artifacts.
         output_dir = _isolate_env / "cron" / "output" / "job_123"
@@ -335,6 +341,14 @@ class TestTrackForgetQuick:
         assert dg.forget(str(p)) == 1
         assert p.exists()  # forget does NOT delete the file
 
+    def test_track_and_forget_wildcard_entry(self, _isolate_env):
+        dg = _load_lib()
+        folder = _isolate_env / "audio_cache"
+        folder.mkdir()
+        wildcard = f"{folder}/*"
+        assert dg.track(wildcard, "temp", silent=True) is True
+        assert dg.forget(wildcard) == 1
+
     def test_quick_preserves_unexpired_temp(self, _isolate_env):
         dg = _load_lib()
         p = _isolate_env / "fresh.tmp"
@@ -383,6 +397,44 @@ class TestTrackForgetQuick:
 
         assert not (_isolate_env / "scratch").exists()
 
+    def test_quick_wildcard_recursively_prunes_old_files_and_empty_dirs(self, _isolate_env):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        nested = root / "bar"
+        nested.mkdir(parents=True)
+        old_file = nested / "old.ogg"
+        old_file.write_text("x")
+        _set_age_in_days(old_file, 10)
+        new_file = root / "fresh.ogg"
+        new_file.write_text("y")
+        assert dg.track(f"{root}/*", "temp", silent=True) is True
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 1
+        assert summary["empty_dirs"] >= 1
+        assert not old_file.exists()
+        assert not nested.exists()
+        assert new_file.exists()
+        assert root.exists()
+
+    def test_quick_skips_legacy_non_wildcard_directory_delete(self, _isolate_env):
+        dg = _load_lib()
+        cache_dir = _isolate_env / "audio_cache"
+        cache_dir.mkdir()
+        (cache_dir / "old.ogg").write_text("x")
+        assert dg.track(str(cache_dir), "temp", silent=True) is True
+
+        tracked = dg.load_tracked()
+        tracked[0]["timestamp"] = "2000-01-01T00:00:00+00:00"
+        dg.save_tracked(tracked)
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert cache_dir.exists()
+        assert dg.load_tracked()[0]["path"] == str(cache_dir.resolve())
+
 
 class TestStatus:
     def test_empty_status(self, _isolate_env):
@@ -416,6 +468,22 @@ class TestDryRun:
         auto, prompt = dg.dry_run()
         # test → auto, other → neither (doesn't hit any rule)
         assert any(i["path"] == str(test_f) for i in auto)
+
+    def test_wildcard_dry_run_lists_recursive_matches(self, _isolate_env):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        nested = root / "bar"
+        nested.mkdir(parents=True)
+        old_file = nested / "old.ogg"
+        old_file.write_text("x")
+        _set_age_in_days(old_file, 10)
+        dg.track(f"{root}/*", "temp", silent=True)
+
+        auto, prompt = dg.dry_run()
+
+        assert any(i["path"] == str(old_file) for i in auto)
+        assert any(i["path"] == str(nested) for i in auto)
+        assert prompt == []
 
 
 # ---------------------------------------------------------------------------
