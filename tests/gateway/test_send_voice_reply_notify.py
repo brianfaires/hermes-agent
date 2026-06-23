@@ -114,3 +114,38 @@ async def test_voice_reply_marks_existing_thread_metadata_without_mutation(monke
         event.source, runner._reply_anchor_for_event(event)
     )
     assert "notify" not in fresh
+
+
+@pytest.mark.asyncio
+async def test_discord_voice_reply_uses_play_tts_not_send_voice(monkeypatch, tmp_path):
+    """Discord linked voice replies must not leak voice files into the transcript channel."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    _fake_tts_call(monkeypatch)
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="1517206455512731961",
+        user_id="188008666304086017",
+        chat_type="channel",
+    )
+    event = MessageEvent(
+        text="voice transcript",
+        message_type=MessageType.VOICE,
+        source=source,
+        message_id="m1",
+    )
+    play_tts = AsyncMock()
+    send_voice = AsyncMock()
+    adapter = SimpleNamespace(
+        play_tts=play_tts,
+        send_voice=send_voice,
+        is_in_voice_channel=lambda *_a, **_k: False,
+    )
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    await runner._send_voice_reply(event, "Still working — 2 min in.")
+
+    play_tts.assert_awaited_once()
+    send_voice.assert_not_awaited()
+    assert play_tts.await_args.kwargs["chat_id"] == "1517206455512731961"
