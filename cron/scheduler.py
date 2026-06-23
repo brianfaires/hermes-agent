@@ -710,6 +710,132 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    """Parse config/env-ish boolean values without making YAML users suffer."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if lowered in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return default
+
+
+def _summarize_delivery_content(job: dict, content: str, user_cfg: Optional[dict] = None) -> str:
+    """Optionally rewrite cron delivery output into a short human notification.
+
+    Full output is saved before delivery in ``tick()``, so this only changes the
+    chat notification. Fail closed to the original content; alerting code that
+    hides alerts because the summarizer coughed is how you build tiny outages
+    with excellent posture.
+    """
+    original = content or ""
+    if not original.strip():
+        return original
+    if "MEDIA:" in original:
+        return original
+
+    try:
+        cfg = user_cfg if isinstance(user_cfg, dict) else load_config()
+        cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
+        summary_cfg = cron_cfg.get("delivery_summary", {})
+        if isinstance(summary_cfg, bool):
+            summary_cfg = {"enabled": summary_cfg}
+        if not isinstance(summary_cfg, dict):
+            summary_cfg = {}
+        if not _coerce_bool(summary_cfg.get("enabled"), False):
+            return original
+
+        max_words = int(summary_cfg.get("max_words") or 32)
+        max_words = max(8, min(max_words, 80))
+        max_input_chars = int(summary_cfg.get("max_input_chars") or 12000)
+        max_input_chars = max(500, min(max_input_chars, 50000))
+        raw = original.strip()[:max_input_chars]
+
+        # Re-read .env so gateway-hosted cron picks up provider/key changes
+        # without restart, matching the main cron-agent path.
+        from dotenv import load_dotenv
+        try:
+            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
+        except UnicodeDecodeError:
+            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
+
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from run_agent import AIAgent
+
+        model = (summary_cfg.get("model") or "").strip()
+        if not model:
+            model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+            if isinstance(model_cfg, str):
+                model = model_cfg
+            elif isinstance(model_cfg, dict):
+                model = model_cfg.get("default", "") or ""
+
+        runtime_kwargs = {"requested": summary_cfg.get("provider")}
+        if summary_cfg.get("base_url"):
+            runtime_kwargs["explicit_base_url"] = summary_cfg.get("base_url")
+        if summary_cfg.get("api_key"):
+            runtime_kwargs["explicit_api_key"] = summary_cfg.get("api_key")
+        runtime = resolve_runtime_provider(**runtime_kwargs)
+
+        prompt = (
+            "Rewrite this scheduled-job output as a concise notification for Brian.\n"
+            f"Limit: {max_words} words, one or two short sentences.\n"
+            "Keep the concrete service/source, severity, and why it matters. "
+            "Preserve security/urgent implications. Do not invent facts. "
+            "Do not include cron headers, job IDs, timestamps, greetings, sign-offs, "
+            "or management instructions. If the output is already concise, return it.\n\n"
+            f"Job name: {job.get('name') or job.get('id') or 'scheduled job'}\n"
+            "Raw output:\n"
+            f"{raw}"
+        )
+
+        agent = AIAgent(
+            model=model,
+            api_key=runtime.get("api_key"),
+            base_url=runtime.get("base_url"),
+            provider=runtime.get("provider"),
+            api_mode=runtime.get("api_mode"),
+            acp_command=runtime.get("command"),
+            acp_args=runtime.get("args"),
+            max_iterations=2,
+            enabled_toolsets=[],
+            disabled_toolsets=[
+                "browser", "cronjob", "messaging", "terminal", "file", "code_execution",
+                "clarify", "delegation", "image_gen", "tts", "vision", "web", "search",
+            ],
+            quiet_mode=True,
+            skip_context_files=True,
+            load_soul_identity=False,
+            skip_memory=True,
+            platform="cron",
+            session_id=f"cron_delivery_summary_{job.get('id', 'job')}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}",
+        )
+        try:
+            result = agent.run_conversation(prompt)
+        finally:
+            try:
+                agent.close()
+            except Exception:
+                pass
+
+        if not isinstance(result, dict):
+            return original
+        summary = (result.get("final_response") or "").strip()
+        if not summary or result.get("failed") is True or result.get("completed") is False:
+            return original
+        return summary
+    except Exception as exc:
+        logger.warning("Job '%s': cron delivery summarizer failed, sending original content: %s", job.get("id", "?"), exc)
+        return original
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -732,15 +858,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
-    # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
+    # Optionally condense then wrap the content. The condensing hook changes
+    # only the chat notification; tick() has already saved the full output.
     wrap_response = True
+    user_cfg = {}
     try:
         user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        cron_cfg = user_cfg.get("cron", {}) if isinstance(user_cfg, dict) else {}
+        wrap_response = cron_cfg.get("wrap_response", True)
     except Exception:
         pass
+
+    content = _summarize_delivery_content(job, content, user_cfg=user_cfg)
 
     if wrap_response:
         task_name = job.get("name", job["id"])

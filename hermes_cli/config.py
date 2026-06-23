@@ -2292,6 +2292,16 @@ DEFAULT_CONFIG = {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
         "wrap_response": True,
+        # Optional LLM pass that rewrites delivered cron output into a short,
+        # human notification while preserving full saved output on disk.
+        "delivery_summary": {
+            "enabled": False,
+            "max_words": 32,
+            "max_input_chars": 12000,
+            # Optional overrides; unset means use the active default provider/model.
+            "provider": None,
+            "model": None,
+        },
         # Maximum number of due jobs to run in parallel per tick.
         # null/0 = unbounded (limited only by thread count).
         # 1 = serial (pre-v0.9 behaviour).

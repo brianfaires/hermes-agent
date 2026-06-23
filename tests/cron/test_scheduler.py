@@ -7,7 +7,16 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _resolve_origin,
+    _resolve_delivery_target,
+    _deliver_result,
+    _send_media_via_adapter,
+    _summarize_delivery_content,
+    run_job,
+    SILENT_MARKER,
+    _build_job_prompt,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -835,6 +844,67 @@ class TestDeliverResultWrapping:
 
         send_mock.assert_called_once()
         assert send_mock.call_args.kwargs["thread_id"] == "17585"
+
+
+class TestDeliverySummary:
+    def test_disabled_by_default_returns_original(self):
+        content = "Urgent sign-on notification from Okta: this may indicate compromise."
+
+        result = _summarize_delivery_content(
+            {"id": "okta", "name": "Okta alerts"},
+            content,
+            user_cfg={"cron": {}},
+        )
+
+        assert result == content
+
+    def test_enabled_rewrites_with_llm_and_no_tools(self):
+        fake_agent = MagicMock()
+        fake_agent.run_conversation.return_value = {
+            "final_response": "You got an urgent sign-on notification from Okta. They say it could indicate account compromise.",
+            "completed": True,
+        }
+
+        with patch("dotenv.load_dotenv"), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value={
+                 "api_key": "key",
+                 "base_url": "https://example.invalid/v1",
+                 "provider": "openrouter",
+                 "api_mode": "chat_completions",
+             }) as runtime_mock, \
+             patch("run_agent.AIAgent", return_value=fake_agent) as agent_cls:
+            result = _summarize_delivery_content(
+                {"id": "okta", "name": "Okta alerts"},
+                "Subject: URGENT Okta sign-on notification\nThis could indicate account compromise.",
+                user_cfg={
+                    "model": {"default": "test-model"},
+                    "cron": {"delivery_summary": {"enabled": True, "max_words": 20}},
+                },
+            )
+
+        assert result == "You got an urgent sign-on notification from Okta. They say it could indicate account compromise."
+        runtime_mock.assert_called_once_with(requested=None)
+        kwargs = agent_cls.call_args.kwargs
+        assert kwargs["model"] == "test-model"
+        assert kwargs["max_iterations"] == 2
+        assert kwargs["enabled_toolsets"] == []
+        assert kwargs["skip_memory"] is True
+        prompt = fake_agent.run_conversation.call_args.args[0]
+        assert "Limit: 20 words" in prompt
+        assert "Okta" in prompt
+
+    def test_summarizer_failure_falls_back_to_original(self):
+        content = "Raw alert text survives. Very load-bearing, unfortunately."
+
+        with patch("dotenv.load_dotenv"), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=RuntimeError("no model")):
+            result = _summarize_delivery_content(
+                {"id": "alert"},
+                content,
+                user_cfg={"cron": {"delivery_summary": True}},
+            )
+
+        assert result == content
 
 
 class TestDeliverResultErrorReturns:
