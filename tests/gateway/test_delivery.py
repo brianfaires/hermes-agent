@@ -128,11 +128,21 @@ class TestPlatformNameCaseInsensitivity:
 class RecordingAdapter:
     def __init__(self):
         self.calls = []
+        self.voice_calls = []
+        self.document_calls = []
         self.ensure_dm_topic_calls = []
 
     async def send(self, chat_id, content, metadata=None):
         self.calls.append({"chat_id": chat_id, "content": content, "metadata": metadata})
         return {"success": True}
+
+    async def send_voice(self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs):
+        self.voice_calls.append({"chat_id": chat_id, "audio_path": audio_path, "caption": caption, "metadata": metadata})
+        return SendResult(success=True)
+
+    async def send_document(self, chat_id, file_path, caption=None, file_name=None, reply_to=None, metadata=None, **kwargs):
+        self.document_calls.append({"chat_id": chat_id, "file_path": file_path, "caption": caption, "metadata": metadata})
+        return SendResult(success=True)
 
     async def ensure_dm_topic(self, chat_id, topic_name, force_create=False):
         self.ensure_dm_topic_calls.append(
@@ -157,6 +167,28 @@ class StaleTopicAdapter:
             {"chat_id": chat_id, "topic_name": topic_name, "force_create": force_create}
         )
         return "38064" if force_create else "32343"
+
+
+@pytest.mark.asyncio
+async def test_platform_delivery_extracts_media_directive_and_sends_native_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    audio_path = tmp_path / "briefing.ogg"
+    audio_path.write_bytes(b"OggS\x00test")
+    adapter = RecordingAdapter()
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
+    target = DeliveryTarget.parse("telegram:722341991")
+
+    await router._deliver_to_platform(
+        target,
+        f"Morning briefing ready.\n[[audio_as_voice]] MEDIA:{audio_path}",
+        metadata={"job_id": "morning"},
+    )
+
+    assert adapter.calls == [{"chat_id": "722341991", "content": "Morning briefing ready.", "metadata": {"job_id": "morning"}}]
+    assert adapter.voice_calls == [
+        {"chat_id": "722341991", "audio_path": str(audio_path), "caption": None, "metadata": {"job_id": "morning"}}
+    ]
+    assert adapter.document_calls == []
 
 
 @pytest.mark.asyncio

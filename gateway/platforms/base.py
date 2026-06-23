@@ -1797,7 +1797,16 @@ def _strip_media_directives(text: str) -> str:
     if not text:
         return text
     text = text.replace("[[audio_as_voice]]", "").replace("[[as_document]]", "")
-    return MEDIA_TAG_CLEANUP_RE.sub("", text)
+
+    masked = BasePlatformAdapter._mask_protected_spans(text)
+    spans = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
+    if not spans:
+        return text
+
+    chars = list(text)
+    for start, end in sorted(spans, reverse=True):
+        del chars[start:end]
+    return "".join(chars)
 
 
 class BasePlatformAdapter(ABC):
@@ -3003,12 +3012,18 @@ class BasePlatformAdapter(ABC):
         # ``content`` for it (so they can still react to it); here we just
         # keep it out of the user-visible cleaned text.
         cleaned = cleaned.replace("[[as_document]]", "")
-        
-        # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
-        # and quoted/backticked paths for LLM-formatted outputs. The extension
-        # set is the shared MEDIA_DELIVERY_EXTS source of truth (built once into
-        # MEDIA_TAG_CLEANUP_RE) so it can never drift from extract_local_files.
-        media_pattern = MEDIA_TAG_CLEANUP_RE
+
+        # Extract standalone MEDIA:<path> directives, allowing optional
+        # [[audio_as_voice]] on the same line plus quoted/backticked paths. The
+        # extension set stays shared with MEDIA_DELIVERY_EXTS so the extractor
+        # and cleanup paths cannot drift.
+        media_pattern = re.compile(
+            r'''(?im)^[ \t>*-]*(?:\[\[audio_as_voice\]\][ \t]*)?[`"']?MEDIA:\s*'''
+            r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
+            r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:'''
+            + _MEDIA_EXT_ALTERNATION +
+            r''')(?=[\s`"',;:)\]}]|$))[`"']?[ \t]*$'''
+        )
         # Mask example/stored MEDIA: paths before scanning so they are never
         # delivered as real attachments:
         #  - code blocks / inline code / blockquotes hold prose examples (#35695)
@@ -3017,28 +3032,28 @@ class BasePlatformAdapter(ABC):
         # stay valid; chaining them masks the union of both protected regions.
         scan_content = BasePlatformAdapter._mask_protected_spans(content)
         scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+        matched_spans = []
         for match in media_pattern.finditer(scan_content):
+            matched_spans.append(match.span())
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
-            if path:
-                try:
-                    media.append((os.path.expanduser(path), has_voice_tag))
-                except (OSError, RuntimeError, ValueError):
-                    # Skip a crafted ~\x00 path rather than aborting extraction
-                    # and dropping every other attachment in the response.
-                    continue
+            if not path:
+                continue
+            try:
+                media.append((os.path.expanduser(path), has_voice_tag))
+            except (OSError, RuntimeError, ValueError):
+                # Skip a crafted ~\x00 path rather than aborting extraction
+                # and dropping every other attachment in the response.
+                continue
 
-        # Remove the delivered MEDIA tags from the user-visible text. Mask a
+        # Remove standalone MEDIA tags from the user-visible text. Mask a
         # length-equal copy of ``cleaned`` (same union of protected regions) to
-        # *locate* the real tag spans, then delete exactly those spans from the
-        # *unmasked* ``cleaned``. Masking is only a locator — protected spans
-        # (code blocks, quotes, JSON-embedded MEDIA: text) must survive verbatim
-        # in the delivered text, not be blanked to whitespace. Masking
-        # ``cleaned`` (not ``content``) keeps offsets valid after the
-        # [[audio_as_voice]] / [[as_document]] directives are removed.
-        if media:
+        # locate real tag spans, then delete exactly those spans from the
+        # unmasked text. Protected spans (code blocks, quotes, JSON-embedded
+        # MEDIA: text) survive verbatim.
+        if matched_spans:
             masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
             masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
             spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
@@ -3048,7 +3063,7 @@ class BasePlatformAdapter(ABC):
                     del chars[start:end]
                 cleaned = "".join(chars)
                 cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        
+
         return media, cleaned
 
     @staticmethod

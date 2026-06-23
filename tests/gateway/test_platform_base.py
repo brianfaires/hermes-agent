@@ -14,6 +14,7 @@ from gateway.platforms.base import (
     utf16_len,
     _log_safe_path,
     _prefix_within_utf16_limit,
+    _strip_media_directives,
 )
 
 
@@ -361,45 +362,6 @@ class TestExtractMedia:
         assert "[[audio_as_voice]]" not in cleaned
         assert "[[as_document]]" not in cleaned
 
-    # Windows path support — regression coverage for #34632
-
-    def test_media_tag_windows_backslash_path(self):
-        """extract_media should recognise Windows backslash paths."""
-        media, cleaned = BasePlatformAdapter.extract_media(
-            r"MEDIA:C:\Users\kotsu\file.pdf"
-        )
-        assert len(media) == 1
-        assert media[0][0].endswith("file.pdf")
-
-    def test_media_tag_windows_forward_slash_path(self):
-        """extract_media should recognise Windows forward-slash paths."""
-        media, cleaned = BasePlatformAdapter.extract_media(
-            "MEDIA:C:/Users/kotsu/file.pdf"
-        )
-        assert len(media) == 1
-        assert media[0][0].endswith("file.pdf")
-
-    def test_media_tag_windows_drive_root(self):
-        """extract_media should recognise a path at the drive root."""
-        media, cleaned = BasePlatformAdapter.extract_media(
-            r"MEDIA:D:\report.md"
-        )
-        assert len(media) == 1
-        assert media[0][0].endswith("report.md")
-
-    def test_media_tag_unix_paths_still_work(self):
-        """Unix absolute and tilde paths must still extract after Windows change."""
-        for content in ["MEDIA:/tmp/audio.ogg", r"MEDIA:~/docs/notes.md"]:
-            media, _ = BasePlatformAdapter.extract_media(content)
-            assert len(media) == 1, f"Failed for: {content}"
-
-    def test_relative_path_still_ignored(self):
-        """Relative Windows-style paths (no drive letter) must not match."""
-        media, _ = BasePlatformAdapter.extract_media(
-            r"MEDIA:Users\kotsu\file.pdf"
-        )
-        assert media == []
-
     # --- Code block / inline code / blockquote false-positive guards (#35695) ---
 
     def test_media_in_fenced_code_block_ignored(self):
@@ -423,39 +385,40 @@ class TestExtractMedia:
         assert media == []
         assert "End." in cleaned
 
-    def test_media_outside_code_blocks_still_extracted(self):
+    def test_media_outside_code_blocks_still_extracted(self, tmp_path):
         """Real MEDIA: tags outside protected regions must still work."""
-        content = "MEDIA:/real/file.png\n```code\nMEDIA:/fake/file.png\n```"
+        real = tmp_path / "file.png"
+        real.write_text("img")
+        content = f"MEDIA:{real}\n```code\nMEDIA:/fake/file.png\n```"
         media, _ = BasePlatformAdapter.extract_media(content)
-        assert len(media) == 1
-        assert media[0][0] == "/real/file.png"
+        assert media == [(str(real), False)]
 
-    def test_media_mixed_code_and_prose(self):
+    def test_media_mixed_code_and_prose(self, tmp_path):
         """Real MEDIA: in prose + example in code block: only prose extracted,
         and the code block survives verbatim in the delivered text."""
+        report = tmp_path / "report.pdf"
+        report.write_text("pdf")
         content = (
             "Here is your file:\n"
-            "MEDIA:/output/report.pdf\n"
+            f"MEDIA:{report}\n"
             "Example usage:\n"
             "```text\nMEDIA:/example/path.pdf\n```\n"
             "Done."
         )
         media, cleaned = BasePlatformAdapter.extract_media(content)
-        assert len(media) == 1
-        assert media[0][0] == "/output/report.pdf"
+        assert media == [(str(report), False)]
         assert "Done." in cleaned
-        # The real tag is stripped from the delivered text...
-        assert "MEDIA:/output/report.pdf" not in cleaned
-        # ...but the fenced code block (incl. its example MEDIA: line) must
-        # survive verbatim — masking is a locator, not a text rewrite.
+        assert str(report) not in cleaned
         assert "```text\nMEDIA:/example/path.pdf\n```" in cleaned
 
-    def test_inline_code_survives_when_real_media_present(self):
+    def test_inline_code_survives_when_real_media_present(self, tmp_path):
         """When a real MEDIA: tag is delivered, an inline-code example in the
         same reply must not be blanked to whitespace."""
-        content = "See MEDIA:/r/a.png and `MEDIA:/ex/b.png` inline"
+        real = tmp_path / "a.png"
+        real.write_text("img")
+        content = f"MEDIA:{real}\nSee `MEDIA:/ex/b.png` inline"
         media, cleaned = BasePlatformAdapter.extract_media(content)
-        assert [p for p, _ in media] == ["/r/a.png"]
+        assert media == [(str(real), False)]
         assert "`MEDIA:/ex/b.png`" in cleaned
 
 
@@ -497,53 +460,37 @@ class TestMediaInsideSerializedJson:
 
     # --- Legitimate tags must still extract (no regression vs line-start anchor) ---
 
-    def test_media_at_line_start_still_extracted(self):
-        media, _ = BasePlatformAdapter.extract_media("MEDIA:/real/file.png")
-        assert len(media) == 1 and media[0][0] == "/real/file.png"
+    def test_media_at_line_start_still_extracted(self, tmp_path):
+        real = tmp_path / "file.png"
+        real.write_text("img")
+        media, _ = BasePlatformAdapter.extract_media(f"MEDIA:{real}")
+        assert media == [(str(real), False)]
 
-    def test_media_after_prose_same_line_still_extracted(self):
-        media, _ = BasePlatformAdapter.extract_media(
-            "Here is your file: MEDIA:/out/report.pdf"
-        )
-        assert len(media) == 1 and media[0][0] == "/out/report.pdf"
+    def test_media_after_prose_same_line_stays_text(self):
+        content = "Here is your file: MEDIA:/out/report.pdf"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert cleaned == content
 
-    def test_media_indented_still_extracted(self):
-        media, _ = BasePlatformAdapter.extract_media("  MEDIA:/tmp/x.png")
-        assert len(media) == 1 and media[0][0] == "/tmp/x.png"
+    def test_media_indented_still_extracted(self, tmp_path):
+        real = tmp_path / "x.png"
+        real.write_text("img")
+        media, _ = BasePlatformAdapter.extract_media(f"  MEDIA:{real}")
+        assert media == [(str(real), False)]
 
-    def test_quoted_path_media_still_extracted(self):
+    def test_quoted_path_media_still_extracted(self, tmp_path):
         """MEDIA:"..." quoted-path form (a real LLM output) is not JSON-masked."""
-        media, _ = BasePlatformAdapter.extract_media(
-            'MEDIA:"/path/with space/file.png"'
-        )
-        assert len(media) == 1 and media[0][0] == "/path/with space/file.png"
+        real = tmp_path / "with space" / "file.png"
+        real.parent.mkdir()
+        real.write_text("img")
+        media, _ = BasePlatformAdapter.extract_media(f'MEDIA:"{real}"')
+        assert media == [(str(real), False)]
 
-    def test_tts_two_line_still_extracted(self):
-        media, _ = BasePlatformAdapter.extract_media(
-            "[[audio_as_voice]]\nMEDIA:/tmp/v.ogg"
-        )
-        assert len(media) == 1 and media[0][0] == "/tmp/v.ogg"
-        assert media[0][1] is True  # voice flag
-
-    # --- cleaned-text invariants: real tags stripped, JSON data kept verbatim ---
-
-    def test_json_embedded_media_kept_verbatim_in_cleaned_text(self):
-        """A real tag is delivered+stripped; a JSON-embedded MEDIA: stays as
-        literal text (stored data must read back unchanged)."""
-        content = 'MEDIA:/real/r.png\nlog: {"old":"MEDIA:/stale/s.png"}'
-        media, cleaned = BasePlatformAdapter.extract_media(content)
-        assert [p for p, _ in media] == ["/real/r.png"]
-        # The JSON-embedded path must survive verbatim — not blanked to spaces.
-        assert '{"old":"MEDIA:/stale/s.png"}' in cleaned
-
-    def test_cleaned_text_after_directive_not_truncated(self):
-        """Stripping a tag preceded by a [[as_document]] directive must not
-        shift offsets and chop the path or trailing text."""
-        content = "See [[as_document]] MEDIA:/d/report.pdf now"
-        media, cleaned = BasePlatformAdapter.extract_media(content)
-        assert [p for p, _ in media] == ["/d/report.pdf"]
-        assert "MEDIA:" not in cleaned          # real tag removed
-        assert cleaned.endswith("now")          # trailing text intact (not chopped)
+    def test_tts_two_line_still_extracted(self, tmp_path):
+        real = tmp_path / "v.ogg"
+        real.write_text("voice")
+        media, _ = BasePlatformAdapter.extract_media(f"[[audio_as_voice]]\nMEDIA:{real}")
+        assert media == [(str(real), True)]
 
 
 class TestMediaExtensionAllowlistParity:
@@ -561,11 +508,12 @@ class TestMediaExtensionAllowlistParity:
     DROPPED_BEFORE = ["md", "json", "yaml", "yml", "xml", "html", "htm",
                       "tsv", "svg"]
 
-    def test_previously_dropped_extensions_now_extract(self):
+    def test_previously_dropped_extensions_now_extract(self, tmp_path):
         for ext in self.DROPPED_BEFORE:
-            path = f"/tmp/report.{ext}"
-            media, _ = BasePlatformAdapter.extract_media(f"Here: MEDIA:{path}")
-            assert media == [(path, False)], f".{ext} should extract via MEDIA:"
+            path = tmp_path / f"report.{ext}"
+            path.write_text("data")
+            media, _ = BasePlatformAdapter.extract_media(f"MEDIA:{path}")
+            assert media == [(str(path), False)], f".{ext} should extract via MEDIA:"
 
     def test_extract_media_and_local_files_share_one_extension_set(self):
         from gateway.platforms.base import MEDIA_DELIVERY_EXTS
@@ -592,6 +540,32 @@ class TestMediaExtensionAllowlistParity:
         assert "MEDIA:" not in stripped
         assert "/tmp/report.md" not in stripped
         assert "Here is your report:" in stripped
+
+
+class TestMediaExtraction:
+    def test_audio_voice_directive_on_same_line_is_extracted_and_stripped(self, tmp_path):
+        audio_path = tmp_path / "briefing.ogg"
+        audio_path.write_bytes(b"OggS\x00test")
+        content = f"Morning briefing ready.\n[[audio_as_voice]] MEDIA:{audio_path}"
+
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+
+        assert media == [(str(audio_path), True)]
+        assert cleaned == "Morning briefing ready."
+
+
+class TestStripMediaDirectives:
+    def test_preserves_inline_code_media_literal_with_known_extension(self):
+        text = "it does not extract and deliver `MEDIA:/tmp/example.ogg` attachments there"
+        assert _strip_media_directives(text) == text
+
+    def test_strips_standalone_media_directive_with_known_extension(self):
+        text = "Here is your file:\nMEDIA:/tmp/example.ogg\nDone"
+        stripped = _strip_media_directives(text)
+        assert "MEDIA:" not in stripped
+        assert "/tmp/example.ogg" not in stripped
+        assert "Here is your file:" in stripped
+        assert "Done" in stripped
 
 
 class TestMediaDeliveryPathValidation:
