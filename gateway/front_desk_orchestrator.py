@@ -43,6 +43,8 @@ def plan_front_desk_turn(message: str, *, config: Mapping[str, Any] | None) -> F
         )
 
     if decision.route == "delegate":
+        if decision.team == "engineering":
+            return FrontDeskTurnPlan(action="handoff", decision=decision)
         return FrontDeskTurnPlan(action="delegate", decision=decision)
 
     return FrontDeskTurnPlan(action="normal_agent", decision=decision)

@@ -37,12 +37,14 @@ def test_clarify_turn_returns_immediate_response():
 
 
 def test_delegate_turn_returns_delegate_plan_without_fake_response():
+    # Non-engineering delegations stay on the generic delegate path; engineering
+    # is special-cased to the handoff action (see test_engteam_handoff).
     result = plan_front_desk_turn(
-        "Debug why replies take forever after I stop talking. Check logs.",
+        "Research the latest docs on websockets backpressure.",
         config={"agent": {"front_desk": {"enabled": True}}},
     )
 
     assert result.action == "delegate"
     assert result.decision is not None
-    assert result.decision.team == "engineering"
+    assert result.decision.team == "research"
     assert result.immediate_response is None
