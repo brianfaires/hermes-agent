@@ -110,9 +110,26 @@ def inject_memory_provider_tools(agent: Any) -> int:
         for tool in tools
         if isinstance(tool, dict)
     }
+    # Allow a provider's own toolset name (e.g. ``hindsight``) to opt the
+    # provider tools in independently of the file-backed ``memory`` toolset.
+    # This lets a user run Hindsight as the durable memory provider while
+    # disabling MEMORY.md/USER.md (``disabled_toolsets: [memory]``) without
+    # losing hindsight_retain/recall/reflect.
+    enabled_toolsets = getattr(agent, "enabled_toolsets", None)
+    _provider_toolset_enabled = False
+    if enabled_toolsets:
+        try:
+            _provider_toolset_enabled = any(
+                p.name in enabled_toolsets
+                for p in memory_manager.providers
+                if getattr(p, "name", "builtin") != "builtin"
+            )
+        except Exception:
+            logger.debug("Failed to check provider-named toolsets", exc_info=True)
     if (
         "memory" not in existing_tool_names
-        and not memory_provider_tools_enabled(getattr(agent, "enabled_toolsets", None))
+        and not memory_provider_tools_enabled(enabled_toolsets)
+        and not _provider_toolset_enabled
     ):
         return 0
 
