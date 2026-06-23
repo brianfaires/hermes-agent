@@ -8389,6 +8389,27 @@ class GatewayRunner:
         # No bare text matching — "yes" in normal conversation must not trigger
         # execution of a dangerous command.
 
+        # ── Front desk: hand engineering work to the eng-manager ──────
+        # Acts only when the front desk is enabled (plan_front_desk_turn
+        # returns normal_agent otherwise, so default runtime is unchanged)
+        # and the message classifies as engineering. The handoff opens an
+        # engteam project and returns its ack without claiming a session or
+        # spinning up an agent. Every other action falls through to the
+        # normal agent path below.
+        if not is_internal and isinstance(getattr(event, "text", None), str) and event.text.strip():
+            try:
+                from hermes_cli.config import load_config as _fd_load_config
+                from gateway.front_desk_orchestrator import plan_front_desk_turn
+                _fd_plan = plan_front_desk_turn(event.text, config=_fd_load_config())
+                if _fd_plan.action == "handoff":
+                    from gateway.engteam_handoff import handoff_engineering
+                    logger.info(
+                        "Front desk handoff -> engineering (session=%s)", _quick_key
+                    )
+                    return handoff_engineering(event.text)
+            except Exception as _fd_exc:
+                logger.warning("front desk handoff planning failed: %s", _fd_exc)
+
         if self._is_telegram_topic_root_lobby(source):
             # Debounce the lobby reminder so a user who forgets about
             # topic mode and fires ten prompts doesn't get ten copies.
