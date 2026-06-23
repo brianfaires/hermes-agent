@@ -50,7 +50,7 @@ def test_stage_cards_carry_profile_and_skills(kb_home):
         assert list(dev.skills) == list(constants.STAGE_SPECS["dev"].skills)
 
 
-def test_gate_inserts_blocked_card_between_stages(kb_home):
+def test_gate_inserts_sticky_parallel_gate(kb_home):
     kb = kb_home
     from hermes_cli.engteam.dag import build_stage_dag
     from hermes_cli.engteam.constants import GateSpec
@@ -60,9 +60,17 @@ def test_gate_inserts_blocked_card_between_stages(kb_home):
                             gates=[GateSpec(after_stage="review", kind="merge")])
         gate_id = g.gate_ids["merge"]
         assert kb.get_task(conn, gate_id).status == "blocked"
-        # commit now depends on the gate, not directly on review
-        assert kb.parent_ids(conn, g.stage_ids["commit"]) == [gate_id]
-        assert kb.parent_ids(conn, gate_id) == [g.stage_ids["review"]]
+        # gate hangs off the (done) root, parallel to the stages
+        assert kb.parent_ids(conn, gate_id) == [g.root_id]
+        # commit waits on BOTH the gated stage (review) and the gate
+        assert set(kb.parent_ids(conn, g.stage_ids["commit"])) == {
+            g.stage_ids["review"], gate_id,
+        }
+        # completing every upstream stage must NOT release the sticky gate
+        for s in ["spec", "plan", "dev", "review"]:
+            kb.complete_task(conn, g.stage_ids[s], summary="x")
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, gate_id).status == "blocked"
 
 
 def test_subset_of_stages_is_honored(kb_home):

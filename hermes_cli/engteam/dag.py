@@ -74,22 +74,28 @@ def build_stage_dag(
 
         gate = gates_by_stage.get(name)
         if gate is not None:
-            # Use initial_status="blocked" so the gate is immediately blocked
-            # regardless of parent status. block_task() only transitions
-            # running|ready -> blocked, which would fail for a todo card.
+            # Parallel STICKY gate. Parent is the already-done root, so the
+            # card is `ready` at creation; block_task then makes the block
+            # STICKY. This is load-bearing: recompute_ready auto-promotes an
+            # ordinary dependency-blocked card to `ready` once its parents
+            # complete, so a gate merely chained behind a stage would silently
+            # open when that stage finished. recompute_ready skips
+            # sticky-blocked cards, so only unblock_task (user approval)
+            # releases it -- the gate never proceeds silently.
             gid = kb.create_task(
                 conn,
                 title=f"[gate:{gate.kind}] {goal}"[:200],
-                body=f"Blocking {gate.kind} gate. The lead resolves this once the "
-                     f"user approves; downstream work stays parked until then.",
+                body=f"{gate.kind} gate. Stays blocked until the user approves; "
+                     f"the next stage waits on both this gate and the prior stage.",
                 assignee=gate.assignee,
                 created_by=created_by,
-                parents=prev,
+                parents=[root_id],
                 board=ENG_BOARD,
-                initial_status="blocked",
             )
+            kb.block_task(conn, gid, reason=f"awaiting user {gate.kind} approval")
             gate_ids[gate.kind] = gid
-            prev = [gid]
+            # The next stage waits on BOTH the gated stage and the gate.
+            prev = [sid, gid]
 
     judgment_id = kb.create_task(
         conn,
