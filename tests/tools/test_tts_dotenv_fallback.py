@@ -56,6 +56,28 @@ class TestDotenvFallbackPerProvider:
 
             mock_import.return_value.assert_called_once_with(api_key="el-dotenv-key")
 
+    def test_elevenlabs_imports_optional_sdk_before_voice_settings(self, tmp_path):
+        from tools import tts_tool
+
+        order = []
+        mock_client = MagicMock()
+        mock_client.text_to_speech.convert.return_value = iter([b"audio"])
+
+        def import_elevenlabs():
+            order.append("import")
+            return MagicMock(return_value=mock_client)
+
+        def voice_settings(_el_config, _tts_config):
+            order.append("settings")
+            return None
+
+        with patch.object(tts_tool, "get_env_value", return_value="el-dotenv-key"), \
+             patch.object(tts_tool, "_import_elevenlabs", side_effect=import_elevenlabs), \
+             patch.object(tts_tool, "_elevenlabs_voice_settings", side_effect=voice_settings):
+            tts_tool._generate_elevenlabs("hi", str(tmp_path / "out.mp3"), {})
+
+        assert order == ["import", "settings"]
+
     def test_xai_reads_dotenv_key(self, tmp_path):
         """xAI TTS now resolves credentials through ``tools.xai_http``; the
         dotenv fallback contract from #17140 is preserved by patching the
