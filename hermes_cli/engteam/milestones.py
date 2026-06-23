@@ -23,5 +23,5 @@ def format_milestone(*, kind: str, goal: str, stage: str | None = None,
     if kind == "blocked":
         return f"{goal}: blocked{tail}."
     if kind == "complete":
-        return f"{goal}: shipped.{tail}"
+        return f"{goal}: shipped{tail}."
     return f"{goal}: stalled{tail}."

@@ -1,8 +1,9 @@
 """Persistent eng-manager registry of live projects.
 
 A project is a root card on the engineering board that has no parents and a
-completion metadata marker `kind == "engteam_project"`. Listing/searching is a
-board query — there is no separate state store."""
+``"Project: "`` title prefix (set by ``open_project``). Detection is title-based
+because completion metadata is not carried on the ``Task`` row. Listing/searching
+is a board query — there is no separate state store."""
 from __future__ import annotations
 
 from dataclasses import dataclass
