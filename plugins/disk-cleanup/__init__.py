@@ -201,6 +201,7 @@ Subcommands:
   quick                      Run safe cleanup now (no prompts)
   deep                       Run quick, then list items that need prompts
   track <path> <category>    Manually add a path to tracking
+                             (trailing /* means recursive cleanup inside folder)
   forget <path>              Stop tracking a path (does not delete)
 
 Categories: temp | test | research | download | chrome-profile | cron-output | other
