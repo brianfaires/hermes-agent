@@ -959,6 +959,26 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
 # ===========================================================================
 # Provider: ElevenLabs (premium)
 # ===========================================================================
+def _elevenlabs_voice_settings(el_config: Dict[str, Any], tts_config: Dict[str, Any]):
+    """Build optional ElevenLabs VoiceSettings from config knobs."""
+    from elevenlabs.types.voice_settings import VoiceSettings
+
+    values = {}
+    speed = float(el_config.get("speed", tts_config.get("speed", 1.0)))
+    if speed != 1.0:
+        values["speed"] = max(0.7, min(1.2, speed))
+    if "stability" in el_config:
+        values["stability"] = max(0.0, min(1.0, float(el_config["stability"])))
+    if "similarity_boost" in el_config:
+        values["similarity_boost"] = max(0.0, min(1.0, float(el_config["similarity_boost"])))
+    if "style" in el_config:
+        values["style"] = max(0.0, min(1.0, float(el_config["style"])))
+    if "use_speaker_boost" in el_config:
+        raw = el_config["use_speaker_boost"]
+        values["use_speaker_boost"] = raw if isinstance(raw, bool) else str(raw).lower() in {"1", "true", "yes", "on"}
+    return VoiceSettings(**values) if values else None
+
+
 def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """
     Generate audio using ElevenLabs.
@@ -978,6 +998,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     el_config = tts_config.get("elevenlabs", {})
     voice_id = el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID)
     model_id = el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID)
+    voice_settings = _elevenlabs_voice_settings(el_config, tts_config)
 
     # Determine output format based on file extension
     if output_path.endswith(".ogg"):
@@ -987,12 +1008,15 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
 
     ElevenLabs = _import_elevenlabs()
     client = ElevenLabs(api_key=api_key)
-    audio_generator = client.text_to_speech.convert(
+    convert_kwargs = dict(
         text=text,
         voice_id=voice_id,
         model_id=model_id,
         output_format=output_format,
     )
+    if voice_settings:
+        convert_kwargs["voice_settings"] = voice_settings
+    audio_generator = client.text_to_speech.convert(**convert_kwargs)
 
     # audio_generator yields chunks -- write them all
     with open(output_path, "wb") as f:
@@ -2597,6 +2621,7 @@ def stream_tts_to_speaker(
         voice_id = el_config.get("voice_id", voice_id)
         model_id = el_config.get("streaming_model_id",
                                  el_config.get("model_id", model_id))
+        voice_settings = _elevenlabs_voice_settings(el_config, tts_config)
         # Per-sentence cap for the streaming path. Look up the cap against
         # the *streaming* model_id (defaults to eleven_flash_v2_5 = 40k chars),
         # not the sync model_id. A user override
@@ -2664,12 +2689,15 @@ def stream_tts_to_speaker(
             if len(cleaned) > stream_max_len:
                 cleaned = cleaned[:stream_max_len]
             try:
-                audio_iter = client.text_to_speech.convert(
+                convert_kwargs = dict(
                     text=cleaned,
                     voice_id=voice_id,
                     model_id=model_id,
                     output_format="pcm_24000",
                 )
+                if voice_settings:
+                    convert_kwargs["voice_settings"] = voice_settings
+                audio_iter = client.text_to_speech.convert(**convert_kwargs)
                 if output_stream is not None:
                     for chunk in audio_iter:
                         if stop_event.is_set():
