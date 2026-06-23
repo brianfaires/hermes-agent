@@ -1542,3 +1542,35 @@ def test_real_configurable_changes_still_reported_in_diff():
     assert ((new_enabled2 - current) & universe) == {"vision"}
 
 
+
+
+def test_configurable_toolsets_include_hindsight():
+    assert any(ts_key == "hindsight" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+
+
+def test_get_platform_tools_preserves_explicit_hindsight_toolset():
+    config = {"platform_toolsets": {"cli": ["hindsight"]}}
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+    assert "hindsight" in enabled
+    assert "memory" not in enabled
+
+
+def test_hindsight_provider_auto_enables_without_file_memory():
+    """memory.provider=hindsight surfaces the hindsight toolset even when the
+    file-backed `memory` toolset is disabled — and never the file memory tool."""
+    config = {
+        "agent": {"disabled_toolsets": ["memory"]},
+        "memory": {"provider": "hindsight", "memory_enabled": False},
+    }
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+    assert "hindsight" in enabled
+    assert "memory" not in enabled
+
+
+def test_hindsight_provider_respects_explicit_disable():
+    config = {
+        "agent": {"disabled_toolsets": ["hindsight"]},
+        "memory": {"provider": "hindsight"},
+    }
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+    assert "hindsight" not in enabled
