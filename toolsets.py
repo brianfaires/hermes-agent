@@ -206,8 +206,19 @@ TOOLSETS = {
     },
     
     "memory": {
-        "description": "Persistent memory across sessions (personal notes + user profile)",
+        "description": "Built-in file-backed memory tool (MEMORY.md / USER.md)",
         "tools": ["memory"],
+        "includes": []
+    },
+
+    "hindsight": {
+        # Provider-backed memory (hindsight_retain/recall/reflect). Tools are
+        # injected at runtime by MemoryManager when memory.provider=hindsight,
+        # so the static list is empty — this entry is the opt-in flag that lets
+        # the provider tools surface WITHOUT enabling the file-backed `memory`
+        # tool. See agent.memory_manager.inject_memory_provider_tools.
+        "description": "Provider-backed memory: retain, recall, reflect (requires memory.provider=hindsight)",
+        "tools": [],
         "includes": []
     },
 
