@@ -149,6 +149,103 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
     return updated_available, updated_unavailable
 
 
+def _read_doctor_config() -> dict:
+    """Read config.yaml from doctor's active HERMES_HOME without mutating it."""
+    config_path = HERMES_HOME / "config.yaml"
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _doctor_configured_enabled_toolsets(config: dict) -> set[str] | None:
+    """Return explicitly enabled platform toolsets, or None for legacy/unconfigured installs.
+
+    `hermes tools` writes `platform_toolsets` as the user's authoritative
+    allow-list per surface. When that exists, doctor should not warn about
+    unavailable toolsets outside the allow-list.
+    """
+    platform_toolsets = config.get("platform_toolsets")
+    if not isinstance(platform_toolsets, dict) or not platform_toolsets:
+        return None
+
+    enabled: set[str] = set()
+    for value in platform_toolsets.values():
+        if not isinstance(value, list):
+            continue
+        enabled.update(str(item) for item in value)
+    return enabled
+
+
+def _filter_doctor_tool_availability_by_enabled_toolsets(
+    available: list[str],
+    unavailable: list[dict],
+    enabled_toolsets: set[str] | None,
+) -> tuple[list[str], list[dict]]:
+    """Drop availability rows for toolsets the user has not enabled."""
+    if enabled_toolsets is None:
+        return available, unavailable
+    return (
+        [toolset for toolset in available if toolset in enabled_toolsets],
+        [item for item in unavailable if item.get("name") in enabled_toolsets],
+    )
+
+
+def _provider_ref_auth_provider(ref: str) -> str | None:
+    provider = str(ref or "").strip().lower().split("/", 1)[0]
+    if provider in {"openai-codex", "openai_codex", "codex"}:
+        return "codex"
+    if provider == "nous":
+        return "nous"
+    if provider in {"google-gemini-cli", "gemini-cli", "gemini-oauth", "google-gemini-oauth"}:
+        return "gemini_oauth"
+    if provider in {"minimax-oauth", "minimax_oauth", "minimax-oauth-io", "minimax-portal", "minimax-global"}:
+        return "minimax_oauth"
+    if provider in {"xai-oauth", "grok-oauth", "x-ai-oauth", "xai-grok-oauth"}:
+        return "xai_oauth"
+    return None
+
+
+def _doctor_relevant_auth_providers(config: dict, enabled_toolsets: set[str] | None = None) -> set[str]:
+    """Return OAuth providers that are actually selected by current config."""
+    del enabled_toolsets  # reserved for future tool auth relevance checks
+    refs: list[str] = []
+
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        refs.extend(str(model_cfg.get(key) or "") for key in ("provider", "default"))
+    elif isinstance(model_cfg, str):
+        refs.append(model_cfg)
+
+    for key in ("provider", "fallback_provider"):
+        refs.append(str(config.get(key) or ""))
+
+    for key in ("fallback_model", "fallback_providers"):
+        raw = config.get(key)
+        if isinstance(raw, dict):
+            refs.extend(str(raw.get(k) or "") for k in ("provider", "model"))
+        elif isinstance(raw, list):
+            for entry in raw:
+                if isinstance(entry, dict):
+                    refs.extend(str(entry.get(k) or "") for k in ("provider", "model"))
+        else:
+            refs.append(str(raw or ""))
+
+    fallback = config.get("fallback")
+    if isinstance(fallback, dict):
+        refs.extend(str(fallback.get(key) or "") for key in ("provider", "model"))
+
+    relevant = set()
+    for ref in refs:
+        auth_provider = _provider_ref_auth_provider(ref)
+        if auth_provider:
+            relevant.add(auth_provider)
+    return relevant
+
+
 def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool:
     """Return True when a direct API-key probe failure is non-blocking.
 
@@ -530,6 +627,12 @@ def run_doctor(args):
     issues = []
     manual_issues = []  # issues that can't be auto-fixed
     fixed_count = 0
+    doctor_config = _read_doctor_config()
+    doctor_enabled_toolsets = _doctor_configured_enabled_toolsets(doctor_config)
+    relevant_auth_providers = _doctor_relevant_auth_providers(
+        doctor_config,
+        enabled_toolsets=doctor_enabled_toolsets,
+    )
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
@@ -1084,13 +1187,13 @@ def run_doctor(args):
         nous_status = get_nous_auth_status()
         if nous_status.get("logged_in"):
             check_ok("Nous Portal auth", "(logged in)")
-        else:
+        elif "nous" in relevant_auth_providers:
             check_warn("Nous Portal auth", "(not logged in)")
 
         codex_status = get_codex_auth_status()
         if codex_status.get("logged_in"):
             check_ok("OpenAI Codex auth", "(logged in)")
-        else:
+        elif "codex" in relevant_auth_providers:
             check_warn("OpenAI Codex auth", "(not logged in)")
             if codex_status.get("error"):
                 check_info(codex_status["error"])
@@ -1116,14 +1219,14 @@ def run_doctor(args):
                 pieces.append(f"project={project}")
             suffix = f" ({', '.join(pieces)})" if pieces else ""
             check_ok("Google Gemini OAuth", f"(logged in{suffix})")
-        else:
+        elif "gemini_oauth" in relevant_auth_providers:
             check_warn("Google Gemini OAuth", "(not logged in)")
 
         minimax_status = get_minimax_oauth_auth_status()
         if minimax_status.get("logged_in"):
             region = minimax_status.get("region", "global")
             check_ok("MiniMax OAuth", f"(logged in, region={region})")
-        else:
+        elif "minimax_oauth" in relevant_auth_providers:
             check_warn("MiniMax OAuth", "(not logged in)")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
@@ -1135,7 +1238,7 @@ def run_doctor(args):
         xai_oauth_status = get_xai_oauth_auth_status() or {}
         if xai_oauth_status.get("logged_in"):
             check_ok("xAI OAuth", "(logged in)")
-        else:
+        elif "xai_oauth" in relevant_auth_providers:
             check_warn("xAI OAuth", "(not logged in)")
             if xai_oauth_status.get("error"):
                 check_info(xai_oauth_status["error"])
@@ -2110,6 +2213,11 @@ def run_doctor(args):
         
         available, unavailable = check_tool_availability()
         available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
+        available, unavailable = _filter_doctor_tool_availability_by_enabled_toolsets(
+            available,
+            unavailable,
+            doctor_enabled_toolsets,
+        )
         
         for tid in available:
             info = TOOLSET_REQUIREMENTS.get(tid, {})
