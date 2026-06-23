@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -204,6 +206,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 }
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
+import cron.hooks as cron_hooks
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -710,7 +713,7 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(job: dict, content: str, adapters=None, loop=None, raw_content: bool = False) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -718,6 +721,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
+
+    When ``raw_content`` is True the message is delivered verbatim — no
+    summarize/condense step and no "Cronjob Response" wrapper. Used for
+    system notifications (e.g. cron_calendar_sync duration alerts) that are
+    already fully formed.
 
     Returns None on success, or an error string on failure.
     """
@@ -732,28 +740,31 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
-    # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
-    try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
-
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
-        )
+    if raw_content:
+        delivery_content = content or ""
     else:
-        delivery_content = content
+        # Optionally wrap the content with a header/footer so the user knows this
+        # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
+        # in config.yaml for clean output.
+        wrap_response = True
+        try:
+            user_cfg = load_config()
+            wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        except Exception:
+            pass
+
+        if wrap_response:
+            task_name = job.get("name", job["id"])
+            job_id = job.get("id", "")
+            delivery_content = (
+                f"Cronjob Response: {task_name}\n"
+                f"(job_id: {job_id})\n"
+                f"-------------\n\n"
+                f"{content}\n\n"
+                f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+            )
+        else:
+            delivery_content = content
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
@@ -2052,6 +2063,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
+    started_at = time.perf_counter()
     try:
         success, output, final_response, error = run_job(job)
 
@@ -2087,11 +2099,15 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
         mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+        _emit_complete(job, success, time.perf_counter() - started_at, error,
+                       adapters=adapters, loop=loop)
         return True
 
     except Exception as e:
         logger.error("Error processing job %s: %s", job['id'], e)
         mark_job_run(job["id"], False, str(e))
+        _emit_complete(job, False, time.perf_counter() - started_at, str(e),
+                       adapters=adapters, loop=loop)
         return False
 
 
@@ -2111,6 +2127,42 @@ def _notify_provider_jobs_changed() -> None:
         resolve_cron_scheduler().on_jobs_changed()
     except Exception as e:
         logger.debug("on_jobs_changed notify failed: %s", e)
+
+
+def _emit_complete(job: dict, success: bool, duration_seconds: float,
+                   error: Optional[str], adapters=None, loop=None) -> None:
+    """Fire the COMPLETE cron hook for a finished run.
+
+    The payload carries a ``notify(message, warn=False)`` callback bound to the
+    job's delivery target (with a log fallback) so hook consumers — e.g. an
+    external cron-calendar-sync plugin — can surface a message to the cron's
+    normal target without depending on scheduler internals. Emitted from the
+    shared ``run_one_job`` body so it fires for both the built-in ticker and an
+    external provider (Chronos) fire_due.
+    """
+    def notify(message: str, warn: bool = False) -> None:
+        targets = _resolve_delivery_targets(job)
+        if not targets:
+            if warn:
+                logger.warning("%s", message)
+            else:
+                logger.info("%s", message)
+            return
+        try:
+            err = _deliver_result(job, message, adapters=adapters, loop=loop, raw_content=True)
+            if err:
+                logger.warning("Job '%s': notification delivery issue: %s", job.get("id"), err)
+        except Exception as e:
+            logger.error("Job '%s': notification delivery failed: %s", job.get("id"), e)
+
+    cron_hooks.emit(
+        cron_hooks.COMPLETE,
+        job=job,
+        success=success,
+        duration_seconds=duration_seconds,
+        error=error,
+        notify=notify,
+    )
 
 
 def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
@@ -2197,12 +2249,21 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
             body."""
             return run_one_job(job, adapters=adapters, loop=loop, verbose=verbose)
 
-        # Partition due jobs: those with a per-job workdir mutate
-        # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
-        # so they MUST run sequentially to avoid corrupting each other.  Jobs
-        # without a workdir leave env untouched and stay parallel-safe.
-        sequential_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
-        parallel_jobs = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
+        # Partition due jobs: jobs with a per-job workdir and/or profile touch
+        # process-global runtime state inside run_job. Workdir jobs temporarily
+        # set os.environ["TERMINAL_CWD"]; profile jobs use a context-local
+        # Hermes home override, scheduler _hermes_home hook, and temporary
+        # profile .env load into os.environ with snapshot/restore. They MUST run
+        # sequentially to avoid corrupting each other. Jobs without either field
+        # stay parallel-safe.
+        sequential_jobs = [
+            j for j in due_jobs
+            if (j.get("workdir") or "").strip() or (j.get("profile") or "").strip()
+        ]
+        parallel_jobs = [
+            j for j in due_jobs
+            if not ((j.get("workdir") or "").strip() or (j.get("profile") or "").strip())
+        ]
 
         _results: list = []
         _all_futures: list = []
