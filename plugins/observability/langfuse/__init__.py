@@ -65,6 +65,7 @@ _TRACE_STATE: Dict[str, TraceState] = {}
 _MAX_TRACE_STATE = 256
 _LANGFUSE_CLIENT = None
 _READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
+_PATH_LIKE_TEXT_RE = re.compile(r"^(?:/[^\n\r\0]+|~[/][^\n\r\0]+|[A-Za-z]:[\\/][^\n\r\0]+)")
 _READ_FILE_HEAD_LINES = 25
 _READ_FILE_TAIL_LINES = 15
 
@@ -281,6 +282,30 @@ def _redact_data_uri(value: str) -> dict[str, Any]:
     }
 
 
+def _looks_like_path_payload_text(value: str) -> bool:
+    """Detect text payloads the Langfuse SDK may mistake for local files.
+
+    The SDK treats strings that look like file paths as media inputs. Tool
+    output can legitimately start with a local path followed by text/log lines;
+    passing that string through unchanged makes the SDK try to stat/open the
+    whole multiline value as a path, which can raise ``ENAMETOOLONG``.
+    """
+    if "\n" not in value and "\r" not in value:
+        return False
+    return bool(_PATH_LIKE_TEXT_RE.match(value.strip()))
+
+
+def _neutralize_path_payload_text(value: str, max_chars: int) -> dict[str, Any]:
+    content = "local-path-like text: " + value
+    if len(content) > max_chars:
+        content = content[:max_chars] + f"... [truncated {len(content) - max_chars} chars]"
+    return {
+        "type": "path_like_text",
+        "content": content,
+        "length": len(value),
+    }
+
+
 def _truncate_text(value: str, max_chars: int) -> Any:
     # Langfuse SDK treats data:*;base64 strings as media and attempts to
     # decode them. Truncating those strings produces invalid base64 and noisy
@@ -289,6 +314,8 @@ def _truncate_text(value: str, max_chars: int) -> Any:
     # reaches the SDK.
     if _is_base64_data_uri(value):
         return _redact_data_uri(value)
+    if _looks_like_path_payload_text(value):
+        return _neutralize_path_payload_text(value, max_chars)
     if len(value) <= max_chars:
         return value
     return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
