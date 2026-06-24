@@ -204,6 +204,24 @@ class TestPayloadSanitization:
             "length": len(payload),
         }
 
+    def test_safe_value_neutralizes_multiline_absolute_path_text(self):
+        sys.modules.pop("plugins.observability.langfuse", None)
+        import importlib
+        mod = importlib.import_module("plugins.observability.langfuse")
+
+        payload = (
+            "/home/brian/services/langfuse/src/.env\n"
+            "TELEMETRY_ENABLED=<set>\n"
+            "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID=<set>\n"
+        )
+        result = mod._safe_value(payload)
+
+        assert result == {
+            "type": "path_like_text",
+            "content": "local-path-like text: " + payload,
+            "length": len(payload),
+        }
+
 
 class TestTraceScopeKey:
     def _fresh_plugin(self):
