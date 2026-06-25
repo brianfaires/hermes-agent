@@ -878,6 +878,7 @@ try:
         pause_job as _cron_pause,
         resume_job as _cron_resume,
         trigger_job as _cron_trigger,
+        read_prompt_file as _cron_read_prompt_file,
     )
     _CRON_AVAILABLE = True
 except ImportError:
@@ -889,6 +890,7 @@ except ImportError:
     _cron_pause = None
     _cron_resume = None
     _cron_trigger = None
+    _cron_read_prompt_file = None
 
 
 def _notify_cron_provider_jobs_changed() -> None:
@@ -4107,7 +4109,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     _JOB_ID_RE = __import__("re").compile(r"[a-f0-9]{12}")
     # Allowed fields for update — prevents clients injecting arbitrary keys
-    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "prompt_path", "deliver", "skills", "skill", "repeat", "enabled"}
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
@@ -4161,7 +4163,11 @@ class APIServerAdapter(BasePlatformAdapter):
             body = await request.json()
             name = (body.get("name") or "").strip()
             schedule = (body.get("schedule") or "").strip()
-            prompt = body.get("prompt", "")
+            prompt_raw = body.get("prompt")
+            prompt = "" if prompt_raw is None else str(prompt_raw)
+            prompt_present = bool(prompt.strip())
+            prompt_path_raw = body.get("prompt_path")
+            prompt_path = "" if prompt_path_raw is None else str(prompt_path_raw).strip()
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
@@ -4178,15 +4184,24 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
                 )
-            if prompt and _scan_cron_prompt is not None:
-                scan_error = _scan_cron_prompt(prompt)
-                if scan_error:
-                    return web.json_response({"error": scan_error}, status=400)
+            if (prompt_present or prompt_path) and _scan_cron_prompt is not None:
+                combined_prompt = prompt if prompt_present else ""
+                if prompt_path and _cron_read_prompt_file is not None:
+                    try:
+                        prompt_from_file = _cron_read_prompt_file(prompt_path)
+                    except ValueError as exc:
+                        return web.json_response({"error": str(exc)}, status=400)
+                    combined_prompt = f"{combined_prompt}\n{prompt_from_file}" if prompt_present else prompt_from_file
+                if combined_prompt:
+                    scan_error = _scan_cron_prompt(combined_prompt)
+                    if scan_error:
+                        return web.json_response({"error": scan_error}, status=400)
             if repeat is not None and (not isinstance(repeat, int) or repeat < 1):
                 return web.json_response({"error": "Repeat must be a positive integer"}, status=400)
 
             kwargs = {
-                "prompt": prompt,
+                "prompt": prompt if prompt_present else "",
+                "prompt_path": prompt_path or None,
                 "schedule": schedule,
                 "name": name,
                 "deliver": deliver,
@@ -4200,6 +4215,8 @@ class APIServerAdapter(BasePlatformAdapter):
             job = _cron_create(**kwargs)
             _notify_cron_provider_jobs_changed()
             return web.json_response({"job": job})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
         except Exception as e:
             return web.json_response({"error": _redact_api_error_text(e)}, status=500)
 
@@ -4244,19 +4261,37 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400,
                 )
-            if "prompt" in sanitized and len(sanitized["prompt"]) > self._MAX_PROMPT_LENGTH:
-                return web.json_response(
-                    {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
-                )
-            if sanitized.get("prompt") and _scan_cron_prompt is not None:
-                scan_error = _scan_cron_prompt(sanitized["prompt"])
-                if scan_error:
-                    return web.json_response({"error": scan_error}, status=400)
+            prompt_present = False
+            if "prompt" in sanitized:
+                sanitized["prompt"] = "" if sanitized["prompt"] is None else str(sanitized["prompt"])
+                prompt_present = bool(sanitized["prompt"].strip())
+                if len(sanitized["prompt"]) > self._MAX_PROMPT_LENGTH:
+                    return web.json_response(
+                        {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
+                    )
+            prompt_path_text = None
+            if "prompt_path" in sanitized:
+                prompt_path_text = "" if sanitized["prompt_path"] is None else str(sanitized["prompt_path"]).strip()
+                sanitized["prompt_path"] = prompt_path_text or None
+            if (prompt_present or prompt_path_text) and _scan_cron_prompt is not None:
+                combined_prompt = sanitized["prompt"] if prompt_present else ""
+                if prompt_path_text and _cron_read_prompt_file is not None:
+                    try:
+                        prompt_from_file = _cron_read_prompt_file(prompt_path_text)
+                    except ValueError as exc:
+                        return web.json_response({"error": str(exc)}, status=400)
+                    combined_prompt = f"{combined_prompt}\n{prompt_from_file}" if prompt_present else prompt_from_file
+                if combined_prompt:
+                    scan_error = _scan_cron_prompt(combined_prompt)
+                    if scan_error:
+                        return web.json_response({"error": scan_error}, status=400)
             job = _cron_update(job_id, sanitized)
             if not job:
                 return web.json_response({"error": "Job not found"}, status=404)
             _notify_cron_provider_jobs_changed()
             return web.json_response({"job": job})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
         except Exception as e:
             return web.json_response({"error": _redact_api_error_text(e)}, status=500)
 

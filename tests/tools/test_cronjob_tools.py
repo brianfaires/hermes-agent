@@ -264,6 +264,43 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_create_from_prompt_path(self, tmp_path):
+        from cron.jobs import get_job
+
+        prompt_file = tmp_path / "digest.md"
+        prompt_file.write_text("Summarize the latest build failures.", encoding="utf-8")
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt_path=str(prompt_file),
+                schedule="every 1h",
+            )
+        )
+
+        assert created["success"] is True
+        assert created["job"]["prompt_path"] == str(prompt_file.resolve())
+        assert created["job"]["prompt_preview"] == f"@{prompt_file.resolve()}"
+        stored = get_job(created["job_id"])
+        assert stored["prompt"] == ""
+        assert stored["prompt_path"] == str(prompt_file.resolve())
+
+    def test_create_ignores_whitespace_prompt_when_prompt_path_is_set(self, tmp_path):
+        prompt_file = tmp_path / "digest.md"
+        prompt_file.write_text("Prompt from file.", encoding="utf-8")
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="   ",
+                prompt_path=str(prompt_file),
+                schedule="every 1h",
+            )
+        )
+
+        assert created["success"] is True
+        assert created["job"]["prompt_path"] == str(prompt_file.resolve())
+
     def test_list_handles_partial_legacy_job_records(self):
         from cron.jobs import save_jobs
 
@@ -308,6 +345,40 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         assert updated["job"]["name"] == "New Name"
         assert updated["job"]["schedule"] == "every 120m"
+
+    def test_update_can_switch_to_prompt_path(self, tmp_path):
+        from cron.jobs import get_job
+
+        prompt_file = tmp_path / "replacement.md"
+        prompt_file.write_text("Replacement prompt from file.", encoding="utf-8")
+
+        created = json.loads(cronjob(action="create", prompt="Inline prompt", schedule="every 1h"))
+        updated = json.loads(
+            cronjob(action="update", job_id=created["job_id"], prompt_path=str(prompt_file))
+        )
+
+        assert updated["success"] is True
+        assert updated["job"]["prompt_path"] == str(prompt_file.resolve())
+        assert updated["job"]["prompt_preview"] == "Inline prompt"
+        stored = get_job(created["job_id"])
+        assert stored["prompt"] == "Inline prompt"
+        assert stored["prompt_path"] == str(prompt_file.resolve())
+
+    def test_create_combines_prompt_and_prompt_path(self, tmp_path):
+        prompt_file = tmp_path / "digest.md"
+        prompt_file.write_text("Prompt from file.", encoding="utf-8")
+
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Inline prompt",
+                prompt_path=str(prompt_file),
+                schedule="every 1h",
+            )
+        )
+
+        assert created["success"] is True
+        assert created["job"]["prompt_path"] == str(prompt_file.resolve())
 
     def test_update_runtime_overrides_can_set_and_clear(self):
         created = json.loads(

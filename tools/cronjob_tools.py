@@ -28,6 +28,7 @@ from cron.jobs import (
     mark_job_run,
     parse_schedule,
     pause_job,
+    read_prompt_file,
     remove_job,
     resolve_job_ref,
     resume_job,
@@ -566,15 +567,23 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(job.get("prompt") or "")
+    prompt_path = str(job.get("prompt_path") or "").strip()
     skills = _canonical_skills(job.get("skill"), job.get("skills"))
     job_id = str(job.get("id") or "unknown")
-    name = str(job.get("name") or prompt[:50] or (skills[0] if skills else "") or job_id or "cron job")
+    name = str(
+        job.get("name")
+        or prompt[:50]
+        or Path(prompt_path).stem
+        or (skills[0] if skills else "")
+        or job_id
+        or "cron job"
+    )
     result = {
         "job_id": job_id,
         "name": name,
         "skill": skills[0] if skills else None,
         "skills": skills,
-        "prompt_preview": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+        "prompt_preview": prompt[:100] + "..." if len(prompt) > 100 else (prompt or (f"@{prompt_path}" if prompt_path else "")),
         "model": job.get("model"),
         "provider": job.get("provider"),
         "base_url": job.get("base_url"),
@@ -590,6 +599,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
     }
+    if prompt_path:
+        result["prompt_path"] = prompt_path
     if job.get("script"):
         result["script"] = job["script"]
     if job.get("no_agent"):
@@ -660,6 +671,7 @@ def cronjob(
     action: str,
     job_id: Optional[str] = None,
     prompt: Optional[str] = None,
+    prompt_path: Optional[str] = None,
     schedule: Optional[str] = None,
     name: Optional[str] = None,
     repeat: Optional[int] = None,
@@ -690,11 +702,13 @@ def cronjob(
                 return tool_error("schedule is required for create", success=False)
             canonical_skills = _canonical_skills(skill, skills)
             _no_agent = bool(no_agent)
+            prompt_text = _normalize_optional_job_value(prompt)
+            prompt_path_text = _normalize_optional_job_value(prompt_path)
             # Job-shape validation differs by mode:
             #   - no_agent=True → script is the job; prompt/skills are optional
             #     (and irrelevant to execution).
-            #   - no_agent=False (default) → at least one of prompt/skills must
-            #     be set, same as before.
+            #   - no_agent=False (default) → at least one of prompt/prompt_path/skills
+            #     must be set.
             if _no_agent:
                 if not script:
                     return tool_error(
@@ -702,10 +716,22 @@ def cronjob(
                         "the script is the job.",
                         success=False,
                     )
-            elif not prompt and not canonical_skills:
-                return tool_error("create requires either prompt or at least one skill", success=False)
-            if prompt:
-                scan_error = _scan_cron_prompt(prompt)
+            elif not prompt_text and not prompt_path_text and not canonical_skills:
+                return tool_error(
+                    "create requires a prompt, prompt_path, or at least one skill",
+                    success=False,
+                )
+            if prompt_text:
+                combined_prompt = prompt_text
+                if prompt_path_text:
+                    file_prompt = read_prompt_file(prompt_path_text)
+                    combined_prompt = f"{prompt_text}\n{file_prompt}"
+                scan_error = _scan_cron_prompt(combined_prompt)
+                if scan_error:
+                    return tool_error(scan_error, success=False)
+            elif prompt_path_text:
+                file_prompt = read_prompt_file(prompt_path_text)
+                scan_error = _scan_cron_prompt(file_prompt)
                 if scan_error:
                     return tool_error(scan_error, success=False)
 
@@ -734,7 +760,8 @@ def cronjob(
                         )
 
             job = create_job(
-                prompt=prompt or "",
+                prompt=prompt_text or "",
+                prompt_path=prompt_path_text,
                 schedule=schedule,
                 name=name,
                 repeat=repeat,
@@ -856,11 +883,26 @@ def cronjob(
 
         if normalized == "update":
             updates: Dict[str, Any] = {}
-            if prompt is not None:
-                scan_error = _scan_cron_prompt(prompt)
-                if scan_error:
-                    return tool_error(scan_error, success=False)
-                updates["prompt"] = prompt
+            prompt_provided = prompt is not None
+            prompt_text = _normalize_optional_job_value(prompt) if prompt_provided else None
+            prompt_path_provided = prompt_path is not None
+            prompt_path_text = _normalize_optional_job_value(prompt_path) if prompt_path_provided else None
+            if prompt_provided:
+                updates["prompt"] = prompt_text or ""
+            if prompt_path_provided:
+                updates["prompt_path"] = prompt_path_text or None
+            if prompt_provided or prompt_path_provided:
+                effective_prompt_raw = updates.get("prompt") if "prompt" in updates else str(job.get("prompt") or "")
+                effective_prompt = _normalize_optional_job_value(effective_prompt_raw)
+                effective_prompt_path = updates.get("prompt_path") if "prompt_path" in updates else _normalize_optional_job_value(job.get("prompt_path"))
+                combined_prompt = effective_prompt or ""
+                if effective_prompt_path:
+                    file_prompt = read_prompt_file(effective_prompt_path)
+                    combined_prompt = f"{combined_prompt}\n{file_prompt}" if effective_prompt else file_prompt
+                if combined_prompt:
+                    scan_error = _scan_cron_prompt(combined_prompt)
+                    if scan_error:
+                        return tool_error(scan_error, success=False)
             if name is not None:
                 updates["name"] = name
             if deliver is not None:
@@ -956,6 +998,16 @@ def cronjob(
                     updates["enabled"] = True
             if not updates:
                 return tool_error("No updates provided.", success=False)
+
+            effective_prompt = _normalize_optional_job_value(updates.get("prompt")) if "prompt" in updates else _normalize_optional_job_value(job.get("prompt"))
+            effective_prompt_path = updates.get("prompt_path") if "prompt_path" in updates else _normalize_optional_job_value(job.get("prompt_path"))
+            effective_skills = updates.get("skills") if "skills" in updates else _canonical_skills(job.get("skill"), job.get("skills"))
+            effective_no_agent = updates.get("no_agent") if "no_agent" in updates else bool(job.get("no_agent"))
+            if not effective_no_agent and not effective_prompt and not effective_prompt_path and not effective_skills:
+                return tool_error(
+                    "Update would leave the cron job without a prompt, prompt_path, or skills.",
+                    success=False,
+                )
             updated = update_job(job_id, updates)
             _notify_provider_jobs_changed_safe()
             return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
@@ -991,7 +1043,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
         "properties": {
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, 'schedule' is REQUIRED and you must provide 'prompt', 'prompt_path', or at least one skill. If both prompt and prompt_path are provided, the effective prompt is prompt + newline + file contents."
             },
             "job_id": {
                 "type": "string",
@@ -999,7 +1051,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "prompt": {
                 "type": "string",
-                "description": "For create: the full self-contained prompt. If skills are also provided, this becomes the task instruction paired with those skills."
+                "description": "Optional inline prompt text. If skills are also provided, this becomes the task instruction paired with those skills. If prompt_path is also provided, the effective prompt is this text, then a newline, then the file contents."
+            },
+            "prompt_path": {
+                "type": "string",
+                "description": "Optional absolute file path. For action=create or update, provide this instead of prompt to load the prompt from a file at run time. Pass empty string on update to clear it."
             },
             "schedule": {
                 "type": "string",
@@ -1124,6 +1180,7 @@ registry.register(
         action=args.get("action", ""),
         job_id=args.get("job_id"),
         prompt=args.get("prompt"),
+        prompt_path=args.get("prompt_path"),
         schedule=args.get("schedule"),
         name=args.get("name"),
         repeat=args.get("repeat"),

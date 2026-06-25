@@ -330,6 +330,13 @@ class TestJobCRUD:
         job = create_job(prompt="Recurring", schedule="every 1h")
         assert job["repeat"]["times"] is None
 
+    def test_script_only_agent_job_is_valid(self, tmp_cron_dir):
+        job = create_job(prompt=None, schedule="every 1h", script="collect.py")
+
+        assert job["prompt"] == ""
+        assert job["script"] == "collect.py"
+        assert job["no_agent"] is False
+
     def test_default_delivery_origin(self, tmp_cron_dir):
         job = create_job(
             prompt="Test", schedule="30m",
