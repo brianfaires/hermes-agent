@@ -215,14 +215,21 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _apply_skill_fields(job)
     job_id = _coerce_job_text(normalized.get("id"), "unknown")
     prompt = _coerce_job_text(normalized.get("prompt"))
+    raw_prompt_path = _coerce_job_text(normalized.get("prompt_path")).strip()
+    try:
+        prompt_path = _normalize_prompt_path(raw_prompt_path)
+    except ValueError:
+        prompt_path = None
     normalized["id"] = job_id
     normalized["prompt"] = prompt
+    normalized["prompt_path"] = prompt_path
 
     name = _coerce_job_text(normalized.get("name")).strip()
     if not name:
         script = _coerce_job_text(normalized.get("script")).strip()
         label_source = (
             prompt
+            or (Path(prompt_path).stem if prompt_path else "")
             or (normalized["skills"][0] if normalized.get("skills") else "")
             or script
             or job_id
@@ -613,6 +620,39 @@ def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
     return str(resolved)
 
 
+def _normalize_prompt_path(prompt_path: Optional[str]) -> Optional[str]:
+    """Normalize and validate an absolute prompt file path."""
+    if prompt_path is None:
+        return None
+    raw = str(prompt_path).strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ValueError(f"Prompt path must be an absolute path. Got: {raw!r}")
+    return str(path.resolve())
+
+
+def resolve_prompt_path(prompt_path: Optional[str]) -> Optional[Path]:
+    """Resolve a stored cron prompt path to its concrete file path."""
+    normalized = _normalize_prompt_path(prompt_path)
+    if normalized is None:
+        return None
+    return Path(normalized)
+
+
+def read_prompt_file(prompt_path: Optional[str]) -> str:
+    """Read a cron prompt file, raising a clear error when it is missing."""
+    resolved = resolve_prompt_path(prompt_path)
+    if resolved is None:
+        return ""
+    if not resolved.exists():
+        raise ValueError(f"Cron prompt file does not exist: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"Cron prompt path is not a file: {resolved}")
+    return resolved.read_text(encoding="utf-8")
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -630,6 +670,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
+    prompt_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -674,6 +715,9 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        prompt_path: Optional absolute file path whose contents are loaded as
+                the prompt at run time. Lets jobs keep their prompt in a file
+                instead of embedding it inline in ``jobs.json``.
 
     Returns:
         The created job dict
@@ -704,10 +748,28 @@ def create_job(
     normalized_base_url = normalized_base_url or None
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
+    normalized_prompt_path = _normalize_prompt_path(prompt_path)
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
+
+    prompt_text = _coerce_job_text(prompt)
+    prompt_present = bool(prompt_text.strip())
+    if not prompt_present:
+        prompt_text = ""
+    if not normalized_no_agent and not prompt_present and not normalized_prompt_path and not normalized_skills:
+        raise ValueError("create_job requires a prompt, prompt_path, or at least one skill")
+    if prompt_present or normalized_prompt_path:
+        from tools.cronjob_tools import _scan_cron_prompt
+
+        prompt_source = prompt_text
+        if normalized_prompt_path:
+            file_prompt = read_prompt_file(normalized_prompt_path)
+            prompt_source = f"{prompt_text}\n{file_prompt}" if prompt_present else file_prompt
+        scan_error = _scan_cron_prompt(prompt_source)
+        if scan_error:
+            raise ValueError(scan_error)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -726,12 +788,17 @@ def create_job(
     else:
         context_from = None
 
-    prompt_text = _coerce_job_text(prompt)
-    label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
+    label_source = (
+        prompt_text
+        or (Path(normalized_prompt_path).stem if normalized_prompt_path else None)
+        or (normalized_skills[0] if normalized_skills else None)
+        or (normalized_script if normalized_no_agent else None)
+    ) or "cron job"
     job = {
         "id": job_id,
         "name": name or label_source[:50].strip(),
         "prompt": prompt_text,
+        "prompt_path": normalized_prompt_path,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
@@ -853,7 +920,36 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
 
+            if "prompt_path" in updates:
+                updates["prompt_path"] = _normalize_prompt_path(updates["prompt_path"])
+
+            prompt_update = None
+            prompt_present = False
+            if "prompt" in updates:
+                prompt_update = _coerce_job_text(updates.get("prompt"))
+                prompt_present = bool(prompt_update.strip())
+                updates["prompt"] = prompt_update if prompt_present else ""
+            prompt_path_update = updates.get("prompt_path") if "prompt_path" in updates else None
+
             updated = _apply_skill_fields({**job, **updates})
+            effective_prompt_raw = _coerce_job_text(updated.get("prompt"))
+            effective_prompt = effective_prompt_raw.strip()
+            effective_prompt_path = _coerce_job_text(updated.get("prompt_path")).strip()
+            effective_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
+            prompt_shape_touched = any(key in updates for key in ("prompt", "prompt_path", "skill", "skills"))
+            if prompt_present or prompt_path_update or ("prompt" in updates and "prompt_path" in updates):
+                from tools.cronjob_tools import _scan_cron_prompt
+
+                prompt_source = effective_prompt_raw if effective_prompt else ""
+                if effective_prompt_path:
+                    file_prompt = read_prompt_file(effective_prompt_path)
+                    prompt_source = f"{prompt_source}\n{file_prompt}" if effective_prompt else file_prompt
+                if prompt_source:
+                    scan_error = _scan_cron_prompt(prompt_source)
+                    if scan_error:
+                        raise ValueError(scan_error)
+            if prompt_shape_touched and not updated.get("no_agent") and not effective_prompt and not effective_prompt_path and not effective_skills:
+                raise ValueError("Cron job must keep a prompt, prompt_path, or at least one skill")
             schedule_changed = "schedule" in updates
 
             if "skills" in updates or "skill" in updates:
@@ -1161,7 +1257,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     """Inner implementation of get_due_jobs(); must be called with _jobs_lock held."""
     now = _hermes_now()
     raw_jobs = load_jobs()
-    jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
+    jobs = [_normalize_job_record(j) for j in copy.deepcopy(raw_jobs)]
     due = []
     needs_save = False
 
