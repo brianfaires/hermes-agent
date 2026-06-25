@@ -7,9 +7,29 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _resolve_origin,
+    _resolve_delivery_target,
+    _deliver_result,
+    _send_media_via_adapter,
+    run_job,
+    SILENT_MARKER,
+    _build_job_prompt,
+    _ensure_cron_attention_prefix,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
+
+
+class TestCronAttentionPrefix:
+    def test_failed_messages_get_red_prefix(self):
+        assert _ensure_cron_attention_prefix("Cron failed", failed=True).startswith("❌ ")
+
+    def test_warning_messages_get_warning_prefix(self):
+        assert _ensure_cron_attention_prefix("WARNING: disk low").startswith("⚠️ ")
+
+    def test_existing_attention_prefix_is_preserved(self):
+        assert _ensure_cron_attention_prefix("🚨 already red", failed=True) == "🚨 already red"
 
 
 class TestResolveOrigin:
@@ -527,6 +547,50 @@ class TestDeliverResultWrapping:
         assert "-------------" in sent_content
         assert "Here is today's summary." in sent_content
         assert "To stop or manage this job" in sent_content
+
+    def test_wrapped_warning_delivery_starts_with_warning_emoji(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "warn-job",
+                "name": "disk-check",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "WARNING: disk low")
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content.startswith("⚠️ ")
+        assert "Cronjob Response: disk-check" in sent_content
+
+    def test_wrapped_failure_delivery_starts_with_red_emoji(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "fail-job",
+                "name": "backup",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "❌ Cron 'backup' failed: timeout")
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content.startswith("❌ ")
+        assert "Cronjob Response: backup" in sent_content
 
     def test_delivery_uses_job_id_when_no_name(self):
         """When a job has no name, the wrapper should fall back to job id."""
@@ -1939,6 +2003,19 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+        assert deliver_mock.call_args.args[1].startswith("❌")
+
+    def test_warning_response_reaches_delivery_for_prefixing(self):
+        """Warning cron outputs are delivered so _deliver_result can prefix chat text."""
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "WARNING: disk low", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        deliver_mock.assert_called_once()
+        assert deliver_mock.call_args.args[1] == "WARNING: disk low"
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
@@ -1996,6 +2073,8 @@ class TestBuildJobPromptSilentHint:
         result = _build_job_prompt(job)
         assert "do NOT use send_message" in result
         assert "automatically delivered" in result
+        assert "ATTENTION PREFIXES" in result
+        assert "red/error emoji" in result
 
     def test_delivery_guidance_precedes_user_prompt(self):
         """System guidance appears before the user's prompt text."""
