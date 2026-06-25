@@ -48,6 +48,27 @@ from hermes_time import now as _hermes_now
 logger = logging.getLogger(__name__)
 
 
+_RED_CRON_PREFIX = "❌"
+_WARN_CRON_PREFIX = "⚠️"
+_ATTENTION_PREFIX_RE = re.compile(r"^\s*(?:❌|🚨|🛑|🔴|⚠️|⚠)\s*")
+_WARNING_HEAD_RE = re.compile(
+    r"^\s*(?:warn(?:ing)?|caution|attention)\b|\b(?:status|result)\s*[:—-]\s*warn\b|—\s*warn\b",
+    re.IGNORECASE,
+)
+def _ensure_cron_attention_prefix(content: str, *, failed: bool = False, warn: bool = False) -> str:
+    """Ensure delivered cron failures/warnings start with an attention emoji."""
+    text = content or ""
+    if _ATTENTION_PREFIX_RE.match(text):
+        return text
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    looks_warning = bool(_WARNING_HEAD_RE.search(first_line[:240]))
+    if failed:
+        return f"{_RED_CRON_PREFIX} {text.lstrip()}"
+    if warn or looks_warning:
+        return f"{_WARN_CRON_PREFIX} {text.lstrip()}"
+    return text
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -67,14 +88,14 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         elif "quota" in lower:
             reason = "quota limit"
         return (
-            f"⚠️ Cron '{job_name}' failed: provider {reason}. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider {reason}. "
             "Fallback chain was exhausted or unavailable. "
             "Full details saved in cron output."
         )
 
     if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
         return (
-            f"⚠️ Cron '{job_name}' failed: provider timeout. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider timeout. "
             "Fallback chain was exhausted or unavailable. "
             "Full details saved in cron output."
         )
@@ -84,7 +105,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # not trip a misleading auth message.
     if re.search(r"authenticat|authoriz", lower) or re.search(r"\b(401|403)\b", text):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider authentication error. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider authentication error. "
             "Full details saved in cron output."
         )
 
@@ -98,7 +119,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
-    return f"⚠️ Cron '{job_name}' failed: {cleaned}"
+    return f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: {cleaned}"
 
 
 class CronPromptInjectionBlocked(Exception):
@@ -651,6 +672,25 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
+def _delivery_target_lost_origin_thread(origin: dict, target: dict) -> bool:
+    """Return True when a delivery target should have preserved origin thread_id.
+
+    ``thread_id`` values are scoped to a platform/channel.  A job may be born
+    in a Discord thread but intentionally deliver to Telegram (or any other
+    home channel); in that case the Discord thread ID is not meaningful for the
+    target and logging a warning is noise.  Warn only when the concrete target
+    is the same platform + chat as the origin and the target has dropped the
+    origin's thread/topic ID.
+    """
+    origin_thread = origin.get("thread_id")
+    if not origin_thread or target.get("thread_id"):
+        return False
+    return (
+        str(origin.get("platform", "")).lower() == str(target.get("platform", "")).lower()
+        and str(origin.get("chat_id", "")) == str(target.get("chat_id", ""))
+    )
+
+
 # Media extension sets — audio routing is centralized in gateway.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
@@ -766,6 +806,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, raw_conte
         else:
             delivery_content = content
 
+    # Attention alerts must start with their emoji even when cron response
+    # wrapping is enabled. Detect the attention class from the original content
+    # and prefix the final message body that actually reaches chat.
+    _attention_source = (content or "").lstrip()
+    _attention_first_line = _attention_source.splitlines()[0] if _attention_source else ""
+    delivery_content = _ensure_cron_attention_prefix(
+        delivery_content,
+        failed=_attention_source.startswith(("❌", "🚨", "🛑", "🔴")),
+        warn=_attention_source.startswith(("⚠️", "⚠"))
+        or bool(_WARNING_HEAD_RE.search(_attention_first_line[:240])),
+    )
+
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
@@ -785,14 +837,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, raw_conte
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
 
-        # Diagnostic: log thread_id for topic-aware delivery debugging
+        # Diagnostic: log thread_id for topic-aware delivery debugging.
+        # Thread IDs are platform/channel scoped, so cross-platform or
+        # home-channel delivery is allowed to omit the origin thread.
         origin = _resolve_origin(job) or {}
-        origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if _delivery_target_lost_origin_thread(origin, target):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",
-                job["id"], origin_thread, job.get("deliver", "local"), target,
+                job["id"], origin.get("thread_id"), job.get("deliver", "local"), target,
             )
         elif thread_id:
             logger.debug(
@@ -1208,6 +1261,10 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "ATTENTION PREFIXES: if your delivered report is a warning, "
+        "start it with a meaningful warning emoji such as ⚠️; if it is "
+        "an error, blocker, or failure, start it with a red/error emoji "
+        "such as ❌, 🚨, 🛑, or 🔴. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
@@ -1438,7 +1495,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # error so the user knows the watchdog itself broke — silent
             # failure for an alerting job is the worst-case outcome.
             alert = (
-                f"⚠ Cron watchdog '{job_name}' script failed\n\n"
+                f"{_RED_CRON_PREFIX} Cron watchdog '{job_name}' script failed\n\n"
                 f"{output}\n\n"
                 f"Time: {now_iso}"
             )
@@ -2149,6 +2206,8 @@ def _emit_complete(job: dict, success: bool, duration_seconds: float,
                 logger.info("%s", message)
             return
         try:
+            if warn:
+                message = _ensure_cron_attention_prefix(message, warn=True)
             err = _deliver_result(job, message, adapters=adapters, loop=loop, raw_content=True)
             if err:
                 logger.warning("Job '%s': notification delivery issue: %s", job.get("id"), err)
