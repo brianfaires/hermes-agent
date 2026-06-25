@@ -1166,7 +1166,15 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             result is used for prompt injection. When omitted, the script
             (if any) runs inline as before.
     """
-    user_prompt = str(job.get("prompt") or "")
+    from cron.jobs import read_prompt_file
+
+    prompt_path = str(job.get("prompt_path") or "").strip()
+    inline_prompt = str(job.get("prompt") or "")
+    if prompt_path:
+        file_prompt = read_prompt_file(prompt_path)
+        user_prompt = f"{inline_prompt}\n{file_prompt}" if inline_prompt.strip() else file_prompt
+    else:
+        user_prompt = inline_prompt
     prompt = user_prompt
     skills = job.get("skills")
     # True when runtime-collected DATA (script stdout, upstream-job output)
@@ -1440,7 +1448,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         Tuple of (success, full_output_doc, final_response, error_message)
     """
     job_id = job["id"]
-    job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+    prompt_path = str(job.get("prompt_path") or "").strip()
+    job_name = str(job.get("name") or job.get("prompt") or prompt_path or job_id or "cron job")
 
     # ---------------------------------------------------------------
     # no_agent short-circuit — the script IS the job, no LLM involvement.
