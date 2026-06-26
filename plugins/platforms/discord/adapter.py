@@ -5274,11 +5274,16 @@ class DiscordAdapter(BasePlatformAdapter):
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
 
-            # Check allowed channels - if set, only respond in these channels
+            # Check allowed channels - if set, only respond in the explicitly
+            # allowed thread or its currently resolved parent. Participation
+            # may bypass mention requirements below, never channel policy.
             allowed_channels_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
             if allowed_channels_raw:
                 allowed_channels = {ch.strip() for ch in allowed_channels_raw.split(",") if ch.strip()}
-                if "*" not in allowed_channels and not (channel_ids & allowed_channels):
+                if (
+                    "*" not in allowed_channels
+                    and not (channel_ids & allowed_channels)
+                ):
                     logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_ids)
                     return
 
@@ -5327,7 +5332,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
+            # Free-response channels only bypass the mention gate; they should
+            # still honor auto-threading so a profile-owned text channel can
+            # respond to every top-level comment while isolating each
+            # conversation in its own thread.  Voice-linked transcript chats
+            # remain inline to avoid spawning threads from live STT chatter.
+            skip_thread = bool(channel_ids & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
