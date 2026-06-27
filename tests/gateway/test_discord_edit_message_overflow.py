@@ -272,7 +272,7 @@ class TestFinalOverflowSplits:
 
         assert result.success is True
         delivered = "".join(edits + [s["content"] for s in sends])
-        assert "END_MARKER_XYZ" in delivered
+        assert r"END\_MARKER\_XYZ" in delivered
 
     @pytest.mark.asyncio
     async def test_continuations_threaded_as_replies(self):
