@@ -83,6 +83,86 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
     ),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)[\s\S]*$", re.IGNORECASE),
 )
+_DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
+_DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+
+
+def _format_discord_inline_code_span(body: str) -> str:
+    """Render inline-code content with a delimiter that can contain backticks."""
+    max_run = max((len(match.group(0)) for match in re.finditer(r"`+", body)), default=0)
+    delimiter = "`" * (max_run + 1)
+    if body.startswith("`") or body.endswith("`"):
+        return f"{delimiter} {body} {delimiter}"
+    return f"{delimiter}{body}{delimiter}"
+
+
+def _escape_discord_markdown_segment(segment: str) -> str:
+    """Escape Discord markdown in prose while preserving inline code spans."""
+    escaped: list[str] = []
+    pos = 0
+    length = len(segment)
+
+    while pos < length:
+        if segment[pos] != "`":
+            next_tick = segment.find("`", pos)
+            end = length if next_tick == -1 else next_tick
+            escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:end]))
+            pos = end
+            continue
+
+        delimiter_end = pos
+        while delimiter_end < length and segment[delimiter_end] == "`":
+            delimiter_end += 1
+        delimiter = segment[pos:delimiter_end]
+        body_start = delimiter_end
+        body_chars: list[str] = []
+        cursor = body_start
+        closed = False
+
+        while cursor < length:
+            if segment[cursor] == "\n":
+                break
+            if segment.startswith(delimiter, cursor):
+                escaped.append(_format_discord_inline_code_span("".join(body_chars)))
+                pos = cursor + len(delimiter)
+                closed = True
+                break
+            if segment[cursor] == "\\" and cursor + 1 < length and segment[cursor + 1] == "`":
+                body_chars.append("`")
+                cursor += 2
+                continue
+            body_chars.append(segment[cursor])
+            cursor += 1
+
+        if closed:
+            continue
+
+        # Unmatched backticks are prose, not code. Escape only the surrounding
+        # Discord markdown markers; backticks themselves do not need escaping.
+        escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:cursor]))
+        pos = cursor
+
+    return "".join(escaped)
+
+
+def _escape_discord_markdown_outside_code(content: str) -> str:
+    """Escape Discord markdown markers in prose while preserving code spans.
+
+    Discord has no parse-mode toggle. Sending literal text such as
+    ``hindsight*config*`` otherwise renders ``config`` in italics, which is
+    especially confusing when Hermes quotes user-provided strings or config
+    keys. Preserve fenced and inline code because those are intentional
+    formatting. Inside inline code, treat ``\\``` as an escaped literal backtick
+    and rewrap with a longer delimiter so Discord renders the backtick itself.
+    """
+    parts = _DISCORD_FENCED_CODE_RE.split(content or "")
+    escaped: list[str] = []
+    for part in parts:
+        if part.startswith("```") and part.endswith("```"):
+            escaped.append(part)
+        else:
+            escaped.append(_escape_discord_markdown_segment(part))
+    return "".join(escaped)
 
 try:
     import discord
@@ -3402,10 +3482,10 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         Format message for Discord.
 
-        Discord uses its own markdown variant.
+        Discord has no parse-mode toggle, so escape markdown markers in prose
+        to keep quoted/user/config text literal while preserving fenced code.
         """
-        # Discord markdown is fairly standard, no special escaping needed
-        return content
+        return _escape_discord_markdown_outside_code(content)
 
     async def _run_simple_slash(
         self,
