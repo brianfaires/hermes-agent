@@ -83,6 +83,33 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
     ),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)[\s\S]*$", re.IGNORECASE),
 )
+_DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
+_DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+_DISCORD_INLINE_CODE_RE = re.compile(r"(`+)([^`\n]*?)\1")
+
+
+def _escape_discord_markdown_outside_code(content: str) -> str:
+    """Escape Discord markdown markers in prose while preserving code spans.
+
+    Discord has no parse-mode toggle. Sending literal text such as
+    ``hindsight*config*`` otherwise renders ``config`` in italics, which is
+    especially confusing when Hermes quotes user-provided strings or config
+    keys. Preserve fenced and inline code because those are intentional
+    formatting and backslashes render literally inside code spans.
+    """
+    parts = _DISCORD_FENCED_CODE_RE.split(content or "")
+    escaped: list[str] = []
+    for part in parts:
+        if part.startswith("```") and part.endswith("```"):
+            escaped.append(part)
+        else:
+            start = 0
+            for match in _DISCORD_INLINE_CODE_RE.finditer(part):
+                escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", part[start:match.start()]))
+                escaped.append(match.group(0))
+                start = match.end()
+            escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", part[start:]))
+    return "".join(escaped)
 
 try:
     import discord
@@ -3402,10 +3429,10 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         Format message for Discord.
 
-        Discord uses its own markdown variant.
+        Discord has no parse-mode toggle, so escape markdown markers in prose
+        to keep quoted/user/config text literal while preserving fenced code.
         """
-        # Discord markdown is fairly standard, no special escaping needed
-        return content
+        return _escape_discord_markdown_outside_code(content)
 
     async def _run_simple_slash(
         self,
