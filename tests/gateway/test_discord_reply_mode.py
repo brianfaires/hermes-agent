@@ -100,6 +100,25 @@ class TestReplyToModeConfig:
         assert adapter._reply_to_mode == "first"
 
 
+class TestDiscordOutboundFormatting:
+    def test_escapes_markdown_markers_in_plain_text(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+        assert adapter.format_message('quoted "hindsight*config*" > value') == 'quoted "hindsight\\*config\\*" \\> value'
+
+    def test_preserves_fenced_code_blocks(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = "before *literal*\n```python\nprint('*keep*')\n```\nafter _literal_"
+
+        assert adapter.format_message(content) == "before \\*literal\\*\n```python\nprint('*keep*')\n```\nafter \\_literal\\_"
+
+    def test_preserves_inline_code_spans(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = "paths: `~/.hermes/config.yaml`, `delegate_task`, `-m <model>` and plain_a > b"
+
+        assert adapter.format_message(content) == "paths: `~/.hermes/config.yaml`, `delegate_task`, `-m <model>` and plain\\_a \\> b"
+
+
 def _make_discord_adapter(reply_to_mode: str = "first"):
     """Create a DiscordAdapter with mocked client and channel for send() tests."""
     config = PlatformConfig(enabled=True, token="test-token", reply_to_mode=reply_to_mode)
