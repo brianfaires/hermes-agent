@@ -407,6 +407,21 @@ class TestRaftActivityHttp:
 
 
 class TestRaftConfig:
+    def test_requirements_stay_quiet_without_profile(self, monkeypatch, caplog):
+        monkeypatch.delenv("RAFT_PROFILE", raising=False)
+
+        assert check_raft_requirements() is False
+        assert "raft CLI not found" not in caplog.text
+
+    def test_requirements_warn_when_profile_set_but_cli_missing(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("RAFT_PROFILE", "my-agent")
+        monkeypatch.setattr("plugins.platforms.raft.adapter.shutil.which", lambda _: None)
+
+        assert check_raft_requirements() is False
+        assert "raft CLI not found" in caplog.text
+
     def test_env_enablement_auto_enables_with_raft_profile(self, monkeypatch):
         monkeypatch.setenv("RAFT_PROFILE", "my-agent")
 
