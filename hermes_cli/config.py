@@ -2297,6 +2297,15 @@ DEFAULT_CONFIG = {
         # 1 = serial (pre-v0.9 behaviour).
         # Also overridable via HERMES_CRON_MAX_PARALLEL env var.
         "max_parallel_jobs": None,
+        # Cross-profile cron lifecycle event publication. Disabled by default:
+        # each profile must explicitly opt in before it appends redacted create,
+        # update, remove, and complete events to the shared JSONL stream under
+        # <Hermes root>/events/cron/<profile>.jsonl. This is observe-only;
+        # schedule changes for another profile must be requested via Kanban.
+        "events": {
+            "enabled": False,
+            "directory": "",
+        },
     },
 
     # Kanban multi-agent coordination — controls the dispatcher loop that
