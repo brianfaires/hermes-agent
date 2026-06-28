@@ -99,6 +99,8 @@ _RAFT_PROMPT_TURN_IDS: set[str] = set()
 
 def check_raft_requirements() -> bool:
     """Check if Raft channel dependencies are available."""
+    if not os.getenv("RAFT_PROFILE"):
+        return False
     if not AIOHTTP_AVAILABLE:
         logger.warning("[raft] aiohttp is not installed — install with: pip install aiohttp")
         return False
