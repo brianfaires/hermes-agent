@@ -96,6 +96,13 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
 )
 _DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
 _DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+_DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize_discord_stt_alias_text(text: str) -> str:
+    """Normalize a spoken transcript or configured STT alias for exact matching."""
+    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _format_discord_inline_code_span(body: str) -> str:
@@ -3799,6 +3806,54 @@ class DiscordAdapter(BasePlatformAdapter):
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
 
+    def _configured_stt_aliases(self) -> Dict[str, str]:
+        """Return normalized Discord STT alias phrase -> replacement text.
+
+        Config lives under ``discord.stt_aliases`` and is intentionally
+        data-only, keyed by the replacement text with one or more spoken
+        phrases per entry:
+
+            discord:
+              stt_aliases:
+                /new: [reset session, new session, start over]
+                /queue continue: keep going
+        """
+        raw = getattr(getattr(self, "config", None), "extra", {}).get("stt_aliases")
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                raw = parsed
+        if not isinstance(raw, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for target, phrases in raw.items():
+            replacement = str(target or "").strip()
+            if not replacement:
+                continue
+            if isinstance(phrases, str):
+                phrases = [phrases]
+            if not isinstance(phrases, (list, tuple, set)):
+                continue
+            for phrase in phrases:
+                norm = _normalize_discord_stt_alias_text(str(phrase or ""))
+                if norm:
+                    aliases[norm] = replacement
+        return aliases
+
+    def _rewrite_stt_alias(self, transcript: str) -> str:
+        """Rewrite an exact Discord voice transcript alias to configured text."""
+        aliases = self._configured_stt_aliases()
+        if not aliases:
+            return transcript
+        replacement = aliases.get(_normalize_discord_stt_alias_text(transcript))
+        if not replacement:
+            return transcript
+        logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
+        return replacement
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not DISCORD_AVAILABLE:
@@ -4152,6 +4207,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:
                 await self._voice_input_callback(

@@ -930,6 +930,26 @@ class TestLoadGatewayConfig:
 
         assert config.group_sessions_per_user is False
 
+    def test_bridges_discord_stt_aliases_from_top_level_discord(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  stt_aliases:\n"
+            "    /new: [reset session, new session]\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        discord_config = config.platforms[Platform.DISCORD]
+        assert discord_config.extra["stt_aliases"] == {
+            "/new": ["reset session", "new session"],
+        }
+
     def test_bridges_thread_sessions_per_user_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()

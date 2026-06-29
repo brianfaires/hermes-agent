@@ -1267,6 +1267,42 @@ class TestDiscordVoiceChannelMethods:
 
         callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello")
 
+    def test_stt_alias_rewrite_from_mapping_config(self):
+        """Discord STT aliases are data-driven; no voice commands are hard-coded."""
+        adapter = self._make_adapter()
+        adapter.config.extra["stt_aliases"] = {
+            "/new": ["reset session", "hard reset"],
+            "/queue continue": "keep going",
+        }
+
+        assert adapter._rewrite_stt_alias("Reset session.") == "/new"
+        assert adapter._rewrite_stt_alias("hard-reset") == "/new"
+        assert adapter._rewrite_stt_alias("keep going") == "/queue continue"
+        assert adapter._rewrite_stt_alias("please reset session") == "please reset session"
+
+    def test_stt_alias_rewrite_from_json_string_config(self):
+        """Support Hermes config set storing dict-like values as strings."""
+        adapter = self._make_adapter()
+        adapter.config.extra["stt_aliases"] = '{"/new": ["new session"]}'
+
+        assert adapter._rewrite_stt_alias("New session.") == "/new"
+
+    @pytest.mark.asyncio
+    async def test_process_voice_input_applies_stt_alias_before_callback(self):
+        """Matched voice aliases should enter the normal message pipeline as target text."""
+        adapter = self._make_adapter()
+        adapter.config.extra["stt_aliases"] = {"/new": ["new session"]}
+        callback = AsyncMock()
+        adapter._voice_input_callback = callback
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav"), \
+             patch("tools.transcription_tools.transcribe_audio",
+                   return_value={"success": True, "transcript": "New session."}), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            await adapter._process_voice_input(111, 42, b"\x00" * 96000)
+
+        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="/new")
+
     @pytest.mark.asyncio
     async def test_process_voice_input_hallucination_filtered(self):
         """Whisper hallucination is filtered out."""
