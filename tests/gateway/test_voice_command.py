@@ -1241,6 +1241,67 @@ class TestDiscordVoiceChannelMethods:
 
         callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello")
 
+    def test_profile_stt_aliases_load_from_toml(self, tmp_path, monkeypatch):
+        """Discord STT aliases live in a readable profile-local TOML file."""
+        voice_dir = tmp_path / "voice"
+        voice_dir.mkdir()
+        (voice_dir / "commands.toml").write_text(
+            '[stt_aliases]\n'
+            '"/new" = [\n'
+            '  "reset session",\n'
+            '  "new session",\n'
+            ']\n'
+            '"/queue continue" = ["keep going"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from plugins.platforms.discord.adapter import _load_profile_stt_aliases
+
+        assert _load_profile_stt_aliases() == {
+            "/new": ["reset session", "new session"],
+            "/queue continue": ["keep going"],
+        }
+
+    def test_profile_stt_aliases_ignore_malformed_toml(self, tmp_path, monkeypatch):
+        voice_dir = tmp_path / "voice"
+        voice_dir.mkdir()
+        (voice_dir / "commands.toml").write_bytes(b"\xff")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from plugins.platforms.discord.adapter import _load_profile_stt_aliases
+
+        assert _load_profile_stt_aliases() == {}
+
+    def test_stt_alias_rewrite_from_profile_commands(self):
+        """Discord STT aliases are data-driven; no voice commands are hard-coded."""
+        adapter = self._make_adapter()
+        adapter._stt_aliases = {
+            "/new": ["reset session", "hard reset"],
+            "/queue continue": "keep going",
+        }
+
+        assert adapter._rewrite_stt_alias("Reset session.") == "/new"
+        assert adapter._rewrite_stt_alias("hard-reset") == "/new"
+        assert adapter._rewrite_stt_alias("keep going") == "/queue continue"
+        assert adapter._rewrite_stt_alias("please reset session") == "please reset session"
+
+    @pytest.mark.asyncio
+    async def test_process_voice_input_applies_stt_alias_before_callback(self):
+        """Matched voice aliases should enter the normal message pipeline as target text."""
+        adapter = self._make_adapter()
+        adapter._stt_aliases = {"/new": ["new session"]}
+        callback = AsyncMock()
+        adapter._voice_input_callback = callback
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav"), \
+             patch("tools.transcription_tools.transcribe_audio",
+                   return_value={"success": True, "transcript": "New session."}), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            await adapter._process_voice_input(111, 42, b"\x00" * 96000)
+
+        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="/new")
+
     @pytest.mark.asyncio
     async def test_process_voice_input_hallucination_filtered(self):
         """Whisper hallucination is filtered out."""

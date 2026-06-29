@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -85,6 +86,30 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
 )
 _DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
 _DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+_DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _load_profile_stt_aliases() -> Dict[str, Any]:
+    """Load Discord STT aliases from the profile-local voice command catalog."""
+    path = get_hermes_home() / "voice" / "commands.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            aliases = tomllib.load(handle).get("stt_aliases")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not load Discord STT aliases from %s: %s", path, exc)
+        return {}
+    if not isinstance(aliases, dict):
+        logger.warning("Discord STT aliases in %s must be a TOML table", path)
+        return {}
+    return aliases
+
+
+def _normalize_discord_stt_alias_text(text: str) -> str:
+    """Normalize a spoken transcript or configured STT alias for exact matching."""
+    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _format_discord_inline_code_span(body: str) -> str:
@@ -181,6 +206,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from hermes_constants import get_hermes_home
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from utils import atomic_json_write
@@ -849,6 +875,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._stt_aliases = _load_profile_stt_aliases()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -2437,6 +2464,45 @@ class DiscordAdapter(BasePlatformAdapter):
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
 
+    def _configured_stt_aliases(self) -> Dict[str, str]:
+        """Return normalized Discord STT alias phrase -> replacement text.
+
+        Aliases live in ``voice/commands.toml``, keyed by replacement text
+        with one or more spoken phrases per entry:
+
+            [stt_aliases]
+            "/new" = ["reset session", "new session", "start over"]
+            "/queue continue" = ["keep going"]
+        """
+        raw = getattr(self, "_stt_aliases", {})
+        if not isinstance(raw, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for target, phrases in raw.items():
+            replacement = str(target or "").strip()
+            if not replacement:
+                continue
+            if isinstance(phrases, str):
+                phrases = [phrases]
+            if not isinstance(phrases, (list, tuple, set)):
+                continue
+            for phrase in phrases:
+                norm = _normalize_discord_stt_alias_text(str(phrase or ""))
+                if norm:
+                    aliases[norm] = replacement
+        return aliases
+
+    def _rewrite_stt_alias(self, transcript: str) -> str:
+        """Rewrite an exact Discord voice transcript alias to configured text."""
+        aliases = self._configured_stt_aliases()
+        if not aliases:
+            return transcript
+        replacement = aliases.get(_normalize_discord_stt_alias_text(transcript))
+        if not replacement:
+            return transcript
+        logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
+        return replacement
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not DISCORD_AVAILABLE:
@@ -2790,6 +2856,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:
                 await self._voice_input_callback(
