@@ -678,6 +678,20 @@ Hermes Agent supports Discord voice messages:
 - **Incoming voice messages** are automatically transcribed using the configured STT provider: local `faster-whisper` (no key), Groq Whisper (`GROQ_API_KEY`), or OpenAI Whisper (`VOICE_TOOLS_OPENAI_KEY`).
 - **Text-to-speech**: Use `/voice tts` to have the bot send spoken audio responses alongside text replies.
 - **Discord voice channels**: Hermes can also join a voice channel, listen to users speaking, and talk back in the channel.
+- **STT aliases**: Discord voice-channel transcripts can be exact-matched and rewritten before dispatch, so spoken phrases like "new session" can trigger `/new` without hard-coding voice commands.
+
+Configure aliases in `config.yaml` under `discord.stt_aliases`:
+
+```yaml
+discord:
+  stt_aliases:
+    /new: [reset session, new session, start over]
+    /queue continue: keep going
+```
+
+Each key is the replacement text; its value is one spoken phrase or a list of phrases.
+
+Aliases are exact after light normalization: case, punctuation, and repeated spaces are ignored. Partial phrases are not matched; `please reset session` remains normal speech.
 
 For the full setup and operational guide, see:
 - [Voice Mode](/user-guide/features/voice-mode)
