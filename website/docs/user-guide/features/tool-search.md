@@ -78,6 +78,13 @@ tools:
     threshold_pct: 10   # percentage of context — only used in auto mode
     search_default_limit: 5
     max_search_limit: 20
+    pinned_toolsets:
+      default:
+        - github       # toolsets kept visible on every platform
+      discord:
+        - discord      # merged with default for Discord sessions
+      telegram:
+        - homeassistant
 ```
 
 | Key | Default | Meaning |
@@ -86,6 +93,9 @@ tools:
 | `threshold_pct` | `10` | Percentage of context length at which `auto` mode kicks in. Range 0–100. |
 | `search_default_limit` | `5` | Hits returned when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `20` | Hard upper bound the model can request via `limit`. Range 1–50. |
+| `pinned_toolsets` | `{}` | Optional map of toolset names that stay directly visible and are excluded from the bridge catalog. Hermes merges `default` with the active platform key (`discord`, `telegram`, etc.). Unknown toolsets are ignored. |
+
+`pinned_toolsets` is toolset-only; there is no per-tool allowlist. The active profile's `config.yaml` provides the per-profile behavior, while gateway sessions use `HERMES_SESSION_PLATFORM` / session context to select the platform-specific entries. The activation threshold counts only tools that remain deferrable after this merge.
 
 You can also flip the legacy boolean shape:
 

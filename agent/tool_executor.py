@@ -156,10 +156,18 @@ def _tool_search_scoped_names(agent) -> frozenset:
 
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
+    try:
+        platform = _ts.resolve_session_platform()
+        ts_cfg = _ts.load_config(platform=platform)
+    except Exception:
+        platform = ""
+        ts_cfg = None
     cache_key = (
         getattr(_registry, "_generation", 0),
         frozenset(enabled) if enabled is not None else None,
         frozenset(disabled) if disabled is not None else None,
+        platform,
+        frozenset(getattr(ts_cfg, "pinned_toolsets", frozenset())),
     )
     cached = getattr(agent, "_tool_search_scope_cache", None)
     if cached is not None and cached[0] == cache_key:
@@ -171,7 +179,7 @@ def _tool_search_scoped_names(agent) -> frozenset:
             quiet_mode=True,
             skip_tool_search_assembly=True,
         ) or []
-        names = _ts.scoped_deferrable_names(scoped_defs)
+        names = _ts.scoped_deferrable_names(scoped_defs, config=ts_cfg)
     except Exception:
         names = frozenset()
     try:
@@ -298,7 +306,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         try:
             from tools import tool_search as _ts
             if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
+                _ts_cfg = _ts.load_config()
+                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(
+                    function_args, config=_ts_cfg,
+                )
                 if not _err and _underlying:
                     if _underlying in _tool_search_scoped_names(agent):
                         function_name = _underlying
@@ -805,7 +816,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         try:
             from tools import tool_search as _ts
             if function_name == _ts.TOOL_CALL_NAME:
-                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(function_args)
+                _ts_cfg = _ts.load_config()
+                _underlying, _underlying_args, _err = _ts.resolve_underlying_call(
+                    function_args, config=_ts_cfg,
+                )
                 if not _err and _underlying:
                     if _underlying in _tool_search_scoped_names(agent):
                         function_name = _underlying
