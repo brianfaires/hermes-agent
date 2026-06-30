@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -68,9 +69,10 @@ class ToolSearchConfig:
     threshold_pct: float  # 0..100 — only used when enabled == "auto"
     search_default_limit: int
     max_search_limit: int
+    pinned_toolsets: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
-    def from_raw(cls, raw: Any) -> "ToolSearchConfig":
+    def from_raw(cls, raw: Any, *, platform: Optional[str] = None) -> "ToolSearchConfig":
         """Build a config from a raw dict / bool / None.
 
         Accepts the legacy bool shape (``tools.tool_search: true``) and the
@@ -111,7 +113,74 @@ class ToolSearchConfig:
             threshold_pct=threshold_pct,
             search_default_limit=search_default_limit,
             max_search_limit=max_search_limit,
+            pinned_toolsets=_resolve_pinned_toolsets(
+                raw.get("pinned_toolsets"), platform=platform,
+            ),
         )
+
+
+def resolve_session_platform(platform: Optional[str] = None) -> str:
+    """Resolve the active gateway/CLI platform for per-platform config."""
+    if platform is not None:
+        return str(platform).strip().lower()
+    try:
+        from gateway.session_context import get_session_env
+        value = get_session_env("HERMES_SESSION_PLATFORM", "")
+    except Exception:
+        value = os.getenv("HERMES_SESSION_PLATFORM", "")
+    return str(value or "").strip().lower()
+
+
+def _coerce_toolset_names(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        values: Iterable[Any] = [value]
+    elif isinstance(value, Iterable) and not isinstance(value, (dict, bytes)):
+        values = value
+    else:
+        return set()
+    result: set[str] = set()
+    for item in values:
+        name = str(item or "").strip()
+        if name:
+            result.add(name)
+    return result
+
+
+def _known_toolset_names(names: set[str]) -> frozenset[str]:
+    if not names:
+        return frozenset()
+    try:
+        from toolsets import validate_toolset
+        from tools.registry import registry
+        aliases = registry.get_registered_toolset_aliases()
+    except Exception as e:
+        logger.debug("Could not validate tool_search pinned_toolsets: %s", e)
+        return frozenset(names)
+
+    known: set[str] = set()
+    for name in sorted(names):
+        canonical = aliases.get(name, name)
+        if validate_toolset(name) or validate_toolset(canonical):
+            known.add(name)
+            known.add(canonical)
+        else:
+            logger.debug("Ignoring unknown tool_search pinned toolset: %s", name)
+    return frozenset(known)
+
+
+def _resolve_pinned_toolsets(raw: Any, *, platform: Optional[str] = None) -> frozenset[str]:
+    """Return default ∪ platform-specific pinned toolset names."""
+    if not isinstance(raw, dict):
+        return frozenset()
+
+    by_key = {str(k).strip().lower(): v for k, v in raw.items() if str(k).strip()}
+    requested = _coerce_toolset_names(by_key.get("default"))
+    platform_key = resolve_session_platform(platform)
+    if platform_key:
+        requested.update(_coerce_toolset_names(by_key.get(platform_key)))
+    return _known_toolset_names(requested)
 
 
 def _safe_int(value: Any, fallback: int) -> int:
@@ -128,7 +197,7 @@ def _safe_float(value: Any, fallback: float) -> float:
         return fallback
 
 
-def load_config() -> ToolSearchConfig:
+def load_config(*, platform: Optional[str] = None) -> ToolSearchConfig:
     """Load tool-search config from the user config file."""
     try:
         from hermes_cli.config import load_config as _load
@@ -136,7 +205,7 @@ def load_config() -> ToolSearchConfig:
         tools_cfg = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
         if not isinstance(tools_cfg, dict):
             tools_cfg = {}
-        return ToolSearchConfig.from_raw(tools_cfg.get("tool_search"))
+        return ToolSearchConfig.from_raw(tools_cfg.get("tool_search"), platform=platform)
     except Exception as e:
         logger.debug("Failed to load tool-search config: %s", e)
         return ToolSearchConfig.from_raw(None)
@@ -160,7 +229,12 @@ def _core_tool_names() -> frozenset[str]:
         return frozenset()
 
 
-def is_deferrable_tool_name(name: str) -> bool:
+def is_deferrable_tool_name(
+    name: str,
+    *,
+    config: Optional[ToolSearchConfig] = None,
+    pinned_toolsets: Optional[frozenset[str]] = None,
+) -> bool:
     """Return True if a tool with this name is *eligible* for deferral.
 
     A tool is deferrable iff it is registered with an MCP toolset prefix
@@ -178,6 +252,13 @@ def is_deferrable_tool_name(name: str) -> bool:
         entry = registry.get_entry(name)
         if entry is None:
             return False
+        protected_toolsets = (
+            pinned_toolsets
+            if pinned_toolsets is not None
+            else (config.pinned_toolsets if config is not None else frozenset())
+        )
+        if entry.toolset in protected_toolsets:
+            return False
         if entry.toolset.startswith("mcp-"):
             return True
         # Non-MCP, non-core → plugin tool, eligible.
@@ -186,7 +267,11 @@ def is_deferrable_tool_name(name: str) -> bool:
         return False
 
 
-def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def classify_tools(
+    tool_defs: List[Dict[str, Any]],
+    *,
+    config: Optional[ToolSearchConfig] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable).
 
     ``visible`` retains every tool that must stay in the model-facing array:
@@ -202,7 +287,7 @@ def classify_tools(tool_defs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
             # Should never happen — bridge tools are added after classification —
             # but be defensive.
             continue
-        if is_deferrable_tool_name(name):
+        if is_deferrable_tool_name(name, config=config):
             deferrable.append(td)
         else:
             visible.append(td)
@@ -551,7 +636,7 @@ def assemble_tool_defs(
     incoming = [td for td in tool_defs
                 if (td.get("function") or {}).get("name") not in BRIDGE_TOOL_NAMES]
 
-    visible, deferrable = classify_tools(incoming)
+    visible, deferrable = classify_tools(incoming, config=config)
     if not deferrable:
         return AssemblyResult(tool_defs=incoming, activated=False)
 
@@ -619,7 +704,7 @@ def dispatch_tool_search(args: Dict[str, Any],
     else:
         limit = max(1, min(config.max_search_limit, _safe_int(raw_limit, config.search_default_limit)))
 
-    _, deferrable = classify_tools(current_tool_defs)
+    _, deferrable = classify_tools(current_tool_defs, config=config)
     catalog = build_catalog(deferrable)
     hits = search_catalog(catalog, query, limit=limit)
     return json.dumps({
@@ -631,19 +716,22 @@ def dispatch_tool_search(args: Dict[str, Any],
 
 def dispatch_tool_describe(args: Dict[str, Any],
                            *,
-                           current_tool_defs: List[Dict[str, Any]]) -> str:
+                           current_tool_defs: List[Dict[str, Any]],
+                           config: Optional[ToolSearchConfig] = None) -> str:
     """Execute the ``tool_describe`` bridge tool. Returns a JSON string."""
+    if config is None:
+        config = load_config()
     name = str(args.get("name") or "").strip()
     if not name:
         return json.dumps({"error": "name is required"}, ensure_ascii=False)
-    if not is_deferrable_tool_name(name):
+    if not is_deferrable_tool_name(name, config=config):
         return json.dumps({
             "error": (
                 f"'{name}' is not a deferrable tool. If you see it in the tools list "
                 "already, call it directly; otherwise check the spelling against tool_search."
             ),
         }, ensure_ascii=False)
-    _, deferrable = classify_tools(current_tool_defs)
+    _, deferrable = classify_tools(current_tool_defs, config=config)
     for td in deferrable:
         fn = td.get("function") or {}
         if fn.get("name") == name:
@@ -657,7 +745,11 @@ def dispatch_tool_describe(args: Dict[str, Any],
     }, ensure_ascii=False)
 
 
-def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
+def scoped_deferrable_names(
+    tool_defs: List[Dict[str, Any]],
+    *,
+    config: Optional[ToolSearchConfig] = None,
+) -> frozenset[str]:
     """Return the set of deferrable tool names present in ``tool_defs``.
 
     ``tool_defs`` is expected to be the *pre-assembly* tool list for the
@@ -672,12 +764,16 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     names: set[str] = set()
     for td in tool_defs:
         name = (td.get("function") or {}).get("name", "")
-        if name and is_deferrable_tool_name(name):
+        if name and is_deferrable_tool_name(name, config=config):
             names.add(name)
     return frozenset(names)
 
 
-def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+def resolve_underlying_call(
+    args: Dict[str, Any],
+    *,
+    config: Optional[ToolSearchConfig] = None,
+) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
     """Parse a ``tool_call`` invocation into (underlying_name, args, error_msg).
 
     Used by:
@@ -702,7 +798,9 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
             return None, {}, f"tool_call 'arguments' is not valid JSON: {e}"
     if not isinstance(raw_args, dict):
         return None, {}, "tool_call 'arguments' must be an object"
-    if not is_deferrable_tool_name(name):
+    if config is None:
+        config = load_config()
+    if not is_deferrable_tool_name(name, config=config):
         return None, {}, (
             f"'{name}' is not a deferrable tool. If it appears in the model-facing tools "
             "list already, call it directly instead of via tool_call."
@@ -718,6 +816,7 @@ __all__ = [
     "ToolSearchConfig",
     "CatalogEntry",
     "AssemblyResult",
+    "resolve_session_platform",
     "load_config",
     "is_deferrable_tool_name",
     "classify_tools",
