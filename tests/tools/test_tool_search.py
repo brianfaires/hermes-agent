@@ -82,6 +82,29 @@ class TestConfigParsing:
         assert cfg.max_search_limit == 50
         assert cfg.search_default_limit <= cfg.max_search_limit
 
+    def test_pinned_toolsets_merge_default_and_platform(self):
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw({
+            "pinned_toolsets": {
+                "default": ["web"],
+                "discord": ["terminal"],
+                "telegram": ["homeassistant"],
+            },
+        }, platform="discord")
+        assert "web" in cfg.pinned_toolsets
+        assert "terminal" in cfg.pinned_toolsets
+        assert "homeassistant" not in cfg.pinned_toolsets
+
+    def test_unknown_pinned_toolset_ignored(self):
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw({
+            "pinned_toolsets": {
+                "default": ["web", "xx_no_such_toolset_xx"],
+            },
+        })
+        assert "web" in cfg.pinned_toolsets
+        assert "xx_no_such_toolset_xx" not in cfg.pinned_toolsets
+
 
 # ---------------------------------------------------------------------------
 # Classification — the hard invariant: core tools NEVER defer.
@@ -277,6 +300,125 @@ class TestAssembly:
         # The pre-existing tool_search was stripped (it would be re-injected if
         # activation happened; here it didn't).
         assert "tool_search" not in names
+
+    def test_pinned_toolset_stays_visible_when_search_activates(self):
+        from tools.registry import registry
+        from tools.tool_search import assemble_tool_defs, ToolSearchConfig
+
+        def _handler(args, task_id=None, **kw):
+            return json.dumps({"ok": True})
+
+        registry.register(
+            name="mcp_visible_keep_op",
+            handler=_handler,
+            schema=_td("mcp_visible_keep_op", "keep visible"),
+            toolset="mcp-visible-keep",
+        )
+        registry.register(
+            name="mcp_deferred_hide_op",
+            handler=_handler,
+            schema=_td("mcp_deferred_hide_op", "defer me"),
+            toolset="mcp-deferred-hide",
+        )
+        defs = [_td("mcp_visible_keep_op"), _td("mcp_deferred_hide_op")]
+        cfg = ToolSearchConfig.from_raw({
+            "enabled": "on",
+            "pinned_toolsets": {"default": ["mcp-visible-keep"]},
+        })
+
+        result = assemble_tool_defs(defs, context_length=200_000, config=cfg)
+        names = {(t.get("function") or {}).get("name") for t in result.tool_defs}
+        assert result.activated
+        assert "mcp_visible_keep_op" in names
+        assert "mcp_deferred_hide_op" not in names
+        assert "tool_search" in names
+
+    def test_pinned_toolset_is_absent_from_bridge_catalog(self):
+        from tools.registry import registry
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_search, scoped_deferrable_names
+
+        def _handler(args, task_id=None, **kw):
+            return json.dumps({"ok": True})
+
+        registry.register(
+            name="mcp_catalog_visible_op",
+            handler=_handler,
+            schema=_td("mcp_catalog_visible_op", "visible catalog test"),
+            toolset="mcp-catalog-visible",
+        )
+        registry.register(
+            name="mcp_catalog_deferred_op",
+            handler=_handler,
+            schema=_td("mcp_catalog_deferred_op", "deferred catalog test"),
+            toolset="mcp-catalog-deferred",
+        )
+        defs = [_td("mcp_catalog_visible_op"), _td("mcp_catalog_deferred_op")]
+        cfg = ToolSearchConfig.from_raw({
+            "enabled": "on",
+            "pinned_toolsets": {"default": ["mcp-catalog-visible"]},
+        })
+
+        parsed = json.loads(dispatch_tool_search(
+            {"query": "catalog", "limit": 10}, current_tool_defs=defs, config=cfg,
+        ))
+        match_names = {m["name"] for m in parsed["matches"]}
+        assert parsed["total_available"] == 1
+        assert "mcp_catalog_visible_op" not in match_names
+        assert "mcp_catalog_deferred_op" in match_names
+        assert scoped_deferrable_names(defs, config=cfg) == frozenset({"mcp_catalog_deferred_op"})
+
+    def test_platform_context_changes_quiet_cache_and_visible_toolsets(self, monkeypatch):
+        import model_tools
+        from tools.registry import registry
+
+        def _handler(args, task_id=None, **kw):
+            return json.dumps({"ok": True})
+
+        for name, toolset in [
+            ("mcp_platform_default_visible_op", "mcp-platform-default-visible"),
+            ("mcp_platform_discord_visible_op", "mcp-platform-discord-visible"),
+            ("mcp_platform_deferred_op", "mcp-platform-deferred"),
+        ]:
+            registry.register(
+                name=name,
+                handler=_handler,
+                schema=_td(name, f"schema for {name}"),
+                toolset=toolset,
+            )
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "tools": {
+                "tool_search": {
+                    "enabled": "on",
+                    "pinned_toolsets": {
+                        "default": ["mcp-platform-default-visible"],
+                        "discord": ["mcp-platform-discord-visible"],
+                    },
+                },
+            },
+        })
+        enabled = [
+            "mcp-platform-default-visible",
+            "mcp-platform-discord-visible",
+            "mcp-platform-deferred",
+        ]
+        model_tools._clear_tool_defs_cache()
+
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "telegram")
+        telegram_defs = model_tools.get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True)
+        telegram_names = {(td.get("function") or {}).get("name") for td in telegram_defs}
+
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+        discord_defs = model_tools.get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True)
+        discord_names = {(td.get("function") or {}).get("name") for td in discord_defs}
+
+        assert "mcp_platform_default_visible_op" in telegram_names
+        assert "mcp_platform_discord_visible_op" not in telegram_names
+        assert "mcp_platform_deferred_op" not in telegram_names
+        assert "tool_search" in telegram_names
+        assert "mcp_platform_default_visible_op" in discord_names
+        assert "mcp_platform_discord_visible_op" in discord_names
+        assert "mcp_platform_deferred_op" not in discord_names
+        assert "tool_search" in discord_names
 
 
 # ---------------------------------------------------------------------------
