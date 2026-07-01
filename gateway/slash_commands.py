@@ -1040,7 +1040,8 @@ class GatewaySlashCommandsMixin:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
-        from gateway.run import _hermes_home, _load_gateway_config
+        from gateway.run import _load_gateway_config
+        from hermes_constants import get_hermes_home, get_hermes_home_override
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags,
@@ -1049,6 +1050,14 @@ class GatewaySlashCommandsMixin:
             list_picker_providers,
         )
         from hermes_cli.providers import get_label
+
+        # Slash commands are dispatched before the normal agent-turn runtime
+        # scope. Pin /model to the inbound source profile explicitly so global
+        # persistence writes that profile's config.yaml, not the gateway
+        # process home (e.g. default gateway routing an ops Discord bot event).
+        if not get_hermes_home_override() and hasattr(self, "_runtime_scope_for_source"):
+            with self._runtime_scope_for_source(event.source):
+                return await self._handle_model_command(event)
 
         raw_args = event.get_command_args().strip()
 
@@ -1077,7 +1086,7 @@ class GatewaySlashCommandsMixin:
         current_api_key = ""
         user_provs = None
         custom_provs = None
-        config_path = _hermes_home / "config.yaml"
+        config_path = get_hermes_home() / "config.yaml"
         try:
             cfg = _load_gateway_config()
             if cfg:
