@@ -1276,6 +1276,24 @@ class MultiplexConfigError(RuntimeError):
 
 
 @_contextmanager
+def _hermes_home_runtime_scope(profile_home: "Path"):
+    """Scope ``get_hermes_home()`` and tool subprocess env to one profile home.
+
+    This is intentionally narrower than ``_profile_runtime_scope``: it does not
+    install a secret scope. Single-profile gateways may legitimately receive
+    credentials from their service environment, but their config/SOUL/session
+    paths must still stay pinned to the profile home they were started with.
+    """
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    home_token = set_hermes_home_override(str(profile_home))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(home_token)
+
+
+@_contextmanager
 def _profile_runtime_scope(profile_home: "Path"):
     """Scope config/skills/memory AND credentials to a profile for one turn.
 
@@ -1294,20 +1312,18 @@ def _profile_runtime_scope(profile_home: "Path"):
     returns an isolated dict — which is what keeps subprocesses (MCP, kanban)
     from inheriting cross-profile secrets.
     """
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from agent.secret_scope import (
         build_profile_secret_scope,
         set_secret_scope,
         reset_secret_scope,
     )
 
-    home_token = set_hermes_home_override(str(profile_home))
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-    try:
-        yield
-    finally:
-        reset_secret_scope(secret_token)
-        reset_hermes_home_override(home_token)
+    with _hermes_home_runtime_scope(Path(profile_home)):
+        secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
+        try:
+            yield
+        finally:
+            reset_secret_scope(secret_token)
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
@@ -2000,17 +2016,27 @@ def _teams_pipeline_plugin_enabled() -> bool:
 
 
 def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error.
+    """Load and parse the active profile's config.yaml, returning {} on error.
 
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
+    Honors the context-local Hermes home override used by gateway profile
+    scoping.  When no override is active, falls back to the module-level
+    ``_hermes_home`` so tests that monkeypatch it still see their fixture.
+    Shares the mtime-keyed raw-yaml cache from
+    ``hermes_cli.config.read_raw_config`` when the paths match.
 
     Managed scope is overlaid on the result (via the shared helper) so the
     gateway honors administrator-pinned values — neither read_raw_config nor a
     direct yaml.safe_load carries the managed merge on its own. Fail-open.
     """
-    config_path = _hermes_home / 'config.yaml'
+    config_home = _hermes_home
+    try:
+        from hermes_constants import get_hermes_home_override
+        override = get_hermes_home_override()
+        if override:
+            config_home = Path(override)
+    except Exception:
+        pass
+    config_path = config_home / 'config.yaml'
     raw: dict = {}
     used_canonical = False
     try:
@@ -2384,6 +2410,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
         self.config = config or load_gateway_config()
+        from hermes_constants import get_hermes_home
+        self._gateway_profile_home = get_hermes_home().resolve()
+        self._gateway_profile_name = self._active_profile_name()
         # Mark the process as a profile multiplexer when configured. This flips
         # agent.secret_scope.get_secret() to fail-closed on any unscoped
         # credential read, so a missed migration crashes loudly instead of
@@ -2510,7 +2539,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
-        self._kanban_notifier_profile = self._active_profile_name()
+        self._kanban_notifier_profile = self._gateway_profile_name
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
         self._teams_pipeline_runtime_error: Optional[str] = None
@@ -10993,11 +11022,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _thread_metadata = self._thread_metadata_for_source(source, event_message_id)
 
         try:
-            user_config = _load_gateway_config()
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
-                source=source,
-                user_config=user_config,
-            )
+            with self._runtime_scope_for_source(source):
+                user_config = _load_gateway_config()
+                model, runtime_kwargs = self._resolve_session_agent_runtime(
+                    source=source,
+                    user_config=user_config,
+                )
             if not runtime_kwargs.get("api_key"):
                 await adapter.send(
                     source.chat_id,
@@ -11038,42 +11068,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.warning("Background task vision enrichment failed: %s", e)
 
             def run_sync():
-                agent = AIAgent(
-                    model=turn_route["model"],
-                    **turn_route["runtime"],
-                    max_iterations=max_iterations,
-                    quiet_mode=True,
-                    verbose_logging=False,
-                    enabled_toolsets=enabled_toolsets,
-                    disabled_toolsets=disabled_toolsets,
-                    reasoning_config=reasoning_config,
-                    service_tier=self._service_tier,
-                    request_overrides=turn_route.get("request_overrides"),
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
-                    session_id=task_id,
-                    platform=platform_key,
-                    user_id=source.user_id,
-                    user_id_alt=source.user_id_alt,
-                    user_name=source.user_name,
-                    chat_id=source.chat_id,
-                    chat_name=source.chat_name,
-                    chat_type=source.chat_type,
-                    thread_id=source.thread_id,
-                    session_db=self._session_db,
-                    fallback_model=self._fallback_model,
-                )
-                try:
-                    return agent.run_conversation(
-                        user_message=enriched_prompt,
-                        task_id=task_id,
+                with self._runtime_scope_for_source(source):
+                    agent = AIAgent(
+                        model=turn_route["model"],
+                        **turn_route["runtime"],
+                        max_iterations=max_iterations,
+                        quiet_mode=True,
+                        verbose_logging=False,
+                        enabled_toolsets=enabled_toolsets,
+                        disabled_toolsets=disabled_toolsets,
+                        reasoning_config=reasoning_config,
+                        service_tier=self._service_tier,
+                        request_overrides=turn_route.get("request_overrides"),
+                        providers_allowed=pr.get("only"),
+                        providers_ignored=pr.get("ignore"),
+                        providers_order=pr.get("order"),
+                        provider_sort=pr.get("sort"),
+                        provider_require_parameters=pr.get("require_parameters", False),
+                        provider_data_collection=pr.get("data_collection"),
+                        session_id=task_id,
+                        platform=platform_key,
+                        user_id=source.user_id,
+                        user_id_alt=source.user_id_alt,
+                        user_name=source.user_name,
+                        chat_id=source.chat_id,
+                        chat_name=source.chat_name,
+                        chat_type=source.chat_type,
+                        thread_id=source.thread_id,
+                        session_db=self._session_db,
+                        fallback_model=self._fallback_model,
                     )
-                finally:
-                    self._cleanup_agent_resources(agent)
+                    try:
+                        return agent.run_conversation(
+                            user_message=enriched_prompt,
+                            task_id=task_id,
+                        )
+                    finally:
+                        self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
 
@@ -13286,6 +13317,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cache_keys: dict | None = None,
         user_id: str | None = None,
         user_id_alt: str | None = None,
+        profile_home: str | None = None,
     ) -> str:
         """Compute a stable string key from agent config values.
 
@@ -13313,6 +13345,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         broke #27371's per-user-peer contract in multi-user gateways.
         Per-user agent rebuilds in shared threads trade prompt-cache
         warmth for correct memory attribution.
+
+        ``profile_home`` is included because SOUL.md, config, skills, memory,
+        session DB, and tool subprocess environment are profile-scoped.  A
+        cached agent built under one home must never be reused after the gateway
+        resolves the same session key under another home.
         """
         import hashlib, json as _j
 
@@ -13339,6 +13376,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _cache_keys_sorted,
                 str(user_id or ""),
                 str(user_id_alt or ""),
+                str(profile_home or ""),
             ],
             sort_keys=True,
             default=str,
@@ -14161,10 +14199,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         run the whole turn inside ``_profile_runtime_scope`` so config/skills/
         memory resolve to that profile's home AND credentials resolve from that
         profile's secret scope (never the process-global ``os.environ``). When
-        multiplexing is off this is a transparent pass-through — zero behavior
-        change for single-profile gateways.
+        multiplexing is off, pin config/SOUL/session paths to the gateway's
+        startup profile home while leaving credentials on the normal
+        single-profile resolution path.
         """
-        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        with self._runtime_scope_for_source(source):
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
@@ -14173,15 +14212,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
             )
 
-        profile_home = self._resolve_profile_home_for_source(source)
-        with _profile_runtime_scope(profile_home):
-            return await self._run_agent_inner(
-                message, context_prompt, history, source, session_id,
-                session_key=session_key, run_generation=run_generation,
-                _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                channel_prompt=channel_prompt, persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-            )
+    def _runtime_profile_home_for_source(self, source: SessionSource) -> "Path":
+        """Return the Hermes home that must scope this gateway turn."""
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return self._resolve_profile_home_for_source(source)
+        profile_home = getattr(self, "_gateway_profile_home", None)
+        if profile_home is not None:
+            return Path(profile_home)
+        from hermes_constants import get_hermes_home
+        return get_hermes_home()
+
+    def _runtime_scope_for_source(self, source: SessionSource):
+        """Return the profile/home scope context manager for a gateway turn."""
+        profile_home = self._runtime_profile_home_for_source(source)
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return _profile_runtime_scope(profile_home)
+        return _hermes_home_runtime_scope(profile_home)
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HERMES_HOME should serve this inbound source.
@@ -15223,6 +15269,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cache_keys=self._extract_cache_busting_config(user_config),
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
+                profile_home=str(self._runtime_profile_home_for_source(source).resolve()),
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -17050,6 +17097,25 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     InProcessCronScheduler().start(stop_event, adapters=adapters, loop=loop, interval=interval)
 
 
+def _start_profile_scoped_cron_provider(cron_provider, stop_event: threading.Event, *, profile_home: Path, adapters=None, loop=None) -> None:
+    """Run the cron provider pinned to the gateway's startup profile home.
+
+    Cron ticks run in a long-lived background thread, outside per-message
+    runtime scopes.  If another import or hot env reload mutates process-global
+    state, the scheduler must still resolve jobs/scripts/output under the
+    profile home this gateway was started for.
+    """
+    from cron import scheduler as cron_scheduler
+
+    previous_home = getattr(cron_scheduler, "_hermes_home", None)
+    cron_scheduler._hermes_home = Path(profile_home).resolve()
+    try:
+        with _hermes_home_runtime_scope(Path(profile_home).resolve()):
+            cron_provider.start(stop_event, adapters=adapters, loop=loop)
+    finally:
+        cron_scheduler._hermes_home = previous_home
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -17452,9 +17518,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_stop = threading.Event()
     cron_provider = resolve_cron_scheduler()
     cron_thread = threading.Thread(
-        target=cron_provider.start,
-        args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        target=_start_profile_scoped_cron_provider,
+        args=(cron_provider, cron_stop),
+        kwargs={
+            "profile_home": runner._gateway_profile_home,
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+        },
         daemon=True,
         name="cron-scheduler",
     )
