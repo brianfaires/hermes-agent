@@ -1444,7 +1444,8 @@ class GatewaySlashCommandsMixin:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
-        from gateway.run import _hermes_home, _load_gateway_config
+        from gateway.run import _load_gateway_config
+        from hermes_constants import get_hermes_home, get_hermes_home_override
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags_detailed,
@@ -1454,13 +1455,16 @@ class GatewaySlashCommandsMixin:
         )
         from hermes_cli.providers import get_label
 
+        # Slash commands are dispatched before the normal agent-turn runtime
+        # scope. Pin /model to the inbound source profile explicitly so global
+        # persistence writes that profile's config.yaml, not the gateway
+        # process home (e.g. default gateway routing an ops Discord bot event).
+        if not get_hermes_home_override() and hasattr(self, "_runtime_scope_for_source"):
+            with self._runtime_scope_for_source(event.source):
+                return await self._handle_model_command(event)
+
         raw_args = event.get_command_args().strip()
         source = event.source
-        _command_profile_home = None
-        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
-            _command_profile_home = getattr(
-                self, "_resolve_profile_home_for_source"
-            )(source)
 
         # Parse --provider, --global, --session, --once, and --refresh flags
         parsed_flags = parse_model_flags_detailed(raw_args)
@@ -1497,7 +1501,7 @@ class GatewaySlashCommandsMixin:
         user_provs = None
         custom_provs = None
         excluded_provs = []
-        config_path = (_command_profile_home or _hermes_home) / "config.yaml"
+        config_path = get_hermes_home() / "config.yaml"
         try:
             cfg = _load_gateway_config()
             if cfg:
@@ -1572,7 +1576,7 @@ class GatewaySlashCommandsMixin:
                     _cur_provider = current_provider
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
-                    _picker_profile_home = _command_profile_home
+                    _picker_source = source
 
                     async def _on_model_selected_scoped(
                         _chat_id: str, model_id: str, provider_slug: str
@@ -1799,13 +1803,11 @@ class GatewaySlashCommandsMixin:
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
-                        if _picker_profile_home is None:
-                            return await _on_model_selected_scoped(
-                                _chat_id, model_id, provider_slug
-                            )
-                        from gateway.run import _profile_runtime_scope
-
-                        with _profile_runtime_scope(_picker_profile_home):
+                        # Picker callbacks run later, after command dispatch has
+                        # left its context. Reinstall the same source-owned
+                        # profile scope for both multiplexed and single-profile
+                        # gateways before reading or persisting config.
+                        with _self._runtime_scope_for_source(_picker_source):
                             return await _on_model_selected_scoped(
                                 _chat_id, model_id, provider_slug
                             )
