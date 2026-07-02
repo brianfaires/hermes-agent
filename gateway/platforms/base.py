@@ -2086,23 +2086,30 @@ class BasePlatformAdapter(ABC):
         if not isinstance(event, ToolCallChunk):
             return None
 
-        from agent.display import get_tool_emoji
+        from agent.display import (
+            get_tool_emoji,
+            shorten_tool_display_args,
+            shorten_tool_display_value,
+        )
         emoji = get_tool_emoji(event.tool_name, default="⚙️")
+        display_args = shorten_tool_display_args(event.tool_name, event.args or {})
 
         if mode == "verbose":
-            if event.args:
+            if display_args:
                 import json
-                args_str = json.dumps(event.args, ensure_ascii=False, default=str)
+                args_str = json.dumps(display_args, ensure_ascii=False, default=str)
                 if preview_max_len > 0 and len(args_str) > preview_max_len:
                     args_str = args_str[:preview_max_len - 3] + "..."
-                return f"{emoji} {event.tool_name}({list(event.args.keys())})\n{args_str}"
+                return f"{emoji} {event.tool_name}({list(display_args.keys())})\n{args_str}"
             if event.preview:
-                return f"{emoji} {event.tool_name}: \"{event.preview}\""
+                preview = shorten_tool_display_value(event.tool_name, "preview", event.preview)
+                return f"{emoji} {event.tool_name}: \"{preview}\""
             return f"{emoji} {event.tool_name}..."
+
 
         # "all" / "new": short preview, capped (default 40 to keep gateway
         # progress bubbles compact — they persist as permanent messages).
-        preview = event.preview
+        preview = shorten_tool_display_value(event.tool_name, "preview", event.preview)
         if preview:
             cap = preview_max_len if preview_max_len > 0 else 40
             if len(preview) > cap:
