@@ -19264,8 +19264,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             last_tool[0] = tool_name
 
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import (
+                get_tool_emoji,
+                shorten_tool_display_args,
+                shorten_tool_display_value,
+            )
             emoji = get_tool_emoji(tool_name, default="⚙️")
+            display_args = shorten_tool_display_args(tool_name, args or {})
+            display_preview = shorten_tool_display_value(tool_name, "preview", preview) if preview else preview
 
             # Markdown-capable platforms render a terminal command as a fenced
             # code block instead of the compact `terminal: "cmd…"` preview.
@@ -19289,12 +19295,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if (
                 getattr(_progress_adapter, "supports_code_blocks", False)
                 and tool_name == "terminal"
-                and isinstance(args, dict)
-                and isinstance(args.get("command"), str)
-                and args["command"].strip()
+                and isinstance(display_args, dict)
+                and isinstance(display_args.get("command"), str)
+                and display_args["command"].strip()
             ):
                 from agent.display import get_tool_preview_max_len
-                _cmd_full = args["command"].rstrip()
+                _cmd_full = display_args["command"].rstrip()
                 # Consecutive terminal calls: drop the repeated
                 # "💻 terminal" header so back-to-back commands render as
                 # adjacent code blocks under a single header.
@@ -19321,18 +19327,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     progress_queue.put(_code_block_full)
                     return
                 last_was_terminal_block[0] = False
-                if args:
+                if display_args:
                     from agent.display import get_tool_preview_max_len
                     _pl = get_tool_preview_max_len()
-                    args_str = json.dumps(args, ensure_ascii=False, default=str)
+                    args_str = json.dumps(display_args, ensure_ascii=False, default=str)
                     # When tool_preview_length is 0 (default), don't truncate
                     # in verbose mode — the user explicitly asked for full
                     # detail.  Platform message-length limits handle the rest.
                     if _pl > 0 and len(args_str) > _pl:
                         args_str = args_str[:_pl - 3] + "..."
-                    msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
-                elif preview:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_name}({list(display_args.keys())})\n{args_str}"
+                elif display_preview:
+                    msg = f"{emoji} {tool_name}: \"{display_preview}\""
+
                 else:
                     msg = f"{emoji} {tool_name}..."
                 progress_queue.put(msg)
@@ -19355,8 +19362,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40
-                if len(preview) > _cap:
-                    preview = preview[:_cap - 3] + "..."
+                display_preview = shorten_tool_display_value(tool_name, "preview", preview)
+                if len(display_preview) > _cap:
+                    display_preview = display_preview[:_cap - 3] + "..."
                 # Friendly labels: render a human-phrased line for built-in
                 # tools ("🔍 Searching the web for ...") by prefixing the verb
                 # onto the preview the callback already computed (so the
@@ -19367,9 +19375,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if verb_drops_preview(tool_name):
                         msg = f"{emoji} {_verb}"
                     else:
-                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
+                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{display_preview}"
                 else:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_name}: \"{display_preview}\""
                 last_was_terminal_block[0] = False
             else:
                 msg = f"{emoji} {tool_name}..."
@@ -19408,6 +19416,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else {"thread_id": _progress_thread_id}
         ) if _progress_thread_id else None
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
+        if source.platform == Platform.DISCORD:
+            _progress_metadata = dict(_progress_metadata or {})
+            _progress_metadata["suppress_embeds"] = True
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id

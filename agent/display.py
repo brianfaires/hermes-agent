@@ -7,6 +7,7 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 import logging
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -34,6 +35,30 @@ def _display_url(value: Any) -> str:
         value = value.get("url") or value.get("href")
     return value.strip() if isinstance(value, str) else ""
 
+def _display_path_replacements() -> tuple[tuple[str, str], ...]:
+    """Longest-prefix-first (old, new) pairs shortening well-known path roots.
+
+    Computed per call so HERMES_HOME overrides (profiles, tests) are honored:
+    profile trees render as ``<profile>/...``, the running checkout as
+    ``<repo-name>/...``, the Hermes home as ``<home-dirname>/...``, and the
+    user home as ``~/...``.
+    """
+    replacements: list[tuple[str, str]] = []
+    try:
+        from hermes_constants import get_hermes_home
+        hermes_home = str(get_hermes_home()).rstrip("/")
+    except Exception:
+        hermes_home = ""
+    if hermes_home:
+        replacements.append((f"{hermes_home}/profiles/", ""))
+    repo_root = Path(__file__).resolve().parent.parent
+    replacements.append((f"{repo_root}/", f"{repo_root.name}/"))
+    if hermes_home:
+        replacements.append((f"{hermes_home}/", f"{Path(hermes_home).name}/"))
+    home = str(Path.home()).rstrip("/")
+    if home:
+        replacements.append((f"{home}/", "~/"))
+    return tuple(replacements)
 
 # Diff colors — resolved lazily from the skin engine so they adapt
 # to light/dark themes.  Falls back to sensible defaults on import
@@ -548,12 +573,142 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if isinstance(value, list):
         value = value[0] if value else ""
 
-    preview = _oneline(str(value))
+    preview = _oneline(shorten_tool_display_value(tool_name, key, value))
     if not preview:
         return None
     if max_len > 0 and len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
     return preview
+
+
+def shorten_tool_display_value(tool_name: str, key: str, value: Any) -> str:
+    """Return a presentation-only shortened value for tool progress chrome.
+
+    This must never feed back into execution inputs; it exists only to keep
+    gateway/CLI tool-progress lines focused on the meaningful tail of a param.
+    """
+    text = str(value)
+    if tool_name in {"read_file", "patch", "write_file"}:
+        for old, new in _display_path_replacements():
+            text = text.replace(old, new)
+    if tool_name == "terminal":
+        shortened = _shorten_terminal_pipefail_setup(text)
+        if shortened is not None:
+            return shortened
+    return text
+
+
+def _shorten_terminal_pipefail_setup(text: str) -> str | None:
+    """Hide an initial strict-shell ``set`` command.
+
+    Terminal calls commonly put shell setup such as ``set -e`` or
+    ``set -euo pipefail`` on its own first line. Remove that setup before the
+    gateway selects and caps the first meaningful command for display.
+    """
+    leading_len = len(text) - len(text.lstrip())
+    if not text[leading_len:].startswith("set"):
+        return None
+
+    after_set = leading_len + len("set")
+    if after_set < len(text) and not text[after_set].isspace():
+        return None
+
+    separator_candidates = (
+        text.find("\n", after_set),
+        text.find(";", after_set),
+        text.find("&&", after_set),
+    )
+    separators = [idx for idx in separator_candidates if idx != -1]
+    setup_end = min(separators) if separators else len(text)
+    setup_args = text[after_set:setup_end]
+    tokens = _split_set_args(setup_args)
+    includes_pipefail = _set_args_include_pipefail_option(tokens)
+    if not includes_pipefail and not _set_args_include_strict_shell_flags(tokens):
+        return None
+
+    if separators:
+        tail_start = setup_end
+        if text.startswith("&&", tail_start):
+            tail_start += 2
+        else:
+            tail_start += 1
+    elif includes_pipefail:
+        tail_start = _pipefail_option_end(text, after_set)
+    else:
+        # Without a command separator there is no safe boundary between a
+        # short flag token and positional arguments to ``set``.
+        return None
+
+    return "..." + text[tail_start:].lstrip()
+
+
+def _split_set_args(setup_args: str) -> list[str]:
+    try:
+        return shlex.split(setup_args)
+    except ValueError:
+        return setup_args.split()
+
+
+def _set_args_include_strict_shell_flags(tokens: list[str]) -> bool:
+    """Return true when every ``set`` argument is an ``e``/``u`` flag token."""
+    if not tokens:
+        return False
+    return all(
+        token.startswith("-")
+        and bool(token[1:])
+        and set(token[1:]) <= {"e", "u"}
+        for token in tokens
+    )
+
+
+def _set_args_include_pipefail_option(tokens: list[str]) -> bool:
+    """Return true when ``pipefail`` is the option name for valid ``set`` flags.
+
+    The parser accepts a compact flag token (``-euo``) or separate flag tokens
+    (``-e -u -o``), but rejects positional arguments such as ``set -- -o
+    pipefail``. Direct callers may include the leading ``set`` token.
+    """
+    args = tokens[1:] if tokens and tokens[0] == "set" else list(tokens)
+    try:
+        pipefail_index = args.index("pipefail")
+    except ValueError:
+        return False
+
+    flag_tokens = args[:pipefail_index]
+    if not flag_tokens:
+        return False
+    for token in flag_tokens:
+        if not token or token[0] not in {"-", "+"}:
+            return False
+        flags = token[1:]
+        if not 1 <= len(flags) <= 5 or not flags.isalpha():
+            return False
+
+    return "o" in flag_tokens[-1][1:]
+
+
+def _pipefail_option_end(text: str, after_set: int) -> int:
+    pipefail_start = text.find("pipefail", after_set)
+    return len(text) if pipefail_start == -1 else pipefail_start + len("pipefail")
+
+
+def shorten_tool_display_args(tool_name: str, args: dict) -> dict:
+    """Return a copy of *args* with display-only shortening applied."""
+    if not isinstance(args, dict):
+        return args
+
+    def _shorten(key: str, value: Any) -> Any:
+        if isinstance(value, str):
+            return shorten_tool_display_value(tool_name, key, value)
+        if isinstance(value, list):
+            return [_shorten(key, item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(_shorten(key, item) for item in value)
+        if isinstance(value, dict):
+            return {k: _shorten(str(k), v) for k, v in value.items()}
+        return value
+
+    return {key: _shorten(str(key), value) for key, value in args.items()}
 
 
 # =========================================================================
