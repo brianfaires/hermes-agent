@@ -106,6 +106,93 @@ def test_tool_preview_truncated_to_cap():
     assert "89ABCDEF" not in lines[0]
 
 
+def test_file_tool_path_previews_are_shortened_before_truncation():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="all", preview_max_len=80,
+    )
+    d.dispatch(
+        ToolCallChunk(
+            tool_name="read_file",
+            preview="/home/brian/.hermes/hermes-agent/gateway/platforms/base.py",
+            args={"path": "/home/brian/.hermes/hermes-agent/gateway/platforms/base.py"},
+        )
+    )
+    assert "hermes-agent/gateway/platforms/base.py" in lines[0]
+    assert "/home/brian/.hermes/hermes-agent" not in lines[0]
+
+
+def test_file_tool_verbose_args_are_shortened():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="verbose", preview_max_len=0,
+    )
+    d.dispatch(
+        ToolCallChunk(
+            tool_name="write_file",
+            args={
+                "path": "/home/brian/projects/report.txt",
+                "content": "see /home/brian/.hermes/hermes-agent/agent/display.py",
+            },
+        )
+    )
+    assert "~/projects/report.txt" in lines[0]
+    assert "hermes-agent/agent/display.py" in lines[0]
+    assert "/home/brian/" not in lines[0]
+
+
+def test_terminal_display_strips_pipefail_boilerplate():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="all", preview_max_len=80,
+    )
+    d.dispatch(
+        ToolCallChunk(
+            tool_name="terminal",
+            preview="set -euo pipefail python -m pytest tests/gateway/test_stream_events.py",
+            args={"command": "set -euo pipefail python -m pytest tests/gateway/test_stream_events.py"},
+        )
+    )
+    assert "...python -m pytest tests/gateway/test_stream_events.py" in lines[0]
+    assert "set -euo pipefail" not in lines[0]
+
+
+def test_terminal_display_strips_set_o_pipefail_boilerplate():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="all", preview_max_len=80,
+    )
+    d.dispatch(
+        ToolCallChunk(
+            tool_name="terminal",
+            preview="set -o pipefail; python -m pytest tests/gateway/test_stream_events.py",
+            args={"command": "set -o pipefail; python -m pytest tests/gateway/test_stream_events.py"},
+        )
+    )
+    assert "...python -m pytest tests/gateway/test_stream_events.py" in lines[0]
+    assert "set -o pipefail" not in lines[0]
+
+
+def test_web_search_url_preview_text_remains_visible():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="all", preview_max_len=80,
+    )
+    d.dispatch(
+        ToolCallChunk(
+            tool_name="web_search",
+            preview="https://example.com/some/page?query=1",
+            args={"query": "https://example.com/some/page?query=1"},
+        )
+    )
+    assert "https://example.com/some/page?query=1" in lines[0]
+
+
 def test_new_mode_dedups_same_tool():
     lines = []
     d = GatewayEventDispatcher(
