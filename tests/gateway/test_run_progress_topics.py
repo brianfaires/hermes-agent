@@ -1333,7 +1333,7 @@ class TerminalCommandAgent:
     """Emits a terminal tool.started with a real, multi-line command arg."""
 
     CMD = (
-        "set -euo pipefail\n"
+        "set -e\n"
         "printf 'node: '; node --version\n"
         "npm install -g hyperframes@latest"
     )
@@ -1397,11 +1397,12 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     # Bare fenced block, no language tag (no '```bash').
     assert "```" in all_content
     assert "```bash" not in all_content
-    # Non-verbose collapses to the first line + truncation marker — the later
-    # command lines must NOT appear (this was the "huge block" regression).
-    assert "set -euo pipefail" in all_content
+    # Non-verbose hides the strict-shell prologue, then collapses to the first
+    # meaningful line + truncation marker — the later command lines must NOT
+    # appear (this was the "huge block" regression).
+    assert "set -e" not in all_content
+    assert "printf 'node: '; node --version" in all_content
     assert "npm install -g hyperframes@latest" not in all_content
-    assert "node --version" not in all_content
     # No truncated quoted preview for the terminal command.
     assert 'terminal: "' not in all_content
 
@@ -1449,7 +1450,9 @@ async def test_terminal_progress_verbose_shows_full_command(monkeypatch, tmp_pat
     all_content += " ".join(call["content"] for call in adapter.edits)
     assert "```" in all_content
     assert "```bash" not in all_content
-    # Full command body present — verbose is uncapped.
+    # Full meaningful command body present — verbose is uncapped, but still hides
+    # the strict-shell prologue.
+    assert "set -e" not in all_content
     assert "npm install -g hyperframes@latest" in all_content
     assert "node --version" in all_content
 
