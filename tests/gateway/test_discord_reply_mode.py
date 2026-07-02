@@ -118,6 +118,17 @@ class TestDiscordOutboundFormatting:
 
         assert adapter.format_message(content) == "paths: `~/.hermes/config.yaml`, `delegate_task`, `-m <model>` and plain\\_a \\> b"
 
+    def test_inline_code_escaped_backtick_renders_literal_backtick(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+        assert adapter.format_message(r"literal: `\``") == "literal: `` ` ``"
+
+    def test_inline_code_escaped_backtick_inside_span_uses_longer_delimiter(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = r"Use `foo \` bar` and *plain* text"
+
+        assert adapter.format_message(content) == "Use ``foo ` bar`` and \\*plain\\* text"
+
 
 def _make_discord_adapter(reply_to_mode: str = "first"):
     """Create a DiscordAdapter with mocked client and channel for send() tests."""
