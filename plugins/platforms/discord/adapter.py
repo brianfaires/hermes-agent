@@ -1175,7 +1175,10 @@ class DiscordAdapter(BasePlatformAdapter):
                     ):
                         return
                     _role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
-                
+
+                if await self._maybe_handle_kanban_inbox(message):
+                    return
+
                 # Multi-agent filtering: if the message mentions specific bots
                 # but NOT this bot, the sender is talking to another agent —
                 # stay silent.  Messages with no bot mentions (general chat)
@@ -1217,6 +1220,11 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
 
                 await self._handle_message(message, role_authorized=_role_authorized)
+
+            @self._client.event
+            async def on_raw_reaction_add(payload):
+                """Route supported Discord reaction intent signals into Kanban."""
+                await adapter_self._handle_raw_reaction_add(payload)
 
             @self._client.event
             async def on_voice_state_update(member, before, after):
@@ -5448,6 +5456,65 @@ class DiscordAdapter(BasePlatformAdapter):
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
+
+    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage) -> bool:
+        """Consume mapped Discord Forum replies into Kanban before chat dispatch."""
+        try:
+            from gateway.kanban_discord_inbox import maybe_handle_discord_message
+
+            result = await maybe_handle_discord_message(
+                message,
+                mark_nonconversational=self._nonconversational_messages.mark_many,
+            )
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban inbox failed; continuing normal dispatch for message_id=%s",
+                self.name,
+                getattr(message, "id", "unknown"),
+                exc_info=True,
+            )
+            return False
+        if result.consumed:
+            logger.info(
+                "[%s] Discord on_message consumed by Kanban inbox: message_id=%s task_id=%s action=%s reason=%s",
+                self.name,
+                getattr(message, "id", "unknown"),
+                result.task_id,
+                result.action,
+                result.reason,
+            )
+            return True
+        return False
+
+    async def _handle_raw_reaction_add(self, payload: Any) -> bool:
+        """Handle supported Discord reaction-add events before normal dispatch."""
+        if self._client and self._client.user is not None:
+            if str(getattr(payload, "user_id", "") or "") == str(getattr(self._client.user, "id", "") or ""):
+                return False
+        try:
+            from gateway.kanban_discord_inbox import maybe_handle_discord_reaction
+
+            result = await maybe_handle_discord_reaction(payload)
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban reaction inbox failed; continuing normal dispatch for message_id=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                exc_info=True,
+            )
+            return False
+        if result.consumed:
+            logger.info(
+                "[%s] Discord reaction consumed by Kanban inbox: message_id=%s thread=%s task_id=%s action=%s reason=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                getattr(payload, "channel_id", "unknown"),
+                result.task_id,
+                result.action,
+                result.reason,
+            )
+            return True
+        return False
 
     async def _handle_message(self, message: DiscordMessage, role_authorized: bool = False) -> None:
         """Handle incoming Discord messages."""

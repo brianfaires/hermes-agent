@@ -47,6 +47,23 @@ KANBAN_LIST_DEFAULT_LIMIT = 50
 KANBAN_LIST_MAX_LIMIT = 200
 
 
+def _session_env(name: str, default: str = "") -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env(name, default)
+    except Exception:
+        return os.environ.get(name, default)
+
+
+def _session_kanban_task() -> str:
+    return _session_env("HERMES_KANBAN_TASK", "")
+
+
+def _session_kanban_board() -> str:
+    return _session_env("HERMES_KANBAN_BOARD", "")
+
+
 def _profile_has_kanban_toolset() -> bool:
     # Uses load_config() which has mtime-based caching, so this adds
     # negligible overhead. The check_fn results are further TTL-cached
@@ -72,7 +89,7 @@ def _check_kanban_mode() -> bool:
     embedded by default) and orchestrator profiles with the kanban
     toolset enabled see the Kanban lifecycle tool surface.
     """
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    if _session_kanban_task():
         return True
     return _profile_has_kanban_toolset()
 
@@ -86,7 +103,7 @@ def _check_kanban_orchestrator_mode() -> bool:
     board state. Profiles that explicitly opt into the kanban toolset
     and are NOT scoped to a single task are the orchestrator surface.
     """
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    if _session_kanban_task():
         return False
     return _profile_has_kanban_toolset()
 
@@ -99,13 +116,13 @@ def _default_task_id(arg: Optional[str]) -> Optional[str]:
     """Resolve ``task_id`` arg or fall back to the env var the dispatcher set."""
     if arg:
         return arg
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    env_tid = _session_kanban_task()
     return env_tid or None
 
 
 def _worker_run_id(task_id: str) -> Optional[int]:
     """Return this worker's dispatcher run id when it is scoped to task_id."""
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
+    if _session_kanban_task() != task_id:
         return None
     raw = os.environ.get("HERMES_KANBAN_RUN_ID")
     if not raw:
@@ -120,9 +137,9 @@ def _stamp_worker_session_metadata(
     task_id: str, metadata: Optional[dict]
 ) -> Optional[dict]:
     """Add trusted worker session id metadata for this worker's own task."""
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
+    if _session_kanban_task() != task_id:
         return metadata
-    session_id = os.environ.get("HERMES_SESSION_ID")
+    session_id = _session_env("HERMES_SESSION_ID", "")
     if not session_id:
         return metadata
     stamped = dict(metadata or {})
@@ -149,7 +166,7 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     when it must be rejected. Callers should ``return`` the error
     verbatim.
     """
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    env_tid = _session_kanban_task()
     if not env_tid:
         # Orchestrator or CLI context — no task-scope restriction.
         return None
@@ -167,14 +184,17 @@ def _connect(board: Optional[str] = None):
     contexts (e.g. test rigs that import every tool module).
 
     When ``board`` is provided it's forwarded to :func:`kb.connect`, which
-    routes the connection to that board's sqlite file. ``None`` (the
-    default) preserves the legacy resolution chain
-    (``HERMES_KANBAN_DB`` → ``HERMES_KANBAN_BOARD`` env → current symlink
-    → ``default``). Per-tool ``board`` lets a Telegram-side agent override
-    the env-pinned active board without restarting Hermes.
+    routes the connection to that board's sqlite file. ``None`` preserves the
+    legacy resolution chain, with one gateway addition: a task-local
+    ``HERMES_KANBAN_BOARD`` ContextVar from a resolved Discord mirror thread is
+    honored before falling back to process env / current symlink / default.
     """
     from hermes_cli import kanban_db as kb
-    return kb, kb.connect(board=board)
+
+    resolved_board = board
+    if resolved_board is None:
+        resolved_board = _session_kanban_board() or None
+    return kb, kb.connect(board=resolved_board)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +244,7 @@ def heartbeat_current_worker_from_env() -> bool:
     the worst case is one extra DB write per race, which is harmless.
     """
     global _auto_heartbeat_last_attempt
-    tid = os.environ.get("HERMES_KANBAN_TASK")
+    tid = _session_kanban_task()
     if not tid:
         return False
     import time as _time
@@ -298,7 +318,7 @@ def _require_orchestrator_tool(tool_name: str) -> Optional[str]:
     structured tool_error so the model gets a clear refusal instead of
     silently mutating board state from a worker context.
     """
-    if os.environ.get("HERMES_KANBAN_TASK"):
+    if _session_kanban_task():
         return tool_error(
             f"{tool_name} is orchestrator-only; dispatcher-spawned workers "
             "must use kanban_complete, kanban_block, kanban_heartbeat, or "
@@ -787,7 +807,7 @@ def _handle_create(args: dict, **kw) -> str:
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
             if _inherit_workspace:
-                _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+                _self_tid = _session_kanban_task()
                 if _self_tid:
                     _self_task = kb.get_task(conn, _self_tid)
                     if _self_task is not None and _self_task.workspace_kind:
