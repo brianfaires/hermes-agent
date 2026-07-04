@@ -185,6 +185,112 @@ _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
 # the next turn, triggering bogus attachment sends (#14665).
 _MEDIA_DIRECTIVE_RE = re.compile(r"MEDIA:\S+")
 
+_SPOKEN_USER_KEYS = (
+    "spoken_text",
+    "voice_text",
+    "voice_transcript",
+    "stt_transcript",
+    "transcript",
+    "_spoken_text",
+    "_voice_text",
+    "_voice_transcript",
+    "_stt_transcript",
+)
+_SPOKEN_ASSISTANT_KEYS = (
+    "spoken_text",
+    "voice_text",
+    "tts_text",
+    "tts_spoken_text",
+    "_spoken_text",
+    "_voice_text",
+    "_tts_text",
+    "_tts_spoken_text",
+)
+
+
+def _normalized_spoken_equivalence(value: str) -> str:
+    """Normalize visible/spoken text enough to avoid compression duplicates."""
+    value = _MEDIA_DIRECTIVE_RE.sub(" ", str(value or ""))
+    value = re.sub(r"```[\s\S]*?```", " ", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"https?://\S+", " ", value)
+    value = re.sub(r"[*_`>#\[\](){}.,!?;:'\"/\\|-]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _is_equivalent_spoken_text(visible: str, spoken: str) -> bool:
+    visible_norm = _normalized_spoken_equivalence(visible)
+    spoken_norm = _normalized_spoken_equivalence(spoken)
+    if not visible_norm or not spoken_norm:
+        return False
+    return visible_norm == spoken_norm
+
+
+def _message_spoken_values(msg: Dict[str, Any], *, role: str) -> list[str]:
+    """Return spoken text metadata attached to a conversation message.
+
+    Gateway/STT/TTS paths historically persisted the visible text only, while
+    newer or platform-specific paths may attach explicit voice metadata.  The
+    compressor treats those metadata fields as conversational content when they
+    are not already represented by the visible message body.
+    """
+    keys = _SPOKEN_USER_KEYS if role == "user" else _SPOKEN_ASSISTANT_KEYS
+    values: list[str] = []
+    for key in keys:
+        value = msg.get(key)
+        if isinstance(value, str) and value.strip():
+            _dedupe_append(values, value, limit=8)
+
+    metadata = msg.get("metadata")
+    if isinstance(metadata, dict):
+        for key in keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                _dedupe_append(values, value, limit=8)
+
+    return values
+
+
+def _tts_texts_from_tool_calls(msg: Dict[str, Any]) -> list[str]:
+    """Extract spoken assistant text from text_to_speech tool-call arguments."""
+    values: list[str] = []
+    for tc in msg.get("tool_calls") or []:
+        name, raw_args = _extract_tool_call_name_and_args(tc)
+        if name != "text_to_speech" or not raw_args:
+            continue
+        try:
+            parsed = json.loads(raw_args)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        text = parsed.get("text")
+        if isinstance(text, str) and text.strip():
+            _dedupe_append(values, text, limit=8)
+    return values
+
+
+def _content_text_for_summary(msg: Dict[str, Any]) -> str:
+    """Return visible content plus non-duplicative spoken conversation text."""
+    role = str(msg.get("role", "unknown"))
+    visible = _content_text_for_contains(msg.get("content"))
+    additions: list[str] = []
+
+    if role == "user":
+        for spoken in _message_spoken_values(msg, role="user"):
+            if not _is_equivalent_spoken_text(visible, spoken):
+                _dedupe_append(additions, f"[Spoken input]: {spoken}", limit=8)
+    elif role == "assistant":
+        spoken_values = _message_spoken_values(msg, role="assistant")
+        spoken_values.extend(_tts_texts_from_tool_calls(msg))
+        for spoken in spoken_values:
+            if not _is_equivalent_spoken_text(visible, spoken):
+                _dedupe_append(additions, f"[Spoken assistant output]: {spoken}", limit=8)
+
+    if additions:
+        return "\n".join(part for part in [visible, *additions] if part).strip()
+    return visible
+
 
 def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
     value = value.strip()
@@ -1041,15 +1147,29 @@ class ContextCompressor(ContextEngine):
         (API keys, tokens, passwords) from leaking into the summary that
         gets sent to the auxiliary model and persisted across compactions.
         """
+        call_id_to_tool: Dict[str, tuple[str, str]] = {}
+        for msg in turns:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                call_id = _extract_tool_call_id(tc)
+                if call_id:
+                    call_id_to_tool[call_id] = _extract_tool_call_name_and_args(tc)
+
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
-            content = redact_sensitive_text(msg.get("content") or "")
+            raw_content = _content_text_for_summary(msg)
+            content = redact_sensitive_text(raw_content)
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
 
-            # Tool results: keep enough content for the summarizer
+            # Tool results: keep enough content for the summarizer, but do not
+            # preserve ordinary TTS delivery artifacts such as temp audio paths.
             if role == "tool":
                 tool_id = msg.get("tool_call_id", "")
+                tool_name, tool_args = call_id_to_tool.get(tool_id, ("unknown", ""))
+                if tool_name == "text_to_speech":
+                    content = _summarize_tool_result(tool_name, tool_args, content)
                 if len(content) > self._CONTENT_MAX:
                     content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
@@ -1067,6 +1187,13 @@ class ContextCompressor(ContextEngine):
                             fn = tc.get("function", {})
                             name = fn.get("name", "?")
                             args = redact_sensitive_text(fn.get("arguments", ""))
+                            if name == "text_to_speech":
+                                # The spoken text is preserved as assistant
+                                # content above when needed. Keep the tool-call
+                                # record, but drop output_path/audio-delivery
+                                # arguments and avoid duplicating equivalent
+                                # visible/spoken text in the summarizer input.
+                                args = "{}"
                             # Truncate long arguments but keep enough for context
                             if len(args) > self._TOOL_ARGS_MAX:
                                 args = args[:self._TOOL_ARGS_HEAD] + "..."
@@ -1145,7 +1272,7 @@ class ContextCompressor(ContextEngine):
                     call_id = _extract_tool_call_id(tc)
                     if call_id:
                         call_id_to_tool[call_id] = (name, args)
-                    if args:
+                    if args and name != "text_to_speech":
                         try:
                             parsed = json.loads(args)
                         except Exception:
@@ -1154,7 +1281,17 @@ class ContextCompressor(ContextEngine):
 
         for msg in turns_to_summarize:
             role = msg.get("role", "unknown")
-            text = _compact_fallback_turn(msg.get("content"))
+            raw_fallback_content: Any = _content_text_for_summary(msg)
+            if role == "tool":
+                call_id = str(msg.get("tool_call_id") or "")
+                tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+                if tool_name == "text_to_speech":
+                    raw_fallback_content = _summarize_tool_result(
+                        tool_name,
+                        tool_args,
+                        _content_text_for_contains(msg.get("content")),
+                    )
+            text = _compact_fallback_turn(raw_fallback_content)
             _collect_path_mentions(text, relevant_files)
 
             turn_text = text
@@ -2308,9 +2445,22 @@ This compaction should PRIORITISE preserving all information related to the focu
                 )
             return messages
 
-        # Phase 4: Assemble compressed message list
-        compressed = []
+        # Phase 4: Assemble compressed message list. If this is a recompression
+        # of an already-compressed lineage, replace the prior protected handoff
+        # summary with the newly-updated one rather than carrying both forward.
+        # Keeping the old summary in the protected head and inserting the new
+        # summary after it makes compressed sessions look like they "end" at a
+        # tiny pile of compaction blocks and causes later turns to reason over
+        # duplicate/stale summaries instead of one current conversation state.
+        skip_head_summary_idx = (
+            summary_idx
+            if summary_idx is not None and summary_idx < compress_start
+            else None
+        )
+        head_messages: list[Dict[str, Any]] = []
         for i in range(compress_start):
+            if i == skip_head_summary_idx:
+                continue
             msg = messages[i].copy()
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
@@ -2320,7 +2470,8 @@ This compaction should PRIORITISE preserving all information related to the focu
                         existing,
                         "\n\n" + _compression_note if isinstance(existing, str) and existing else _compression_note,
                     )
-            compressed.append(msg)
+            head_messages.append(msg)
+        compressed = list(head_messages)
 
         # If LLM summary failed, insert a deterministic fallback so the model
         # gets at least locally recoverable continuity anchors instead of a
@@ -2337,7 +2488,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
 
         _merge_summary_into_tail = False
-        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
+        last_head_role = head_messages[-1].get("role", "user") if head_messages else "user"
         first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
