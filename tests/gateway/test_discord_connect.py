@@ -755,6 +755,49 @@ async def test_post_connect_initialization_skips_same_fingerprint_after_success(
 
 
 @pytest.mark.asyncio
+async def test_post_connect_initialization_retries_failed_new_fingerprint_after_old_success(tmp_path, monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+
+    class _DesiredCommand:
+        def to_dict(self, tree):
+            return {
+                "name": "model",
+                "description": "Show or change the model",
+                "type": 1,
+                "options": [],
+            }
+
+    adapter._client = SimpleNamespace(
+        tree=SimpleNamespace(get_commands=lambda: [_DesiredCommand()]),
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+    state_path = (
+        tmp_path
+        / discord_platform._DISCORD_COMMAND_SYNC_STATE_SUBDIR
+        / discord_platform._DISCORD_COMMAND_SYNC_STATE_FILENAME
+    )
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps({"999": {"fingerprint": "old", "last_success_at": 123.0}}),
+        encoding="utf-8",
+    )
+
+    sync = AsyncMock(side_effect=RuntimeError("discord command sync failed"))
+    monkeypatch.setattr(adapter, "_safe_sync_slash_commands", sync)
+
+    await adapter._run_post_connect_initialization()
+    await adapter._run_post_connect_initialization()
+
+    assert sync.await_count == 2
+    state = json.loads(state_path.read_text())
+    entry = state["999"]
+    assert entry["fingerprint"] != "old"
+    assert "last_success_at" not in entry
+
+
+@pytest.mark.asyncio
 async def test_post_connect_initialization_respects_discord_retry_after(tmp_path, monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
