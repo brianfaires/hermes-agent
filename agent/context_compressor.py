@@ -2377,9 +2377,22 @@ This compaction should PRIORITISE preserving all information related to the focu
                 )
             return messages
 
-        # Phase 4: Assemble compressed message list
-        compressed = []
+        # Phase 4: Assemble compressed message list. If this is a recompression
+        # of an already-compressed lineage, replace the prior protected handoff
+        # summary with the newly-updated one rather than carrying both forward.
+        # Keeping the old summary in the protected head and inserting the new
+        # summary after it makes compressed sessions look like they "end" at a
+        # tiny pile of compaction blocks and causes later turns to reason over
+        # duplicate/stale summaries instead of one current conversation state.
+        skip_head_summary_idx = (
+            summary_idx
+            if summary_idx is not None and summary_idx < compress_start
+            else None
+        )
+        head_messages: list[Dict[str, Any]] = []
         for i in range(compress_start):
+            if i == skip_head_summary_idx:
+                continue
             msg = messages[i].copy()
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
@@ -2389,7 +2402,8 @@ This compaction should PRIORITISE preserving all information related to the focu
                         existing,
                         "\n\n" + _compression_note if isinstance(existing, str) and existing else _compression_note,
                     )
-            compressed.append(msg)
+            head_messages.append(msg)
+        compressed = list(head_messages)
 
         # If LLM summary failed, insert a deterministic fallback so the model
         # gets at least locally recoverable continuity anchors instead of a
@@ -2406,7 +2420,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             )
 
         _merge_summary_into_tail = False
-        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
+        last_head_role = head_messages[-1].get("role", "user") if head_messages else "user"
         first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
         # Pick a role that avoids consecutive same-role with both neighbors.
         # Priority: avoid colliding with head (already committed), then tail.
