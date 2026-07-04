@@ -167,7 +167,7 @@ _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 # only meant to preserve continuity anchors from the dropped window, not to
 # become another unbounded transcript copy after the LLM summarizer failed.
 _FALLBACK_SUMMARY_MAX_CHARS = 8_000
-_FALLBACK_TURN_MAX_CHARS = 700
+_FALLBACK_TURN_MAX_CHARS = 600
 _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
@@ -184,6 +184,46 @@ _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
 # the summary, the downstream model may re-emit it as an active directive on
 # the next turn, triggering bogus attachment sends (#14665).
 _MEDIA_DIRECTIVE_RE = re.compile(r"MEDIA:\S+")
+
+def _spoken_text_key(value: str) -> str:
+    """Normalize visible and spoken text enough to detect duplicate speech."""
+    value = _MEDIA_DIRECTIVE_RE.sub(" ", str(value or ""))
+    value = re.sub(r"```[\s\S]*?```", " ", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"https?://\S+", " ", value)
+    value = re.sub(r"[*_`>#\[\](){}.,!?;:'\"/\\|-]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _tts_text_from_tool_call(tool_call: Any) -> str:
+    """Return conversational text from a text_to_speech tool call."""
+    name, raw_args = _extract_tool_call_name_and_args(tool_call)
+    if name != "text_to_speech" or not raw_args:
+        return ""
+    try:
+        parsed = json.loads(raw_args)
+    except (TypeError, ValueError):
+        return ""
+    text = parsed.get("text") if isinstance(parsed, dict) else None
+    return text.strip() if isinstance(text, str) else ""
+
+
+def _content_text_for_summary(msg: Dict[str, Any]) -> str:
+    """Return visible content plus distinct TTS tool-call speech."""
+    visible = _content_text_for_contains(msg.get("content"))
+    if msg.get("role") != "assistant":
+        return visible
+
+    seen = {_spoken_text_key(visible)}
+    additions: list[str] = []
+    for tool_call in msg.get("tool_calls") or []:
+        spoken = _tts_text_from_tool_call(tool_call)
+        key = _spoken_text_key(spoken)
+        if key and key not in seen:
+            additions.append(f"[Spoken assistant output]: {spoken}")
+            seen.add(key)
+
+    return "\n".join(part for part in [visible, *additions] if part).strip()
 
 
 def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
@@ -994,7 +1034,13 @@ class ContextCompressor(ContextEngine):
             modified = False
             for tc in msg["tool_calls"]:
                 if isinstance(tc, dict):
-                    args = tc.get("function", {}).get("arguments", "")
+                    fn = tc.get("function", {})
+                    # TTS text is conversational content recovered during
+                    # compression, not a disposable delivery argument.
+                    if fn.get("name") == "text_to_speech":
+                        new_tcs.append(tc)
+                        continue
+                    args = fn.get("arguments", "")
                     if len(args) > 500:
                         new_args = _truncate_tool_call_args_json(args)
                         if new_args != args:
@@ -1041,15 +1087,29 @@ class ContextCompressor(ContextEngine):
         (API keys, tokens, passwords) from leaking into the summary that
         gets sent to the auxiliary model and persisted across compactions.
         """
+        tts_call_ids: set[str] = set()
+        for msg in turns:
+            if msg.get("role") != "assistant":
+                continue
+            for tool_call in msg.get("tool_calls") or []:
+                name, _args = _extract_tool_call_name_and_args(tool_call)
+                call_id = _extract_tool_call_id(tool_call)
+                if name == "text_to_speech" and call_id:
+                    tts_call_ids.add(call_id)
+
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
-            content = redact_sensitive_text(msg.get("content") or "")
+            raw_content = _content_text_for_summary(msg)
+            content = redact_sensitive_text(raw_content)
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
 
-            # Tool results: keep enough content for the summarizer
+            # TTS results contain delivery artifacts; the conversational text
+            # is already retained from the matching assistant tool call.
             if role == "tool":
-                tool_id = msg.get("tool_call_id", "")
+                tool_id = str(msg.get("tool_call_id") or "")
+                if tool_id in tts_call_ids:
+                    continue
                 if len(content) > self._CONTENT_MAX:
                     content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
                 parts.append(f"[TOOL RESULT {tool_id}]: {content}")
@@ -1067,6 +1127,13 @@ class ContextCompressor(ContextEngine):
                             fn = tc.get("function", {})
                             name = fn.get("name", "?")
                             args = redact_sensitive_text(fn.get("arguments", ""))
+                            if name == "text_to_speech":
+                                # The spoken text is preserved as assistant
+                                # content above when needed. Keep the tool-call
+                                # record, but drop output_path/audio-delivery
+                                # arguments and avoid duplicating equivalent
+                                # visible/spoken text in the summarizer input.
+                                args = "{}"
                             # Truncate long arguments but keep enough for context
                             if len(args) > self._TOOL_ARGS_MAX:
                                 args = args[:self._TOOL_ARGS_HEAD] + "..."
@@ -1113,7 +1180,7 @@ class ContextCompressor(ContextEngine):
             text = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b", "[REDACTED]", text)
             text = re.sub(r"\s+", " ", text).strip()
             if len(text) > _FALLBACK_TURN_MAX_CHARS:
-                text = text[: _FALLBACK_TURN_MAX_CHARS - 15].rstrip() + " ...[truncated]"
+                text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
             return re.sub(r"\bgh[pousr]_[A-Za-z0-9_.-]+", "[REDACTED]", text)
 
         def _remember_dropped_turn(label: str, text: str, *, limit: int = 8) -> None:
@@ -1145,7 +1212,7 @@ class ContextCompressor(ContextEngine):
                     call_id = _extract_tool_call_id(tc)
                     if call_id:
                         call_id_to_tool[call_id] = (name, args)
-                    if args:
+                    if args and name != "text_to_speech":
                         try:
                             parsed = json.loads(args)
                         except Exception:
@@ -1154,7 +1221,12 @@ class ContextCompressor(ContextEngine):
 
         for msg in turns_to_summarize:
             role = msg.get("role", "unknown")
-            text = _compact_fallback_turn(msg.get("content"))
+            if role == "tool":
+                call_id = str(msg.get("tool_call_id") or "")
+                tool_name, _tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+                if tool_name == "text_to_speech":
+                    continue
+            text = _compact_fallback_turn(_content_text_for_summary(msg))
             _collect_path_mentions(text, relevant_files)
 
             turn_text = text
@@ -1167,9 +1239,6 @@ class ContextCompressor(ContextEngine):
                     prefix = "tool calls: " + ", ".join(turn_tool_names[:6])
                     turn_text = f"{prefix}; {turn_text}" if turn_text else prefix
             _remember_dropped_turn(str(role).upper(), turn_text)
-
-            if len(text) > 600:
-                text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
 
             if role == "user" and text:
                 user_asks.append(text)
