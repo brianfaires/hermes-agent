@@ -154,3 +154,42 @@ class TestExternalSkillView:
             result = json.loads(skill_view("my-external-skill"))
         assert result["success"] is True
         assert "external things" in result["content"]
+
+
+class TestExternalSkillsPromptCacheInvalidation:
+    """Edits inside skills.external_dirs must invalidate the skills prompt cache."""
+
+    def test_skills_prompt_cache_invalidates_on_external_skill_change(
+        self, hermes_home, tmp_path
+    ):
+        def _write_skill(root, name, description):
+            skill_dir = root / name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {description}\n---\n\n"
+                f"# {name}\n\n{description}\n",
+                encoding="utf-8",
+            )
+
+        external = tmp_path / "shared-skills"
+        _write_skill(external, "first-shared", "First shared")
+        (hermes_home / "config.yaml").write_text(
+            f"skills:\n  external_dirs:\n    - {external}\n"
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
+            from agent.skill_utils import _external_dirs_cache_clear
+            from agent.prompt_builder import (
+                build_skills_system_prompt,
+                clear_skills_system_prompt_cache,
+            )
+
+            _external_dirs_cache_clear()
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+            first_prompt = build_skills_system_prompt()
+            _write_skill(external, "second-shared", "Second shared")
+            second_prompt = build_skills_system_prompt()
+
+        assert "first-shared: First shared" in first_prompt
+        assert "second-shared: Second shared" not in first_prompt
+        assert "second-shared: Second shared" in second_prompt
