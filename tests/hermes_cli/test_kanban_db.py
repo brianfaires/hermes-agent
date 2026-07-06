@@ -242,8 +242,25 @@ def test_create_task_persists_worktree_branch_name(kanban_home, tmp_path):
     assert "Branch:   wt/t6-wire" in context
 
 
-def test_branch_name_requires_worktree_workspace(kanban_home):
-    with kb.connect() as conn, pytest.raises(ValueError, match="worktree"):
+def test_create_task_persists_dir_branch_name(kanban_home, tmp_path):
+    target = tmp_path / "repo"
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="ship branch",
+            workspace_kind="dir",
+            workspace_path=str(target),
+            branch_name=" work/new-feature ",
+        )
+        task = kb.get_task(conn, tid)
+        context = kb.build_worker_context(conn, tid)
+
+    assert task.branch_name == "work/new-feature"
+    assert "Branch:   work/new-feature" in context
+
+
+def test_branch_name_requires_persistent_workspace(kanban_home):
+    with kb.connect() as conn, pytest.raises(ValueError, match="persistent"):
         kb.create_task(
             conn,
             title="bad branch",
