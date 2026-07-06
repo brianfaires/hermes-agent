@@ -262,3 +262,29 @@ class TestPlayAckInVoice:
             ok = await adapter.play_ack_in_voice(111, phrase="Testing one two.")
         assert ok is True
         mixer.play_speech.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ack_temp_path_is_profile_scoped(self, tmp_path, monkeypatch):
+        adapter = _make_adapter()
+        adapter._voice_mixers[111] = MagicMock()
+        adapter._reset_voice_timeout = MagicMock()
+
+        ack_file = tmp_path / "ack.mp3"
+        ack_file.write_bytes(b"id3")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "ops"))
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "tmp"))
+
+        seen = {}
+        import json as _json
+
+        def _tts(**kwargs):
+            seen["output_path"] = kwargs["output_path"]
+            return _json.dumps({"success": True, "file_path": str(ack_file)})
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=_tts), \
+                patch.object(vm, "decode_to_pcm", return_value=b"\x00" * vm.FRAME_SIZE):
+            ok = await adapter.play_ack_in_voice(111, phrase="Testing one two.")
+
+        assert ok is True
+        assert os.path.dirname(seen["output_path"]) == str(tmp_path / "tmp" / "hermes_voice" / "ops")
+        assert os.path.basename(seen["output_path"]).startswith("ack_")

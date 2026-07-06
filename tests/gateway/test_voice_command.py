@@ -1,5 +1,6 @@
 """Tests for the /voice command and auto voice reply in the gateway."""
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -547,6 +548,7 @@ class TestDiscordPlayTtsSkip:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
+        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
@@ -940,6 +942,7 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._client = MagicMock()
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello")
@@ -950,6 +953,7 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -980,6 +984,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {111: bound_source.to_dict()}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -998,10 +1003,11 @@ class TestVoiceChannelCommands:
 
     @pytest.mark.asyncio
     async def test_input_posts_transcript_in_text_channel(self, runner):
-        """Voice input sends transcript message to text channel."""
+        """Voice input sends transcript message to the configured transcript channel."""
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1021,6 +1027,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1041,6 +1048,7 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1102,10 +1110,12 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
+        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._voice_session_generations = {}
         adapter._voice_input_callback = None
         adapter._allowed_user_ids = set()
         adapter._running = True
@@ -1134,9 +1144,13 @@ class TestDiscordVoiceChannelMethods:
         adapter = self._make_adapter()
         mock_vc = MagicMock()
         mock_vc.is_connected.return_value = True
-        mock_vc.disconnect = AsyncMock()
+        async def disconnect_asserts_generation_bumped():
+            assert adapter._voice_session_generations[111] == 8
+        mock_vc.disconnect = AsyncMock(side_effect=disconnect_asserts_generation_bumped)
         adapter._voice_clients[111] = mock_vc
+        adapter._voice_session_generations[111] = 7
         adapter._voice_text_channels[111] = 123
+        adapter._voice_transcript_channels[111] = 123
         adapter._voice_sources[111] = {"chat_id": "123", "chat_type": "group"}
 
         mock_receiver = MagicMock()
@@ -1156,6 +1170,7 @@ class TestDiscordVoiceChannelMethods:
         mock_timeout.cancel.assert_called_once()
         assert 111 not in adapter._voice_clients
         assert 111 not in adapter._voice_text_channels
+        assert 111 not in adapter._voice_transcript_channels
         assert 111 not in adapter._voice_sources
         assert 111 not in adapter._voice_receivers
 
@@ -1303,6 +1318,56 @@ class TestDiscordVoiceChannelMethods:
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": False, "error": "API error"}):
             await adapter._process_voice_input(111, 42, b"\x00" * 96000)
+
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_voice_input_disconnect_does_not_delete_wav_mid_stt(self):
+        """Listener cancellation must not unlink the WAV while STT is reading it."""
+        adapter = self._make_adapter()
+        callback = AsyncMock()
+        adapter._voice_input_callback = callback
+        entered_stt = threading.Event()
+
+        def fake_pcm_to_wav(_pcm_data, wav_path):
+            with open(wav_path, "wb") as f:
+                f.write(b"RIFFfake")
+
+        def fake_transcribe(wav_path):
+            entered_stt.set()
+            time.sleep(0.05)
+            assert os.path.exists(wav_path), "voice WAV was unlinked while STT was active"
+            return {"success": True, "transcript": "still here"}
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav", fake_pcm_to_wav), \
+             patch("tools.transcription_tools.transcribe_audio", fake_transcribe), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            task = asyncio.create_task(adapter._process_voice_input(111, 42, b"\x00" * 96000))
+            deadline = time.monotonic() + 1.0
+            while not entered_stt.wait(0.01):
+                assert time.monotonic() < deadline, "voice STT phase was not reached"
+                await asyncio.sleep(0.01)
+            task.cancel()
+            await task
+
+        callback.assert_called_once_with(guild_id=111, user_id=42, transcript="still here")
+
+    @pytest.mark.asyncio
+    async def test_process_voice_input_stale_generation_drops_transcript(self):
+        """Late STT from an old VC session must not speak into a new session."""
+        adapter = self._make_adapter()
+        callback = AsyncMock()
+        adapter._voice_input_callback = callback
+        adapter._voice_session_generations[111] = 2
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav"), \
+             patch("tools.transcription_tools.transcribe_audio",
+                   return_value={"success": True, "transcript": "old message"}), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            await adapter._process_voice_input(
+                111, 42, b"\x00" * 96000,
+                session_generation=1,
+            )
 
         callback.assert_not_called()
 
@@ -1882,10 +1947,10 @@ class TestSendVoiceReplyFilename:
     """_send_voice_reply uses uuid for unique filenames."""
 
     def test_filename_uses_uuid(self):
-        """The method uses uuid in the filename, not time-based."""
+        """The helper uses uuid in the filename, not time-based."""
         import inspect
-        from gateway.run import GatewayRunner
-        source = inspect.getsource(GatewayRunner._send_voice_reply)
+        from gateway import temp_audio
+        source = inspect.getsource(temp_audio.gateway_tts_temp_path)
         assert "uuid" in source, \
             "_send_voice_reply should use uuid for unique filenames"
         assert "int(time.time())" not in source, \
@@ -1899,6 +1964,18 @@ class TestSendVoiceReplyFilename:
             name = f"tts_reply_{uuid.uuid4().hex[:12]}.mp3"
             assert name not in names, f"Collision detected: {name}"
             names.add(name)
+
+    def test_gateway_tts_temp_path_is_profile_scoped(self, tmp_path, monkeypatch):
+        from gateway.temp_audio import gateway_tts_temp_path
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "ops"))
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "tmp"))
+
+        path = gateway_tts_temp_path("tts_reply", "mp3")
+
+        assert os.path.dirname(path) == str(tmp_path / "tmp" / "hermes_voice" / "ops")
+        assert os.path.basename(path).startswith("tts_reply_")
+        assert path.endswith(".mp3")
 
 
 # =====================================================================
@@ -1924,6 +2001,7 @@ class TestVoiceTimeoutCleansRunnerState:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._voice_session_generations = {}
         adapter._voice_input_callback = None
         adapter._on_voice_disconnect = None
         adapter._client = None
@@ -2058,6 +2136,7 @@ class TestPlaybackTimeout:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._voice_session_generations = {}
         adapter._voice_input_callback = None
         adapter._on_voice_disconnect = None
         adapter._client = None
