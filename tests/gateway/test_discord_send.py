@@ -8,6 +8,12 @@ import pytest
 from gateway.config import PlatformConfig
 
 
+@pytest.fixture(autouse=True)
+def _clear_discord_channel_policy_env(monkeypatch):
+    monkeypatch.delenv("DISCORD_ALLOWED_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_IGNORED_CHANNELS", raising=False)
+
+
 def _ensure_discord_mock():
     if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
         return
