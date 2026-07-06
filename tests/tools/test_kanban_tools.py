@@ -2168,6 +2168,30 @@ def test_create_subscribes_gateway_session(monkeypatch, worker_env):
     assert s["user_id"] == "user-9"
 
 
+def test_create_discord_origin_routes_to_telegram_home_under_policy(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+    home = os.environ["HERMES_HOME"]
+    with open(os.path.join(home, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("kanban:\n  notification_policy:\n    mode: telegram_home_only\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc:fake")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "tg-home")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "tg-thread")
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "discord")
+    monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "discord-channel")
+    monkeypatch.setenv("HERMES_SESSION_THREAD_ID", "discord-thread")
+
+    out = kt._handle_create({"title": "discord origin", "assignee": "peer"})
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["subscribed"] is True, d
+
+    subs = _sub_index(_list_subs_for_task(d["task_id"]))
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "tg-home"
+    assert subs[0]["thread_id"] == "tg-thread"
+
+
 def test_create_subscribes_tui_session_via_session_key(monkeypatch, worker_env):
     """TUI / desktop sessions don't have a platform/chat_id (single
     local channel), but the parent process exports HERMES_SESSION_KEY.

@@ -1543,6 +1543,16 @@ DEFAULT_CONFIG = {
         # behaviour — e.g. for a profile that prefers explicit
         # ``kanban_notify-subscribe`` calls per task.
         "auto_subscribe_on_create": True,
+        # Notification routing policy for kanban_notify_subs. Defaults to
+        # backward-compatible origin delivery. Set mode=telegram_home_only to
+        # force gateway/dashboard/tool/CLI subscription targets and notifier
+        # sends to the configured Telegram home channel while preserving TUI
+        # local notifications unless preserve_tui=false.
+        "notification_policy": {
+            "mode": "origin",
+            "allowed_platforms": [],
+            "preserve_tui": True,
+        },
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).

@@ -198,9 +198,16 @@ class GatewayKanbanWatchersMixin:
             try:
                 def _collect():
                     deliveries: list[dict] = []
+                    adapter_maps = [self.adapters]
+                    adapter_maps.extend(
+                        (getattr(self, "_profile_adapters", None) or {}).values()
+                    )
                     active_platforms = {
                         getattr(platform, "value", str(platform)).lower()
-                        for platform in self.adapters.keys()
+                        for adapters in adapter_maps
+                        for platform, adapter in adapters.items()
+                        if adapter is not None
+                        and getattr(adapter, "_running", True) is not False
                     }
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
@@ -262,10 +269,25 @@ class GatewayKanbanWatchersMixin:
                                         )
                                         continue
                                 platform = (sub.get("platform") or "").lower()
-                                if platform not in active_platforms:
+                                from hermes_cli.kanban_notifications import resolve_notify_target
+                                target = resolve_notify_target(
+                                    platform=sub.get("platform") or "",
+                                    chat_id=sub.get("chat_id") or "",
+                                    thread_id=sub.get("thread_id") or None,
+                                    user_id=sub.get("user_id") or None,
+                                    notifier_profile=sub.get("notifier_profile") or None,
+                                )
+                                if target is None:
+                                    logger.debug(
+                                        "kanban notifier: subscription for %s on %s skipped by notification policy",
+                                        sub.get("task_id"), platform or "<missing>",
+                                    )
+                                    continue
+                                effective_platform = target.platform
+                                if effective_platform not in active_platforms:
                                     logger.debug(
                                         "kanban notifier: subscription for %s on %s skipped; adapter not connected",
-                                        sub.get("task_id"), platform or "<missing>",
+                                        sub.get("task_id"), effective_platform or "<missing>",
                                     )
                                     continue
                                 old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
@@ -300,7 +322,22 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
-                    platform_str = (sub["platform"] or "").lower()
+                    from hermes_cli.kanban_notifications import resolve_notify_target
+                    target = resolve_notify_target(
+                        platform=sub.get("platform") or "",
+                        chat_id=sub.get("chat_id") or "",
+                        thread_id=sub.get("thread_id") or None,
+                        user_id=sub.get("user_id") or None,
+                        notifier_profile=sub.get("notifier_profile") or None,
+                    )
+                    if target is None:
+                        logger.debug(
+                            "kanban notifier: subscription for %s on %s skipped by notification policy",
+                            sub.get("task_id"), sub.get("platform") or "<missing>",
+                        )
+                        await asyncio.to_thread(self._kanban_advance, sub, d["cursor"], board_slug)
+                        continue
+                    platform_str = target.platform
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
@@ -406,19 +443,19 @@ class GatewayKanbanWatchersMixin:
                             # _WAKE_KINDS below, so they never wake the creator.
                             continue
                         metadata: dict[str, Any] = {}
-                        if sub.get("thread_id"):
-                            metadata["thread_id"] = sub["thread_id"]
+                        if target.thread_id:
+                            metadata["thread_id"] = target.thread_id
                         sub_key = (
-                            sub["task_id"], sub["platform"],
-                            sub["chat_id"], sub.get("thread_id") or "",
+                            sub["task_id"], target.platform,
+                            target.chat_id, target.thread_id or "",
                         )
                         try:
                             await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
+                                target.chat_id, msg, metadata=metadata,
                             )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                kind, sub["task_id"], platform_str, target.chat_id, board_slug,
                             )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
@@ -433,7 +470,7 @@ class GatewayKanbanWatchersMixin:
                                 try:
                                     await self._deliver_kanban_artifacts(
                                         adapter=adapter,
-                                        chat_id=sub["chat_id"],
+                                        chat_id=target.chat_id,
                                         metadata=metadata,
                                         event_payload=getattr(ev, "payload", None),
                                         task=task,

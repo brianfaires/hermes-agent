@@ -1775,7 +1775,10 @@ def _configured_home_channels() -> list[dict]:
     except Exception:
         return []
     result: list[dict] = []
+    from hermes_cli.kanban_notifications import is_notify_target_allowed
     for platform, pcfg in gw_cfg.platforms.items():
+        if not is_notify_target_allowed(platform.value):
+            continue
         if not pcfg or not pcfg.home_channel:
             continue
         hc = pcfg.home_channel
@@ -1849,6 +1852,12 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
     Idempotent — re-subscribing is a no-op at the DB layer. 404 if the
     platform has no home channel configured. 404 if the task doesn't exist.
     """
+    from hermes_cli.kanban_notifications import is_notify_target_allowed
+    if not is_notify_target_allowed(platform):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Kanban notification policy does not allow {platform!r} subscriptions.",
+        )
     homes = _configured_home_channels()
     home = next((h for h in homes if h["platform"] == platform), None)
     if not home:

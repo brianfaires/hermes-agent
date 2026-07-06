@@ -483,23 +483,36 @@ class GatewaySlashCommandsMixin:
                     if platform_str and chat_id:
                         def _sub():
                             from hermes_cli import kanban_db as _kb
+                            from hermes_cli.kanban_notifications import resolve_notify_target
                             conn = _kb.connect(board=requested_board)
                             try:
-                                _kb.add_notify_sub(
-                                    conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
+                                notifier_profile = getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name()
+                                target = resolve_notify_target(
+                                    platform=platform_str,
+                                    chat_id=chat_id,
                                     thread_id=thread_id or None,
                                     user_id=user_id,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
+                                    notifier_profile=notifier_profile,
                                 )
+                                if target is None:
+                                    return False
+                                _kb.add_notify_sub(
+                                    conn, task_id=task_id,
+                                    platform=target.platform, chat_id=target.chat_id,
+                                    thread_id=target.thread_id,
+                                    user_id=target.user_id,
+                                    notifier_profile=target.notifier_profile,
+                                )
+                                return True
                             finally:
                                 conn.close()
-                        await asyncio.to_thread(_sub)
-                        output = (
-                            output.rstrip()
-                            + "\n"
-                            + t("gateway.kanban.subscribed_suffix", task_id=task_id)
-                        )
+                        subscribed = await asyncio.to_thread(_sub)
+                        if subscribed:
+                            output = (
+                                output.rstrip()
+                                + "\n"
+                                + t("gateway.kanban.subscribed_suffix", task_id=task_id)
+                            )
                 except Exception as exc:
                     logger.warning("kanban create auto-subscribe failed: %s", exc)
 
