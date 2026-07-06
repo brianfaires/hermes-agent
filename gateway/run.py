@@ -5441,6 +5441,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             
             # Set up message + fatal error handlers
+            if hasattr(adapter, "set_runtime_profile_home"):
+                adapter.set_runtime_profile_home(self._gateway_profile_home)
             adapter.set_message_handler(self._handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
@@ -6214,6 +6216,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         del self._failed_platforms[platform]
                         continue
 
+                    if hasattr(adapter, "set_runtime_profile_home"):
+                        adapter.set_runtime_profile_home(self._gateway_profile_home)
                     adapter.set_message_handler(self._handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
@@ -6872,6 +6876,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Stamp every inbound event from this adapter with its profile so
             # the agent turn (and session key) resolve to the right home.
+            if hasattr(adapter, "set_runtime_profile_home"):
+                adapter.set_runtime_profile_home(profile_home)
             adapter.set_message_handler(
                 self._make_profile_message_handler(profile_name)
             )

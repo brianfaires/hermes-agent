@@ -481,6 +481,7 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
 
 
 import dataclasses
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1842,6 +1843,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._runtime_profile_home: Optional[Path] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2258,6 +2260,39 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_runtime_profile_home(self, profile_home: Optional[Path | str]) -> None:
+        """Pin adapter-side gateway work to the profile that owns this adapter.
+
+        The agent turn itself runs under a profile scope in the gateway runner.
+        Adapter-side post-processing runs after the handler returns, so keep the
+        owning profile home here for paths/config used by that post-processing.
+        """
+        self._runtime_profile_home = Path(profile_home).resolve() if profile_home else None
+
+    @contextmanager
+    def _runtime_profile_scope(self, event: MessageEvent):
+        """Scope adapter-side post-processing to this adapter/event's profile."""
+        profile_home = self._runtime_profile_home
+        if profile_home is None:
+            try:
+                profile_name = (getattr(getattr(event, "source", None), "profile", None) or "").strip()
+                if profile_name:
+                    from hermes_cli.profiles import get_profile_dir
+                    profile_home = Path(get_profile_dir(profile_name)).resolve()
+            except Exception:
+                profile_home = None
+        if profile_home is None:
+            yield
+            return
+
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(str(profile_home))
+        try:
+            yield
+        finally:
+            reset_hermes_home_override(token)
 
     def set_topic_recovery_fn(
         self,
