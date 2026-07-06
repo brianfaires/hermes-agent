@@ -132,7 +132,12 @@ class TestDiscordOutboundFormatting:
 
 def _make_discord_adapter(reply_to_mode: str = "first"):
     """Create a DiscordAdapter with mocked client and channel for send() tests."""
-    config = PlatformConfig(enabled=True, token="test-token", reply_to_mode=reply_to_mode)
+    config = PlatformConfig(
+        enabled=True,
+        token="test-token",
+        reply_to_mode=reply_to_mode,
+        extra={"allowed_channels": "12345"},
+    )
     adapter = DiscordAdapter(config)
 
     # Mock the Discord client and channel.
@@ -140,6 +145,7 @@ def _make_discord_adapter(reply_to_mode: str = "first"):
     # the fetched Message via to_reference(fail_if_not_exists=False) so a
     # deleted target degrades to "send without reply chip" instead of a 400.
     mock_channel = AsyncMock()
+    mock_channel.id = 12345
     ref_message = MagicMock()
     ref_reference = MagicMock(name="MessageReference")
     ref_message.to_reference = MagicMock(return_value=ref_reference)
