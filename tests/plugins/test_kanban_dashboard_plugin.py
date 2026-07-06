@@ -1611,6 +1611,27 @@ def test_home_channels_lists_only_platforms_with_home(client, with_home_channels
         assert h["subscribed"] is False
 
 
+def test_home_channels_telegram_only_policy_hides_and_rejects_discord(client, with_home_channels, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    # Use the active test HERMES_HOME; dashboard fixtures already isolate it.
+    import os
+    with open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("kanban:\n  notification_policy:\n    mode: telegram_home_only\n")
+
+    r = client.get("/api/plugins/kanban/home-channels")
+    assert r.status_code == 200
+    assert {h["platform"] for h in r.json()["home_channels"]} == {"telegram"}
+
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/discord")
+    assert r.status_code == 403
+    conn = kb.connect()
+    try:
+        assert kb.list_notify_subs(conn, t["id"]) == []
+    finally:
+        conn.close()
+
+
 def test_home_channels_no_task_id_all_unsubscribed(client, with_home_channels):
     """Without task_id, every entry's subscribed=false (UI "no task" state)."""
     r = client.get("/api/plugins/kanban/home-channels")

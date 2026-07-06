@@ -3,7 +3,9 @@ from pathlib import Path
 
 
 from gateway.config import Platform
+from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 from hermes_cli import kanban_db as kb
 
 
@@ -35,12 +37,59 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
+def test_gateway_kanban_create_discord_origin_subscribes_telegram_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    db_path = home / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    _write_telegram_only_policy(home, monkeypatch)
+    kb.init_db()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._kanban_notifier_profile = "ops"
+    runner._active_profile_name = lambda: "ops"
+    event = MessageEvent(
+        text="/kanban create 'gateway policy' --assignee worker",
+        message_id="m1",
+        source=SessionSource(
+            platform=Platform.DISCORD,
+            user_id="u1",
+            chat_id="discord-channel",
+            thread_id="discord-thread",
+            chat_type="group",
+        ),
+    )
+
+    result = asyncio.run(runner._handle_kanban_command(event))
+    assert "Created" in result
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn)
+    finally:
+        conn.close()
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "tg-home"
+    assert subs[0]["thread_id"] == "tg-thread"
+
+
 def _make_runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
+
+
+def _write_telegram_only_policy(path: Path, monkeypatch):
+    (path / "config.yaml").write_text(
+        "kanban:\n  notification_policy:\n    mode: telegram_home_only\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(path))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc:fake")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "tg-home")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "tg-thread")
 
 
 def _create_completed_subscription(summary="done once"):
@@ -86,6 +135,49 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     assert len(adapter.sent) == 1
     assert "Kanban" in adapter.sent[0]["text"]
     assert tid in adapter.sent[0]["text"]
+
+
+def test_kanban_notifier_reroutes_discord_row_to_telegram_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    db_path = home / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    _write_telegram_only_policy(home, monkeypatch)
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify policy", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="discord-channel",
+            thread_id="discord-thread",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    tg_adapter = RecordingAdapter()
+    discord_adapter = RecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.TELEGRAM: tg_adapter, Platform.DISCORD: discord_adapter}
+    runner._kanban_sub_fail_counts = {}
+    artifact_targets = []
+
+    async def fake_artifacts(**kwargs):
+        artifact_targets.append((kwargs["chat_id"], dict(kwargs["metadata"])))
+
+    runner._deliver_kanban_artifacts = fake_artifacts
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(tg_adapter.sent) == 1
+    assert tg_adapter.sent[0]["chat_id"] == "tg-home"
+    assert tg_adapter.sent[0]["metadata"] == {"thread_id": "tg-thread"}
+    assert discord_adapter.sent == []
+    assert artifact_targets == [("tg-home", {"thread_id": "tg-thread"})]
 
 
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):
