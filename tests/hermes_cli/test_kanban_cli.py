@@ -65,6 +65,7 @@ def test_parse_workspace_flag_rejects(bad):
 def test_parse_branch_flag_rejects_empty_and_option_like():
     assert kc._parse_branch_flag(None) is None
     assert kc._parse_branch_flag(" wt/t6-wire ") == "wt/t6-wire"
+    assert kc._parse_branch_flag(" <merged to brian/main> ") == "<merged to brian/main>"
     with pytest.raises(argparse.ArgumentTypeError):
         kc._parse_branch_flag("   ")
     with pytest.raises(argparse.ArgumentTypeError):
@@ -107,9 +108,25 @@ def test_run_slash_create_worktree_path_and_branch(kanban_home, tmp_path):
     assert task.branch_name == "wt/t6-wire"
 
 
-def test_run_slash_rejects_branch_without_worktree(kanban_home):
+def test_run_slash_create_dir_path_and_branch(kanban_home, tmp_path):
+    target = tmp_path / "repo"
+    target_arg = target.as_posix()
+    out = kc.run_slash(
+        f"create 'ship dir branch' --workspace dir:{target_arg} --branch brian/main"
+    )
+    assert "Created" in out
+
+    with kb.connect() as conn:
+        tasks = kb.list_tasks(conn)
+    task = tasks[0]
+    assert task.workspace_kind == "dir"
+    assert task.workspace_path == target_arg
+    assert task.branch_name == "brian/main"
+
+
+def test_run_slash_rejects_branch_on_scratch_workspace(kanban_home):
     out = kc.run_slash("create 'bad branch' --workspace scratch --branch wt/bad")
-    assert "--branch is only valid with --workspace worktree" in out
+    assert "--branch is only valid with --workspace dir or worktree" in out
 
 
 def test_run_slash_create_with_parent_and_cascade(kanban_home):

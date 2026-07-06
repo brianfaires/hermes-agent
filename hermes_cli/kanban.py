@@ -122,13 +122,12 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
     if value is None:
         return None
-    branch = value.strip()
-    if not branch:
+    try:
+        branch = kb.normalize_branch_name(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc).replace("branch_name", "--branch")) from exc
+    if branch is None:
         raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
     return branch
 
 
@@ -314,7 +313,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="scratch | worktree | worktree:<path> | dir:<path> "
                                "(default: scratch)")
     p_create.add_argument("--branch", default=None,
-                          help="Branch name for worktree tasks, e.g. wt/t6-wire")
+                          help="Branch name for persistent workspace tasks, e.g. brian/main or wt/t6-wire")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
     p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
     p_create.add_argument("--triage", action="store_true",
@@ -1331,8 +1330,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except argparse.ArgumentTypeError as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
-    if branch_name and ws_kind != "worktree":
-        print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
+    if branch_name and ws_kind == "scratch":
+        print("kanban: --branch is only valid with --workspace dir or worktree", file=sys.stderr)
         return 2
     try:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))
