@@ -72,6 +72,45 @@ def _build_encrypted_rtp_packet(secret_key, opus_payload, ssrc=100, seq=1, times
     return header + ciphertext + nonce_counter
 
 
+def _build_encrypted_rtp_packet_with_encrypted_extension(
+    secret_key, opus_payload, ssrc=100, seq=1, timestamp=960, ext_words=1,
+):
+    """Build an extension RTP packet whose extension preamble is encrypted.
+
+    This matches live first-join packets where decrypting with the dynamic
+    16-byte header fails, but decrypting with the fixed 12-byte RTP header as
+    AAD succeeds and yields the extension preamble in plaintext.
+    """
+    header = struct.pack(">BBHII", 0x90, 0x78, seq, timestamp, ssrc)
+    ext_preamble = struct.pack(">HH", 0xBEDE, ext_words)
+    ext_data = b"\xab" * (ext_words * 4)
+    plaintext = ext_preamble + ext_data + opus_payload
+
+    box = nacl.secret.Aead(secret_key)
+    nonce_counter = struct.pack(">I", seq)
+    full_nonce = nonce_counter + b"\x00" * 20
+
+    enc_msg = box.encrypt(plaintext, header, full_nonce)
+    return header + enc_msg.ciphertext + nonce_counter
+
+
+def _build_encrypted_rtp_packet_with_clear_extension_data(
+    secret_key, opus_payload, ssrc=100, seq=1, timestamp=960, ext_words=1,
+):
+    """Build an extension packet with the full extension block in AEAD AAD."""
+    fixed_header = struct.pack(">BBHII", 0x90, 0x78, seq, timestamp, ssrc)
+    ext_preamble = struct.pack(">HH", 0xBEDE, ext_words)
+    ext_data = b"\xab" * (ext_words * 4)
+    header = fixed_header + ext_preamble + ext_data
+
+    box = nacl.secret.Aead(secret_key)
+    nonce_counter = struct.pack(">I", seq)
+    full_nonce = nonce_counter + b"\x00" * 20
+
+    enc_msg = box.encrypt(opus_payload, header, full_nonce)
+    return header + enc_msg.ciphertext + nonce_counter
+
+
 def _build_padded_rtp_packet(
     secret_key, opus_payload, pad_len, ssrc=100, seq=1, timestamp=960,
     declared_pad_len=None, ext_words=0,
@@ -149,6 +188,34 @@ class TestRealNaClDecrypt:
         receiver = _make_voice_receiver(key)
 
         packet = _build_encrypted_rtp_packet(key, opus_silence, ssrc=100)
+        receiver._on_packet(packet)
+
+        assert 100 in receiver._buffers
+        assert len(receiver._buffers[100]) > 0
+
+    def test_encrypted_extension_preamble_fallback_buffered(self):
+        """First-join extension packets recover with fixed RTP-header AAD."""
+        key = _make_secret_key()
+        opus_silence = b'\xf8\xff\xfe'
+        receiver = _make_voice_receiver(key)
+
+        packet = _build_encrypted_rtp_packet_with_encrypted_extension(
+            key, opus_silence, ssrc=100,
+        )
+        receiver._on_packet(packet)
+
+        assert 100 in receiver._buffers
+        assert len(receiver._buffers[100]) > 0
+
+    def test_clear_extension_data_aad_buffered(self):
+        """Extension data may be cleartext AAD before encrypted Opus."""
+        key = _make_secret_key()
+        opus_silence = b'\xf8\xff\xfe'
+        receiver = _make_voice_receiver(key)
+
+        packet = _build_encrypted_rtp_packet_with_clear_extension_data(
+            key, opus_silence, ssrc=100,
+        )
         receiver._on_packet(packet)
 
         assert 100 in receiver._buffers

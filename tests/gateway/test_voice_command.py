@@ -419,6 +419,9 @@ class TestSendVoiceReply:
         from gateway.config import Platform
 
         mock_adapter = AsyncMock()
+        # Telegram's adapter has no play_tts; drop the AsyncMock auto-attr so
+        # the send_voice fallback under test is actually reachable.
+        del mock_adapter.play_tts
         mock_adapter.send_voice = AsyncMock()
         event = _make_event()
         event.source.platform = Platform.TELEGRAM
@@ -443,6 +446,9 @@ class TestSendVoiceReply:
         from gateway.config import Platform
 
         mock_adapter = AsyncMock()
+        # Telegram's adapter has no play_tts; drop the AsyncMock auto-attr so
+        # the send_voice fallback under test is actually reachable.
+        del mock_adapter.play_tts
         mock_adapter.send_voice = AsyncMock()
         event = _make_event()
         event.source.platform = Platform.SLACK
@@ -465,6 +471,9 @@ class TestSendVoiceReply:
         from gateway.config import Platform
 
         mock_adapter = AsyncMock()
+        # Telegram's adapter has no play_tts; drop the AsyncMock auto-attr so
+        # the send_voice fallback under test is actually reachable.
+        del mock_adapter.play_tts
         mock_adapter.send_voice = AsyncMock()
         event = _make_event()
         event.source.platform = Platform.TELEGRAM
@@ -548,7 +557,6 @@ class TestDiscordPlayTtsSkip:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
-        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
@@ -841,12 +849,41 @@ class TestVoiceChannelCommands:
         event.source.chat_type = "group"
         event.source.chat_name = "Hermes Server / #general"
         runner.adapters[event.source.platform] = mock_adapter
+        runner._send_voice_reply = AsyncMock()
         result = await runner._handle_voice_channel_join(event)
         assert "joined" in result.lower()
         assert "General" in result
-        assert runner._voice_mode["discord:123"] == "all"
+        assert runner._voice_mode["discord:123"] == "voice_only"
         assert mock_adapter._voice_sources[111]["chat_id"] == "123"
         assert mock_adapter._voice_sources[111]["chat_type"] == "group"
+        runner._send_voice_reply.assert_awaited_once_with(event, "I'm here. What's up?")
+
+    @pytest.mark.asyncio
+    async def test_auto_voice_join_speaks_brief_connected_notice(self, runner):
+        """Configured auto-voice joins should also speak a short readiness cue."""
+        from gateway.config import Platform
+
+        guild = SimpleNamespace(id=111)
+        member = SimpleNamespace(id="user1", display_name="Brian", guild=guild)
+        voice_channel = SimpleNamespace(id=222, name="General", guild=guild)
+        mock_adapter = AsyncMock()
+        mock_adapter.join_voice_channel = AsyncMock(return_value=True)
+        mock_adapter._voice_text_channels = {}
+        mock_adapter._auto_voice_session_channels = set()
+        mock_adapter._voice_sources = {}
+        mock_adapter._voice_input_callback = None
+        mock_adapter._on_voice_disconnect = None
+        runner.adapters[Platform.DISCORD] = mock_adapter
+        runner._send_voice_reply = AsyncMock()
+
+        result = await runner._handle_discord_auto_voice_join(mock_adapter, member, voice_channel)
+
+        assert result is True
+        assert runner._voice_mode["discord:222"] == "voice_only"
+        runner._send_voice_reply.assert_awaited_once()
+        notice_event, spoken = runner._send_voice_reply.call_args.args
+        assert notice_event.source.chat_id == "222"
+        assert spoken == "I'm here. What's up?"
 
     @pytest.mark.asyncio
     async def test_join_failure(self, runner):
@@ -942,7 +979,6 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {}
-        mock_adapter._voice_transcript_channels = {}
         mock_adapter._client = MagicMock()
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello")
@@ -953,7 +989,6 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -962,11 +997,12 @@ class TestVoiceChannelCommands:
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello from VC")
         mock_adapter.handle_message.assert_called_once()
+        mock_channel.send.assert_called_once()
         event = mock_adapter.handle_message.call_args[0][0]
         assert event.text == "Hello from VC"
         assert event.message_type == MessageType.VOICE
         assert event.source.chat_id == "123"
-        assert event.source.chat_type == "channel"
+        assert event.source.chat_type == "group"
 
     @pytest.mark.asyncio
     async def test_input_reuses_bound_source_metadata(self, runner):
@@ -984,7 +1020,6 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_transcript_channels = {}
         mock_adapter._voice_sources = {111: bound_source.to_dict()}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1003,11 +1038,10 @@ class TestVoiceChannelCommands:
 
     @pytest.mark.asyncio
     async def test_input_posts_transcript_in_text_channel(self, runner):
-        """Voice input sends transcript message to the configured transcript channel."""
+        """Voice input echoes the transcript into the session channel."""
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1027,7 +1061,6 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1048,7 +1081,6 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_transcript_channels = {111: 123}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1110,7 +1142,6 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_clients = {}
         adapter._voice_locks = {}
         adapter._voice_text_channels = {}
-        adapter._voice_transcript_channels = {}
         adapter._voice_sources = {}
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
@@ -1150,7 +1181,6 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_clients[111] = mock_vc
         adapter._voice_session_generations[111] = 7
         adapter._voice_text_channels[111] = 123
-        adapter._voice_transcript_channels[111] = 123
         adapter._voice_sources[111] = {"chat_id": "123", "chat_type": "group"}
 
         mock_receiver = MagicMock()
@@ -1170,7 +1200,6 @@ class TestDiscordVoiceChannelMethods:
         mock_timeout.cancel.assert_called_once()
         assert 111 not in adapter._voice_clients
         assert 111 not in adapter._voice_text_channels
-        assert 111 not in adapter._voice_transcript_channels
         assert 111 not in adapter._voice_sources
         assert 111 not in adapter._voice_receivers
 
@@ -2264,7 +2293,7 @@ class TestSendVoiceReplyCleanup:
             "file_path": str(audio_file),
         })
 
-        with patch("gateway.run.asyncio.to_thread", new_callable=AsyncMock, return_value=tts_result), \
+        with patch("gateway.voice_mixin.asyncio.to_thread", new_callable=AsyncMock, return_value=tts_result), \
              patch("tools.tts_tool._strip_markdown_for_tts", return_value="hello"), \
              patch("os.path.isfile", return_value=True), \
              patch("os.makedirs"):
