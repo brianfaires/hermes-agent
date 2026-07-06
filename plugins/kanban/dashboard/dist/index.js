@@ -2489,6 +2489,7 @@
 
     const progress = t.progress;
     const needsAssignee = t.status === "ready" && !t.assignee;
+    const branch = branchDisplay(t);
 
     return h("div", {
       ref: cardRef,
@@ -2586,6 +2587,9 @@
                             title: `${t.link_counts.parents} parent${t.link_counts.parents === 1 ? "" : "s"}, ${t.link_counts.children} child${t.link_counts.children === 1 ? "" : "ren"}. Children stay blocked until their parent is done.` },
                   "↔ ", t.link_counts.parents + t.link_counts.children)
               : null,
+            branch
+              ? h("span", { className: "hermes-kanban-count", title: "Branch" }, "Branch: ", branch)
+              : null,
             h("span", { className: "hermes-kanban-ago",
                         title: t.created_at ? `Created ${t.created_at}` : "" },
               timeAgo ? timeAgo(t.created_at) : ""),
@@ -2612,6 +2616,7 @@
     // input here to save vertical space in the common `scratch` case.
     const [workspaceKind, setWorkspaceKind] = useState("scratch");
     const [workspacePath, setWorkspacePath] = useState("");
+    const [branchName, setBranchName] = useState("");
     // Goal-mode: when on, the dispatched worker runs the Ralph-style /goal
     // loop — a judge re-checks the card after each turn and the worker keeps
     // going in the same session until done, or the turn budget runs out
@@ -2645,6 +2650,8 @@
       }
       const wpTrim = workspacePath.trim();
       if (wpTrim) body.workspace_path = wpTrim;
+      const branchTrim = branchName.trim();
+      if (branchTrim) body.branch_name = branchTrim;
       // Goal-mode toggle. Only send the keys when enabled so the request
       // shape stays small and old dispatchers ignore it cleanly.
       if (goalMode) {
@@ -2654,7 +2661,7 @@
       }
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
-      setWorkspaceKind("scratch"); setWorkspacePath("");
+      setWorkspaceKind("scratch"); setWorkspacePath(""); setBranchName("");
       setGoalMode(false); setGoalMaxTurns("");
     };
 
@@ -2752,6 +2759,17 @@
           className: "h-7 text-xs flex-1",
         }) : null,
       ),
+      h(Input, {
+        value: branchName,
+        onChange: function (e) { setBranchName(e.target.value); },
+        placeholder: tx(t, "branchPlaceholder", "branch (optional): brian/main, work/new-feature, <merged to brian/main>"),
+        title: "Git branch to show on the Kanban card. Use <merged to brian/main> after the branch has been closed and merged.",
+        className: "h-7 text-xs",
+        style: { textTransform: "none" },
+        autoCapitalize: "none",
+        autoCorrect: "off",
+        spellCheck: false,
+      }),
       h(Select, Object.assign({
         value: parent,
         className: "h-7 text-xs",
@@ -2779,6 +2797,16 @@
   // -------------------------------------------------------------------------
   // Task drawer
   // -------------------------------------------------------------------------
+
+  function branchDisplay(t) {
+    if (t.branch_display) return t.branch_display;
+    const branch = (t.branch_name || "").trim();
+    if (!branch) return null;
+    if (branch[0] === "<" && branch[branch.length - 1] === ">") return branch;
+    if (branch === "main" || branch === "master" || branch.endsWith("/main")) return "`" + branch + "` (main)";
+    if (t.workspace_kind === "worktree") return "`" + branch + "` (worktree)";
+    return "`" + branch + "`";
+  }
 
   function TaskDrawer(props) {
     const { t } = useI18n();
@@ -3179,6 +3207,7 @@
   function TaskDetail(props) {
     const { t: i18n } = useI18n();
     const t = props.data.task;
+    const branch = branchDisplay(t);
     const comments = props.data.comments || [];
     const events = props.data.events || [];
     const attachments = props.data.attachments || [];
@@ -3206,10 +3235,10 @@
         h(AssigneeEditor, { task: t, onPatch: props.onPatch }),
         h(PriorityEditor, { task: t, onPatch: props.onPatch }),
         t.tenant ? h(MetaRow, { label: tx(i18n, "tenant", "Tenant"), value: t.tenant }) : null,
-        h(MetaRow, {
-          label: tx(i18n, "workspace", "Workspace"),
-          value: `${t.workspace_kind}${t.workspace_path ? ": " + t.workspace_path : ""}`,
-        }),
+        branch ? h(MetaRow, {
+          label: tx(i18n, "branch", "Branch"),
+          value: branch,
+        }) : null,
         (t.skills && t.skills.length > 0) ? h(MetaRow, {
           label: tx(i18n, "skills", "Skills"),
           value: t.skills.join(", "),
