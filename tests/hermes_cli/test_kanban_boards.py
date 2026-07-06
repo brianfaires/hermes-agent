@@ -133,6 +133,49 @@ class TestPathResolution:
         assert kb.kanban_db_path() == forced
         assert kb.kanban_db_path(board="ignored") == forced
 
+    def test_board_listing_ignores_pinned_db_override_for_inventory(
+        self, fresh_home, monkeypatch, capsys
+    ):
+        """Board inventory should report real board DBs, not the pinned task DB."""
+        import hermes_cli.kanban as kc
+
+        kb.create_board("alpha")
+        with kb.connect(board="default") as conn:
+            kb.create_task(conn, title="default-1", assignee="dev")
+            kb.create_task(conn, title="default-2", assignee="dev")
+        with kb.connect(board="alpha") as conn:
+            kb.create_task(conn, title="alpha-1", assignee="dev")
+
+        pinned = fresh_home / "pinned.db"
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(pinned))
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "alpha")
+        with kb.connect() as conn:
+            kb.create_task(conn, title="pinned-1", assignee="dev")
+            kb.create_task(conn, title="pinned-2", assignee="dev")
+            kb.create_task(conn, title="pinned-3", assignee="dev")
+
+        boards = kb.list_boards(include_archived=False)
+        assert [b["slug"] for b in boards] == ["default", "alpha"]
+        assert {b["slug"]: b["db_path"] for b in boards} == {
+            "default": str(fresh_home / "kanban.db"),
+            "alpha": str(fresh_home / "kanban" / "boards" / "alpha" / "kanban.db"),
+        }
+
+        rc = kc._cmd_boards_list(type("Args", (), {"all": False, "json": False})())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "HERMES_KANBAN_DB is pinned to" in out
+        assert "default" in out and "ready=2" in out
+        assert "alpha" in out and "ready=1" in out
+        assert "ready=3" not in out
+
+        rc = kc._cmd_boards_show(object())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"DB path:      {fresh_home / 'kanban' / 'boards' / 'alpha' / 'kanban.db'}" in out
+        assert "Note:         HERMES_KANBAN_DB is pinned to" in out
+        assert "Tasks:        1 total (ready=1)" in out
+
     def test_env_var_workspaces_override(self, fresh_home, tmp_path, monkeypatch):
         forced = tmp_path / "ws"
         monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(forced))
