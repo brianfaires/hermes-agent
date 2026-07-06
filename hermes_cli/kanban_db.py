@@ -2403,6 +2403,26 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def normalize_branch_name(
+    branch_name: Optional[str], *, workspace_kind: Optional[str] = None
+) -> Optional[str]:
+    """Normalize branch metadata using the CLI's established syntax contract."""
+    if branch_name is None:
+        return None
+    branch = str(branch_name).strip()
+    if not branch:
+        return None
+    if branch.startswith("-"):
+        raise ValueError("branch_name must not start with '-'")
+    if not (branch.startswith("<") and branch.endswith(">")) and any(
+        char.isspace() for char in branch
+    ):
+        raise ValueError("branch_name must not contain whitespace")
+    if workspace_kind == "scratch":
+        raise ValueError("branch_name is only valid for persistent workspaces")
+    return branch
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2463,11 +2483,6 @@ def create_task(
             f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
             f"got {workspace_kind!r}"
         )
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
-
     # Resolve an optional first-class Project link. A project-linked task is
     # anchored to the project's primary repo as a git worktree, so its branch
     # can be named deterministically (project slug + task id) instead of the
@@ -2509,6 +2524,7 @@ def create_task(
                 # ``<repo>/.worktrees/<task-id>`` dir keyed on the new task id.
                 project_repo = str(project_obj.primary_path)
 
+    branch_name = normalize_branch_name(branch_name, workspace_kind=workspace_kind)
     parents = tuple(p for p in parents if p)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
