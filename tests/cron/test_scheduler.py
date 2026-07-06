@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
+import cron.scheduler as scheduler
 from cron.scheduler import (
     _resolve_origin,
     _resolve_delivery_target,
@@ -2477,6 +2478,157 @@ class TestParallelTick:
         assert len(starts) == 2
         assert len(ends) == 2
         assert max(starts) < min(ends), f"Jobs not concurrent: {call_order}"
+
+    @pytest.mark.skipif(scheduler.fcntl is None, reason="POSIX fcntl/flock required")
+    def test_job_execution_runs_after_tick_lock_is_released(self):
+        """Slow execution and COMPLETE hooks must not serialize later ticks."""
+        lock_dir, lock_file = scheduler._get_lock_paths()
+        observed = []
+        job = {
+            "id": "job-a",
+            "name": "a",
+            "deliver": "local",
+            "schedule": {"kind": "interval", "seconds": 300},
+        }
+
+        def mock_run_job(_job):
+            with open(lock_file, "w", encoding="utf-8") as probe:
+                scheduler.fcntl.flock(
+                    probe, scheduler.fcntl.LOCK_EX | scheduler.fcntl.LOCK_NB
+                )
+                observed.append("released")
+                scheduler.fcntl.flock(probe, scheduler.fcntl.LOCK_UN)
+            return (True, "output", "response", None)
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run", return_value=True), \
+             patch("cron.scheduler.run_job", side_effect=mock_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            assert scheduler.tick(verbose=False) == 1
+
+        assert observed == ["released"]
+
+    @pytest.mark.skipif(scheduler.fcntl is None, reason="POSIX fcntl/flock required")
+    def test_oneshot_execution_keeps_tick_lock(self):
+        """One-shots remain serialized until a durable execution lease exists."""
+        lock_dir, lock_file = scheduler._get_lock_paths()
+        observed = []
+        job = {
+            "id": "job-once",
+            "name": "once",
+            "deliver": "local",
+            "schedule": {"kind": "at", "at": "2026-07-19T12:00:00Z"},
+        }
+
+        def mock_run_job(_job):
+            with open(lock_file, "w", encoding="utf-8") as probe:
+                with pytest.raises(OSError):
+                    scheduler.fcntl.flock(
+                        probe, scheduler.fcntl.LOCK_EX | scheduler.fcntl.LOCK_NB
+                    )
+            observed.append("held")
+            return (True, "output", "response", None)
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run", return_value=False), \
+             patch("cron.scheduler.run_job", side_effect=mock_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            assert scheduler.tick(verbose=False) == 1
+
+        assert observed == ["held"]
+
+    @pytest.mark.skipif(scheduler.fcntl is None, reason="POSIX fcntl/flock required")
+    def test_async_oneshot_keeps_tick_lock_until_worker_finishes(self):
+        """Production async ticks must not expose a running one-shot to another process."""
+        import threading
+        import time
+
+        lock_dir, lock_file = scheduler._get_lock_paths()
+        started = threading.Event()
+        release_worker = threading.Event()
+        finished = threading.Event()
+        job = {
+            "id": "job-once-async",
+            "name": "once-async",
+            "deliver": "local",
+            "schedule": {"kind": "at", "at": "2026-07-19T12:00:00Z"},
+        }
+
+        def mock_run_job(_job):
+            started.set()
+            release_worker.wait(timeout=5)
+            finished.set()
+            return (True, "output", "response", None)
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run", return_value=False), \
+             patch("cron.scheduler.run_job", side_effect=mock_run_job), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run"):
+            assert scheduler.tick(verbose=False, sync=False) == 1
+            assert started.wait(timeout=2)
+
+            with open(lock_file, "w", encoding="utf-8") as probe:
+                with pytest.raises(OSError):
+                    scheduler.fcntl.flock(
+                        probe, scheduler.fcntl.LOCK_EX | scheduler.fcntl.LOCK_NB
+                    )
+
+            release_worker.set()
+            assert finished.wait(timeout=2)
+
+            deadline = time.monotonic() + 2
+            while True:
+                with open(lock_file, "w", encoding="utf-8") as probe:
+                    try:
+                        scheduler.fcntl.flock(
+                            probe, scheduler.fcntl.LOCK_EX | scheduler.fcntl.LOCK_NB
+                        )
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            pytest.fail("tick lock was not released after one-shot completion")
+                        time.sleep(0.01)
+                        continue
+                    scheduler.fcntl.flock(probe, scheduler.fcntl.LOCK_UN)
+                    break
+
+        scheduler._shutdown_parallel_pool()
+
+    def test_async_tick_finalizer_runs_once_under_concurrent_callbacks(self, monkeypatch):
+        """Only one worker may sweep and release the transferred tick lock."""
+        import threading
+
+        finalized = []
+        callback_count = 20
+        barrier = threading.Barrier(callback_count)
+        lock_fd = object()
+        monkeypatch.setattr(
+            scheduler,
+            "_release_tick_lock",
+            lambda fd: finalized.append(("release", fd)),
+        )
+        finalizer = scheduler._AsyncTickFinalizer(
+            callback_count,
+            lock_fd,
+            lambda: finalized.append(("sweep", None)),
+        )
+
+        def complete():
+            barrier.wait(timeout=2)
+            finalizer(None)
+
+        threads = [threading.Thread(target=complete) for _ in range(callback_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert finalized == [("sweep", None), ("release", lock_fd)]
 
     def test_parallel_jobs_isolated_contextvars(self):
         """Each job's ContextVars must be isolated — no cross-contamination."""

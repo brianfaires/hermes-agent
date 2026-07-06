@@ -2170,7 +2170,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         mark_job_run(job["id"], success, error, delivery_error=delivery_error)
         _emit_complete(job, success, time.perf_counter() - started_at, error,
-                       adapters=adapters, loop=loop)
+                       adapters=adapters, loop=loop, output_file=output_file)
         return True
 
     except Exception as e:
@@ -2200,7 +2200,8 @@ def _notify_provider_jobs_changed() -> None:
 
 
 def _emit_complete(job: dict, success: bool, duration_seconds: float,
-                   error: Optional[str], adapters=None, loop=None) -> None:
+                   error: Optional[str], adapters=None, loop=None,
+                   output_file=None) -> None:
     """Fire the COMPLETE cron hook for a finished run.
 
     The payload carries a ``notify(message, warn=False)`` callback bound to the
@@ -2234,7 +2235,52 @@ def _emit_complete(job: dict, success: bool, duration_seconds: float,
         duration_seconds=duration_seconds,
         error=error,
         notify=notify,
+        output_file=str(output_file) if output_file else None,
     )
+
+
+def _release_tick_lock(lock_fd) -> None:
+    """Release and close the cross-process tick lock exactly once."""
+    if lock_fd is None:
+        return
+    if fcntl:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except (OSError, IOError):
+            pass
+    elif globals().get("msvcrt"):
+        try:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except (OSError, IOError):
+            pass
+    lock_fd.close()
+
+
+class _AsyncTickFinalizer:
+    """Finalize an async tick exactly once after all worker futures complete."""
+
+    def __init__(self, remaining: int, lock_fd, sweep) -> None:
+        self._remaining = remaining
+        self._lock_fd = lock_fd
+        self._sweep = sweep
+        self._mutex = threading.Lock()
+        self._finalized = False
+
+    def __call__(self, _future: concurrent.futures.Future) -> None:
+        should_finalize = False
+        with self._mutex:
+            if self._finalized:
+                return
+            self._remaining -= 1
+            if self._remaining <= 0:
+                self._finalized = True
+                should_finalize = True
+
+        if should_finalize:
+            try:
+                self._sweep()
+            finally:
+                _release_tick_lock(self._lock_fd)
 
 
 def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
@@ -2284,8 +2330,17 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # For parallel jobs that are already running, advance_next_run keeps
         # bumping next_run_at forward so the grace window never expires.
         # mark_job_run() overwrites next_run_at on completion.
-        for job in due_jobs:
-            advance_next_run(job["id"])
+        advance_results = [advance_next_run(job["id"]) for job in due_jobs]
+
+        # Recurring schedules have now advanced durably, so another process
+        # cannot select the same occurrence. Release the cross-process tick lock
+        # before workers execute hooks, delivery, subprocesses, or network I/O.
+        # One-shots intentionally remain due until completion so they can retry
+        # after a crash; without a durable execution lease they must retain the
+        # lock to prevent another scheduler process from dispatching a duplicate.
+        if all(advance_results):
+            _release_tick_lock(lock_fd)
+            lock_fd = None
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
@@ -2423,12 +2478,15 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # done-callback fired after the LAST dispatched job completes, so the
         # sweep still happens after jobs finish without stalling the tick.
         if _all_futures:
-            _remaining = [len(_all_futures)]
-
-            def _on_done(_f: concurrent.futures.Future) -> None:
-                _remaining[0] -= 1
-                if _remaining[0] <= 0:
-                    _sweep_mcp_orphans()
+            # If any due job could not be durably advanced (notably one-shots),
+            # transfer ownership of the tick lock to the completion callback.
+            # The outer finally must not release it when async tick() returns.
+            _deferred_lock_fd = lock_fd
+            if _deferred_lock_fd is not None:
+                lock_fd = None
+            _on_done = _AsyncTickFinalizer(
+                len(_all_futures), _deferred_lock_fd, _sweep_mcp_orphans
+            )
 
             for _f in _all_futures:
                 _f.add_done_callback(_on_done)
@@ -2438,17 +2496,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         return sum(_results)
     finally:
-        if fcntl:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
-        elif msvcrt:
-            try:
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
-        lock_fd.close()
+        _release_tick_lock(lock_fd)
 
 
 if __name__ == "__main__":
