@@ -1113,6 +1113,35 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
     return manifest
 
 
+def _skills_dirs_signature(
+    skills_dirs: list[Path],
+) -> tuple[tuple[str, tuple[tuple[str, tuple[int, int]], ...]], ...]:
+    """Return path+manifest signature for non-snapshotted skills dirs.
+
+    Cache keys built from external dir *paths* alone never invalidate when a
+    skill inside one of those dirs changes; include each dir's manifest
+    (relative path, mtime, size) so edits are picked up like local skills.
+    """
+    signature = []
+    for skills_dir in skills_dirs:
+        try:
+            manifest = _build_skills_manifest(skills_dir)
+        except Exception:
+            manifest = {}
+        signature.append(
+            (
+                str(skills_dir.resolve()),
+                tuple(
+                    sorted(
+                        (rel, (values[0], values[1]))
+                        for rel, values in manifest.items()
+                    )
+                ),
+            )
+        )
+    return tuple(signature)
+
+
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     """Load the disk snapshot if it exists and its manifest still matches."""
     snapshot_path = _skills_prompt_snapshot_path()
@@ -1284,7 +1313,7 @@ def build_skills_system_prompt(
     disabled = get_disabled_skill_names(_platform_hint or None)
     cache_key = (
         str(skills_dir.resolve()),
-        tuple(str(d) for d in external_dirs),
+        _skills_dirs_signature(external_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
