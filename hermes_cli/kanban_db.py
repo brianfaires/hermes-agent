@@ -442,6 +442,22 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     return board_dir(slug) / "kanban.db"
 
 
+def board_db_path(board: Optional[str] = None) -> Path:
+    """Return the on-disk DB path for a board without env overrides.
+
+    This is the inventory view used by board listing/show commands. It
+    ignores ``HERMES_KANBAN_DB`` so board management reports the actual
+    DBs that belong to each board instead of collapsing everything onto
+    whatever task DB is currently pinned in the environment.
+    """
+    slug = _normalize_board_slug(board)
+    if slug is None:
+        slug = get_current_board()
+    if slug == DEFAULT_BOARD:
+        return kanban_home() / "kanban.db"
+    return board_dir(slug) / "kanban.db"
+
+
 def workspaces_root(board: Optional[str] = None) -> Path:
     """Return the directory under which ``scratch`` workspaces are created.
 
@@ -660,7 +676,9 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     seen: set[str] = set()
 
     # Default board is always first.
-    entries.append(read_board_metadata(DEFAULT_BOARD))
+    default_meta = read_board_metadata(DEFAULT_BOARD)
+    default_meta["db_path"] = str(board_db_path(DEFAULT_BOARD))
+    entries.append(default_meta)
     seen.add(DEFAULT_BOARD)
 
     root = boards_root()
@@ -684,6 +702,7 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
             meta = read_board_metadata(normed)
             if meta.get("archived") and not include_archived:
                 continue
+            meta["db_path"] = str(board_db_path(normed))
             entries.append(meta)
             seen.add(normed)
     return entries
