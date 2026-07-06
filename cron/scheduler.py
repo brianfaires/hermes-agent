@@ -228,6 +228,11 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 import cron.hooks as cron_hooks
+from cron import calendar_sync as _cron_calendar_sync
+
+# Opt-in Brian-local COMPLETE-hook consumer: append cron output to its Calendar
+# instance. No-ops unless ~/.hermes/scripts/cron_calendar_recurring_sync.py exists.
+_cron_calendar_sync.register()
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -2166,7 +2171,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
         mark_job_run(job["id"], success, error, delivery_error=delivery_error)
         _emit_complete(job, success, time.perf_counter() - started_at, error,
-                       adapters=adapters, loop=loop)
+                       adapters=adapters, loop=loop, output_file=output_file)
         return True
 
     except Exception as e:
@@ -2196,7 +2201,8 @@ def _notify_provider_jobs_changed() -> None:
 
 
 def _emit_complete(job: dict, success: bool, duration_seconds: float,
-                   error: Optional[str], adapters=None, loop=None) -> None:
+                   error: Optional[str], adapters=None, loop=None,
+                   output_file=None) -> None:
     """Fire the COMPLETE cron hook for a finished run.
 
     The payload carries a ``notify(message, warn=False)`` callback bound to the
@@ -2230,6 +2236,7 @@ def _emit_complete(job: dict, success: bool, duration_seconds: float,
         duration_seconds=duration_seconds,
         error=error,
         notify=notify,
+        output_file=str(output_file) if output_file else None,
     )
 
 
