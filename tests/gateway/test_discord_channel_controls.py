@@ -75,6 +75,7 @@ class FakeThread:
 
 @pytest.fixture
 def adapter(monkeypatch):
+    monkeypatch.delenv("DISCORD_ALLOWED_CHANNELS", raising=False)
     monkeypatch.setattr(discord_platform.discord, "DMChannel", FakeDMChannel, raising=False)
     monkeypatch.setattr(discord_platform.discord, "Thread", FakeThread, raising=False)
 

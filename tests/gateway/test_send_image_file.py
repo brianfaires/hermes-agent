@@ -195,7 +195,8 @@ from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 class TestDiscordSendImageFile:
     @pytest.fixture
-    def adapter(self):
+    def adapter(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "*")
         config = PlatformConfig(enabled=True, token="fake-token")
         a = DiscordAdapter(config)
         a._client = MagicMock()

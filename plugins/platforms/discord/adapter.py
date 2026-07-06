@@ -105,6 +105,48 @@ def _normalize_discord_stt_alias_text(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _discord_config_id_set(raw: Any) -> set[str]:
+    """Normalize a Discord channel policy value to a set of string IDs."""
+    if isinstance(raw, list):
+        return {str(part).strip() for part in raw if str(part).strip()}
+    s = str(raw).strip() if raw is not None else ""
+    if s:
+        return {part.strip() for part in s.split(",") if part.strip()}
+    return set()
+
+
+def _discord_policy_sets(extra: Optional[Dict[str, Any]] = None) -> tuple[set[str], set[str]]:
+    """Return (allowed_channels, ignored_channels) for Discord sends.
+
+    Prefer the resolved adapter config when it carries channel policy keys, but
+    fall back to the profile-scoped environment values populated by the gateway
+    config loader. Some live PlatformConfig instances do not include top-level
+    ``discord.allowed_channels`` in ``extra``; treating that as unrestricted
+    bypasses the profile boundary on outbound delivery.
+    """
+    if extra is not None and "allowed_channels" in extra:
+        allowed_raw = extra.get("allowed_channels")
+    else:
+        allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
+
+    if extra is not None and "ignored_channels" in extra:
+        ignored_raw = extra.get("ignored_channels")
+    else:
+        ignored_raw = os.getenv("DISCORD_IGNORED_CHANNELS", "")
+
+    return _discord_config_id_set(allowed_raw), _discord_config_id_set(ignored_raw)
+
+
+def _discord_outbound_scope_allowed(channel_ids: set[str], allowed_channels: set[str], ignored_channels: set[str]) -> Tuple[bool, str]:
+    """Apply Discord outbound allow/deny policy to channel/thread scope IDs."""
+    if ignored_channels and ("*" in ignored_channels or (channel_ids & ignored_channels)):
+        return False, "channel in DISCORD_IGNORED_CHANNELS"
+    if allowed_channels and "*" not in allowed_channels and not (channel_ids & allowed_channels):
+        return False, "channel not in DISCORD_ALLOWED_CHANNELS"
+    return True, "allowed"
+
+
+
 def _format_discord_inline_code_span(body: str) -> str:
     """Render inline-code content with a delimiter that can contain backticks."""
     max_run = max((len(match.group(0)) for match in re.finditer(r"`+", body)), default=0)
@@ -2948,6 +2990,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not channel:
                     return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord outbound send: target=%s thread=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    thread_id or "",
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
+
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
                 result = await self._send_to_forum(channel, content)
@@ -3403,6 +3456,16 @@ class DiscordAdapter(BasePlatformAdapter):
         if not channel:
             return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+        allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed_to_send:
+            logger.warning(
+                "[%s] Blocked Discord file outbound send: target=%s reason=%s",
+                self.name,
+                chat_id,
+                deny_reason,
+            )
+            return SendResult(success=False, error=deny_reason)
+
         filename = file_name or os.path.basename(file_path)
         with open(file_path, "rb") as fh:
             file = discord.File(fh, filename=filename)
@@ -3454,6 +3517,16 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to resolve channel for multi-image send: %s", self.name, e)
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
+            return
+
+        allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed_to_send:
+            logger.warning(
+                "[%s] Blocked Discord multi-image outbound send: target=%s reason=%s",
+                self.name,
+                chat_id,
+                deny_reason,
+            )
             return
 
         CHUNK = 10
@@ -3579,6 +3652,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord voice outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
 
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=f"Audio file not found: {audio_path}")
@@ -4666,6 +4749,16 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord image outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
+
             # Download the image and send as a Discord file attachment
             # (Discord renders attachments inline, unlike plain URLs)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
@@ -4744,6 +4837,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord animation outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
 
             # Download the GIF and send as a Discord file attachment
             # (Discord renders .gif attachments as auto-playing animations inline)
@@ -5970,6 +6073,42 @@ class DiscordAdapter(BasePlatformAdapter):
             keys.add(f"#{parent_name}")
 
         return keys
+    def _discord_allowed_channels(self) -> set:
+        """Return Discord channel IDs this adapter may receive/send in.
+
+        An empty set means unrestricted, matching the existing inbound
+        ``DISCORD_ALLOWED_CHANNELS`` semantics. A ``"*"`` entry allows all.
+        """
+        allowed_channels, _ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return allowed_channels
+
+    def _discord_ignored_channels(self) -> set:
+        """Return Discord channel IDs this adapter must never send/respond in."""
+        _allowed_channels, ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return ignored_channels
+
+    def _discord_channel_scope_ids(self, channel: Any) -> set:
+        """Return the Discord keys governing a channel/thread send target."""
+        return self._discord_channel_keys_from_channel(
+            channel, self._get_parent_channel_id(channel)
+        )
+
+    def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
+        """Enforce this profile's Discord channel policy on outbound sends.
+
+        Inbound handling already gates normal messages, but delivery paths
+        (origin/home-channel/cron/tool sends) can target a Discord channel by
+        stored session origin. Re-check the resolved send target here so a
+        profile cannot deliver into a channel its own Discord adapter config
+        denies. Threads inherit their parent channel's policy when the parent
+        ID is available; explicit thread IDs on the allowlist also work.
+        """
+        if DISCORD_AVAILABLE and isinstance(channel, discord.DMChannel):
+            return True, "allowed"
+
+        channel_ids = self._discord_channel_scope_ids(channel)
+        allowed_channels, ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return _discord_outbound_scope_allowed(channel_ids, allowed_channels, ignored_channels)
 
     def _discord_thread_require_mention(self) -> bool:
         """Return whether thread participation requires @mention to follow up.
@@ -9124,6 +9263,52 @@ async def _standalone_send(
         media_files = media_files or []
         last_data = None
         warnings = []
+
+        allowed_channels, ignored_channels = _discord_policy_sets(getattr(pconfig, "extra", None))
+        channel_ids = {str(chat_id)}
+        if thread_id:
+            channel_ids.add(str(thread_id))
+        if thread_id and (allowed_channels or ignored_channels):
+            # REST-only delivery does not have a hydrated discord.py Thread
+            # object. Include the caller-provided chat_id first so explicit
+            # origin delivery to an authorized parent continues to work without
+            # a network probe, then probe the target thread when needed so
+            # parent deny rules still fence stale/leaked thread targets.
+            try:
+                info_url = f"https://discord.com/api/v10/channels/{thread_id}"
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), **_sess_kw) as info_sess:
+                    async with info_sess.get(info_url, headers=json_headers, **_req_kw) as info_resp:
+                        if info_resp.status == 200:
+                            info = await info_resp.json()
+                            parent_id = info.get("parent_id")
+                            if parent_id:
+                                channel_ids.add(str(parent_id))
+                        else:
+                            logger.warning(
+                                "Discord standalone outbound policy probe failed for thread %s: HTTP %s",
+                                thread_id,
+                                info_resp.status,
+                            )
+                            return {
+                                "error": "Discord outbound policy could not verify the thread parent"
+                            }
+            except Exception:
+                logger.warning(
+                    "Discord standalone outbound policy probe failed for thread %s",
+                    thread_id,
+                    exc_info=True,
+                )
+                return {
+                    "error": "Discord outbound policy could not verify the thread parent"
+                }
+
+        allowed_to_send, deny_reason = _discord_outbound_scope_allowed(
+            channel_ids,
+            allowed_channels,
+            ignored_channels,
+        )
+        if not allowed_to_send:
+            return {"error": deny_reason}
 
         # Thread endpoint: Discord threads are channels; send directly to the thread ID.
         if thread_id:
