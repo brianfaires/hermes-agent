@@ -2140,8 +2140,8 @@ def create_task(
         )
     if branch_name is not None:
         branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
+    if branch_name and workspace_kind == "scratch":
+        raise ValueError("branch_name is only valid for persistent workspaces")
     parents = tuple(p for p in parents if p)
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
