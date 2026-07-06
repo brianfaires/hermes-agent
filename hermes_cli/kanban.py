@@ -690,6 +690,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--notifier-profile", default=None,
         help="Profile gateway that owns/delivers this subscription (default: active profile)",
     )
+    p_nsub.add_argument(
+        "--force-policy-override", action="store_true",
+        help="Bypass kanban.notification_policy for explicit manual subscriptions",
+    )
+
+    p_naudit = sub.add_parser(
+        "notify-audit",
+        help="Dry-run: list existing notification subscriptions disallowed by policy",
+    )
+    p_naudit.add_argument("--json", action="store_true")
 
     p_nlist = sub.add_parser(
         "notify-list",
@@ -953,6 +963,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "heartbeat": _cmd_heartbeat,
             "assignees": _cmd_assignees,
             "notify-subscribe":   _cmd_notify_subscribe,
+            "notify-audit":       _cmd_notify_audit,
             "notify-list":        _cmd_notify_list,
             "notify-unsubscribe": _cmd_notify_unsubscribe,
             "context":  _cmd_context,
@@ -2442,17 +2453,57 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         if kb.get_task(conn, args.task_id) is None:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
+        platform = args.platform
+        chat_id = args.chat_id
+        thread_id = args.thread_id
+        user_id = args.user_id
+        notifier_profile = args.notifier_profile or _profile_author()
+        if not getattr(args, "force_policy_override", False):
+            from hermes_cli.kanban_notifications import resolve_notify_target
+            target = resolve_notify_target(
+                platform=platform,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                notifier_profile=notifier_profile,
+            )
+            if target is None:
+                print("subscription rejected by kanban.notification_policy", file=sys.stderr)
+                return 2
+            platform = target.platform
+            chat_id = target.chat_id
+            thread_id = target.thread_id
+            user_id = target.user_id
+            notifier_profile = target.notifier_profile
         kb.add_notify_sub(
             conn, task_id=args.task_id,
-            platform=args.platform, chat_id=args.chat_id,
-            thread_id=args.thread_id, user_id=args.user_id,
-            notifier_profile=args.notifier_profile or _profile_author(),
+            platform=platform, chat_id=chat_id,
+            thread_id=thread_id, user_id=user_id,
+            notifier_profile=notifier_profile,
         )
-    print(f"Subscribed {args.platform}:{args.chat_id}"
-          + (f":{args.thread_id}" if args.thread_id else "")
+    print(f"Subscribed {platform}:{chat_id}"
+          + (f":{thread_id}" if thread_id else "")
           + f" to {args.task_id}")
     return 0
 
+
+def _cmd_notify_audit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_notifications import audit_notify_subs
+    with kb.connect_closing() as conn:
+        rows = audit_notify_subs(conn)
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No noncompliant notification subscriptions found.")
+        return 0
+    for s in rows:
+        thr = f":{s['thread_id']}" if s.get("thread_id") else ""
+        print(
+            f"{s['task_id']} {s['platform']}:{s['chat_id']}{thr} -> "
+            f"{s.get('policy_target') or 'blocked'}"
+        )
+    return 0
 
 def _cmd_notify_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
