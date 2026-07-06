@@ -868,6 +868,30 @@ def test_cli_notify_subscribe_and_list(kanban_home):
     assert "Unsubscribed" in rm
 
 
+def test_cli_notify_policy_reroutes_discord_and_audits_existing_rows(kanban_home, monkeypatch):
+    Path(os.environ["HERMES_HOME"], "config.yaml").write_text(
+        "kanban:\n  notification_policy:\n    mode: telegram_home_only\n"
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc:fake")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "tg-home")
+    tid = json.loads(run_slash("create 'x' --json"))["id"]
+
+    out = run_slash(f"notify-subscribe {tid} --platform discord --chat-id disc-1")
+    assert "Subscribed telegram:tg-home" in out
+    subs = json.loads(run_slash(f"notify-list {tid} --json"))
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "tg-home"
+
+    conn = kb.connect()
+    try:
+        kb.add_notify_sub(conn, task_id=tid, platform="discord", chat_id="legacy-disc")
+    finally:
+        conn.close()
+    audit = json.loads(run_slash("notify-audit --json"))
+    assert any(row["task_id"] == tid and row["platform"] == "discord" for row in audit)
+
+
 def test_cli_log_missing_task(kanban_home):
     # No such task → exit-style (no log for...) message on stderr, returned
     # in combined output.

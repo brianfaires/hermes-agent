@@ -937,11 +937,21 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
         # Lazy-import to keep the module-level dependency light
         from hermes_cli import kanban_db as _kb
+        from hermes_cli.kanban_notifications import resolve_notify_target
+        target = resolve_notify_target(
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            notifier_profile=notifier_profile,
+        )
+        if target is None:
+            return False
         _kb.add_notify_sub(
             conn, task_id=task_id,
-            platform=platform, chat_id=chat_id,
-            thread_id=thread_id, user_id=user_id,
-            notifier_profile=notifier_profile,
+            platform=target.platform, chat_id=target.chat_id,
+            thread_id=target.thread_id, user_id=target.user_id,
+            notifier_profile=target.notifier_profile,
         )
         return True
     except Exception as _exc:
