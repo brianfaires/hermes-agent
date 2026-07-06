@@ -74,7 +74,13 @@ def test_emit_complete_payload_and_log_fallback(monkeypatch, caplog):
     completed = _record(hooks.COMPLETE)
 
     job = {"id": "j1", "name": "job", "deliver": "local"}
-    scheduler._emit_complete(job, success=True, duration_seconds=12.5, error=None)
+    scheduler._emit_complete(
+        job,
+        success=True,
+        duration_seconds=12.5,
+        error=None,
+        output_file="/tmp/cron-output.md",
+    )
 
     assert len(completed) == 1
     payload = completed[0]
@@ -83,6 +89,7 @@ def test_emit_complete_payload_and_log_fallback(monkeypatch, caplog):
     assert payload["duration_seconds"] == 12.5
     assert payload["error"] is None
     assert callable(payload["notify"])
+    assert payload["output_file"] == "/tmp/cron-output.md"
 
     # notify with no targets must not raise; it logs.
     import logging
@@ -111,3 +118,55 @@ def test_emit_complete_notify_delivers_when_targets(monkeypatch):
 
     assert delivered["content"] == "a message"
     assert delivered["raw"] is True
+
+
+def test_run_one_job_emits_saved_output_after_persistence(monkeypatch, tmp_path):
+    """COMPLETE observes the persisted output after terminal state is recorded."""
+    events = []
+    output_file = tmp_path / "cron" / "output" / "j1" / "run.md"
+    completed = _record(hooks.COMPLETE)
+    hooks.register_hook(hooks.COMPLETE, lambda **_kw: events.append("complete"))
+
+    monkeypatch.setattr(scheduler, "claim_dispatch", lambda _job_id: True)
+    monkeypatch.setattr(
+        scheduler,
+        "mark_execution_running",
+        lambda _execution_id: events.append("running"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda _job, *, defer_agent_teardown=None: (
+            True,
+            "saved output",
+            "final response",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "save_job_output",
+        lambda _job_id, _output: events.append("save") or output_file,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_deliver_result",
+        lambda *_args, **_kwargs: events.append("deliver") or None,
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "mark_job_run",
+        lambda *_args, **_kwargs: events.append("mark"),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "finish_execution",
+        lambda *_args, **_kwargs: events.append("finish"),
+    )
+
+    assert scheduler.run_one_job(
+        {"id": "j1", "deliver": "local", "execution_id": "exec-1"}
+    ) is True
+
+    assert completed[0]["output_file"] == str(output_file)
+    assert events == ["running", "save", "deliver", "mark", "finish", "complete"]

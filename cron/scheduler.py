@@ -3939,7 +3939,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
         finish_execution(execution_id, success=success, error=error)
         _emit_complete(job, success, time.perf_counter() - started_at, error,
-                       adapters=adapters, loop=loop)
+                       adapters=adapters, loop=loop, output_file=output_file)
         return True
 
     except Exception as e:
@@ -3971,7 +3971,8 @@ def _notify_provider_jobs_changed() -> None:
 
 
 def _emit_complete(job: dict, success: bool, duration_seconds: float,
-                   error: Optional[str], adapters=None, loop=None) -> None:
+                   error: Optional[str], adapters=None, loop=None,
+                   output_file=None) -> None:
     """Fire the COMPLETE cron hook for a finished run.
 
     The payload carries a ``notify(message, warn=False)`` callback bound to the
@@ -4005,6 +4006,7 @@ def _emit_complete(job: dict, success: bool, duration_seconds: float,
         duration_seconds=duration_seconds,
         error=error,
         notify=notify,
+        output_file=str(output_file) if output_file else None,
     )
 
 

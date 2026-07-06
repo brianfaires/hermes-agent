@@ -9,7 +9,7 @@ events are:
     REMOVE    — a job was removed                 payload: job
     COMPLETE  — a job finished a run              payload: job, success,
                                                   duration_seconds, error,
-                                                  notify
+                                                  notify, output_file
 
 Hooks are *best effort*: each callback runs inside its own try/except so a
 faulty hook can never break a job mutation or a scheduler run. Callbacks
