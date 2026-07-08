@@ -2718,9 +2718,32 @@ class DiscordAdapter(BasePlatformAdapter):
             if error:
                 logger.error("Voice mixer stream error (guild=%d): %s", guild_id, error)
 
+        audio_source_base = getattr(discord, "AudioSource", None)
+        if isinstance(audio_source_base, type):
+            class _DiscordMixerSource(audio_source_base):
+                def __init__(self, wrapped_mixer):
+                    self._wrapped_mixer = wrapped_mixer
+
+                def read(self) -> bytes:
+                    return self._wrapped_mixer.read()
+
+                def is_opus(self) -> bool:
+                    return False
+
+                def cleanup(self) -> None:
+                    cleanup = getattr(self._wrapped_mixer, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+
+            source = _DiscordMixerSource(mixer)
+        else:
+            # Test/mock fallback only. Real discord.py exposes AudioSource and
+            # rejects sources that are not instances of it.
+            source = mixer
+
         if vc.is_playing():
             vc.stop()
-        vc.play(mixer, after=_after)
+        vc.play(source, after=_after)
         self._voice_mixers[guild_id] = mixer
         logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
 

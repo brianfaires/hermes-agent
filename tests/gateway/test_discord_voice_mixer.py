@@ -155,6 +155,28 @@ def _make_adapter(fx_cfg=None):
     return adapter
 
 
+class TestInstallVoiceMixer:
+    @pytest.mark.asyncio
+    async def test_installs_discord_audio_source_wrapper(self, monkeypatch):
+        import plugins.platforms.discord.adapter as discord_adapter
+        from plugins.platforms.discord.adapter import DiscordAdapter
+
+        class _FakeAudioSource:
+            pass
+
+        monkeypatch.setattr(discord_adapter.discord, "AudioSource", _FakeAudioSource, raising=False)
+        adapter = _make_adapter()
+        adapter._get_ambient_pcm = MagicMock(return_value=None)
+        vc = MagicMock()
+        vc.is_playing.return_value = False
+
+        await DiscordAdapter._install_voice_mixer(adapter, 111, vc)
+
+        source = vc.play.call_args.args[0]
+        assert isinstance(source, _FakeAudioSource)
+        assert adapter._voice_mixers[111].__class__.__name__ == "VoiceMixer"
+
+
 class TestVoiceMixerActive:
     def test_false_when_no_mixer(self):
         adapter = _make_adapter()
