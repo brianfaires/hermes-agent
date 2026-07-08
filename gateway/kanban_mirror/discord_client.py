@@ -204,6 +204,14 @@ class DiscordClient:
         resp = self.request("GET", f"/channels/{channel_id}", expected={200})
         return resp.data or {}
 
+    def list_active_threads(self, guild_id: str) -> list[dict[str, Any]]:
+        resp = self.request("GET", f"/guilds/{guild_id}/threads/active", expected={200})
+        data = resp.data or {}
+        threads = data.get("threads") if isinstance(data, dict) else []
+        if not isinstance(threads, list):
+            return []
+        return [thread for thread in threads if isinstance(thread, dict)]
+
     def get_message(self, channel_id: str, message_id: str) -> dict[str, Any]:
         resp = self.request("GET", f"/channels/{channel_id}/messages/{message_id}", expected={200})
         return resp.data or {}

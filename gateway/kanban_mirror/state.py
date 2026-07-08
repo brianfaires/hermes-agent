@@ -441,6 +441,14 @@ def set_archived(conn: sqlite3.Connection, initiative_id: str, archived_at: int)
     conn.commit()
 
 
+def clear_archived(conn: sqlite3.Connection, initiative_id: str) -> None:
+    conn.execute(
+        "UPDATE mirror_initiatives SET archived_at = NULL, updated_at = ? WHERE id = ?",
+        (_now(), initiative_id),
+    )
+    conn.commit()
+
+
 def record_note(
     conn: sqlite3.Connection, initiative_id: str, note_key: str, message_id: str
 ) -> None:

@@ -40,9 +40,11 @@ from gateway.kanban_mirror.state import (
     Initiative,
     MemberState,
     add_member,
+    clear_archived,
     connect_mirror,
     create_initiative,
     get_digest,
+    is_terminal,
     load_board_snapshot,
     load_mirror_state,
     load_note_keys,
@@ -585,6 +587,17 @@ async def _do_archive_thread(cfg: MirrorConfig, client: DiscordClient | None, co
         log.append(f"archive_thread: SKIPPED {initiative_id} (missing members {missing})")
         return
 
+    current_hash = current_publish_hash(initiative, snapshot, cfg)
+    if current_hash != initiative.published_hash:
+        logger.info(
+            "kanban mirror: skipping archive for %s; pending Discord publish (%s != %s)",
+            initiative_id,
+            current_hash,
+            initiative.published_hash,
+        )
+        log.append(f"archive_thread: SKIPPED {initiative_id} (pending publish)")
+        return
+
     idle_delay_seconds = max(0.0, float(cfg.done_thread_archive_idle_minutes) * 60.0)
     if initiative.thread_id and client is not None and idle_delay_seconds > 0:
         try:
@@ -612,6 +625,57 @@ async def _do_archive_thread(cfg: MirrorConfig, client: DiscordClient | None, co
             logger.warning("kanban mirror: archive_thread failed for %s: %s", initiative_id, exc)
             return
     await asyncio.to_thread(set_archived, conn, initiative_id, int(time.time()))
+
+
+async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None, conn: sqlite3.Connection,
+                                snapshot: BoardSnapshot, state: dict[str, Initiative], log: list[str]) -> bool:
+    """Detect open Discord forum threads that no longer match unfinished Kanban work.
+
+    Discord can drift from mirror.db: a thread may remain open after a card is
+    terminal, or an archived initiative may be reopened manually.  This audit
+    runs every tick against Discord's active-thread list and clears stale local
+    archive markers for mapped active threads so the normal planner can reapply
+    the Done tag and idle archive policy.  Unmapped active threads are logged but
+    not mutated; the forum may contain manual/admin threads that the mirror must
+    not silently close.
+
+    Returns True when mirror state changed and should be reloaded before planning.
+    """
+    if client is None or not cfg.guild_id:
+        return False
+    try:
+        threads = await asyncio.to_thread(client.list_active_threads, cfg.guild_id)
+    except Exception as exc:
+        logger.warning("kanban mirror: active-thread audit failed: %s", exc)
+        log.append("active_thread_audit: SKIPPED (Discord fetch failed)")
+        return False
+
+    by_thread = {initiative.thread_id: initiative for initiative in state.values() if initiative.thread_id}
+    changed = False
+    for thread in threads:
+        if str(thread.get("parent_id") or "") != cfg.forum_channel_id:
+            continue
+        thread_id = str(thread.get("id") or "").strip()
+        if not thread_id:
+            continue
+        initiative = by_thread.get(thread_id)
+        if initiative is None:
+            logger.info("kanban mirror: active Discord thread %s has no mirror mapping", thread_id)
+            log.append(f"active_thread_audit: UNMAPPED {thread_id}")
+            continue
+
+        member_cards = [snapshot.cards[tid] for tid in initiative.members if tid in snapshot.cards]
+        all_terminal = bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        if all_terminal and initiative.archived_at is not None:
+            logger.info(
+                "kanban mirror: active Discord thread %s maps to archived terminal initiative %s; reopening local mirror state for repair",
+                thread_id,
+                initiative.id,
+            )
+            log.append(f"active_thread_audit: REPAIR {initiative.id} thread={thread_id}")
+            changed = True
+            await asyncio.to_thread(clear_archived, conn, initiative.id)
+    return changed
 
 
 async def _do_ensure_digest(cfg: MirrorConfig, client: DiscordClient | None, conn: sqlite3.Connection,
@@ -819,6 +883,8 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     digest = await asyncio.to_thread(get_digest, mirror_conn)
     note_keys = await asyncio.to_thread(load_note_keys, mirror_conn)
+    if not dry_run and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log):
+        state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     now = int(time.time())
     ops = plan(snapshot, state, digest, note_keys, cfg, now)
 

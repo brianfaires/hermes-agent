@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from dataclasses import replace
 from typing import cast
 
 from gateway.kanban_mirror.closed_thread_policy import classify_thread_state
 from gateway.kanban_mirror.config import MirrorConfig, load_mirror_config
-from gateway.kanban_mirror.daemon import _do_archive_thread, _do_edit_post, _do_post_note, _publish_edit, _send_with_closed_thread_policy
+from gateway.kanban_mirror.daemon import _audit_active_threads, _do_archive_thread, _do_edit_post, _do_post_note, _publish_edit, _send_with_closed_thread_policy
 from gateway.kanban_mirror.discord_client import DiscordClient
-from gateway.kanban_mirror.planner import Op
+from gateway.kanban_mirror.planner import Op, current_publish_hash
 from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
 
 
@@ -33,9 +34,10 @@ def mk_initiative(thread_id="th1"):
 
 
 class FakeClient:
-    def __init__(self, state="active", *, last_message_ts="2026-07-06T00:00:00+00:00"):
+    def __init__(self, state="active", *, last_message_ts="2026-07-06T00:00:00+00:00", active_threads=None):
         self.state = state
         self.last_message_ts = last_message_ts
+        self.active_threads = active_threads or []
         self.sent = []
         self.updated = []
         self.message_updates = []
@@ -69,6 +71,9 @@ class FakeClient:
 
     def get_message(self, channel_id, message_id):
         return {"id": message_id, "channel_id": channel_id, "timestamp": self.last_message_ts}
+
+    def list_active_threads(self, guild_id):
+        return self.active_threads
 
     def update_thread(self, thread_id, **kwargs):
         self.updated.append((thread_id, kwargs))
@@ -433,6 +438,29 @@ def _done_snapshot():
     return BoardSnapshot({"t1": card}, {}, {}, {}, {})
 
 
+def _published_done_initiative():
+    snapshot = _done_snapshot()
+    cfg = MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", done_thread_archive_idle_minutes=1)
+    initiative = mk_initiative()
+    return Initiative(
+        id=initiative.id,
+        title=initiative.title,
+        kind=initiative.kind,
+        thread_id=initiative.thread_id,
+        starter_message_id=initiative.starter_message_id,
+        brief=initiative.brief,
+        needs_you=initiative.needs_you,
+        blocked_reasons=initiative.blocked_reasons,
+        published_hash=current_publish_hash(initiative, snapshot, cfg),
+        brief_stale=initiative.brief_stale,
+        brief_updated_at=initiative.brief_updated_at,
+        archived_at=initiative.archived_at,
+        created_at=initiative.created_at,
+        updated_at=initiative.updated_at,
+        members=initiative.members,
+    )
+
+
 def test_done_thread_archive_waits_until_idle_delay(monkeypatch):
     monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: 2000.0)
     conn = _archive_test_conn()
@@ -444,7 +472,7 @@ def test_done_thread_archive_waits_until_idle_delay(monkeypatch):
         cast(DiscordClient, client),
         conn,
         _done_snapshot(),
-        {"init_t1": mk_initiative()},
+        {"init_t1": _published_done_initiative()},
         Op("archive_thread", {"initiative_id": "init_t1"}),
         False,
         log,
@@ -466,7 +494,7 @@ def test_done_thread_archive_runs_after_idle_delay(monkeypatch):
         cast(DiscordClient, client),
         conn,
         _done_snapshot(),
-        {"init_t1": mk_initiative()},
+        {"init_t1": _published_done_initiative()},
         Op("archive_thread", {"initiative_id": "init_t1"}),
         False,
         log,
@@ -489,12 +517,33 @@ def test_new_message_resets_done_thread_archive_idle_timer(monkeypatch):
         cast(DiscordClient, client),
         conn,
         _done_snapshot(),
-        {"init_t1": mk_initiative()},
+        {"init_t1": _published_done_initiative()},
         Op("archive_thread", {"initiative_id": "init_t1"}),
         False,
         log,
     ))
     now["value"] = 2070.0
+    asyncio.run(_do_archive_thread(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", done_thread_archive_idle_minutes=1),
+        cast(DiscordClient, client),
+        conn,
+        _done_snapshot(),
+        {"init_t1": _published_done_initiative()},
+        Op("archive_thread", {"initiative_id": "init_t1"}),
+        False,
+        log,
+    ))
+
+    assert client.updated == [("th1", {"archive": True})]
+    assert any("idle 30s < required 60s" in line for line in log)
+
+
+def test_done_thread_archive_skips_until_done_tag_publish_is_current(monkeypatch):
+    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: 2000.0)
+    conn = _archive_test_conn()
+    client = FakeClient("active", last_message_ts="1970-01-01T00:30:00+00:00")
+    log = []
+
     asyncio.run(_do_archive_thread(
         MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", done_thread_archive_idle_minutes=1),
         cast(DiscordClient, client),
@@ -506,5 +555,45 @@ def test_new_message_resets_done_thread_archive_idle_timer(monkeypatch):
         log,
     ))
 
-    assert client.updated == [("th1", {"archive": True})]
-    assert any("idle 30s < required 60s" in line for line in log)
+    assert client.updated == []
+    assert conn.execute("SELECT archived_at FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] is None
+    assert "archive_thread: SKIPPED init_t1 (pending publish)" in log
+
+
+def test_active_thread_audit_reopens_archived_terminal_mapping_for_repair():
+    conn = _archive_test_conn()
+    conn.execute("UPDATE mirror_initiatives SET archived_at = 123 WHERE id='init_t1'")
+    initiative = replace(_published_done_initiative(), archived_at=123)
+    client = FakeClient(active_threads=[{"id": "th1", "parent_id": "forum1"}])
+    log = []
+
+    changed = asyncio.run(_audit_active_threads(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
+        cast(DiscordClient, client),
+        conn,
+        _done_snapshot(),
+        {"init_t1": initiative},
+        log,
+    ))
+
+    assert changed is True
+    assert conn.execute("SELECT archived_at FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] is None
+    assert "active_thread_audit: REPAIR init_t1 thread=th1" in log
+
+
+def test_active_thread_audit_logs_unmapped_open_forum_thread():
+    conn = _archive_test_conn()
+    client = FakeClient(active_threads=[{"id": "orphan", "parent_id": "forum1"}])
+    log = []
+
+    changed = asyncio.run(_audit_active_threads(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
+        cast(DiscordClient, client),
+        conn,
+        _done_snapshot(),
+        {},
+        log,
+    ))
+
+    assert changed is False
+    assert "active_thread_audit: UNMAPPED orphan" in log

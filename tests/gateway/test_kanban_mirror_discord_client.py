@@ -57,3 +57,36 @@ def test_create_forum_thread_uses_multipart_for_attachments(tmp_path, monkeypatc
     assert b"PDFDATA" in body
     payload_marker = body.index(b'payload_json')
     assert b'Starter post\\nMEDIA:/tmp/evidence/report.pdf' in body[payload_marker:]
+
+
+def test_list_active_threads_uses_guild_endpoint_and_filters_payload(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=30):
+        captured["url"] = req.full_url
+        return _DummyResponse(payload=json.dumps({
+            "threads": [
+                {"id": "th1", "parent_id": "forum1"},
+                "not-a-thread",
+                {"id": "th2", "parent_id": "forum2"},
+            ],
+        }))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    threads = DiscordClient("token").list_active_threads("guild1")
+
+    assert captured["url"].endswith("/guilds/guild1/threads/active")
+    assert threads == [
+        {"id": "th1", "parent_id": "forum1"},
+        {"id": "th2", "parent_id": "forum2"},
+    ]
+
+
+def test_list_active_threads_handles_malformed_threads_payload(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda req, timeout=30: _DummyResponse(payload=json.dumps({"threads": {"id": "not-a-list"}})),
+    )
+
+    assert DiscordClient("token").list_active_threads("guild1") == []
