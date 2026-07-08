@@ -170,6 +170,14 @@ class TestInstallVoiceMixer:
         vc = MagicMock()
         vc.is_playing.return_value = False
 
+        def _strict_play(source, *, after=None):
+            # Match discord.py VoiceClient.play's contract: it rejects objects
+            # that merely look like AudioSource but do not inherit from it.
+            if not isinstance(source, _FakeAudioSource):
+                raise TypeError(f"source must be an AudioSource not {source.__class__.__name__}")
+
+        vc.play.side_effect = _strict_play
+
         await DiscordAdapter._install_voice_mixer(adapter, 111, vc)
 
         source = vc.play.call_args.args[0]
