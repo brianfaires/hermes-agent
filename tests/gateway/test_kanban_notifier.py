@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import sqlite3
 from pathlib import Path
 
 
@@ -238,6 +240,35 @@ class FailingAdapter:
     async def send(self, chat_id, text, metadata=None):
         self.attempts += 1
         raise RuntimeError("simulated send failure")
+
+
+def test_kanban_notifier_tick_failure_log_includes_diagnostic_context(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "io-error.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    def _raise_disk_io_error(conn, task_id=None):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(kb, "list_notify_subs", _raise_disk_io_error)
+    caplog.set_level(logging.WARNING, logger="gateway.run")
+
+    runner = _make_runner(RecordingAdapter())
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    messages = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "gateway.run"
+    )
+    assert "kanban notifier tick failed" in messages
+    assert "OperationalError" in messages
+    assert "OperationalError('disk I/O error')" in messages
+    assert "operation=list_notify_subs" in messages
+    assert "board=default" in messages
+    assert "db_path=" in messages
+    assert ".db" in messages
 
 
 def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
