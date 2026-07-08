@@ -194,8 +194,15 @@ class GatewayKanbanWatchersMixin:
         # Initial delay so the gateway can finish wiring adapters.
         await asyncio.sleep(5)
 
+        tick_context: dict[str, Any] = {}
         while self._running:
             try:
+                tick_context = {"operation": "collect_active_platforms"}
+
+                def _set_tick_context(**updates: Any) -> None:
+                    tick_context.clear()
+                    tick_context.update(updates)
+
                 def _collect():
                     deliveries: list[dict] = []
                     adapter_maps = [self.adapters]
@@ -219,8 +226,10 @@ class GatewayKanbanWatchersMixin:
                     # one gateway could collect the same subscription/event
                     # more than once before advancing the cursor.
                     try:
+                        _set_tick_context(operation="list_boards")
                         boards = _kb.list_boards(include_archived=False)
                     except Exception:
+                        _set_tick_context(operation="read_default_board_metadata", board=_kb.DEFAULT_BOARD)
                         boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
                     seen_db_paths: set[str] = set()
                     for board_meta in boards:
@@ -238,6 +247,11 @@ class GatewayKanbanWatchersMixin:
                             continue
                         seen_db_paths.add(resolved_db_path)
                         try:
+                            _set_tick_context(
+                                operation="connect_board",
+                                board=slug,
+                                db_path=resolved_db_path,
+                            )
                             conn = _kb.connect(board=slug)
                         except Exception as exc:
                             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
@@ -255,6 +269,11 @@ class GatewayKanbanWatchersMixin:
                             # a legacy DB. `_add_column_if_missing` now
                             # tolerates that race, but we still skip the
                             # redundant call to avoid the wasted work.
+                            _set_tick_context(
+                                operation="list_notify_subs",
+                                board=slug,
+                                db_path=resolved_db_path,
+                            )
                             subs = _kb.list_notify_subs(conn)
                             if not subs:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
@@ -290,6 +309,13 @@ class GatewayKanbanWatchersMixin:
                                         sub.get("task_id"), effective_platform or "<missing>",
                                     )
                                     continue
+                                _set_tick_context(
+                                    operation="claim_unseen_events",
+                                    board=slug,
+                                    db_path=resolved_db_path,
+                                    task_id=sub.get("task_id"),
+                                    platform=platform or None,
+                                )
                                 old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                     conn,
                                     task_id=sub["task_id"],
@@ -300,6 +326,13 @@ class GatewayKanbanWatchersMixin:
                                 )
                                 if not events:
                                     continue
+                                _set_tick_context(
+                                    operation="get_task",
+                                    board=slug,
+                                    db_path=resolved_db_path,
+                                    task_id=sub.get("task_id"),
+                                    platform=platform or None,
+                                )
                                 task = _kb.get_task(conn, sub["task_id"])
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
@@ -312,6 +345,7 @@ class GatewayKanbanWatchersMixin:
                                     "events": events,
                                     "task": task,
                                     "board": slug,
+                                    "db_path": resolved_db_path,
                                 })
                         finally:
                             conn.close()
@@ -322,6 +356,14 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    db_path = d.get("db_path")
+                    _set_tick_context(
+                        operation="resolve_delivery_target",
+                        board=board_slug,
+                        db_path=db_path,
+                        task_id=sub.get("task_id"),
+                        platform=(sub.get("platform") or None),
+                    )
                     from hermes_cli.kanban_notifications import resolve_notify_target
                     target = resolve_notify_target(
                         platform=sub.get("platform") or "",
@@ -335,6 +377,13 @@ class GatewayKanbanWatchersMixin:
                             "kanban notifier: subscription for %s on %s skipped by notification policy",
                             sub.get("task_id"), sub.get("platform") or "<missing>",
                         )
+                        _set_tick_context(
+                            operation="advance_after_policy_skip",
+                            board=board_slug,
+                            db_path=db_path,
+                            task_id=sub.get("task_id"),
+                            platform=sub.get("platform") or None,
+                        )
                         await asyncio.to_thread(self._kanban_advance, sub, d["cursor"], board_slug)
                         continue
                     platform_str = target.platform
@@ -343,6 +392,13 @@ class GatewayKanbanWatchersMixin:
                     except ValueError:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
+                        _set_tick_context(
+                            operation="advance_after_unknown_platform",
+                            board=board_slug,
+                            db_path=db_path,
+                            task_id=sub.get("task_id"),
+                            platform=platform_str,
+                        )
                         await asyncio.to_thread(
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
@@ -362,6 +418,13 @@ class GatewayKanbanWatchersMixin:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
                             platform_str, sub["task_id"],
+                        )
+                        _set_tick_context(
+                            operation="rewind_after_adapter_disconnect",
+                            board=board_slug,
+                            db_path=db_path,
+                            task_id=sub.get("task_id"),
+                            platform=platform_str,
                         )
                         await asyncio.to_thread(
                             self._kanban_rewind,
@@ -515,6 +578,13 @@ class GatewayKanbanWatchersMixin:
                         # All events delivered; advance cursor. The cursor
                         # is the dedup mechanism — it prevents re-delivery
                         # of the same event on subsequent ticks.
+                        _set_tick_context(
+                            operation="advance_after_delivery",
+                            board=board_slug,
+                            db_path=db_path,
+                            task_id=sub.get("task_id"),
+                            platform=platform_str,
+                        )
                         await asyncio.to_thread(
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
@@ -599,11 +669,29 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], _wk_err, exc_info=True,
                                 )
                         if task_terminal:
+                            _set_tick_context(
+                                operation="unsubscribe_after_terminal_task",
+                                board=board_slug,
+                                db_path=db_path,
+                                task_id=sub.get("task_id"),
+                                platform=platform_str,
+                            )
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
                             )
             except Exception as exc:
-                logger.warning("kanban notifier tick failed: %s", exc)
+                logger.warning(
+                    "kanban notifier tick failed: %s: %r "
+                    "(operation=%s board=%s db_path=%s task_id=%s platform=%s)",
+                    exc.__class__.__name__,
+                    exc,
+                    tick_context.get("operation"),
+                    tick_context.get("board"),
+                    tick_context.get("db_path"),
+                    tick_context.get("task_id"),
+                    tick_context.get("platform"),
+                    exc_info=True,
+                )
             # Sleep with cancellation checks.
             for _ in range(int(max(1, interval))):
                 if not self._running:
