@@ -72,7 +72,68 @@ def test_work_items_use_children_and_emoji_and_blocked_reason():
     s = snap([root, a, b], links=[("t_r", "t_a"), ("t_r", "t_b")])
     body = render_post(init_with(["t_r"], blocked_reasons={"t_b": "needs your call"}), s, 3800, now=200)
     assert "✅ Audit" in body and "🔴 Design — *needs your call*" in body
-    assert "🟢 Root" not in body   # root with children is not itself an item
+    assert "🟢 Root" in body   # dependency view shows the prerequisite card too
+
+
+def test_work_items_render_dependency_chain_with_sibling_fanout_indent():
+    spec = mk_card("t_spec", "Spec mirror DAG format", "done")
+    implement = mk_card("t_impl", "Implement renderer", "running")
+    tests = mk_card("t_tests", "Update tests", "todo")
+    review = mk_card("t_review", "Review rendered output", "ready")
+    deploy = mk_card("t_deploy", "Deploy mirror update", "todo")
+    s = snap(
+        [spec, implement, tests, review, deploy],
+        links=[
+            ("t_spec", "t_impl"),
+            ("t_spec", "t_tests"),
+            ("t_impl", "t_review"),
+            ("t_tests", "t_review"),
+            ("t_review", "t_deploy"),
+        ],
+    )
+    body = render_post(init_with(["t_spec"]), s, 3800, now=200)
+    lines = body.splitlines()
+
+    assert "✅ Spec mirror DAG format" in lines
+    assert "  🟢 Implement renderer" in lines
+    assert "  ▫️ Update tests" in lines
+    assert "▫️ Review rendered output — waits on: Implement renderer, Update tests" in lines
+    assert "▫️ Deploy mirror update" in lines
+
+    work_index = lines.index("**Work items**")
+    work_lines = lines[work_index + 1 : work_index + 6]
+    assert work_lines == [
+        "✅ Spec mirror DAG format",
+        "  🟢 Implement renderer",
+        "  ▫️ Update tests",
+        "▫️ Review rendered output — waits on: Implement renderer, Update tests",
+        "▫️ Deploy mirror update",
+    ]
+
+
+def test_child_with_external_parent_still_renders_with_waits_on_note():
+    root = mk_card("t_root", "Current root", "running")
+    external = mk_card("t_external", "External prerequisite", "todo")
+    child = mk_card("t_child", "Shared child", "todo")
+    s = snap(
+        [root, external, child],
+        links=[("t_root", "t_child"), ("t_external", "t_child")],
+    )
+    body = render_post(init_with(["t_root"]), s, 3800, now=200)
+
+    assert "🟢 Current root" in body
+    assert "▫️ Shared child — waits on: Current root, External prerequisite" in body
+
+
+def test_status_emoji_includes_skipped_and_canceled_items():
+    root = mk_card("t_r", "Root", "done")
+    skipped = mk_card("t_skip", "Discard rich embed experiment", "skipped")
+    canceled = mk_card("t_cancel", "Cancel redundant review", "canceled")
+    s = snap([root, skipped, canceled], links=[("t_r", "t_skip"), ("t_r", "t_cancel")])
+    body = render_post(init_with(["t_r"]), s, 3800, now=200)
+
+    assert "  ⏭️ Discard rich embed experiment" in body
+    assert "  ⏭️ Cancel redundant review" in body
 
 
 def test_review_artifacts_are_hoisted_to_top():
@@ -107,9 +168,9 @@ def test_active_overflow_shows_indicator_not_silent_drop():
     s = snap([root, *active, *done], links=[("t_r", k.id) for k in [*active, *done]])
     body = render_post(init_with(["t_r"]), s, 3800, now=200)
     # 11 active shown + 1 tail line = 12-line cap; nothing silently dropped
-    shown = [ln for ln in body.split("\n") if ln.startswith(STATUS_EMOJI["running"])]
+    shown = [ln for ln in body.split("\n") if ln.strip().startswith(STATUS_EMOJI["running"])]
     assert len(shown) == 11
-    assert "… 3 more active, 4 done" in body
+    assert "… 4 more active, 4 done" in body
 
 
 def test_active_overflow_without_done_items():
@@ -117,7 +178,7 @@ def test_active_overflow_without_done_items():
     active = [mk_card(f"t_a{i}", f"Active {i}", "running") for i in range(13)]
     s = snap([root, *active], links=[("t_r", k.id) for k in active])
     body = render_post(init_with(["t_r"]), s, 3800, now=200)
-    assert "… 2 more active" in body
+    assert "… 3 more active" in body
     assert "done" not in body.rsplit("more active", 1)[-1].split("\n")[0]
 
 

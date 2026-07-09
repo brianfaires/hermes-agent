@@ -13,6 +13,7 @@ across the rewrite.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,9 @@ STATUS_ORDER = {
     "triage": 6,
     "done": 90,
     "archived": 91,
+    "skipped": 92,
+    "canceled": 92,
+    "cancelled": 92,
 }
 
 STATUS_EMOJI: dict[str, str] = {
@@ -40,6 +44,9 @@ STATUS_EMOJI: dict[str, str] = {
     "running": "\U0001F7E2",
     "review": "\U0001F7E1",
     "blocked": "\U0001F534",
+    "skipped": "⏭️",
+    "canceled": "⏭️",
+    "cancelled": "⏭️",
 }
 
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
@@ -207,20 +214,78 @@ def _split_first_sentence(brief: str) -> str:
     return f"**{first}**{rest}"
 
 
-def _work_items(member_ids: list[str], snapshot: BoardSnapshot) -> list[Card]:
-    """Children are the items for a root; a childless root is itself the item."""
-    items: list[Card] = []
+def _finished_for_display(status: str | int | None) -> bool:
+    return is_terminal(_s(status)) or _s(status).strip().lower() in {"skipped", "canceled", "cancelled"}
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    card: Card
+    indented: bool = False
+    wait_parent_ids: tuple[str, ...] = ()
+
+
+def _work_items(member_ids: list[str], snapshot: BoardSnapshot) -> list[WorkItem]:
+    """Flat dependency-DAG list for Discord.
+
+    Parent→child links are dependency edges, not epic containment. Render a
+    shallow, readable topological list: the main chain stays unindented;
+    children are indented only when a parent fans out to sibling children that
+    may run in parallel after that parent completes.
+    """
+    items: list[WorkItem] = []
+    emitted: set[str] = set()
+    visiting: set[str] = set()
+    reachable: set[str] = set()
+
+    def mark_reachable(task_id: str) -> None:
+        if task_id in reachable or task_id not in snapshot.cards:
+            return
+        reachable.add(task_id)
+        for cid in snapshot.children.get(task_id, []):
+            mark_reachable(cid)
+
     for root_id in member_ids:
-        child_ids = snapshot.children.get(root_id, [])
-        if child_ids:
-            for cid in child_ids:
-                child = snapshot.cards.get(cid)
-                if child is not None:
-                    items.append(child)
-        else:
-            root = snapshot.cards.get(root_id)
-            if root is not None:
-                items.append(root)
+        mark_reachable(root_id)
+
+    def emit(task_id: str, *, indented: bool) -> None:
+        if task_id in emitted or task_id in visiting:
+            return
+        card = snapshot.cards.get(task_id)
+        if card is None:
+            return
+        parents = snapshot.parents.get(task_id, [])
+        if any(pid in reachable and pid not in emitted for pid in parents if pid in snapshot.cards):
+            return
+
+        visiting.add(task_id)
+        wait_parent_ids = tuple(parents) if len(parents) > 1 else ()
+        items.append(WorkItem(card=card, indented=indented, wait_parent_ids=wait_parent_ids))
+        emitted.add(task_id)
+
+        children = [cid for cid in snapshot.children.get(task_id, []) if cid in snapshot.cards]
+        children.sort(key=lambda cid: _sort_key(snapshot.cards[cid]))
+        child_indent = len(children) > 1
+        for cid in children:
+            emit(cid, indented=child_indent)
+        visiting.discard(task_id)
+
+    for root_id in member_ids:
+        emit(root_id, indented=False)
+
+    # Fan-in cards skipped on the first parent become eligible after a later
+    # sibling emits; iterate boundedly until no more known descendants can land.
+    changed = True
+    while changed:
+        before = len(items)
+        for item in list(items):
+            children = [cid for cid in snapshot.children.get(item.card.id, []) if cid in snapshot.cards]
+            children.sort(key=lambda cid: _sort_key(snapshot.cards[cid]))
+            child_indent = len(children) > 1
+            for cid in children:
+                emit(cid, indented=child_indent)
+        changed = len(items) != before
+
     return items
 
 
@@ -260,34 +325,61 @@ def review_artifacts_block(member_cards: list[Card], snapshot: BoardSnapshot) ->
     return "\n".join(lines)
 
 
-def _fold_items(items: list[Card]) -> tuple[list[Card], str | None]:
-    """Sort (STATUS_ORDER, priority desc); cap at 12 lines with a fold tail.
+def _fold_items(items: list[WorkItem]) -> tuple[list[WorkItem], str | None]:
+    """Cap the already-ordered DAG display at 12 lines with a fold tail.
 
-    Done items fold first (``… N more done``). If even the non-done items
-    overflow the cap, show the first 11 and account for everything hidden in
-    the tail (``… N more active[, M done]``) — nothing is silently dropped.
+    Finished items fold first (``… N more done``). If even the active items
+    overflow the cap, preserve the visible DAG order for the first 11 active
+    items and account for everything hidden in the tail.
     """
-    non_done = sorted((c for c in items if not is_terminal(_s(c.status))), key=_sort_key)
-    done = sorted((c for c in items if is_terminal(_s(c.status))), key=_sort_key)
+    non_done = [item for item in items if not _finished_for_display(item.card.status)]
+    done = [item for item in items if _finished_for_display(item.card.status)]
 
     if len(non_done) + len(done) <= _MAX_WORK_ITEM_LINES:
-        return non_done + done, None
+        return items, None
 
     item_budget = _MAX_WORK_ITEM_LINES - 1  # reserve one line for the tail
     if len(non_done) > item_budget:
-        hidden_active = len(non_done) - item_budget
+        shown: list[WorkItem] = []
+        hidden_active = 0
+        for item in items:
+            if _finished_for_display(item.card.status):
+                continue
+            if len(shown) < item_budget:
+                shown.append(item)
+            else:
+                hidden_active += 1
         tail = f"… {hidden_active} more active"
         if done:
             tail += f", {len(done)} done"
-        return non_done[:item_budget], tail
+        return shown, tail
 
-    shown_done = done[: item_budget - len(non_done)]
-    folded_done = len(done) - len(shown_done)
-    return non_done + shown_done, f"… {folded_done} more done"
+    shown: list[WorkItem] = []
+    shown_done = 0
+    done_budget = item_budget - len(non_done)
+    for item in items:
+        if not _finished_for_display(item.card.status):
+            shown.append(item)
+        elif shown_done < done_budget:
+            shown.append(item)
+            shown_done += 1
+    folded_done = len(done) - shown_done
+    return shown, f"… {folded_done} more done"
 
 
-def _format_item(card: Card, initiative: Initiative) -> str:
+def _format_item(item: WorkItem, initiative: Initiative, snapshot: BoardSnapshot) -> str:
+    card = item.card
     line = f"{_emoji(card.status)} {redact(_s(card.title))}"
+    if item.indented:
+        line = "  " + line
+    if item.wait_parent_ids:
+        parent_titles = [
+            redact(_s(snapshot.cards[parent_id].title))
+            for parent_id in item.wait_parent_ids
+            if parent_id in snapshot.cards
+        ]
+        if parent_titles:
+            line += f" — waits on: {', '.join(parent_titles)}"
     status = _s(card.status).strip().lower()
     if status == "blocked":
         reason = initiative.blocked_reasons.get(card.id)
@@ -356,7 +448,7 @@ def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int,
 
     items = _work_items(member_ids, snapshot)
     shown, fold_tail = _fold_items(items)
-    item_lines = [_format_item(c, initiative) for c in shown]
+    item_lines = [_format_item(item, initiative, snapshot) for item in shown]
     if fold_tail:
         item_lines.append(fold_tail)
 
