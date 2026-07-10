@@ -184,6 +184,34 @@ class TestInstallVoiceMixer:
         assert isinstance(source, _FakeAudioSource)
         assert adapter._voice_mixers[111].__class__.__name__ == "VoiceMixer"
 
+    @pytest.mark.asyncio
+    async def test_join_does_not_start_continuous_idle_audio(self, monkeypatch):
+        """Joining a VC must not transmit an ambient loop while Hermes is idle."""
+        import plugins.platforms.discord.adapter as discord_adapter
+        from plugins.platforms.discord.adapter import DiscordAdapter
+
+        adapter = _make_adapter()
+        adapter._voice_session_generations = {}
+        adapter._reset_voice_timeout = MagicMock()
+        adapter._schedule_stt_warmup = MagicMock()
+        adapter._voice_listen_loop = AsyncMock()
+
+        vc = MagicMock()
+        channel = MagicMock()
+        channel.guild.id = 111
+        channel.connect = AsyncMock(return_value=vc)
+
+        receiver = MagicMock()
+        monkeypatch.setattr(discord_adapter, "DISCORD_AVAILABLE", True)
+        monkeypatch.setattr(discord_adapter, "VoiceReceiver", MagicMock(return_value=receiver))
+        install_mixer = AsyncMock()
+        monkeypatch.setattr(adapter, "_install_voice_mixer", install_mixer)
+
+        assert await DiscordAdapter.join_voice_channel(adapter, channel) is True
+
+        install_mixer.assert_not_awaited()
+        vc.play.assert_not_called()
+
 
 class TestVoiceMixerActive:
     def test_false_when_no_mixer(self):

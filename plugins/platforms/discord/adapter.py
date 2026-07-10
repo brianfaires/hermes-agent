@@ -3048,15 +3048,9 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
 
-            # Phase 3: install the continuous mixer (ambient bed + ducked
-            # speech).  Best-effort — if it fails we fall back to the legacy
-            # one-shot FFmpegPCMAudio playback path in play_in_voice_channel.
-            if getattr(self, "_voice_fx_cfg", {}).get("enabled"):
-                try:
-                    await self._install_voice_mixer(guild_id, vc)
-                except Exception as e:
-                    logger.warning("Voice mixer failed to start: %s", e)
-
+            # Do not start an outbound stream while idle. TTS uses the one-shot
+            # playback path in play_in_voice_channel, so Discord only shows
+            # Hermes speaking while it has meaningful audio to send.
             return True
 
     async def leave_voice_channel(self, guild_id: int) -> None:
