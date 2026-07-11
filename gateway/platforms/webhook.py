@@ -156,6 +156,13 @@ class WebhookAdapter(BasePlatformAdapter):
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
+        # Script routes are single-flight per route. Providers such as Pub/Sub
+        # retry aggressively when a script is slow; overlapping copies can
+        # exhaust the gateway's process/thread allowance. A short post-run
+        # cooldown absorbs retries already in flight when the script finishes.
+        self._script_route_tasks: Dict[str, asyncio.Task] = {}
+        self._script_route_completed_at: Dict[str, float] = {}
+
         # Rate limiting: per-route timestamps in a fixed window.
         self._rate_counts: Dict[str, Deque[float]] = {}
         self._rate_limit: int = int(config.extra.get("rate_limit", 30))  # per minute
@@ -348,13 +355,19 @@ class WebhookAdapter(BasePlatformAdapter):
         window.append(now)
         return True
 
-    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
-        """Return True when this delivery should be processed."""
+    def _delivery_id_is_seen(self, delivery_id: str, now: float) -> bool:
+        """Return whether a delivery ID is still inside the idempotency window."""
         seen_at = self._seen_deliveries.get(delivery_id)
         if seen_at is not None and now - seen_at < self._idempotency_ttl:
-            return False
+            return True
         if seen_at is not None:
             self._seen_deliveries.pop(delivery_id, None)
+        return False
+
+    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
+        """Record an accepted delivery, returning False for a recent duplicate."""
+        if self._delivery_id_is_seen(delivery_id, now):
+            return False
         self._seen_deliveries[delivery_id] = now
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
@@ -788,13 +801,41 @@ class WebhookAdapter(BasePlatformAdapter):
                 request.headers.get("X-Request-ID", str(int(now * 1000))),
             ),
         )
-        if not self._record_delivery_id(delivery_id, now):
+        if self._delivery_id_is_seen(delivery_id, now):
             logger.info(
                 "[webhook] Skipping duplicate script delivery %s", delivery_id
             )
             return web.json_response(
                 {"status": "duplicate", "delivery_id": delivery_id},
                 status=200,
+            )
+
+        active_task = self._script_route_tasks.get(route_name)
+        if active_task is not None and not active_task.done():
+            logger.info(
+                "[webhook] Backpressuring script trigger while route is active route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return web.json_response(
+                {"status": "busy", "route": route_name, "delivery_id": delivery_id},
+                status=429,
+                headers={"Retry-After": "1"},
+            )
+
+        cooldown = max(0.0, float(route_config.get("script_cooldown_seconds", 10)))
+        completed_at = self._script_route_completed_at.get(route_name)
+        if completed_at is not None and now - completed_at < cooldown:
+            retry_after = max(1, int(cooldown - (now - completed_at) + 0.999))
+            logger.info(
+                "[webhook] Backpressuring script trigger during cooldown route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return web.json_response(
+                {"status": "cooldown", "route": route_name, "delivery_id": delivery_id},
+                status=429,
+                headers={"Retry-After": str(retry_after)},
             )
 
         script_name = str(route_config.get("script") or "").strip()
@@ -812,6 +853,14 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=500,
             )
 
+        # Mark the delivery seen only after it has passed backpressure and
+        # validation. Distinct busy/cooldown requests must remain retryable.
+        if not self._record_delivery_id(delivery_id, now):
+            return web.json_response(
+                {"status": "duplicate", "delivery_id": delivery_id},
+                status=200,
+            )
+
         timeout = float(route_config.get("script_timeout", 300))
         logger.info(
             "[webhook] script-trigger route=%s script=%s delivery=%s",
@@ -826,7 +875,7 @@ class WebhookAdapter(BasePlatformAdapter):
             ),
         }
         task = asyncio.create_task(
-            self._run_script_trigger(
+            self._run_guarded_script_trigger(
                 route_name=route_name,
                 script_path=script_path,
                 delivery_id=delivery_id,
@@ -834,6 +883,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery=delivery,
             )
         )
+        self._script_route_tasks[route_name] = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
@@ -841,6 +891,30 @@ class WebhookAdapter(BasePlatformAdapter):
             {"status": "accepted", "route": route_name, "delivery_id": delivery_id},
             status=202,
         )
+
+    async def _run_guarded_script_trigger(
+        self,
+        *,
+        route_name: str,
+        script_path: Path,
+        delivery_id: str,
+        timeout: float,
+        delivery: Optional[dict] = None,
+    ) -> None:
+        """Run one script for a route and record when its cooldown begins."""
+        try:
+            await self._run_script_trigger(
+                route_name=route_name,
+                script_path=script_path,
+                delivery_id=delivery_id,
+                timeout=timeout,
+                delivery=delivery,
+            )
+        finally:
+            self._script_route_completed_at[route_name] = time.time()
+            current_task = asyncio.current_task()
+            if self._script_route_tasks.get(route_name) is current_task:
+                self._script_route_tasks.pop(route_name, None)
 
     def _resolve_script_path(self, script_name: str) -> Path:
         """Resolve a route script under ~/.hermes/scripts only."""
@@ -878,6 +952,7 @@ class WebhookAdapter(BasePlatformAdapter):
             cmd = ["bash", str(script_path)]
         else:
             cmd = [str(script_path)]
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -885,7 +960,31 @@ class WebhookAdapter(BasePlatformAdapter):
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.CancelledError:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    logger.exception(
+                        "[webhook] failed to kill cancelled script route=%s script=%s delivery=%s",
+                        route_name,
+                        script_path.name,
+                        delivery_id,
+                    )
+                try:
+                    await proc.wait()
+                except Exception:
+                    logger.exception(
+                        "[webhook] failed to reap cancelled script route=%s script=%s delivery=%s",
+                        route_name,
+                        script_path.name,
+                        delivery_id,
+                    )
+            raise
         except asyncio.TimeoutError:
+            assert proc is not None
             logger.error(
                 "[webhook] script timeout route=%s script=%s delivery=%s timeout=%s",
                 route_name,
