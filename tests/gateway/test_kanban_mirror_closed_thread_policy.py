@@ -612,7 +612,7 @@ def test_active_thread_audit_adopts_unmapped_bot_thread_with_one_known_card():
         active_threads=[{"id": "orphan", "parent_id": "forum1"}],
         messages={("orphan", "orphan"): {
             "id": "orphan",
-            "content": "Work items\n🔴 Security follow-up `t1`",
+            "content": "Work items\n🔴 Security follow-up\n`ops · P0 · t1 · updated just now`",
             "author": {"id": "mirror-bot", "bot": True},
         }},
     )

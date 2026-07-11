@@ -686,7 +686,7 @@ async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None,
                 content = str(starter.get("content") or "") if isinstance(starter, dict) else ""
                 referenced_cards = {
                     token
-                    for token in re.findall(r"`([^`\s]+)`", content)
+                    for token in re.findall(r"(?<!\w)(t_[0-9a-f]{8}|t[0-9]+)(?!\w)", content)
                     if token in snapshot.cards
                 }
                 candidates = [
