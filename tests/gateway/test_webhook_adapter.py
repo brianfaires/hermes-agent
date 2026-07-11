@@ -743,6 +743,102 @@ class TestHTTPHandling:
         adapter._run_script_trigger.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_script_route_backpressures_distinct_delivery_while_run_is_active(self):
+        """A distinct busy delivery remains retryable instead of being discarded."""
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        release = asyncio.Event()
+
+        async def blocked_run(**kwargs):
+            await release.wait()
+
+        adapter._run_script_trigger = AsyncMock(side_effect=blocked_run)
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/script",
+                data=b"first",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert first.status == 202
+            await asyncio.sleep(0)
+
+            busy = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert busy.status == 429
+            assert busy.headers["Retry-After"] == "1"
+            assert (await busy.json())["status"] == "busy"
+            adapter._run_script_trigger.assert_awaited_once()
+
+            release.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            retried = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert retried.status == 202
+            assert (await retried.json())["status"] == "accepted"
+            assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_script_route_cooldown_backpressures_without_consuming_delivery_id(self):
+        """A distinct cooldown delivery can be retried after the quiet period."""
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_cooldown_seconds": 10,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/script",
+                data=b"first",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert first.status == 202
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            cooling_down = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert cooling_down.status == 429
+            assert cooling_down.headers["Retry-After"] == "10"
+            assert (await cooling_down.json())["status"] == "cooldown"
+            adapter._run_script_trigger.assert_awaited_once()
+
+            adapter._script_route_completed_at["script"] = time.time() - 11
+            retried = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert retried.status == 202
+            assert (await retried.json())["status"] == "accepted"
+            await asyncio.sleep(0)
+            assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_script_timeout_kills_and_reaps_child_process(self):
         """Timed-out script triggers must not leave orphaned child processes."""
         adapter = _make_adapter()
@@ -778,6 +874,52 @@ class TestHTTPHandling:
                 delivery_id="delivery-1",
                 timeout=0.01,
             )
+
+        assert proc.killed is True
+        assert proc.waited is True
+
+    @pytest.mark.asyncio
+    async def test_script_cancellation_kills_and_reaps_child_process(self):
+        """Gateway shutdown must not orphan an active script subprocess."""
+        adapter = _make_adapter()
+        started = asyncio.Event()
+
+        class SlowProc:
+            returncode = None
+
+            def __init__(self):
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                started.set()
+                await asyncio.Event().wait()
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                self.waited = True
+                return self.returncode
+
+        proc = SlowProc()
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            task = asyncio.create_task(
+                adapter._run_script_trigger(
+                    route_name="script",
+                    script_path=Path("/tmp/noop.py"),
+                    delivery_id="delivery-cancelled",
+                    timeout=10,
+                )
+            )
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
         assert proc.killed is True
         assert proc.waited is True
