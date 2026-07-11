@@ -100,7 +100,7 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
-VALID_OWNER_INSTRUCTION_STATUSES = {"pending", "accepted", "completed", "refused"}
+
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -922,12 +922,6 @@ class OwnerInstruction:
     body: str
     status: str
     created_at: int
-    accepted_at: Optional[int] = None
-    completed_at: Optional[int] = None
-    outcome: Optional[str] = None
-    claim_lock: Optional[str] = None
-    claim_expires: Optional[int] = None
-    worker_pid: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "OwnerInstruction":
@@ -1119,12 +1113,6 @@ CREATE TABLE IF NOT EXISTS task_owner_instructions (
     body          TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'pending',
     created_at    INTEGER NOT NULL,
-    accepted_at   INTEGER,
-    completed_at  INTEGER,
-    outcome       TEXT,
-    claim_lock    TEXT,
-    claim_expires INTEGER,
-    worker_pid    INTEGER,
     UNIQUE(source, source_key)
 );
 
@@ -1205,7 +1193,7 @@ CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_owner_instructions_task ON task_owner_instructions(task_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_owner_instructions_dispatch ON task_owner_instructions(status, claim_lock, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_instructions_dispatch ON task_owner_instructions(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
@@ -2661,7 +2649,7 @@ def create_owner_instruction(conn: sqlite3.Connection, *, task_id: str, assignee
 
 def route_owner_instruction(conn: sqlite3.Connection, instruction_id: int, *,
                             explicit_rerun: bool = False, passive: bool = False) -> str:
-    """Route an instruction through the original card, never a sidecar worker."""
+    """Route an instruction through the original card's ordinary lifecycle."""
     with write_txn(conn):
         row = conn.execute(
             "SELECT i.task_id,i.status,t.status task_status,t.assignee task_assignee "
@@ -2719,11 +2707,11 @@ def route_queued_owner_instructions(conn: sqlite3.Connection) -> int:
     return len(ids)
 
 
-def route_legacy_pending_owner_instructions(conn: sqlite3.Connection) -> int:
-    """Migrate pre-redesign pending instructions onto ordinary card dispatch."""
+def route_pending_owner_instructions(conn: sqlite3.Connection) -> int:
+    """Route pending instructions onto ordinary card dispatch."""
     rows = conn.execute(
         "SELECT id,body FROM task_owner_instructions "
-        "WHERE status='pending' AND claim_lock IS NULL ORDER BY created_at,id"
+        "WHERE status='pending' ORDER BY created_at,id"
     ).fetchall()
     for row in rows:
         intent = next(
@@ -2755,115 +2743,6 @@ def list_owner_instructions(conn: sqlite3.Connection, task_id: Optional[str] = N
         rows = conn.execute("SELECT * FROM task_owner_instructions WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall()
     return [OwnerInstruction.from_row(row) for row in rows]
 
-
-def claim_owner_instruction(conn: sqlite3.Connection, instruction_id: int,
-                            ttl_seconds: Optional[int] = None) -> Optional[OwnerInstruction]:
-    now = int(time.time()); token = secrets.token_hex(16)
-    with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE task_owner_instructions SET status='accepted',accepted_at=?,claim_lock=?,claim_expires=? "
-            "WHERE id=? AND status='pending' AND claim_lock IS NULL",
-            (now, token, now + _resolve_claim_ttl_seconds(ttl_seconds), int(instruction_id)),
-        )
-        if not cur.rowcount:
-            return None
-        row = conn.execute("SELECT * FROM task_owner_instructions WHERE id=?", (int(instruction_id),)).fetchone()
-        return OwnerInstruction.from_row(row)
-
-
-def set_owner_instruction_pid(conn: sqlite3.Connection, instruction_id: int, claim_lock: str, pid: int) -> bool:
-    with write_txn(conn):
-        return bool(conn.execute("UPDATE task_owner_instructions SET worker_pid=? WHERE id=? AND status='accepted' AND claim_lock=?",
-                                 (int(pid), int(instruction_id), claim_lock)).rowcount)
-
-
-def heartbeat_owner_instruction(conn: sqlite3.Connection, instruction_id: int,
-                                claim_lock: str, ttl_seconds: Optional[int] = None) -> bool:
-    """Renew an authoritative, unexpired owner-instruction lease."""
-    now = int(time.time())
-    with write_txn(conn):
-        return bool(conn.execute(
-            "UPDATE task_owner_instructions SET claim_expires=? "
-            "WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
-            (now + _resolve_claim_ttl_seconds(ttl_seconds), int(instruction_id), claim_lock, now),
-        ).rowcount)
-
-
-def finish_owner_instruction(conn: sqlite3.Connection, instruction_id: int, claim_lock: str,
-                             disposition: str, outcome: str, *, author: str) -> int:
-    """Atomically write the required outcome comment and terminal transition."""
-    if disposition not in {"completed", "refused"}:
-        raise ValueError("owner instruction disposition must be completed or refused")
-    if not str(outcome).strip():
-        raise ValueError("owner instruction outcome is required")
-    now = int(time.time())
-    archived_task = False
-    comment_id = 0
-    with write_txn(conn):
-        row = conn.execute("SELECT task_id,body FROM task_owner_instructions WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
-                           (int(instruction_id), claim_lock, now)).fetchone()
-        if not row:
-            raise ValueError("owner instruction claim is not active")
-        cur = conn.execute("INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)",
-                           (row["task_id"], author, f"[owner instruction #{instruction_id} {disposition}]\n{outcome.strip()}", now))
-        comment_id = int(cur.lastrowid or 0)
-        conn.execute("UPDATE task_owner_instructions SET status=?,completed_at=?,outcome=?,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
-                     (disposition, now, outcome.strip(), int(instruction_id)))
-        _append_event(conn, row["task_id"], f"owner_instruction_{disposition}", {"instruction_id": int(instruction_id)})
-        requested_close = any(
-            line == "Instruction: close_request"
-            for line in str(row["body"] or "").splitlines()
-        )
-        if disposition == "completed" and requested_close:
-            task_cur = conn.execute(
-                """UPDATE tasks SET status='archived',claim_lock=NULL,
-                          claim_expires=NULL,worker_pid=NULL
-                   WHERE id=? AND status!='archived'""",
-                (row["task_id"],),
-            )
-            if task_cur.rowcount:
-                run_id = _end_run(
-                    conn, row["task_id"], outcome="reclaimed", status="reclaimed",
-                    summary=f"archived by completed owner instruction #{instruction_id}",
-                )
-                _append_event(
-                    conn, row["task_id"], "archived",
-                    {"owner_instruction_id": int(instruction_id)}, run_id=run_id,
-                )
-                archived_task = True
-    if archived_task:
-        recompute_ready(conn)
-    return comment_id
-
-
-def release_stale_owner_instructions(conn: sqlite3.Connection) -> int:
-    now = int(time.time())
-    with write_txn(conn):
-        rows = conn.execute("SELECT id,worker_pid,claim_expires FROM task_owner_instructions WHERE status='accepted'").fetchall()
-        stale_ids = [
-            int(row["id"]) for row in rows
-            if (row["worker_pid"] is not None and not _pid_alive(row["worker_pid"]))
-            or (row["worker_pid"] is None and row["claim_expires"] < now)
-        ]
-        if not stale_ids:
-            return 0
-        placeholders = ",".join("?" for _ in stale_ids)
-        cur = conn.execute(f"UPDATE task_owner_instructions SET status='pending',accepted_at=NULL,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id IN ({placeholders})", stale_ids)
-        return cur.rowcount
-
-
-def build_owner_instruction_context(conn: sqlite3.Connection, instruction_id: int) -> str:
-    inst = get_owner_instruction(conn, instruction_id)
-    if inst is None:
-        raise ValueError(f"unknown owner instruction {instruction_id}")
-    task = get_task(conn, inst.task_id)
-    if task is None:
-        raise ValueError(f"unknown task {inst.task_id}")
-    return (f"Owner instruction #{inst.id} for original task {task.id}\n"
-            f"Original task status (do not change): {task.status}\nTitle: {task.title}\n"
-            f"Instruction actor: {inst.actor}\nInstruction:\n{inst.body}\n\n"
-            "Respond using kanban_comment on the original task with owner_instruction_disposition "
-            "completed or refused. Do not complete/block/change the original task.")
 
 
 # ---------------------------------------------------------------------------
@@ -6482,13 +6361,9 @@ def dispatch_once(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
-    # Drain records created by the retired sidecar lane. Live legacy workers
-    # keep their accepted lease; stale ones are released and routed normally.
-    release_stale_owner_instructions(conn)
-    route_legacy_pending_owner_instructions(conn)
+    route_pending_owner_instructions(conn)
     route_queued_owner_instructions(conn)
 
-    # Only ordinary card workers count toward dispatcher concurrency.
     active_total = int(conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE status='running'"
     ).fetchone()[0])

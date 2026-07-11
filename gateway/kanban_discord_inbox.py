@@ -446,7 +446,7 @@ def handle_reaction(
         unresolved = conn.execute(
             """SELECT id,source_key FROM task_owner_instructions
                WHERE task_id=? AND source='discord_reaction'
-                 AND status IN ('pending','queued','accepted','unroutable')
+                 AND status IN ('pending','queued','unroutable')
                  AND (source_key=? OR source_key LIKE ?)
                ORDER BY id DESC LIMIT 1""",
             (task_id, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),

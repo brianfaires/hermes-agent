@@ -255,11 +255,6 @@ def heartbeat_current_worker_from_env() -> bool:
     try:
         kb, conn = _connect()
         try:
-            instruction_raw = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", "")
-            instruction_claim = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION_CLAIM", "")
-            if instruction_raw and instruction_claim:
-                kb.heartbeat_owner_instruction(conn, int(instruction_raw), instruction_claim)
-                return True
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
             try:
                 kb.heartbeat_claim(conn, tid, claimer=claim_lock)
@@ -501,8 +496,6 @@ def _handle_list(args: dict, **kw) -> str:
 
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
-    if _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", ""):
-        return tool_error("instruction workers must use kanban_comment with owner_instruction_disposition")
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -625,8 +618,6 @@ def _handle_complete(args: dict, **kw) -> str:
 
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
-    if _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", ""):
-        return tool_error("instruction workers must use kanban_comment with owner_instruction_disposition")
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         return tool_error(
@@ -686,12 +677,6 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            instruction_raw = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", "")
-            instruction_claim = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION_CLAIM", "")
-            if instruction_raw:
-                if not instruction_claim or not kb.heartbeat_owner_instruction(conn, int(instruction_raw), instruction_claim):
-                    return tool_error("owner instruction claim is not active")
-                return _ok(task_id=tid, owner_instruction_id=int(instruction_raw))
             # Extend the claim TTL first. The dispatcher pins
             # HERMES_KANBAN_CLAIM_LOCK in the worker env at spawn time
             # (see _default_spawn in kanban_db.py); falling back to the
@@ -731,9 +716,7 @@ def _handle_comment(args: dict, **kw) -> str:
     body = args.get("body")
     if not body or not str(body).strip():
         return tool_error("body is required")
-    disposition = args.get("owner_instruction_disposition")
-    if disposition is not None and disposition not in {"completed", "refused"}:
-        return tool_error("owner_instruction_disposition must be completed or refused")
+
     # Author is intentionally derived from the worker's own runtime
     # identity, NOT from caller-supplied args. Comments are injected
     # into the next worker's system prompt by ``build_worker_context``
@@ -748,21 +731,6 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            if disposition is not None:
-                raw_id = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", "")
-                claim = _session_env("HERMES_KANBAN_OWNER_INSTRUCTION_CLAIM", "")
-                env_task = _session_kanban_task()
-                if not raw_id or not claim or env_task != tid or not author or author == "worker":
-                    return tool_error("owner instruction disposition is not valid in this worker context")
-                try:
-                    instruction_id = int(raw_id)
-                except ValueError:
-                    return tool_error("invalid owner instruction id")
-                cid = kb.finish_owner_instruction(conn, instruction_id, claim, disposition,
-                                                  str(body), author=author)
-                return _ok(task_id=tid, comment_id=cid,
-                           owner_instruction_id=instruction_id,
-                           owner_instruction_status=disposition)
             cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
         finally:
@@ -780,8 +748,7 @@ def _handle_create(args: dict, **kw) -> str:
     ``parents`` can be a list of task ids; dependency-gated promotion
     works as usual.
     """
-    if _session_env("HERMES_KANBAN_OWNER_INSTRUCTION", ""):
-        return tool_error("instruction workers cannot create cards; use kanban_comment for disposition")
+
     title = args.get("title")
     if not title or not str(title).strip():
         return tool_error("title is required")
@@ -1313,11 +1280,7 @@ KANBAN_COMMENT_SCHEMA = {
                 "type": "string",
                 "description": "Markdown-supported comment body.",
             },
-            "owner_instruction_disposition": {
-                "type": "string",
-                "enum": ["completed", "refused"],
-                "description": "Instruction workers only: atomically records this comment as the durable terminal outcome.",
-            },
+
             "board": _board_schema_prop(),
         },
         "required": ["task_id", "body"],
