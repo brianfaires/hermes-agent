@@ -156,7 +156,8 @@ def test_reaction_intent_mapping_and_normalization():
         ("watch", "watch"), ("rerun", "rerun_request"), ("redo", "rerun_request"),
         ("reject", "reject"), ("rejected", "reject"), ("no", "reject"),
         ("context", "needs_context"), ("review", "review_request"),
-        ("expand", "expand_idea"),
+        ("expand", "expand_idea"), ("close.", "close_request"),
+        ("“YES!”", "approve"), ("...stop???", "pause"),
     ],
 )
 def test_text_action_aliases_are_exact_casefolded_matches(text, intent):
@@ -165,7 +166,7 @@ def test_text_action_aliases_are_exact_casefolded_matches(text, intent):
     assert action.intent == intent
 
 
-@pytest.mark.parametrize("text", ["close.", "please close", "yes please", "review this", ""])
+@pytest.mark.parametrize("text", ["please close", "yes please", "review this", "cl.ose", ""])
 def test_text_action_does_not_match_conversation_or_punctuation(text):
     assert text_action_for_command(text) is None
 

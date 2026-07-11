@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -119,8 +120,15 @@ _TEXT_ACTION_ALIASES: dict[str, str] = {
 
 
 def text_action_for_command(text: str) -> ParsedKanbanReaction | None:
-    """Resolve an exact, prefix-free text action after whitespace/case normalization."""
-    command = (text or "").strip().casefold()
+    """Resolve an exact bare action after trimming edge whitespace/punctuation."""
+    command = (text or "").casefold()
+    start = 0
+    end = len(command)
+    while start < end and (command[start].isspace() or unicodedata.category(command[start]).startswith("P")):
+        start += 1
+    while end > start and (command[end - 1].isspace() or unicodedata.category(command[end - 1]).startswith("P")):
+        end -= 1
+    command = command[start:end]
     emoji = _TEXT_ACTION_ALIASES.get(command)
     return _REACTION_INTENTS.get(emoji) if emoji is not None else None
 
