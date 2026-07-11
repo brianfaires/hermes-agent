@@ -86,6 +86,7 @@ class KanbanReplyInboxResult:
     task_id: str | None = None
     action: str | None = None
     kanban_comment_id: int | None = None
+    routed_task_id: str | None = None
     ack: str | None = None
 
 
@@ -94,11 +95,11 @@ _REACTION_INTENTS: dict[str, ParsedKanbanReaction] = {
     "⏸": ParsedKanbanReaction("⏸️", "pause", "Pause work; blocked on human input."),
     "🗑": ParsedKanbanReaction("🗑️", "close_request", "Close card or dismiss as noise."),
     "👀": ParsedKanbanReaction("👀", "watch", "Watching; keep me updated."),
-    "🔁": ParsedKanbanReaction("🔁", "rerun", "Rerun / try again / rework needed."),
+    "🔁": ParsedKanbanReaction("🔁", "rerun_request", "Rerun / try again / rework needed."),
     "🚫": ParsedKanbanReaction("🚫", "reject", "Reject / do not do this."),
     "❔": ParsedKanbanReaction("❔", "needs_context", "Need more context / explanation."),
-    "🧐": ParsedKanbanReaction("🧐", "review", "Review closely / question assumptions."),
-    "🤔": ParsedKanbanReaction("🤔", "expand", "Interesting — flesh this out."),
+    "🧐": ParsedKanbanReaction("🧐", "review_request", "Review closely / question assumptions."),
+    "🤔": ParsedKanbanReaction("🤔", "expand_idea", "Interesting — flesh this out."),
 }
 
 
@@ -322,20 +323,51 @@ def apply_instruction(
     )
 
 
+def _reaction_author(ctx: DiscordReactionContext) -> str:
+    """Return a safe, stable provenance label for a Discord reaction actor."""
+    author_id = str(ctx.author_id or "").strip()
+    return f"discord:{author_id}" if author_id.isdigit() else "discord:unknown"
+
+
 def _reaction_comment_body(ctx: DiscordReactionContext, replied_to_comment_id: int | None) -> str:
     lines = [
-        "[discord reaction intent]",
-        f"Reaction from discord:{ctx.author_label}",
+        "[discord reaction instruction]",
+        f"Instruction from {_reaction_author(ctx)}",
         f"Emoji: {ctx.emoji}",
-        f"Intent: {ctx.intent}",
+        f"Instruction: {ctx.intent}",
         f"Meaning: {ctx.meaning}",
         f"Thread: {ctx.thread_id}",
         f"Message: {ctx.message_id}",
+        f"Reaction key: {ctx.reaction_key}",
         "State change: none (owner-only)",
     ]
     if replied_to_comment_id is not None:
         lines.append(f"Reacted Kanban comment: #{replied_to_comment_id}")
     return "\n".join(lines).strip()
+
+
+def _reaction_followup_body(ctx: DiscordReactionContext, original_task_id: str) -> str:
+    """Build a dispatchable owner instruction without changing the source card."""
+    return "\n".join([
+        "[discord reaction instruction]",
+        f"Original card: {original_task_id}",
+        f"Instruction from {_reaction_author(ctx)}",
+        f"Emoji: {ctx.emoji}",
+        f"Instruction: {ctx.intent}",
+        f"Meaning: {ctx.meaning}",
+        f"Discord thread: {ctx.thread_id}",
+        f"Discord message: {ctx.message_id}",
+        "",
+        "Carry out this instruction or leave a durable explanation on the original card for refusing it.",
+    ])
+
+
+def _find_reaction_comment_id(conn: sqlite3.Connection, task_id: str, reaction_key: str) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM task_comments WHERE task_id = ? AND body LIKE ? ORDER BY id DESC LIMIT 1",
+        (task_id, f"%Reaction key: {reaction_key}%"),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
 
 
 def handle_reaction(
@@ -359,12 +391,32 @@ def handle_reaction(
     mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
     try:
         ensure_receipts(mirror_conn)
+        mirror_conn.execute("BEGIN IMMEDIATE")
         if receipt_exists(mirror_conn, ctx.reaction_key):
+            mirror_conn.rollback()
             return KanbanReplyInboxResult(consumed=True, reason="duplicate", task_id=task_id, action="duplicate")
 
+        task = kb.get_task(conn, task_id)
+        if task is None:
+            return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+        if not task.assignee:
+            return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
+
+        routed_task_id = kb.create_task(
+            conn,
+            title=f"Discord reaction instruction: {ctx.intent} for {task_id}",
+            body=_reaction_followup_body(ctx, task_id),
+            assignee=task.assignee,
+            created_by=_reaction_author(ctx),
+            priority=task.priority,
+            idempotency_key=f"discord-reaction-followup:{ctx.reaction_key}",
+            board=resolved_board_slug,
+        )
         replied_to_comment_id = find_receipt_comment_id(mirror_conn, ctx.message_id)
-        comment_body = _reaction_comment_body(ctx, replied_to_comment_id)
-        comment_id = kb.add_comment(conn, task_id, author=f"discord:{ctx.author_label}", body=comment_body)
+        comment_id = _find_reaction_comment_id(conn, task_id, ctx.reaction_key)
+        if comment_id is None:
+            comment_body = _reaction_comment_body(ctx, replied_to_comment_id)
+            comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
         record_receipt(
             mirror_conn,
             discord_message_id=ctx.reaction_key,
@@ -384,7 +436,8 @@ def handle_reaction(
             task_id=task_id,
             action=f"reaction:{ctx.intent}",
             kanban_comment_id=comment_id,
-            ack=f"Recorded reaction on Kanban card {task_id} as comment #{comment_id}.",
+            routed_task_id=routed_task_id,
+            ack=f"Recorded reaction on Kanban card {task_id} as comment #{comment_id}; routed to {task.assignee} as {routed_task_id}.",
         )
     finally:
         mirror_conn.close()
