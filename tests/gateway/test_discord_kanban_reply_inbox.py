@@ -314,7 +314,7 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
 
 
 @pytest.mark.asyncio
-async def test_removed_reaction_can_be_added_again_as_new_instruction(kanban_db, inbox_config):
+async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, inbox_config):
     _db_path, tid = kanban_db
     payload = reaction_payload(emoji="🗑️")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
@@ -324,14 +324,13 @@ async def test_removed_reaction_can_be_added_again_as_new_instruction(kanban_db,
     assert removed.reason == "reaction_removed"
 
     second = await maybe_handle_discord_reaction(payload, config=inbox_config)
-    assert second.owner_instruction_id is not None
-    assert second.owner_instruction_id != first.owner_instruction_id
+    assert second.owner_instruction_id == first.owner_instruction_id
 
     conn = kb.connect()
     try:
         instructions = kb.list_owner_instructions(conn, task_id=tid)
-        assert len(instructions) == 2
-        assert len(kb.list_comments(conn, tid)) == 2
+        assert len(instructions) == 1
+        assert len(kb.list_comments(conn, tid)) == 1
     finally:
         conn.close()
 

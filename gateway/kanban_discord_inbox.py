@@ -446,15 +446,29 @@ def handle_reaction(
             if generation == 0
             else f"{ctx.reaction_key}:generation:{generation}"
         )
-        instruction = kb.create_owner_instruction(
-            conn,
-            task_id=task_id,
-            assignee=task.assignee,
-            source="discord_reaction",
-            source_key=source_key,
-            actor=_reaction_author(ctx),
-            body=_reaction_followup_body(ctx, task_id),
-        )
+        unresolved = conn.execute(
+            """SELECT id,source_key FROM task_owner_instructions
+               WHERE task_id=? AND source='discord_reaction'
+                 AND status IN ('pending','accepted')
+                 AND (source_key=? OR source_key LIKE ?)
+               ORDER BY id DESC LIMIT 1""",
+            (task_id, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
+        ).fetchone()
+        if unresolved is not None:
+            source_key = str(unresolved["source_key"])
+            instruction = kb.get_owner_instruction(conn, int(unresolved["id"]))
+        else:
+            instruction = kb.create_owner_instruction(
+                conn,
+                task_id=task_id,
+                assignee=task.assignee,
+                source="discord_reaction",
+                source_key=source_key,
+                actor=_reaction_author(ctx),
+                body=_reaction_followup_body(ctx, task_id),
+            )
+        if instruction is None:  # pragma: no cover - row disappeared inside one connection
+            raise RuntimeError("owner instruction disappeared during reaction handling")
         replied_to_comment_id = find_receipt_comment_id(mirror_conn, ctx.message_id)
         comment_id = _find_reaction_comment_id(conn, task_id, source_key)
         if comment_id is None:
