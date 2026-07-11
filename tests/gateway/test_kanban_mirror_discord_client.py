@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 
-from gateway.kanban_mirror.discord_client import DiscordClient
+import pytest
+
+from gateway.kanban_mirror.discord_client import DiscordAPIError, DiscordClient
 
 
 class _DummyResponse:
@@ -90,3 +95,75 @@ def test_list_active_threads_handles_malformed_threads_payload(monkeypatch):
     )
 
     assert DiscordClient("token").list_active_threads("guild1") == []
+
+
+def test_get_retries_transient_network_timeouts(monkeypatch):
+    attempts = []
+
+    def flaky_urlopen(req, timeout=30):
+        attempts.append(req.full_url)
+        if len(attempts) < 3:
+            raise urllib.error.URLError(TimeoutError("TLS handshake timed out"))
+        return _DummyResponse(payload=json.dumps({"threads": []}))
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    assert DiscordClient("token").list_active_threads("guild1") == []
+    assert len(attempts) == 3
+
+
+def test_get_retries_transient_discord_503(monkeypatch):
+    attempts = []
+
+    def flaky_urlopen(req, timeout=30):
+        attempts.append(req.full_url)
+        if len(attempts) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "unavailable", Message(), io.BytesIO(b"upstream unavailable")
+            )
+        return _DummyResponse(payload=json.dumps({"threads": []}))
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky_urlopen)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    assert DiscordClient("token").list_active_threads("guild1") == []
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_get_stops_after_transient_http_retries(monkeypatch, status):
+    attempts = []
+
+    def always_fails(req, timeout=30):
+        attempts.append(req.full_url)
+        raise urllib.error.HTTPError(
+            req.full_url, status, "unavailable", Message(), io.BytesIO(b"upstream unavailable")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", always_fails)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    with pytest.raises(DiscordAPIError) as exc:
+        DiscordClient("token").list_active_threads("guild1")
+
+    assert exc.value.status == status
+    assert len(attempts) == 3
+
+
+def test_non_get_request_does_not_retry_transient_http_error(monkeypatch):
+    attempts = []
+
+    def always_fails(req, timeout=30):
+        attempts.append(req.full_url)
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "unavailable", Message(), io.BytesIO(b"upstream unavailable")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", always_fails)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    with pytest.raises(DiscordAPIError):
+        DiscordClient("token").update_thread("thread1", name="Updated")
+
+    assert len(attempts) == 1

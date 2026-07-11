@@ -154,6 +154,8 @@ class DiscordClient:
         self.timeout = timeout
 
     _MAX_429_RETRIES = 3
+    _MAX_TRANSIENT_RETRIES = 3
+    _TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504})
 
     def request(
         self,
@@ -174,7 +176,8 @@ class DiscordClient:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        attempt = 0
+        rate_limit_attempt = 0
+        transient_attempt = 0
         while True:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -184,8 +187,8 @@ class DiscordClient:
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="replace")
                 if e.code == 429:
-                    attempt += 1
-                    if attempt > self._MAX_429_RETRIES:
+                    rate_limit_attempt += 1
+                    if rate_limit_attempt > self._MAX_429_RETRIES:
                         raise DiscordAPIError(method, path, e.code, body)
                     try:
                         retry_after = float((json.loads(body) or {}).get("retry_after", 1.0))
@@ -193,15 +196,29 @@ class DiscordClient:
                         retry_after = 1.0
                     time.sleep(min(max(retry_after, 0.5), 10.0))
                     continue
+                if method == "GET" and e.code in self._TRANSIENT_HTTP_STATUSES:
+                    transient_attempt += 1
+                    if transient_attempt < self._MAX_TRANSIENT_RETRIES:
+                        time.sleep(0.5 * (2 ** (transient_attempt - 1)))
+                        continue
                 if e.code not in expected:
                     raise DiscordAPIError(method, path, e.code, body)
                 parsed = json.loads(body) if body else None
                 return DiscordResponse(e.code, parsed, body)
             except urllib.error.URLError as e:
+                if method == "GET":
+                    transient_attempt += 1
+                    if transient_attempt < self._MAX_TRANSIENT_RETRIES:
+                        time.sleep(0.5 * (2 ** (transient_attempt - 1)))
+                        continue
                 raise RuntimeError(f"Discord API network error for {method} {path}: {sanitize_error(e)}") from e
 
     def get_channel(self, channel_id: str) -> dict[str, Any]:
         resp = self.request("GET", f"/channels/{channel_id}", expected={200})
+        return resp.data or {}
+
+    def get_current_user(self) -> dict[str, Any]:
+        resp = self.request("GET", "/users/@me", expected={200})
         return resp.data or {}
 
     def list_active_threads(self, guild_id: str) -> list[dict[str, Any]]:
