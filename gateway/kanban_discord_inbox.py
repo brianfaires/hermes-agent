@@ -32,7 +32,6 @@ from gateway.kanban_mirror.state import (
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_ACTIONS = {"comment", "block", "unblock"}
-_RESERVED_COMMANDS = {"complete", "delete"}
 _COMMAND_USAGE = "Usage: comment <text>, block <reason>, or unblock"
 
 
@@ -243,8 +242,6 @@ def parse_instruction(text: str, *, config: KanbanReplyInboxConfig | None = None
         if command == "unblock" and arg:
             raise ValueError("Usage: unblock")
         return ParsedKanbanInstruction(action=command, text=arg)
-    if command in _RESERVED_COMMANDS:
-        raise ValueError(f"unsupported Kanban inbox command: {command}")
     if cfg.default_action != "comment" or "comment" not in cfg.allow_commands:
         raise ValueError(_COMMAND_USAGE)
     return ParsedKanbanInstruction(action="comment", text=body)

@@ -127,7 +127,7 @@ def test_parse_default_comment_and_commands(inbox_config):
 
 @pytest.mark.parametrize(
     "text",
-    ["block", "unblock extra", "complete now", "complete\tnow", "complete\nnow", "delete this", "delete\tthis"],
+    ["block", "unblock extra"],
 )
 def test_parse_malformed_command_rejected(inbox_config, text):
     with pytest.raises(ValueError):
@@ -142,9 +142,13 @@ def test_parse_malformed_command_rejected(inbox_config, text):
         "create-child investigate logs",
         "create_child investigate logs",
         "archive after review",
+        "complete now",
+        "complete\tnow",
+        "delete this",
+        "delete\tthis",
     ],
 )
-def test_unreserved_mutation_words_are_recorded_as_comments(inbox_config, text):
+def test_non_command_keywords_are_recorded_as_comments(inbox_config, text):
     parsed = parse_instruction(text, config=inbox_config)
     assert parsed.action == "comment"
     assert parsed.text == text
