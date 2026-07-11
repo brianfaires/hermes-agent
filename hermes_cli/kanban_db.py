@@ -100,6 +100,7 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+VALID_OWNER_INSTRUCTION_STATUSES = {"pending", "accepted", "completed", "refused"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -909,6 +910,31 @@ class Task:
 
 
 @dataclass
+class OwnerInstruction:
+    """Durable owner request attached to an existing task."""
+
+    id: int
+    task_id: str
+    assignee: str
+    source: str
+    source_key: str
+    actor: str
+    body: str
+    status: str
+    created_at: int
+    accepted_at: Optional[int] = None
+    completed_at: Optional[int] = None
+    outcome: Optional[str] = None
+    claim_lock: Optional[str] = None
+    claim_expires: Optional[int] = None
+    worker_pid: Optional[int] = None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "OwnerInstruction":
+        return cls(**{name: row[name] for name in cls.__dataclass_fields__})
+
+
+@dataclass
 class Run:
     """In-memory view of a ``task_runs`` row.
 
@@ -1083,6 +1109,25 @@ CREATE TABLE IF NOT EXISTS task_comments (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_owner_instructions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    assignee      TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    source_key    TEXT NOT NULL,
+    actor         TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    accepted_at   INTEGER,
+    completed_at  INTEGER,
+    outcome       TEXT,
+    claim_lock    TEXT,
+    claim_expires INTEGER,
+    worker_pid    INTEGER,
+    UNIQUE(source, source_key)
+);
+
 CREATE TABLE IF NOT EXISTS task_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    TEXT NOT NULL,
@@ -1159,6 +1204,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_instructions_task ON task_owner_instructions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_instructions_dispatch ON task_owner_instructions(status, claim_lock, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
@@ -2585,6 +2632,128 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Owner instructions
+# ---------------------------------------------------------------------------
+
+def create_owner_instruction(conn: sqlite3.Connection, *, task_id: str, assignee: str,
+                             source: str, source_key: str, actor: str, body: str) -> OwnerInstruction:
+    """Create or return the authoritative source-deduplicated instruction."""
+    if not all(str(v).strip() for v in (task_id, assignee, source, source_key, actor, body)):
+        raise ValueError("owner instruction fields are required")
+    now = int(time.time())
+    with write_txn(conn):
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        conn.execute(
+            "INSERT OR IGNORE INTO task_owner_instructions "
+            "(task_id,assignee,source,source_key,actor,body,status,created_at) "
+            "VALUES (?,?,?,?,?,?,'pending',?)",
+            (task_id, assignee.strip(), source.strip(), source_key.strip(), actor.strip(), body.strip(), now),
+        )
+        row = conn.execute("SELECT * FROM task_owner_instructions WHERE source=? AND source_key=?",
+                           (source.strip(), source_key.strip())).fetchone()
+        assert row is not None
+        return OwnerInstruction.from_row(row)
+
+
+def get_owner_instruction(conn: sqlite3.Connection, instruction_id: int) -> Optional[OwnerInstruction]:
+    row = conn.execute("SELECT * FROM task_owner_instructions WHERE id=?", (int(instruction_id),)).fetchone()
+    return OwnerInstruction.from_row(row) if row else None
+
+
+def list_owner_instructions(conn: sqlite3.Connection, task_id: Optional[str] = None) -> list[OwnerInstruction]:
+    if task_id is None:
+        rows = conn.execute("SELECT * FROM task_owner_instructions ORDER BY created_at,id").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM task_owner_instructions WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall()
+    return [OwnerInstruction.from_row(row) for row in rows]
+
+
+def claim_owner_instruction(conn: sqlite3.Connection, instruction_id: int,
+                            ttl_seconds: Optional[int] = None) -> Optional[OwnerInstruction]:
+    now = int(time.time()); token = secrets.token_hex(16)
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE task_owner_instructions SET status='accepted',accepted_at=?,claim_lock=?,claim_expires=? "
+            "WHERE id=? AND status='pending' AND claim_lock IS NULL",
+            (now, token, now + _resolve_claim_ttl_seconds(ttl_seconds), int(instruction_id)),
+        )
+        if not cur.rowcount:
+            return None
+        row = conn.execute("SELECT * FROM task_owner_instructions WHERE id=?", (int(instruction_id),)).fetchone()
+        return OwnerInstruction.from_row(row)
+
+
+def set_owner_instruction_pid(conn: sqlite3.Connection, instruction_id: int, claim_lock: str, pid: int) -> bool:
+    with write_txn(conn):
+        return bool(conn.execute("UPDATE task_owner_instructions SET worker_pid=? WHERE id=? AND status='accepted' AND claim_lock=?",
+                                 (int(pid), int(instruction_id), claim_lock)).rowcount)
+
+
+def heartbeat_owner_instruction(conn: sqlite3.Connection, instruction_id: int,
+                                claim_lock: str, ttl_seconds: Optional[int] = None) -> bool:
+    """Renew an authoritative, unexpired owner-instruction lease."""
+    now = int(time.time())
+    with write_txn(conn):
+        return bool(conn.execute(
+            "UPDATE task_owner_instructions SET claim_expires=? "
+            "WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
+            (now + _resolve_claim_ttl_seconds(ttl_seconds), int(instruction_id), claim_lock, now),
+        ).rowcount)
+
+
+def finish_owner_instruction(conn: sqlite3.Connection, instruction_id: int, claim_lock: str,
+                             disposition: str, outcome: str, *, author: str) -> int:
+    """Atomically write the required outcome comment and terminal transition."""
+    if disposition not in {"completed", "refused"}:
+        raise ValueError("owner instruction disposition must be completed or refused")
+    if not str(outcome).strip():
+        raise ValueError("owner instruction outcome is required")
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute("SELECT task_id FROM task_owner_instructions WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
+                           (int(instruction_id), claim_lock, now)).fetchone()
+        if not row:
+            raise ValueError("owner instruction claim is not active")
+        cur = conn.execute("INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)",
+                           (row["task_id"], author, f"[owner instruction #{instruction_id} {disposition}]\n{outcome.strip()}", now))
+        conn.execute("UPDATE task_owner_instructions SET status=?,completed_at=?,outcome=?,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+                     (disposition, now, outcome.strip(), int(instruction_id)))
+        _append_event(conn, row["task_id"], f"owner_instruction_{disposition}", {"instruction_id": int(instruction_id)})
+        return int(cur.lastrowid or 0)
+
+
+def release_stale_owner_instructions(conn: sqlite3.Connection) -> int:
+    now = int(time.time())
+    with write_txn(conn):
+        rows = conn.execute("SELECT id,worker_pid,claim_expires FROM task_owner_instructions WHERE status='accepted'").fetchall()
+        stale_ids = [
+            int(row["id"]) for row in rows
+            if (row["worker_pid"] is not None and not _pid_alive(row["worker_pid"]))
+            or (row["worker_pid"] is None and row["claim_expires"] < now)
+        ]
+        if not stale_ids:
+            return 0
+        placeholders = ",".join("?" for _ in stale_ids)
+        cur = conn.execute(f"UPDATE task_owner_instructions SET status='pending',accepted_at=NULL,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id IN ({placeholders})", stale_ids)
+        return cur.rowcount
+
+
+def build_owner_instruction_context(conn: sqlite3.Connection, instruction_id: int) -> str:
+    inst = get_owner_instruction(conn, instruction_id)
+    if inst is None:
+        raise ValueError(f"unknown owner instruction {instruction_id}")
+    task = get_task(conn, inst.task_id)
+    if task is None:
+        raise ValueError(f"unknown task {inst.task_id}")
+    return (f"Owner instruction #{inst.id} for original task {task.id}\n"
+            f"Original task status (do not change): {task.status}\nTitle: {task.title}\n"
+            f"Instruction actor: {inst.actor}\nInstruction:\n{inst.body}\n\n"
+            "Respond using kanban_comment on the original task with owner_instruction_disposition "
+            "completed or refused. Do not complete/block/change the original task.")
 
 
 # ---------------------------------------------------------------------------
@@ -4945,6 +5114,8 @@ class DispatchResult:
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
     rate_limited: list[str] = field(default_factory=list)
+    owner_instructions_spawned: list[tuple[int, str, str]] = field(default_factory=list)
+    """Instruction worker ``(instruction_id, task_id, assignee)`` triples."""
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
@@ -6135,6 +6306,7 @@ def dispatch_once(
     conn: sqlite3.Connection,
     *,
     spawn_fn=None,
+    owner_instruction_spawn_fn=None,
     ttl_seconds: Optional[int] = None,
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
@@ -6201,6 +6373,49 @@ def dispatch_once(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    release_stale_owner_instructions(conn)
+
+    # Owner instructions are an independent lightweight lane: the original
+    # card (including a blocked card) is never claimed or status-mutated.
+    active_tasks = int(conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running'").fetchone()[0])
+    active_instructions = int(conn.execute("SELECT COUNT(*) FROM task_owner_instructions WHERE status='accepted'").fetchone()[0])
+    active_total = active_tasks + active_instructions
+    profile_active = {r["assignee"]: int(r["n"]) for r in conn.execute(
+        "SELECT assignee,COUNT(*) n FROM (SELECT assignee FROM tasks WHERE status='running' UNION ALL "
+        "SELECT assignee FROM task_owner_instructions WHERE status='accepted') GROUP BY assignee")}
+    pending = conn.execute("SELECT id,task_id,assignee FROM task_owner_instructions WHERE status='pending' AND claim_lock IS NULL ORDER BY created_at,id").fetchall()
+    for irow in pending:
+        if max_spawn is not None and active_total >= max_spawn:
+            break
+        if max_in_progress is not None and active_total >= max_in_progress:
+            break
+        if max_in_progress_per_profile and profile_active.get(irow["assignee"], 0) >= max_in_progress_per_profile:
+            continue
+        if dry_run:
+            result.owner_instructions_spawned.append((irow["id"], irow["task_id"], irow["assignee"]))
+            active_total += 1; profile_active[irow["assignee"]] = profile_active.get(irow["assignee"], 0) + 1
+            continue
+        inst = claim_owner_instruction(conn, irow["id"], ttl_seconds)
+        if inst is None:
+            continue
+        task = get_task(conn, inst.task_id)
+        if task is None:
+            continue
+        try:
+            workspace = resolve_workspace(task, board=board)
+            spawner = owner_instruction_spawn_fn
+            if spawner is None:
+                pid = _default_spawn(task, str(workspace), board=board, owner_instruction=inst)
+            else:
+                pid = spawner(inst, task, str(workspace), board=board)
+            if pid:
+                set_owner_instruction_pid(conn, inst.id, inst.claim_lock or "", int(pid))
+            result.owner_instructions_spawned.append((inst.id, inst.task_id, inst.assignee))
+            active_total += 1; profile_active[inst.assignee] = profile_active.get(inst.assignee, 0) + 1
+        except Exception:
+            with write_txn(conn):
+                conn.execute("UPDATE task_owner_instructions SET status='pending',accepted_at=NULL,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?", (inst.id,))
+            _log.exception("failed to spawn owner instruction %s", inst.id)
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
@@ -6209,13 +6424,9 @@ def dispatch_once(
     # board, since "running" tasks aren't reclaimed by completion alone —
     # they sit in status='running' until the worker calls
     # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
-    running_count = 0
+    running_count = active_total
     if max_spawn is not None:
-        running_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-            ).fetchone()[0]
-        )
+        running_count = active_total
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
@@ -6227,15 +6438,14 @@ def dispatch_once(
     # resource-constrained hosts) can finish what they have before more tasks
     # pile up and time out.
     if max_in_progress is not None and ready_rows:
-        in_progress = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-        ).fetchone()[0]
+        in_progress = active_total
         if in_progress >= max_in_progress:
             return result
         # Only spawn enough to reach the cap, respecting max_spawn too.
         remaining = max_in_progress - in_progress
-        if max_spawn is None or max_spawn > remaining:
-            max_spawn = remaining
+        absolute_cap = running_count + remaining
+        if max_spawn is None or max_spawn > absolute_cap:
+            max_spawn = absolute_cap
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -6249,14 +6459,14 @@ def dispatch_once(
         isinstance(max_in_progress_per_profile, int)
         and max_in_progress_per_profile > 0
     ) else None
-    _per_profile_running: dict[str, int] = {}
+    _per_profile_running: dict[str, int] = dict(profile_active)
     if _per_profile_cap is not None:
         for prow in conn.execute(
             "SELECT assignee, COUNT(*) AS n FROM tasks "
             "WHERE status = 'running' AND assignee IS NOT NULL "
             "GROUP BY assignee"
         ):
-            _per_profile_running[prow["assignee"]] = int(prow["n"])
+            _per_profile_running.setdefault(prow["assignee"], int(prow["n"]))
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -6823,6 +7033,7 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+    owner_instruction: Optional[OwnerInstruction] = None,
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -6837,14 +7048,25 @@ def _default_spawn(
     from. Workers cannot accidentally see other boards.
     """
     import subprocess
-    if not task.assignee:
+    assignee = owner_instruction.assignee if owner_instruction is not None else task.assignee
+    if not assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
     from hermes_cli.profiles import normalize_profile_name
 
-    profile_arg = normalize_profile_name(task.assignee)
+    profile_arg = normalize_profile_name(assignee)
 
-    prompt = f"work kanban task {task.id}"
+    if owner_instruction:
+        prompt = (
+            f"respond to owner instruction {owner_instruction.id} on kanban task {task.id}\n\n"
+            "The authorized owner instruction is delimited below. Carry it out against the original card, "
+            "then record completed or refused disposition through kanban_comment.\n"
+            "<owner_instruction>\n"
+            f"{owner_instruction.body}\n"
+            "</owner_instruction>"
+        )
+    else:
+        prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
@@ -6869,11 +7091,16 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    if owner_instruction is not None:
+        env["HERMES_KANBAN_OWNER_INSTRUCTION"] = str(owner_instruction.id)
+        env["HERMES_KANBAN_OWNER_INSTRUCTION_CLAIM"] = owner_instruction.claim_lock or ""
+        env.pop("HERMES_KANBAN_RUN_ID", None)
+        env.pop("HERMES_KANBAN_CLAIM_LOCK", None)
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
-    if task.current_run_id is not None:
+    if owner_instruction is None and task.current_run_id is not None:
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
-    if task.claim_lock:
+    if owner_instruction is None and task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
     # Goal-loop mode: the worker reads these and wraps its run in the
     # Ralph-style /goal judge loop (see cli.py quiet-mode path). Only set
@@ -6964,7 +7191,8 @@ def _default_spawn(
     # logs don't collide across boards that happen to share task ids.
     log_dir = worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{task.id}.log"
+    log_path = (log_dir / f"{task.id}.owner-instruction-{owner_instruction.id}.log"
+                if owner_instruction else log_dir / f"{task.id}.log")
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(log_path, rotate_bytes, backup_count)
 

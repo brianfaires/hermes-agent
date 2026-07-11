@@ -385,6 +385,10 @@ def _format_item(item: WorkItem, initiative: Initiative, snapshot: BoardSnapshot
         reason = initiative.blocked_reasons.get(card.id)
         if reason:
             line += f" — *{redact(reason)}*"
+    instructions = snapshot.owner_instructions.get(card.id, [])
+    if instructions:
+        compact = ", ".join(f"#{i['id']} {i['status']}" for i in instructions[-3:])
+        line += f" — owner: {compact}"
     return line
 
 

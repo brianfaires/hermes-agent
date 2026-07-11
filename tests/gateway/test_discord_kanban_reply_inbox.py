@@ -182,7 +182,7 @@ def test_mapped_reply_creates_comment_and_mirror_receipt(kanban_db, inbox_config
 
 
 @pytest.mark.asyncio
-async def test_supported_reaction_creates_comment_receipt_and_owner_followup(tmp_path, monkeypatch, inbox_config):
+async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(tmp_path, monkeypatch, inbox_config):
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "home"))
     db_path = tmp_path / "kanban.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
@@ -216,7 +216,8 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_followup(tmp
     assert result.action == "reaction:approve"
     assert result.task_id == tid
     assert result.kanban_comment_id is not None
-    assert result.routed_task_id is not None
+    assert result.owner_instruction_id is not None
+    assert result.owner_instruction_status == "pending"
 
     duplicate = await maybe_handle_discord_reaction(reaction_payload(), config=inbox_config)
     assert duplicate.consumed is True
@@ -236,19 +237,14 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_followup(tmp
         assert "State change: none" in comments[0].body
         after_status = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"]
         assert after_status == before_status
-        followups = conn.execute(
-            "SELECT id, title, body, assignee, status, idempotency_key FROM tasks WHERE id != ?", (tid,)
-        ).fetchall()
-        assert len(followups) == 1
-        followup = followups[0]
-        assert followup["title"] == f"Discord reaction instruction: approve for {tid}"
-        assert followup["assignee"] == "ops"
-        assert followup["status"] == "ready"
-        assert followup["idempotency_key"] == f"discord-reaction-followup:reaction:{THREAD_ID}:4004:42:✅"
-        assert f"Original card: {tid}" in followup["body"]
-        assert "discord:42" in followup["body"]
-        assert "Mallory" not in followup["body"]
-        assert "Carry out this instruction or leave a durable explanation" in followup["body"]
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
+        instruction = kb.get_owner_instruction(conn, result.owner_instruction_id)
+        assert instruction is not None
+        assert instruction.task_id == tid
+        assert instruction.assignee == "ops"
+        assert instruction.status == "pending"
+        assert "discord:42" in instruction.body
+        assert "Mallory" not in instruction.body
     finally:
         conn.close()
 
@@ -317,12 +313,13 @@ async def test_reaction_retry_after_comment_before_receipt_does_not_duplicate_co
 
     result = await maybe_handle_discord_reaction(reaction_payload(), config=inbox_config)
     assert result.consumed is True
-    assert result.routed_task_id is not None
+    assert result.owner_instruction_id is not None
 
     conn = kb.connect()
     try:
         assert len(kb.list_comments(conn, tid)) == 1
-        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
+        assert len(kb.list_owner_instructions(conn, task_id=tid)) == 1
     finally:
         conn.close()
 

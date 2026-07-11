@@ -70,6 +70,7 @@ class BoardSnapshot:
     parents: dict[str, list[str]]
     recent_comments: dict[str, list[dict]]
     recent_events: dict[str, list[dict]]
+    owner_instructions: dict[str, list[dict]] = field(default_factory=dict)
 
     def active_roots(self) -> list[Card]:
         return [
@@ -143,7 +144,14 @@ def load_board_snapshot(board: str) -> BoardSnapshot:
                 parents.setdefault(e["child_id"], []).append(e["parent_id"])
         recent_comments = _recent(con, "task_comments", cards)
         recent_events = _recent(con, "task_events", cards)
-        return BoardSnapshot(cards, children, parents, recent_comments, recent_events)
+        owner_instructions: dict[str, list[dict]] = {}
+        try:
+            for row in con.execute("SELECT id,task_id,status FROM task_owner_instructions ORDER BY id"):
+                if row["task_id"] in cards:
+                    owner_instructions.setdefault(row["task_id"], []).append(dict(row))
+        except sqlite3.OperationalError:
+            pass
+        return BoardSnapshot(cards, children, parents, recent_comments, recent_events, owner_instructions)
     finally:
         con.close()
 

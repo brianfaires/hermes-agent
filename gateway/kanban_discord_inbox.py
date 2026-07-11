@@ -87,6 +87,8 @@ class KanbanReplyInboxResult:
     action: str | None = None
     kanban_comment_id: int | None = None
     routed_task_id: str | None = None
+    owner_instruction_id: int | None = None
+    owner_instruction_status: str | None = None
     ack: str | None = None
 
 
@@ -402,20 +404,20 @@ def handle_reaction(
         if not task.assignee:
             return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
 
-        routed_task_id = kb.create_task(
+        instruction = kb.create_owner_instruction(
             conn,
-            title=f"Discord reaction instruction: {ctx.intent} for {task_id}",
-            body=_reaction_followup_body(ctx, task_id),
+            task_id=task_id,
             assignee=task.assignee,
-            created_by=_reaction_author(ctx),
-            priority=task.priority,
-            idempotency_key=f"discord-reaction-followup:{ctx.reaction_key}",
-            board=resolved_board_slug,
+            source="discord_reaction",
+            source_key=ctx.reaction_key,
+            actor=_reaction_author(ctx),
+            body=_reaction_followup_body(ctx, task_id),
         )
         replied_to_comment_id = find_receipt_comment_id(mirror_conn, ctx.message_id)
         comment_id = _find_reaction_comment_id(conn, task_id, ctx.reaction_key)
         if comment_id is None:
-            comment_body = _reaction_comment_body(ctx, replied_to_comment_id)
+            comment_body = (_reaction_comment_body(ctx, replied_to_comment_id)
+                            + f"\nOwner instruction: #{instruction.id} ({instruction.status})")
             comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
         record_receipt(
             mirror_conn,
@@ -436,8 +438,9 @@ def handle_reaction(
             task_id=task_id,
             action=f"reaction:{ctx.intent}",
             kanban_comment_id=comment_id,
-            routed_task_id=routed_task_id,
-            ack=f"Recorded reaction on Kanban card {task_id} as comment #{comment_id}; routed to {task.assignee} as {routed_task_id}.",
+            owner_instruction_id=instruction.id,
+            owner_instruction_status=instruction.status,
+            ack=f"Recorded owner instruction #{instruction.id} ({instruction.status}) on Kanban card {task_id}; routed to {task.assignee}.",
         )
     finally:
         mirror_conn.close()
