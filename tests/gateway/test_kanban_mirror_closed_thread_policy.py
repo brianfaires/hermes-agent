@@ -34,10 +34,11 @@ def mk_initiative(thread_id="th1"):
 
 
 class FakeClient:
-    def __init__(self, state="active", *, last_message_ts="2026-07-06T00:00:00+00:00", active_threads=None):
+    def __init__(self, state="active", *, last_message_ts="2026-07-06T00:00:00+00:00", active_threads=None, messages=None):
         self.state = state
         self.last_message_ts = last_message_ts
         self.active_threads = active_threads or []
+        self.messages = messages or {}
         self.sent = []
         self.updated = []
         self.message_updates = []
@@ -70,7 +71,12 @@ class FakeClient:
         return {"id": "dm1"}
 
     def get_message(self, channel_id, message_id):
+        if (channel_id, message_id) in self.messages:
+            return self.messages[(channel_id, message_id)]
         return {"id": message_id, "channel_id": channel_id, "timestamp": self.last_message_ts}
+
+    def get_current_user(self):
+        return {"id": "mirror-bot"}
 
     def list_active_threads(self, guild_id):
         return self.active_threads
@@ -421,11 +427,29 @@ def _archive_test_conn():
     conn.execute("""
         CREATE TABLE mirror_initiatives (
             id TEXT PRIMARY KEY,
+            title TEXT,
+            kind TEXT,
+            thread_id TEXT,
+            starter_message_id TEXT,
             archived_at INTEGER,
+            created_at INTEGER,
             updated_at INTEGER
         )
     """)
-    conn.execute("INSERT INTO mirror_initiatives (id, archived_at, updated_at) VALUES ('init_t1', NULL, 1)")
+    conn.execute("""
+        CREATE TABLE mirror_members (
+            task_id TEXT PRIMARY KEY,
+            initiative_id TEXT NOT NULL,
+            last_status TEXT,
+            last_sig TEXT
+        )
+    """)
+    conn.execute("""
+        INSERT INTO mirror_initiatives
+            (id, title, kind, thread_id, starter_message_id, archived_at, created_at, updated_at)
+        VALUES ('init_t1', 'A card', 'post', 'th1', 'm1', NULL, 1, 1)
+    """)
+    conn.execute("INSERT INTO mirror_members VALUES ('t1', 'init_t1', NULL, NULL)")
     return conn
 
 
@@ -581,9 +605,17 @@ def test_active_thread_audit_reopens_archived_terminal_mapping_for_repair():
     assert "active_thread_audit: REPAIR init_t1 thread=th1" in log
 
 
-def test_active_thread_audit_logs_unmapped_open_forum_thread():
+def test_active_thread_audit_adopts_unmapped_bot_thread_with_one_known_card():
     conn = _archive_test_conn()
-    client = FakeClient(active_threads=[{"id": "orphan", "parent_id": "forum1"}])
+    conn.execute("UPDATE mirror_initiatives SET archived_at=123 WHERE id='init_t1'")
+    client = FakeClient(
+        active_threads=[{"id": "orphan", "parent_id": "forum1"}],
+        messages={("orphan", "orphan"): {
+            "id": "orphan",
+            "content": "Work items\n🔴 Security follow-up `t1`",
+            "author": {"id": "mirror-bot", "bot": True},
+        }},
+    )
     log = []
 
     changed = asyncio.run(_audit_active_threads(
@@ -591,9 +623,77 @@ def test_active_thread_audit_logs_unmapped_open_forum_thread():
         cast(DiscordClient, client),
         conn,
         _done_snapshot(),
-        {},
+        {"init_t1": replace(mk_initiative(), archived_at=123)},
         log,
     ))
 
+    row = conn.execute(
+        "SELECT thread_id, starter_message_id, archived_at FROM mirror_initiatives WHERE id='init_t1'"
+    ).fetchone()
+    assert changed is True
+    assert row == ("orphan", "orphan", None)
+    assert "active_thread_audit: ADOPT init_t1 thread=orphan task=t1" in log
+
+
+def test_active_thread_audit_refuses_ambiguous_or_foreign_orphan_threads():
+    conn = _archive_test_conn()
+    snapshot = _done_snapshot()
+    snapshot.cards["t2"] = replace(snapshot.cards["t1"], id="t2", title="Other")
+    client = FakeClient(
+        active_threads=[
+            {"id": "ambiguous", "parent_id": "forum1"},
+            {"id": "foreign", "parent_id": "forum1"},
+        ],
+        messages={
+            ("ambiguous", "ambiguous"): {
+                "id": "ambiguous",
+                "content": "Cards `t1` and `t2`",
+                "author": {"id": "mirror-bot", "bot": True},
+            },
+            ("foreign", "foreign"): {
+                "id": "foreign",
+                "content": "Card `t1`",
+                "author": {"id": "other-bot", "bot": True},
+            },
+        },
+    )
+    log = []
+
+    changed = asyncio.run(_audit_active_threads(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
+        cast(DiscordClient, client), conn, snapshot, {"init_t1": mk_initiative()}, log,
+    ))
+
     assert changed is False
-    assert "active_thread_audit: UNMAPPED orphan" in log
+    assert "active_thread_audit: UNMAPPED ambiguous" in log
+    assert "active_thread_audit: UNMAPPED foreign" in log
+
+
+def test_active_thread_audit_refuses_two_orphans_for_the_same_card():
+    conn = _archive_test_conn()
+    messages = {
+        (thread_id, thread_id): {
+            "id": thread_id,
+            "content": "Card `t1`",
+            "author": {"id": "mirror-bot", "bot": True},
+        }
+        for thread_id in ("orphan-a", "orphan-b")
+    }
+    client = FakeClient(
+        active_threads=[
+            {"id": "orphan-a", "parent_id": "forum1"},
+            {"id": "orphan-b", "parent_id": "forum1"},
+        ],
+        messages=messages,
+    )
+    log = []
+
+    changed = asyncio.run(_audit_active_threads(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
+        cast(DiscordClient, client), conn, _done_snapshot(), {"init_t1": mk_initiative()}, log,
+    ))
+
+    assert changed is False
+    assert conn.execute("SELECT thread_id FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] == "th1"
+    assert "active_thread_audit: UNMAPPED orphan-a" in log
+    assert "active_thread_audit: UNMAPPED orphan-b" in log
