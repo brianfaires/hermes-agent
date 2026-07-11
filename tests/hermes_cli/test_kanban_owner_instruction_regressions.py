@@ -4,7 +4,6 @@ import json
 import os
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -65,18 +64,54 @@ def test_expired_instruction_claim_cannot_finish_and_live_pid_is_not_requeued(bo
         assert kb.get_owner_instruction(conn, inst.id).status == "pending"
 
 
-def test_accepted_instruction_counts_against_task_global_and_profile_caps(board, monkeypatch):
+def test_legacy_accepted_instruction_does_not_consume_normal_worker_capacity(board, monkeypatch):
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda profile: True)
     with kb.connect() as conn:
         inst = kb.claim_owner_instruction(conn, _instruction(conn, board, "same").id)
         kb.set_owner_instruction_pid(conn, inst.id, inst.claim_lock, os.getpid())
-        second = kb.create_task(conn, title="task", assignee="same", triage=False)
+        kb.create_task(conn, title="task", assignee="same", triage=False)
         spawned = []
-        result = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 123,
-                                  max_in_progress=1, max_in_progress_per_profile=1)
-        assert spawned == []
-        assert kb.get_task(conn, second).status == "ready"
-        assert result.spawned == []
+        kb.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 123,
+                         max_in_progress=1, max_in_progress_per_profile=1)
+        assert len(spawned) == 1
+
+
+def test_running_instruction_is_durably_queued_then_reopens_after_run(board):
+    with kb.connect() as conn:
+        claimed = kb.claim_task(conn, board)
+        assert claimed is not None
+        inst = _instruction(conn, board)
+        assert kb.route_owner_instruction(conn, inst.id) == "queued"
+        assert kb.get_task(conn, board).status == "running"
+        assert kb.get_task(conn, board).claim_lock == claimed.claim_lock
+        conn.execute(
+            "UPDATE tasks SET status='done',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+            (board,),
+        )
+        assert kb.route_queued_owner_instructions(conn) == 1
+        assert kb.get_task(conn, board).status == "ready"
+        assert kb.get_owner_instruction(conn, inst.id).status == "routed"
+
+
+def test_terminal_card_only_reopens_for_explicit_rerun(board):
+    with kb.connect() as conn:
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (board,))
+        ambiguous = _instruction(conn, board)
+        assert kb.route_owner_instruction(conn, ambiguous.id) == "ignored"
+        assert kb.get_task(conn, board).status == "done"
+        rerun = _instruction(conn, board)
+        assert kb.route_owner_instruction(conn, rerun.id, explicit_rerun=True) == "routed"
+        assert kb.get_task(conn, board).status == "ready"
+
+
+def test_blocked_instruction_respects_unfinished_dependencies(board):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="task-owner")
+        kb.link_tasks(conn, parent, board)
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (board,))
+        inst = _instruction(conn, board)
+        assert kb.route_owner_instruction(conn, inst.id) == "routed"
+        assert kb.get_task(conn, board).status == "todo"
 
 
 def test_instruction_worker_cannot_create_cards(board, monkeypatch):
@@ -112,22 +147,37 @@ def test_completed_close_instruction_archives_original_card(board):
         assert any(event.kind == "archived" for event in kb.list_events(conn, board))
 
 
-def test_spawn_uses_snapshotted_instruction_assignee_and_does_not_leak_task_claim(board, monkeypatch, tmp_path):
+def test_actionable_instruction_routes_review_card_back_to_normal_worker(board):
     with kb.connect() as conn:
-        conn.execute("UPDATE tasks SET claim_lock='original-task-token' WHERE id=?", (board,))
+        conn.execute("UPDATE tasks SET status='review' WHERE id=?", (board,))
+        inst = _instruction(conn, board)
+        assert kb.route_owner_instruction(conn, inst.id) == "routed"
         task = kb.get_task(conn, board)
-        inst = kb.claim_owner_instruction(conn, _instruction(conn, board, "snapshot-owner").id)
-    captured = {}
-    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda profile: str(tmp_path))
-    monkeypatch.setattr(kb, "_kanban_worker_skill_available", lambda home: False)
-    monkeypatch.setattr(kb, "_resolve_worker_cli_toolsets", lambda home: None)
-    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
-    import subprocess
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: captured.update(cmd=cmd, env=kw["env"]) or SimpleNamespace(pid=321))
-    kb._default_spawn(task, str(tmp_path), owner_instruction=inst)
-    assert captured["cmd"][captured["cmd"].index("-p") + 1] == "snapshot-owner"
-    prompt = captured["cmd"][captured["cmd"].index("-q") + 1]
-    assert "please inspect" in prompt
-    assert f"owner instruction {inst.id}" in prompt
-    assert captured["env"]["HERMES_PROFILE"] == "snapshot-owner"
-    assert "HERMES_KANBAN_CLAIM_LOCK" not in captured["env"]
+        assert task is not None
+        assert task.status == "ready"
+
+
+def test_unassigned_instruction_is_durable_but_not_claimed_as_routed(board):
+    with kb.connect() as conn:
+        conn.execute("UPDATE tasks SET assignee=NULL,status='blocked' WHERE id=?", (board,))
+        inst = _instruction(conn, board, "unassigned")
+        assert kb.route_owner_instruction(conn, inst.id) == "unroutable"
+        stored = kb.get_owner_instruction(conn, inst.id)
+        task = kb.get_task(conn, board)
+        assert stored is not None
+        assert task is not None
+        assert stored.status == "unroutable"
+        assert task.status == "blocked"
+
+
+def test_dispatcher_migrates_legacy_pending_instruction_to_normal_card(board, monkeypatch):
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda profile: True)
+    with kb.connect() as conn:
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (board,))
+        inst = _instruction(conn, board)
+        spawned = []
+        kb.dispatch_once(conn, spawn_fn=lambda *args, **kwargs: spawned.append(args) or 123)
+        stored = kb.get_owner_instruction(conn, inst.id)
+        assert stored is not None
+        assert stored.status == "routed"
+        assert len(spawned) == 1

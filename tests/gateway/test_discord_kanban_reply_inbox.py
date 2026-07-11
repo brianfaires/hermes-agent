@@ -172,7 +172,7 @@ def test_text_action_does_not_match_conversation_or_punctuation(text):
     assert text_action_for_command(text) is None
 
 
-def test_text_action_creates_owner_instruction_without_changing_card(kanban_db, inbox_config):
+def test_text_action_routes_original_card_and_preserves_instruction(kanban_db, inbox_config):
     _db_path, tid = kanban_db
     conn = kb.connect()
     try:
@@ -192,8 +192,11 @@ def test_text_action_creates_owner_instruction_without_changing_card(kanban_db, 
         assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
         instructions = kb.list_owner_instructions(conn, task_id=tid)
         assert len(instructions) == 1
-        assert instructions[0].status == "pending"
+        assert instructions[0].status == "routed"
         assert instructions[0].body.find("approve") >= 0
+        assert "Reply context: Kanban comment from worker" in instructions[0].body
+        comments = kb.list_comments(conn, tid)
+        assert "Reply context: Kanban comment from worker" in comments[0].body
     finally:
         conn.close()
 
@@ -267,7 +270,7 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
     assert result.task_id == tid
     assert result.kanban_comment_id is not None
     assert result.owner_instruction_id is not None
-    assert result.owner_instruction_status == "pending"
+    assert result.owner_instruction_status == "routed"
 
     duplicate = await maybe_handle_discord_reaction(reaction_payload(), config=inbox_config)
     assert duplicate.consumed is True
@@ -276,7 +279,7 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
     conn = kb.connect(db_path)
     try:
         before_status = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"]
-        assert before_status == "blocked"
+        assert before_status == "ready"
         comments = kb.list_comments(conn, tid)
         assert len(comments) == 1
         assert "[discord reaction instruction]" in comments[0].body
@@ -284,15 +287,15 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
         assert "Instruction: approve" in comments[0].body
         assert "discord:42" in comments[0].body
         assert "Mallory" not in comments[0].body
-        assert "State change: none" in comments[0].body
+        assert "Owner instruction:" in comments[0].body
         after_status = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()["status"]
-        assert after_status == before_status
+        assert after_status == "ready"
         assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
         instruction = kb.get_owner_instruction(conn, result.owner_instruction_id)
         assert instruction is not None
         assert instruction.task_id == tid
         assert instruction.assignee == "ops"
-        assert instruction.status == "pending"
+        assert instruction.status == "routed"
         assert "discord:42" in instruction.body
         assert "Mallory" not in instruction.body
     finally:
@@ -316,6 +319,15 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
 @pytest.mark.asyncio
 async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, inbox_config):
     _db_path, tid = kanban_db
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET status='ready',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+        assert kb.claim_task(conn, tid) is not None
+    finally:
+        conn.close()
     payload = reaction_payload(emoji="🗑️")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
     assert first.owner_instruction_id is not None
@@ -331,6 +343,33 @@ async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, i
         instructions = kb.list_owner_instructions(conn, task_id=tid)
         assert len(instructions) == 1
         assert len(kb.list_comments(conn, tid)) == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_removed_reaction_creates_new_generation_after_prior_routing(kanban_db, inbox_config):
+    _db_path, tid = kanban_db
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET status='ready',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+    finally:
+        conn.close()
+
+    payload = reaction_payload(emoji="🗑️")
+    first = await maybe_handle_discord_reaction(payload, config=inbox_config)
+    assert first.owner_instruction_status == "routed"
+    await maybe_handle_discord_reaction_remove(payload, config=inbox_config)
+    second = await maybe_handle_discord_reaction(payload, config=inbox_config)
+    assert second.owner_instruction_id != first.owner_instruction_id
+
+    conn = kb.connect()
+    try:
+        assert len(kb.list_owner_instructions(conn, task_id=tid)) == 2
+        assert len(kb.list_comments(conn, tid)) == 2
     finally:
         conn.close()
 

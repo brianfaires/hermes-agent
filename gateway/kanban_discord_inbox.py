@@ -377,7 +377,7 @@ def _reaction_comment_body(
         f"Thread: {ctx.thread_id}",
         f"Message: {ctx.message_id}",
         f"Reaction key: {source_key}",
-        "State change: none (owner-only)",
+        "Lifecycle routing: original card (or passive watch)",
     ]
     if replied_to_comment_id is not None:
         lines.append(f"Reacted Kanban comment: #{replied_to_comment_id}")
@@ -437,9 +437,6 @@ def handle_reaction(
         task = kb.get_task(conn, task_id)
         if task is None:
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
-        if not task.assignee:
-            return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
-
         generation = reaction_generation(mirror_conn, ctx.reaction_key)
         source_key = (
             ctx.reaction_key
@@ -449,7 +446,7 @@ def handle_reaction(
         unresolved = conn.execute(
             """SELECT id,source_key FROM task_owner_instructions
                WHERE task_id=? AND source='discord_reaction'
-                 AND status IN ('pending','accepted')
+                 AND status IN ('pending','queued','accepted','unroutable')
                  AND (source_key=? OR source_key LIKE ?)
                ORDER BY id DESC LIMIT 1""",
             (task_id, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
@@ -461,7 +458,7 @@ def handle_reaction(
             instruction = kb.create_owner_instruction(
                 conn,
                 task_id=task_id,
-                assignee=task.assignee,
+                assignee=task.assignee or "unassigned",
                 source="discord_reaction",
                 source_key=source_key,
                 actor=_reaction_author(ctx),
@@ -475,6 +472,13 @@ def handle_reaction(
             comment_body = (_reaction_comment_body(ctx, replied_to_comment_id, source_key)
                             + f"\nOwner instruction: #{instruction.id} ({instruction.status})")
             comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
+        routed_status = kb.route_owner_instruction(
+            conn, instruction.id,
+            explicit_rerun=ctx.intent == "rerun_request",
+            passive=ctx.intent == "watch",
+        )
+        instruction = kb.get_owner_instruction(conn, instruction.id)
+        assert instruction is not None
         mark_reaction_active(mirror_conn, ctx.reaction_key)
         record_receipt(
             mirror_conn,
@@ -497,7 +501,7 @@ def handle_reaction(
             kanban_comment_id=comment_id,
             owner_instruction_id=instruction.id,
             owner_instruction_status=instruction.status,
-            ack=f"Recorded owner instruction #{instruction.id} ({instruction.status}) on Kanban card {task_id}; routed to {task.assignee}.",
+            ack=f"Recorded owner instruction #{instruction.id} ({routed_status}) on Kanban card {task_id}.",
         )
     finally:
         mirror_conn.close()
@@ -528,9 +532,7 @@ def _handle_text_action(
     if task is None:
         mirror_conn.rollback()
         return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
-    if not task.assignee:
-        mirror_conn.rollback()
-        return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
+    reply_context = re.sub(r"\s+", " ", ctx.reply_to_text).strip()[:200] if ctx.reply_to_text else None
     body = "\n".join([
         "[discord text instruction]",
         f"Original card: {task_id}",
@@ -540,13 +542,14 @@ def _handle_text_action(
         f"Meaning: {action.meaning}",
         f"Discord thread: {ctx.thread_id}",
         f"Discord message: {ctx.message_id}",
+        *([f"Reply context: {reply_context}"] if reply_context else []),
         "",
         "Carry out this instruction or leave a durable explanation on the original card for refusing it.",
     ])
     instruction = kb.create_owner_instruction(
         conn,
         task_id=task_id,
-        assignee=task.assignee,
+        assignee=task.assignee or "unassigned",
         source="discord_text_command",
         source_key=source_key,
         actor=_reply_author(ctx),
@@ -567,11 +570,19 @@ def _handle_text_action(
             f"Command: {(ctx.content or '').strip()}",
             f"Instruction: {action.intent}",
             f"Meaning: {action.meaning}",
+            *([f"Reply context: {reply_context}"] if reply_context else []),
             marker,
             f"Owner instruction: #{instruction.id} ({instruction.status})",
-            "State change: none (owner-only)",
+            "Lifecycle routing: original card (or passive watch)",
         ]),
     )
+    routed_status = kb.route_owner_instruction(
+        conn, instruction.id,
+        explicit_rerun=action.intent == "rerun_request",
+        passive=action.intent == "watch",
+    )
+    instruction = kb.get_owner_instruction(conn, instruction.id)
+    assert instruction is not None
     record_receipt(
         mirror_conn,
         discord_message_id=ctx.message_id,
@@ -593,7 +604,7 @@ def _handle_text_action(
         kanban_comment_id=comment_id,
         owner_instruction_id=instruction.id,
         owner_instruction_status=instruction.status,
-        ack=f"Recorded owner instruction #{instruction.id} ({instruction.status}) on Kanban card {task_id}; routed to {task.assignee}.",
+        ack=f"Recorded owner instruction #{instruction.id} ({routed_status}) on Kanban card {task_id}.",
     )
 
 
