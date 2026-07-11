@@ -32,7 +32,7 @@ from gateway.kanban_mirror.state import (
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_ACTIONS = {"comment", "block", "unblock"}
-_RESERVED_COMMANDS = {"priority", "assign", "create-child", "create_child", "complete", "delete", "archive"}
+_RESERVED_COMMANDS = {"complete", "delete"}
 _COMMAND_USAGE = "Usage: comment <text>, block <reason>, or unblock"
 
 
@@ -232,12 +232,12 @@ def parse_instruction(text: str, *, config: KanbanReplyInboxConfig | None = None
     body = (text or "").strip()
     if not body:
         raise ValueError("message text is required")
-    first, sep, rest = body.partition(" ")
-    command = first.rstrip(":").lower()
+    parts = body.split(None, 1)
+    command = parts[0].rstrip(":").lower()
     if command in _SUPPORTED_ACTIONS:
         if command not in cfg.allow_commands:
             raise ValueError(f"command not allowed: {command}")
-        arg = rest.strip() if sep else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
         if command in {"comment", "block"} and not arg:
             raise ValueError(_COMMAND_USAGE)
         if command == "unblock" and arg:

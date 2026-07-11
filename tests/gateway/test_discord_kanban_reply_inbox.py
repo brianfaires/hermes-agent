@@ -125,10 +125,29 @@ def test_parse_default_comment_and_commands(inbox_config):
     assert multiline.text == "first line\nsecond line"
 
 
-@pytest.mark.parametrize("text", ["block", "unblock extra", "priority 10"])
+@pytest.mark.parametrize(
+    "text",
+    ["block", "unblock extra", "complete now", "complete\tnow", "complete\nnow", "delete this", "delete\tthis"],
+)
 def test_parse_malformed_command_rejected(inbox_config, text):
     with pytest.raises(ValueError):
         parse_instruction(text, config=inbox_config)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "priority 10",
+        "assign this to Ops",
+        "create-child investigate logs",
+        "create_child investigate logs",
+        "archive after review",
+    ],
+)
+def test_unreserved_mutation_words_are_recorded_as_comments(inbox_config, text):
+    parsed = parse_instruction(text, config=inbox_config)
+    assert parsed.action == "comment"
+    assert parsed.text == text
 
 
 def test_reaction_intent_mapping_and_normalization():
@@ -232,6 +251,21 @@ def test_mapped_reply_creates_comment_and_mirror_receipt(kanban_db, inbox_config
         assert row["kanban_comment_id"] == result.kanban_comment_id
     finally:
         mirror_conn.close()
+
+
+def test_unreserved_mutation_word_creates_durable_comment(kanban_db, inbox_config):
+    _db_path, tid = kanban_db
+    result = handle_reply(ctx(content="assign this to Ops"), config=inbox_config)
+    assert result.consumed is True
+    assert result.action == "comment"
+
+    conn = kb.connect()
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "assign this to Ops" in comments[0].body
+    finally:
+        conn.close()
 
 
 @pytest.mark.asyncio
