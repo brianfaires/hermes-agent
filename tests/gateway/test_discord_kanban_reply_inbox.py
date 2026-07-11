@@ -15,6 +15,7 @@ from gateway.kanban_discord_inbox import (
     reaction_intent_for_emoji,
     text_action_for_command,
     maybe_handle_discord_reaction,
+    maybe_handle_discord_reaction_remove,
 )
 from gateway.kanban_mirror.state import (
     add_member,
@@ -310,6 +311,29 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
         assert row["kanban_comment_id"] == result.kanban_comment_id
     finally:
         mirror_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_removed_reaction_can_be_added_again_as_new_instruction(kanban_db, inbox_config):
+    _db_path, tid = kanban_db
+    payload = reaction_payload(emoji="🗑️")
+    first = await maybe_handle_discord_reaction(payload, config=inbox_config)
+    assert first.owner_instruction_id is not None
+
+    removed = await maybe_handle_discord_reaction_remove(payload, config=inbox_config)
+    assert removed.reason == "reaction_removed"
+
+    second = await maybe_handle_discord_reaction(payload, config=inbox_config)
+    assert second.owner_instruction_id is not None
+    assert second.owner_instruction_id != first.owner_instruction_id
+
+    conn = kb.connect()
+    try:
+        instructions = kb.list_owner_instructions(conn, task_id=tid)
+        assert len(instructions) == 2
+        assert len(kb.list_comments(conn, tid)) == 2
+    finally:
+        conn.close()
 
 
 @pytest.mark.asyncio

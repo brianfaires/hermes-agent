@@ -1437,6 +1437,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._handle_raw_reaction_add(payload)
 
             @self._client.event
+            async def on_raw_reaction_remove(payload):
+                """Allow a later re-add of a supported Kanban reaction to dispatch again."""
+                await adapter_self._handle_raw_reaction_remove(payload)
+
+            @self._client.event
             async def on_voice_state_update(member, before, after):
                 """Track voice channel join/leave events and auto-manage configured voice presence."""
                 # Ignore the bot itself
@@ -6007,6 +6012,43 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             return True
         return False
+
+    async def _handle_raw_reaction_remove(self, payload: Any) -> bool:
+        """Clear a supported Kanban reaction receipt after an authorized removal."""
+        user_id = str(getattr(payload, "user_id", "") or "")
+        if not user_id:
+            return False
+        member = getattr(payload, "member", None)
+        guild = getattr(member, "guild", None) if member is not None else None
+        if member is None and self._client is not None:
+            guild_id = getattr(payload, "guild_id", None)
+            try:
+                guild = self._client.get_guild(int(guild_id)) if guild_id is not None else None
+                if guild is not None:
+                    member = guild.get_member(int(user_id))
+                    if member is None:
+                        member = await guild.fetch_member(int(user_id))
+            except Exception:
+                logger.debug("[%s] Could not resolve member for reaction removal", self.name, exc_info=True)
+        if bool(getattr(member, "bot", False)):
+            return False
+        if not self._is_allowed_user(user_id, author=member, guild=guild):
+            return False
+        if self._client and self._client.user is not None:
+            if user_id == str(getattr(self._client.user, "id", "") or ""):
+                return False
+        try:
+            from gateway.kanban_discord_inbox import maybe_handle_discord_reaction_remove
+            result = await maybe_handle_discord_reaction_remove(payload)
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban reaction removal failed for message_id=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                exc_info=True,
+            )
+            return False
+        return bool(result.consumed)
 
     async def _handle_message(self, message: DiscordMessage, role_authorized: bool = False) -> None:
         """Handle incoming Discord messages."""

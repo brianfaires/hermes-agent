@@ -217,6 +217,12 @@ CREATE TABLE IF NOT EXISTS mirror_inbox_receipts (
   replied_to_message_id TEXT, replied_to_kanban_comment_id INTEGER,
   kanban_comment_id INTEGER, created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mirror_reaction_states (
+  reaction_key TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
 """
 
 SCHEMA_SQL += RECEIPTS_SCHEMA_SQL
@@ -572,6 +578,48 @@ def record_receipt(conn: sqlite3.Connection, **fields) -> None:
         [values[c] for c in columns],
     )
     conn.commit()
+
+
+def reaction_generation(conn: sqlite3.Connection, reaction_key: str) -> int:
+    row = conn.execute(
+        "SELECT generation FROM mirror_reaction_states WHERE reaction_key=?",
+        (reaction_key,),
+    ).fetchone()
+    return int(row["generation"]) if row is not None else 0
+
+
+def mark_reaction_active(conn: sqlite3.Connection, reaction_key: str) -> None:
+    conn.execute(
+        """INSERT INTO mirror_reaction_states(reaction_key,generation,active,updated_at)
+           VALUES (?,0,1,?)
+           ON CONFLICT(reaction_key) DO UPDATE SET active=1,updated_at=excluded.updated_at""",
+        (reaction_key, _now()),
+    )
+
+
+def mark_reaction_removed(conn: sqlite3.Connection, reaction_key: str) -> bool:
+    """Atomically advance the lifecycle generation and clear its active receipt."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existed = receipt_exists(conn, reaction_key)
+        conn.execute(
+            """INSERT INTO mirror_reaction_states(reaction_key,generation,active,updated_at)
+               VALUES (?,1,0,?)
+               ON CONFLICT(reaction_key) DO UPDATE SET
+                 generation=mirror_reaction_states.generation+1,
+                 active=0,
+                 updated_at=excluded.updated_at""",
+            (reaction_key, _now()),
+        )
+        conn.execute(
+            "DELETE FROM mirror_inbox_receipts WHERE discord_message_id=?",
+            (reaction_key,),
+        )
+        conn.commit()
+        return existed
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def find_receipt_comment_id(conn: sqlite3.Connection, discord_message_id: str) -> int | None:

@@ -6,6 +6,7 @@ normal chat dispatcher out of those messages.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sqlite3
@@ -19,7 +20,10 @@ from gateway.kanban_mirror.state import (
     connect_mirror,
     ensure_receipts,
     find_receipt_comment_id,
+    mark_reaction_active,
+    mark_reaction_removed,
     mirror_db_path,
+    reaction_generation,
     receipt_exists,
     record_receipt,
     resolve_thread_task,
@@ -359,7 +363,11 @@ def _reaction_author(ctx: DiscordReactionContext) -> str:
     return f"discord:{author_id}" if author_id.isdigit() else "discord:unknown"
 
 
-def _reaction_comment_body(ctx: DiscordReactionContext, replied_to_comment_id: int | None) -> str:
+def _reaction_comment_body(
+    ctx: DiscordReactionContext,
+    replied_to_comment_id: int | None,
+    source_key: str,
+) -> str:
     lines = [
         "[discord reaction instruction]",
         f"Instruction from {_reaction_author(ctx)}",
@@ -368,7 +376,7 @@ def _reaction_comment_body(ctx: DiscordReactionContext, replied_to_comment_id: i
         f"Meaning: {ctx.meaning}",
         f"Thread: {ctx.thread_id}",
         f"Message: {ctx.message_id}",
-        f"Reaction key: {ctx.reaction_key}",
+        f"Reaction key: {source_key}",
         "State change: none (owner-only)",
     ]
     if replied_to_comment_id is not None:
@@ -432,21 +440,28 @@ def handle_reaction(
         if not task.assignee:
             return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
 
+        generation = reaction_generation(mirror_conn, ctx.reaction_key)
+        source_key = (
+            ctx.reaction_key
+            if generation == 0
+            else f"{ctx.reaction_key}:generation:{generation}"
+        )
         instruction = kb.create_owner_instruction(
             conn,
             task_id=task_id,
             assignee=task.assignee,
             source="discord_reaction",
-            source_key=ctx.reaction_key,
+            source_key=source_key,
             actor=_reaction_author(ctx),
             body=_reaction_followup_body(ctx, task_id),
         )
         replied_to_comment_id = find_receipt_comment_id(mirror_conn, ctx.message_id)
-        comment_id = _find_reaction_comment_id(conn, task_id, ctx.reaction_key)
+        comment_id = _find_reaction_comment_id(conn, task_id, source_key)
         if comment_id is None:
-            comment_body = (_reaction_comment_body(ctx, replied_to_comment_id)
+            comment_body = (_reaction_comment_body(ctx, replied_to_comment_id, source_key)
                             + f"\nOwner instruction: #{instruction.id} ({instruction.status})")
             comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
+        mark_reaction_active(mirror_conn, ctx.reaction_key)
         record_receipt(
             mirror_conn,
             discord_message_id=ctx.reaction_key,
@@ -683,6 +698,47 @@ async def maybe_handle_discord_message(
     return result
 
 
+def handle_reaction_remove(
+    ctx: DiscordReactionContext,
+    *,
+    config: KanbanReplyInboxConfig | None = None,
+) -> KanbanReplyInboxResult:
+    """Forget the active-delivery receipt so a later re-add becomes a new instruction."""
+    cfg = config or load_config()
+    if not cfg.enabled:
+        return KanbanReplyInboxResult(consumed=False, reason="disabled")
+    board_slug = cfg.board_slug or "default"
+    resolved = resolve_thread_task(
+        mirror_db_path(board_slug), forum_channel_id="", thread_id=ctx.thread_id
+    )
+    if resolved is None:
+        return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
+    task_id, resolved_board_slug = map(str, resolved)
+    mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
+    try:
+        ensure_receipts(mirror_conn)
+        removed = mark_reaction_removed(mirror_conn, ctx.reaction_key)
+    finally:
+        mirror_conn.close()
+    return KanbanReplyInboxResult(
+        consumed=True,
+        reason="reaction_removed" if removed else "no_active_receipt",
+        task_id=task_id,
+        action=f"reaction_removed:{ctx.intent}",
+    )
+
+
+async def maybe_handle_discord_reaction_remove(
+    payload: Any,
+    *,
+    config: KanbanReplyInboxConfig | None = None,
+) -> KanbanReplyInboxResult:
+    ctx = context_from_discord_reaction(payload)
+    if ctx is None:
+        return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
+    return await asyncio.to_thread(handle_reaction_remove, ctx, config=config or load_config())
+
+
 async def maybe_handle_discord_reaction(
     payload: Any,
     *,
@@ -693,6 +749,6 @@ async def maybe_handle_discord_reaction(
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
     cfg = config or load_config()
     try:
-        return handle_reaction(ctx, config=cfg)
+        return await asyncio.to_thread(handle_reaction, ctx, config=cfg)
     except ValueError as exc:
         return KanbanReplyInboxResult(consumed=True, reason="rejected", ack=f"Rejected: {exc}")
