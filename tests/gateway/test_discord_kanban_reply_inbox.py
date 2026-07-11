@@ -13,6 +13,7 @@ from gateway.kanban_discord_inbox import (
     load_config,
     parse_instruction,
     reaction_intent_for_emoji,
+    text_action_for_command,
     maybe_handle_discord_reaction,
 )
 from gateway.kanban_mirror.state import (
@@ -146,6 +147,53 @@ def test_reaction_intent_mapping_and_normalization():
     assert expand is not None and expand.intent == "expand_idea"
     assert reaction_intent_for_emoji("❓") is None
 
+
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        ("approve", "approve"), (" APPROVED ", "approve"), ("Yes", "approve"),
+        ("pause", "pause"), ("stop", "pause"), ("close", "close_request"),
+        ("watch", "watch"), ("rerun", "rerun_request"), ("redo", "rerun_request"),
+        ("reject", "reject"), ("rejected", "reject"), ("no", "reject"),
+        ("context", "needs_context"), ("review", "review_request"),
+        ("expand", "expand_idea"),
+    ],
+)
+def test_text_action_aliases_are_exact_casefolded_matches(text, intent):
+    action = text_action_for_command(text)
+    assert action is not None
+    assert action.intent == intent
+
+
+@pytest.mark.parametrize("text", ["close.", "please close", "yes please", "review this", ""])
+def test_text_action_does_not_match_conversation_or_punctuation(text):
+    assert text_action_for_command(text) is None
+
+
+def test_text_action_creates_owner_instruction_without_changing_card(kanban_db, inbox_config):
+    _db_path, tid = kanban_db
+    conn = kb.connect()
+    try:
+        before_status = kb.get_task(conn, tid).status
+    finally:
+        conn.close()
+    result = handle_reply(ctx(content="  YES  "), config=inbox_config)
+    assert result.consumed is True
+    assert result.action == "text:approve"
+    assert result.owner_instruction_id is not None
+    duplicate = handle_reply(ctx(content="yes"), config=inbox_config)
+    assert duplicate.reason == "duplicate"
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.status == before_status
+        assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
+        instructions = kb.list_owner_instructions(conn, task_id=tid)
+        assert len(instructions) == 1
+        assert instructions[0].status == "pending"
+        assert instructions[0].body.find("approve") >= 0
+    finally:
+        conn.close()
 
 
 def test_mapped_reply_creates_comment_and_mirror_receipt(kanban_db, inbox_config):

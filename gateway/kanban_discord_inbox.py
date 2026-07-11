@@ -105,6 +105,26 @@ _REACTION_INTENTS: dict[str, ParsedKanbanReaction] = {
 }
 
 
+_TEXT_ACTION_ALIASES: dict[str, str] = {
+    "approve": "✅", "approved": "✅", "yes": "✅",
+    "pause": "⏸", "stop": "⏸",
+    "close": "🗑",
+    "watch": "👀",
+    "rerun": "🔁", "redo": "🔁",
+    "reject": "🚫", "rejected": "🚫", "no": "🚫",
+    "context": "❔",
+    "review": "🧐",
+    "expand": "🤔",
+}
+
+
+def text_action_for_command(text: str) -> ParsedKanbanReaction | None:
+    """Resolve an exact, prefix-free text action after whitespace/case normalization."""
+    command = (text or "").strip().casefold()
+    emoji = _TEXT_ACTION_ALIASES.get(command)
+    return _REACTION_INTENTS.get(emoji) if emoji is not None else None
+
+
 def _normalize_emoji(emoji: str) -> str:
     return (emoji or "").replace("️", "").strip()
 
@@ -447,6 +467,99 @@ def handle_reaction(
         conn.close()
 
 
+def _reply_author(ctx: DiscordReplyContext) -> str:
+    author_id = str(ctx.author_id or "").strip()
+    return f"discord:{author_id}" if author_id.isdigit() else "discord:unknown"
+
+
+def _handle_text_action(
+    conn: sqlite3.Connection,
+    mirror_conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    board_slug: str,
+    ctx: DiscordReplyContext,
+    action: ParsedKanbanReaction,
+) -> KanbanReplyInboxResult:
+    source_key = f"text:{ctx.thread_id}:{ctx.message_id}"
+    ensure_receipts(mirror_conn)
+    mirror_conn.execute("BEGIN IMMEDIATE")
+    if receipt_exists(mirror_conn, ctx.message_id):
+        mirror_conn.rollback()
+        return KanbanReplyInboxResult(consumed=True, reason="duplicate", task_id=task_id, action="duplicate")
+    task = kb.get_task(conn, task_id)
+    if task is None:
+        mirror_conn.rollback()
+        return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+    if not task.assignee:
+        mirror_conn.rollback()
+        return KanbanReplyInboxResult(consumed=False, reason="unassigned_task", task_id=task_id)
+    body = "\n".join([
+        "[discord text instruction]",
+        f"Original card: {task_id}",
+        f"Instruction from {_reply_author(ctx)}",
+        f"Command: {(ctx.content or '').strip()}",
+        f"Instruction: {action.intent}",
+        f"Meaning: {action.meaning}",
+        f"Discord thread: {ctx.thread_id}",
+        f"Discord message: {ctx.message_id}",
+        "",
+        "Carry out this instruction or leave a durable explanation on the original card for refusing it.",
+    ])
+    instruction = kb.create_owner_instruction(
+        conn,
+        task_id=task_id,
+        assignee=task.assignee,
+        source="discord_text_command",
+        source_key=source_key,
+        actor=_reply_author(ctx),
+        body=body,
+    )
+    marker = f"Text instruction key: {source_key}"
+    row = conn.execute(
+        "SELECT id FROM task_comments WHERE task_id=? AND body LIKE ? ORDER BY id DESC LIMIT 1",
+        (task_id, f"%{marker}%"),
+    ).fetchone()
+    comment_id = int(row["id"]) if row is not None else kb.add_comment(
+        conn,
+        task_id,
+        author=_reply_author(ctx),
+        body="\n".join([
+            "[discord text instruction]",
+            f"Instruction from {_reply_author(ctx)}",
+            f"Command: {(ctx.content or '').strip()}",
+            f"Instruction: {action.intent}",
+            f"Meaning: {action.meaning}",
+            marker,
+            f"Owner instruction: #{instruction.id} ({instruction.status})",
+            "State change: none (owner-only)",
+        ]),
+    )
+    record_receipt(
+        mirror_conn,
+        discord_message_id=ctx.message_id,
+        board_slug=board_slug,
+        forum_channel_id=ctx.forum_channel_id,
+        thread_id=ctx.thread_id,
+        task_id=task_id,
+        author_id=ctx.author_id,
+        action=f"text:{action.intent}",
+        replied_to_message_id=ctx.reply_to_message_id,
+        replied_to_kanban_comment_id=_find_replied_to_comment_id(ctx.reply_to_message_id, mirror_conn=mirror_conn),
+        kanban_comment_id=comment_id,
+    )
+    return KanbanReplyInboxResult(
+        consumed=True,
+        reason="handled",
+        task_id=task_id,
+        action=f"text:{action.intent}",
+        kanban_comment_id=comment_id,
+        owner_instruction_id=instruction.id,
+        owner_instruction_status=instruction.status,
+        ack=f"Recorded owner instruction #{instruction.id} ({instruction.status}) on Kanban card {task_id}; routed to {task.assignee}.",
+    )
+
+
 def handle_reply(
     ctx: DiscordReplyContext,
     *,
@@ -474,6 +587,16 @@ def handle_reply(
     try:
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
+            text_action = text_action_for_command(ctx.content)
+            if text_action is not None:
+                return _handle_text_action(
+                    conn,
+                    mirror_conn,
+                    task_id=str(task_id),
+                    board_slug=resolved_board_slug,
+                    ctx=ctx,
+                    action=text_action,
+                )
             parsed = parse_instruction(ctx.content, config=cfg)
             return apply_instruction(
                 conn,
