@@ -2713,17 +2713,43 @@ def finish_owner_instruction(conn: sqlite3.Connection, instruction_id: int, clai
     if not str(outcome).strip():
         raise ValueError("owner instruction outcome is required")
     now = int(time.time())
+    archived_task = False
+    comment_id = 0
     with write_txn(conn):
-        row = conn.execute("SELECT task_id FROM task_owner_instructions WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
+        row = conn.execute("SELECT task_id,body FROM task_owner_instructions WHERE id=? AND status='accepted' AND claim_lock=? AND claim_expires>=?",
                            (int(instruction_id), claim_lock, now)).fetchone()
         if not row:
             raise ValueError("owner instruction claim is not active")
         cur = conn.execute("INSERT INTO task_comments(task_id,author,body,created_at) VALUES(?,?,?,?)",
                            (row["task_id"], author, f"[owner instruction #{instruction_id} {disposition}]\n{outcome.strip()}", now))
+        comment_id = int(cur.lastrowid or 0)
         conn.execute("UPDATE task_owner_instructions SET status=?,completed_at=?,outcome=?,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
                      (disposition, now, outcome.strip(), int(instruction_id)))
         _append_event(conn, row["task_id"], f"owner_instruction_{disposition}", {"instruction_id": int(instruction_id)})
-        return int(cur.lastrowid or 0)
+        requested_close = any(
+            line == "Instruction: close_request"
+            for line in str(row["body"] or "").splitlines()
+        )
+        if disposition == "completed" and requested_close:
+            task_cur = conn.execute(
+                """UPDATE tasks SET status='archived',claim_lock=NULL,
+                          claim_expires=NULL,worker_pid=NULL
+                   WHERE id=? AND status!='archived'""",
+                (row["task_id"],),
+            )
+            if task_cur.rowcount:
+                run_id = _end_run(
+                    conn, row["task_id"], outcome="reclaimed", status="reclaimed",
+                    summary=f"archived by completed owner instruction #{instruction_id}",
+                )
+                _append_event(
+                    conn, row["task_id"], "archived",
+                    {"owner_instruction_id": int(instruction_id)}, run_id=run_id,
+                )
+                archived_task = True
+    if archived_task:
+        recompute_ready(conn)
+    return comment_id
 
 
 def release_stale_owner_instructions(conn: sqlite3.Connection) -> int:

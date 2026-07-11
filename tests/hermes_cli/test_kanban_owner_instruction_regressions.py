@@ -90,6 +90,28 @@ def test_instruction_worker_cannot_create_cards(board, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before
 
 
+def test_completed_close_instruction_archives_original_card(board):
+    with kb.connect() as conn:
+        inst = kb.create_owner_instruction(
+            conn,
+            task_id=board,
+            assignee="instruction-owner",
+            source="test",
+            source_key=f"close-{time.time_ns()}",
+            actor="owner",
+            body="Instruction: close_request\nMeaning: close it",
+        )
+        claimed = kb.claim_owner_instruction(conn, inst.id)
+        assert claimed is not None
+        assert claimed.claim_lock is not None
+        kb.finish_owner_instruction(
+            conn, claimed.id, claimed.claim_lock, "completed", "closed", author="worker"
+        )
+        assert kb.get_task(conn, board).status == "archived"
+        assert kb.get_owner_instruction(conn, claimed.id).status == "completed"
+        assert any(event.kind == "archived" for event in kb.list_events(conn, board))
+
+
 def test_spawn_uses_snapshotted_instruction_assignee_and_does_not_leak_task_claim(board, monkeypatch, tmp_path):
     with kb.connect() as conn:
         conn.execute("UPDATE tasks SET claim_lock='original-task-token' WHERE id=?", (board,))
