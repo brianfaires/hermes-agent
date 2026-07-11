@@ -632,13 +632,19 @@ def test_active_thread_audit_adopts_unmapped_bot_thread_with_one_known_card():
     ).fetchone()
     assert changed is True
     assert row == ("orphan", "orphan", None)
-    assert "active_thread_audit: ADOPT init_t1 thread=orphan task=t1" in log
+    assert "active_thread_audit: ADOPT init_t1 winner=orphan" in log
 
 
-def test_active_thread_audit_refuses_ambiguous_or_foreign_orphan_threads():
+def test_active_thread_audit_repairs_multiple_pointers_but_rejects_foreign_bot():
     conn = _archive_test_conn()
     snapshot = _done_snapshot()
-    snapshot.cards["t2"] = replace(snapshot.cards["t1"], id="t2", title="Other")
+    snapshot.cards["t1"] = replace(snapshot.cards["t1"], status="ready")
+    snapshot.cards["t2"] = replace(snapshot.cards["t1"], id="t2", title="Other", created_at=2)
+    snapshot.cards["t3"] = replace(snapshot.cards["t1"], id="t3", title="Third", created_at=3)
+    initiative = replace(
+        mk_initiative(),
+        members={task_id: MemberState(task_id, None, None) for task_id in ("t1", "t2", "t3")},
+    )
     client = FakeClient(
         active_threads=[
             {"id": "ambiguous", "parent_id": "forum1"},
@@ -647,12 +653,12 @@ def test_active_thread_audit_refuses_ambiguous_or_foreign_orphan_threads():
         messages={
             ("ambiguous", "ambiguous"): {
                 "id": "ambiguous",
-                "content": "Cards `t1` and `t2`",
+                "content": "card_ID: t2\ncard_ID: t3\n**Work items**\nT1 then T2 then T3",
                 "author": {"id": "mirror-bot", "bot": True},
             },
             ("foreign", "foreign"): {
                 "id": "foreign",
-                "content": "Card `t1`",
+                "content": "card_ID: t1",
                 "author": {"id": "other-bot", "bot": True},
             },
         },
@@ -661,28 +667,29 @@ def test_active_thread_audit_refuses_ambiguous_or_foreign_orphan_threads():
 
     changed = asyncio.run(_audit_active_threads(
         MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
-        cast(DiscordClient, client), conn, snapshot, {"init_t1": mk_initiative()}, log,
+        cast(DiscordClient, client), conn, snapshot, {"init_t1": initiative}, log,
     ))
 
-    assert changed is False
-    assert "active_thread_audit: UNMAPPED ambiguous" in log
+    assert changed is True
+    assert conn.execute("SELECT thread_id FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] == "ambiguous"
+    assert "active_thread_audit: ADOPT init_t1 winner=ambiguous" in log
     assert "active_thread_audit: UNMAPPED foreign" in log
 
 
-def test_active_thread_audit_refuses_two_orphans_for_the_same_card():
+def test_active_thread_audit_merges_two_orphans_into_most_recent():
     conn = _archive_test_conn()
     messages = {
         (thread_id, thread_id): {
             "id": thread_id,
-            "content": "Card `t1`",
+            "content": "card_ID: t1",
             "author": {"id": "mirror-bot", "bot": True},
         }
         for thread_id in ("orphan-a", "orphan-b")
     }
     client = FakeClient(
         active_threads=[
-            {"id": "orphan-a", "parent_id": "forum1"},
-            {"id": "orphan-b", "parent_id": "forum1"},
+            {"id": "orphan-a", "parent_id": "forum1", "last_message_id": "100"},
+            {"id": "orphan-b", "parent_id": "forum1", "last_message_id": "200"},
         ],
         messages=messages,
     )
@@ -693,7 +700,33 @@ def test_active_thread_audit_refuses_two_orphans_for_the_same_card():
         cast(DiscordClient, client), conn, _done_snapshot(), {"init_t1": mk_initiative()}, log,
     ))
 
-    assert changed is False
-    assert conn.execute("SELECT thread_id FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] == "th1"
-    assert "active_thread_audit: UNMAPPED orphan-a" in log
-    assert "active_thread_audit: UNMAPPED orphan-b" in log
+    assert changed is True
+    assert conn.execute("SELECT thread_id FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] == "orphan-b"
+    assert ("orphan-a", {"archive": True}) in client.updated
+    assert "active_thread_audit: MERGE init_t1 winner=orphan-b archived=orphan-a" in log
+
+
+def test_active_thread_audit_replaces_active_mapping_when_orphan_is_newer():
+    conn = _archive_test_conn()
+    client = FakeClient(
+        active_threads=[
+            {"id": "th1", "parent_id": "forum1", "last_message_id": "100"},
+            {"id": "orphan", "parent_id": "forum1", "last_message_id": "200"},
+        ],
+        messages={("orphan", "orphan"): {
+            "id": "orphan",
+            "content": "card_ID: t1",
+            "author": {"id": "mirror-bot", "bot": True},
+        }},
+    )
+    log = []
+
+    changed = asyncio.run(_audit_active_threads(
+        MirrorConfig(enabled=True, board="operations", forum_channel_id="forum1", guild_id="guild1"),
+        cast(DiscordClient, client), conn, _done_snapshot(), {"init_t1": mk_initiative()}, log,
+    ))
+
+    assert changed is True
+    assert conn.execute("SELECT thread_id FROM mirror_initiatives WHERE id='init_t1'").fetchone()[0] == "orphan"
+    assert ("th1", {"archive": True}) in client.updated
+    assert "active_thread_audit: MERGE init_t1 winner=orphan archived=th1" in log

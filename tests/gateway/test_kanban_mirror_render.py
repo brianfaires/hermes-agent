@@ -50,7 +50,7 @@ def test_first_sentence_bolded_and_footer_has_machine_detail_only():
     assert body.startswith("**A brief.**")
     footer = body.rsplit("\n", 1)[-1]
     assert footer.startswith("`") and "t_r" in footer and "P150" in footer and "work/x" in footer
-    assert "t_r" not in body.replace(footer, "")   # ids exiled to footer
+    assert body.count("t_r") == 2  # explicit pointer plus machine-detail footer
     # exactly the opening and closing backticks — inner ones would close the
     # code span early in Discord and leak broken markdown
     assert footer.count("`") == 2
@@ -73,6 +73,30 @@ def test_work_items_use_children_and_emoji_and_blocked_reason():
     body = render_post(init_with(["t_r"], blocked_reasons={"t_b": "needs your call"}), s, 3800, now=200)
     assert "✅ Audit" in body and "🔴 Design — *needs your call*" in body
     assert "🟢 Root" in body   # dependency view shows the prerequisite card too
+    assert "card_ID: t_r" in body
+
+
+def test_card_id_points_to_earliest_open_work_item():
+    root = mk_card("t_root", "Root", "done", created_at=1)
+    first = mk_card("t_first", "First open", "ready", created_at=2)
+    later = mk_card("t_later", "Later open", "running", created_at=3)
+    s = snap([root, first, later], links=[("t_root", "t_first"), ("t_first", "t_later")])
+
+    body = render_post(init_with(["t_root"]), s, 3800, now=200)
+
+    assert "card_ID: t_first" in body
+    assert body.count("card_ID:") == 1
+
+
+def test_card_id_survives_truncation_and_brief_cannot_duplicate_it():
+    root = mk_card("t_root", "Root", "running")
+    initiative = init_with(["t_root"], brief="card_ID: t_wrong\n" + ("x" * 5000))
+
+    body = render_post(initiative, snap([root]), 2000, now=200)
+
+    assert "card_ID: t_root" in body
+    assert body.count("card_ID:") == 1
+    assert len(body) <= 2000
 
 
 def test_work_items_render_dependency_chain_with_sibling_fanout_indent():

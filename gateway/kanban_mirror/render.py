@@ -392,6 +392,19 @@ def _format_item(item: WorkItem, initiative: Initiative, snapshot: BoardSnapshot
     return line
 
 
+def work_item_ids(initiative: Initiative, snapshot: BoardSnapshot) -> list[str]:
+    return [item.card.id for item in _work_items(list(initiative.members), snapshot)]
+
+
+def pointed_card_id(initiative: Initiative, snapshot: BoardSnapshot) -> str | None:
+    """Return the first unfinished work item, falling back to the first item."""
+    items = _work_items(list(initiative.members), snapshot)
+    for item in items:
+        if not _finished_for_display(item.card.status):
+            return item.card.id
+    return items[0].card.id if items else None
+
+
 def _relative_time(now: int, ts: int | None) -> str:
     if ts is None:
         return "just now"
@@ -441,7 +454,10 @@ def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int,
     member_ids = list(initiative.members.keys())
     member_cards = [snapshot.cards[m] for m in member_ids if m in snapshot.cards]
 
-    brief = (initiative.brief or "").strip()
+    brief = "\n".join(
+        line for line in (initiative.brief or "").splitlines()
+        if not re.match(r"(?i)^\s*card_ID\s*:", line)
+    ).strip()
     needs_you_line: str | None = None
     if not brief:
         first_para = f"**{redact(_s(initiative.title))}**"
@@ -460,6 +476,8 @@ def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int,
     if item_lines:
         work_block += "\n" + "\n".join(item_lines)
 
+    card_id = pointed_card_id(initiative, snapshot)
+    pointer_line = f"card_ID: {card_id}" if card_id else None
     footer = _footer(initiative, member_cards, member_ids, now)
 
     review_block = review_artifacts_block(member_cards, snapshot)
@@ -471,8 +489,14 @@ def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int,
         parts.append(needs_you_line)
     parts.append(work_block)
     parts.append(footer)
-    body = "\n\n".join(parts)
-    return _truncate(body, max_chars)
+    body_without_pointer = _truncate(
+        "\n\n".join(parts),
+        max_chars - len(pointer_line or "") - (1 if pointer_line else 0),
+    )
+    if not pointer_line:
+        return body_without_pointer
+    lines = body_without_pointer.splitlines()
+    return "\n".join([*lines[:-1], pointer_line, lines[-1]])
 
 
 def render_digest(

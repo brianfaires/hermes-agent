@@ -31,10 +31,12 @@ from gateway.kanban_mirror.discord_client import (
 from gateway.kanban_mirror.planner import Op, _digest_hash, _tags_for, current_publish_hash, plan
 from gateway.kanban_mirror.render import (
     post_title,
+    pointed_card_id,
     redact,
     render_digest,
     render_post,
     review_artifact_paths,
+    work_item_ids,
 )
 from gateway.kanban_mirror.state import (
     BoardSnapshot,
@@ -633,12 +635,11 @@ async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None,
     """Detect open Discord forum threads that no longer match unfinished Kanban work.
 
     Discord can drift from mirror.db: a thread may remain open after a card is
-    terminal, or an archived initiative may be reopened manually.  This audit
-    runs every tick against Discord's active-thread list and clears stale local
-    archive markers for mapped active threads so the normal planner can reapply
-    the Done tag and idle archive policy.  Unmapped active threads are logged but
-    not mutated; the forum may contain manual/admin threads that the mirror must
-    not silently close.
+    terminal, an archived initiative may be reopened manually, or duplicate
+    bot-authored threads may point at one card. This audit runs every tick,
+    keeps the thread with the newest Discord activity, archives duplicates,
+    and clears stale local archive markers so the normal planner can repair
+    the surviving post. Unrecognized/manual threads remain untouched.
 
     Returns True when mirror state changed and should be reloaded before planning.
     """
@@ -657,9 +658,13 @@ async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None,
         for thread in threads
         if str(thread.get("parent_id") or "") == cfg.forum_channel_id
     }
+    active_threads_by_id = {
+        str(thread.get("id") or "").strip(): thread
+        for thread in threads
+        if str(thread.get("parent_id") or "") == cfg.forum_channel_id
+    }
     bot_user_id: str | None = None
     orphan_inspections: dict[str, tuple[Initiative | None, str | None]] = {}
-    orphan_candidate_counts: dict[str, int] = {}
     orphan_threads = [
         thread_id
         for thread_id in active_thread_ids
@@ -684,55 +689,79 @@ async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None,
                 author = starter.get("author") if isinstance(starter, dict) else None
                 author_id = str((author or {}).get("id") or "").strip() if isinstance(author, dict) else ""
                 content = str(starter.get("content") or "") if isinstance(starter, dict) else ""
+                explicit_card_ids = re.findall(
+                    r"(?im)^\s*card_ID\s*:\s*(t_[0-9a-f]{8}|t[0-9]+)\s*$", content
+                )
                 referenced_cards = {
                     token
-                    for token in re.findall(r"(?<!\w)(t_[0-9a-f]{8}|t[0-9]+)(?!\w)", content)
+                    for token in (
+                        explicit_card_ids
+                        or re.findall(r"(?<!\w)(t_[0-9a-f]{8}|t[0-9]+)(?!\w)", content)
+                    )
                     if token in snapshot.cards
                 }
                 candidates = [
                     candidate
                     for candidate in state.values()
-                    if candidate.kind == "post" and len(referenced_cards & set(candidate.members)) == 1
+                    if candidate.kind == "post"
+                    and referenced_cards.intersection(work_item_ids(candidate, snapshot))
                 ]
                 candidate = candidates[0] if len(candidates) == 1 else None
-                referenced_task = next(iter(referenced_cards)) if len(referenced_cards) == 1 else None
-                if author_id != bot_user_id or candidate is None or referenced_task not in candidate.members:
+                referenced_task = pointed_card_id(candidate, snapshot) if candidate is not None else None
+                if author_id != bot_user_id or candidate is None:
                     candidate = None
                     referenced_task = None
                 orphan_inspections[orphan_thread_id] = (candidate, referenced_task)
-                if candidate is not None:
-                    orphan_candidate_counts[candidate.id] = orphan_candidate_counts.get(candidate.id, 0) + 1
+    def activity_key(thread_id: str) -> tuple[int, str]:
+        thread = active_threads_by_id.get(thread_id, {})
+        raw = str(thread.get("last_message_id") or thread_id)
+        return (int(raw) if raw.isdigit() else 0, thread_id)
+
+    handled_threads: set[str] = set()
     changed = False
+    grouped_orphans: dict[str, list[str]] = {}
+    for thread_id, (candidate, _) in orphan_inspections.items():
+        if candidate is not None:
+            grouped_orphans.setdefault(candidate.id, []).append(thread_id)
+    for initiative_id, orphan_ids in grouped_orphans.items():
+        candidate = state[initiative_id]
+        candidates = list(orphan_ids)
+        if candidate.thread_id in active_thread_ids:
+            candidates.append(str(candidate.thread_id))
+        winner = max(candidates, key=activity_key)
+        losers = [thread_id for thread_id in candidates if thread_id != winner]
+        archived: list[str] = []
+        merge_failed = False
+        for loser in losers:
+            try:
+                await asyncio.to_thread(client.update_thread, loser, archive=True)
+                archived.append(loser)
+            except Exception as exc:
+                logger.warning("kanban mirror: duplicate archive failed for %s: %s", loser, exc)
+                merge_failed = True
+                break
+        if merge_failed:
+            continue
+        if candidate.thread_id != winner:
+            await asyncio.to_thread(set_thread, conn, initiative_id, winner, winner)
+        if candidate.archived_at is not None:
+            await asyncio.to_thread(clear_archived, conn, initiative_id)
+        handled_threads.update(candidates)
+        changed = True
+        action = "MERGE" if archived else "ADOPT"
+        suffix = f" archived={','.join(archived)}" if archived else ""
+        log.append(f"active_thread_audit: {action} {initiative_id} winner={winner}{suffix}")
+
     for thread in threads:
         if str(thread.get("parent_id") or "") != cfg.forum_channel_id:
             continue
         thread_id = str(thread.get("id") or "").strip()
         if not thread_id:
             continue
+        if thread_id in handled_threads:
+            continue
         initiative = by_thread.get(thread_id)
         if initiative is None:
-            safe_candidate, referenced_task = orphan_inspections.get(thread_id, (None, None))
-            existing_thread_active = bool(
-                safe_candidate and safe_candidate.thread_id in active_thread_ids
-            )
-            if (
-                safe_candidate is not None
-                and referenced_task is not None
-                and not existing_thread_active
-                and orphan_candidate_counts.get(safe_candidate.id) == 1
-            ):
-                await asyncio.to_thread(set_thread, conn, safe_candidate.id, thread_id, thread_id)
-                if safe_candidate.archived_at is not None:
-                    await asyncio.to_thread(clear_archived, conn, safe_candidate.id)
-                logger.info(
-                    "kanban mirror: adopted orphan Discord thread %s as initiative %s for task %s",
-                    thread_id, safe_candidate.id, referenced_task,
-                )
-                log.append(
-                    f"active_thread_audit: ADOPT {safe_candidate.id} thread={thread_id} task={referenced_task}"
-                )
-                changed = True
-                continue
             logger.info("kanban mirror: active Discord thread %s has no mirror mapping", thread_id)
             log.append(f"active_thread_audit: UNMAPPED {thread_id}")
             continue
