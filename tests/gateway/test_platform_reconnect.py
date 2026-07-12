@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -59,6 +60,7 @@ def _make_runner():
     runner._exit_cleanly = False
     runner._failed_platforms = {}
     runner.adapters = {}
+    runner._gateway_profile_home = Path.cwd()
     runner.delivery_router = MagicMock()
     runner._running_agents = {}
     runner._pending_messages = {}
