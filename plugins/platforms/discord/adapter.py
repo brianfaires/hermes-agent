@@ -1332,8 +1332,20 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # on_ready also fires after Discord reconnect/RESUME. Recovery
                 # is bounded and runs independently from unrelated channels.
-                cfg, _runtime = await adapter_self._kanban_runtime()
-                if cfg.enabled and cfg.conversation_router_enabled:
+                try:
+                    cfg, runtime = await adapter_self._kanban_runtime()
+                except RuntimeError:
+                    # Preserve unrelated reconnect initialization, but put the
+                    # identity failure under supervision so health reports it.
+                    logger.error("[%s] Discord Kanban ingress identity validation failed", adapter_self.name,
+                                 exc_info=True)
+                    adapter_self._kanban_backfill_task = adapter_self._kanban_supervisor.start(
+                        "reconnect-backfill", adapter_self._run_kanban_reconnect_backfill
+                    )
+                    cfg = None
+                    runtime = None
+                if (cfg is not None and cfg.enabled and cfg.conversation_router_enabled
+                        and runtime is not None):
                     adapter_self._kanban_inbound_task = adapter_self._kanban_supervisor.start(
                         "pending-inbound", adapter_self._run_kanban_pending_inbound
                     )
@@ -6012,9 +6024,20 @@ class DiscordAdapter(BasePlatformAdapter):
         cfg = load_config()
         if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
             return cfg, None
-        # Fenced until gateway startup validates all connected bot identities.
-        if not getattr(self, "_kanban_router_ready", False):
+        # Only the configured ingress identity may own historical persistence.
+        # Re-check the live identity on every reconnect/worker pass: a stale
+        # startup boolean would let a swapped multiplex bot freeze its policy.
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        if not identity:
             return cfg, None
+        profile, expected_bot_id = identity
+        actual_bot_id = str(
+            getattr(getattr(getattr(self, "_client", None), "user", None), "id", "") or ""
+        )
+        if not actual_bot_id or actual_bot_id != str(expected_bot_id):
+            raise RuntimeError(
+                f"Discord Kanban ingress identity lost for profile '{profile}'"
+            )
         if self._kanban_ingestor is None:
             from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
             from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
@@ -6145,6 +6168,12 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
         """Fakeable discord.py history seam used by durable reconnect recovery."""
         from gateway.kanban_mirror.backfill import HistoryPage
+
+        # Defense in depth: history must not even be fetched if this adapter is
+        # not the currently validated ingress identity.
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return HistoryPage([], has_more=False)
 
         channel = self._client.get_channel(int(thread_id)) if self._client else None
         if channel is None and self._client and hasattr(self._client, "fetch_channel"):

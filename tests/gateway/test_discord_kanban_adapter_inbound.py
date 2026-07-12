@@ -188,3 +188,69 @@ async def test_restart_replay_keeps_frozen_unauthorized_disposition(runtime, mon
     assert row[0] == "processed"
     assert disposition[0] == "unauthorized"
     assert dispatched is False
+
+
+@pytest.mark.asyncio
+async def test_only_validated_ingress_backfills_and_freezes_its_policy(tmp_path, monkeypatch):
+    from gateway.kanban_mirror.inbound import PendingInboundRunner
+
+    conn = connect_mirror(tmp_path / "mirror.db")
+    _bind(conn, "10")
+    ingestor = DiscordBackfillIngestor(conn, clock=lambda: 1_000)
+    cfg = SimpleNamespace(enabled=True, conversation_router_enabled=True,
+                          forum_channel_ids=frozenset({"99"}))
+    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", lambda: cfg)
+
+    def make(bot_id, allowed):
+        item = discord_adapter.DiscordAdapter(PlatformConfig(enabled=True, token="fixture"))
+        item._client = SimpleNamespace(user=SimpleNamespace(id=bot_id))
+        item._kanban_mirror_conn = conn
+        item._kanban_ingestor = ingestor
+        item._allowed_user_ids = allowed
+        return item
+
+    non_ingress = make("111", {"7"})
+    ingress = make("222", {"8"})
+    non_ingress._kanban_router_ingress_identity = None
+    ingress._kanban_router_ingress_identity = ("owner", "222")
+    fetches = {"non_ingress": 0, "ingress": 0}
+
+    async def non_ingress_fetch(*_args):
+        fetches["non_ingress"] += 1
+        return HistoryPage([])
+
+    async def ingress_fetch(thread_id, _after, _limit):
+        fetches["ingress"] += 1
+        return HistoryPage([ingress._discord_inbound(_message(701, thread=thread_id), relevant=True)])
+
+    monkeypatch.setattr(non_ingress, "_fetch_kanban_history_page", non_ingress_fetch)
+    monkeypatch.setattr(ingress, "_fetch_kanban_history_page", ingress_fetch)
+    await non_ingress._backfill_kanban_mirror_threads()
+    assert fetches == {"non_ingress": 0, "ingress": 0}
+    await ingress._backfill_kanban_mirror_threads()
+    assert fetches == {"non_ingress": 0, "ingress": 1}
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM mirror_discord_inbound_state WHERE discord_message_id='701'"
+    ).fetchone()[0])
+    assert payload["authorized"] is False
+    assert payload["authorization_policy"]["ingress_bot_id"] == "222"
+
+    ingress._allowed_user_ids = {"7"}
+    dispatched = False
+
+    async def dispatch(_event):
+        nonlocal dispatched
+        dispatched = True
+
+    monkeypatch.setattr(ingress, "_dispatch_message_event", dispatch)
+    assert await PendingInboundRunner(conn, ingress._process_kanban_pending_inbound,
+                                      clock=lambda: 2_000).run_once() == 1
+    assert not dispatched
+
+    ingress._client.user.id = "111"
+    with pytest.raises(RuntimeError, match="identity lost"):
+        await ingress._backfill_kanban_mirror_threads()
+    ingress._client.user = None
+    with pytest.raises(RuntimeError, match="identity lost"):
+        await ingress._kanban_runtime()
+    conn.close()

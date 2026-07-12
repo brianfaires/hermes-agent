@@ -6709,6 +6709,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.kanban_discord_inbox import load_config, validate_router_config
         from gateway.kanban_mirror.config import load_mirror_config
         cfg = load_config()
+        # Readiness is identity-bearing and must never survive a failed
+        # revalidation (for example, bots swapped during reconnect).
+        adapters = self._kanban_profile_adapters()
+        for adapter in adapters.values():
+            adapter._kanban_router_ingress_identity = None
         if not (cfg.enabled and cfg.conversation_router_enabled):
             return None
         try:
@@ -6718,7 +6723,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         except ValueError as exc:
             raise MultiplexConfigError(str(exc)) from exc
-        adapters = self._kanban_profile_adapters()
         errors = []
         for bot_id, profile in cfg.profile_bot_user_ids:
             adapter = adapters.get(profile)
@@ -6732,8 +6736,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 errors.append(f"Discord bot user ID does not match profile '{profile}'")
         if errors:
             raise MultiplexConfigError("Discord conversation router readiness failed: " + "; ".join(errors))
-        for adapter in adapters.values():
-            adapter._kanban_router_ready = True
+        ingress = adapters[ingress_profile]
+        ingress_bot_id = next(
+            bot_id for bot_id, profile in cfg.profile_bot_user_ids
+            if profile == ingress_profile
+        )
+        ingress._kanban_router_ingress_identity = (ingress_profile, ingress_bot_id)
         self._kanban_router_ingress_profile = ingress_profile
         return ingress_profile
 

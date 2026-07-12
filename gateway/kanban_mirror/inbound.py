@@ -1,4 +1,10 @@
-"""Leased durable processing for frozen mirrored Discord input."""
+"""Leased durable processing for frozen mirrored Discord input.
+
+Deployment note: payloads persisted before authorization freezing was introduced
+may lack ``authorized``. They intentionally fail closed; operators must drain or
+explicitly migrate those rows before upgrade rather than infer authorization
+from the current adapter policy.
+"""
 from __future__ import annotations
 import asyncio, inspect, json, sqlite3, time
 from dataclasses import dataclass

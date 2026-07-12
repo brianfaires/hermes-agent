@@ -53,10 +53,13 @@ def test_live_readiness_accepts_secondary_ingress_and_rejects_swapped_ids(monkey
     validate = GatewayRunner._validate_kanban_router_readiness.__get__(runner)
     assert validate() == "owner"
     assert runner._kanban_router_ingress_profile == "owner"
+    assert runner.adapters[Platform.DISCORD]._kanban_router_ingress_identity is None
+    assert runner._profile_adapters["owner"][Platform.DISCORD]._kanban_router_ingress_identity == ("owner", "222")
     runner.adapters[Platform.DISCORD]._client.user.id = "222"
     runner._profile_adapters["owner"][Platform.DISCORD]._client.user.id = "111"
     with pytest.raises(MultiplexConfigError, match="does not match"):
         validate()
+    assert runner._profile_adapters["owner"][Platform.DISCORD]._kanban_router_ingress_identity is None
 
 
 def test_daemon_advanced_gates_require_binding_backfill_and_legacy_remains_off():
