@@ -827,6 +827,24 @@ def resolve_profile_route(
     )
 
 
+def _event_bound_task_id(
+    mirror_conn: sqlite3.Connection, *, thread_id: str, binding_key: str | None,
+    legacy_task_id: str,
+) -> str | None:
+    """Resolve the card captured with an event, retaining epoch-less mirrors."""
+    if binding_key is not None:
+        row = mirror_conn.execute(
+            "SELECT task_id FROM mirror_binding_epochs WHERE thread_id=? AND binding_key=?",
+            (str(thread_id), str(binding_key)),
+        ).fetchone()
+        if row is not None:
+            return str(row["task_id"])
+    epoch_count = mirror_conn.execute(
+        "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?", (str(thread_id),)
+    ).fetchone()[0]
+    return str(legacy_task_id) if not epoch_count else None
+
+
 def handle_reply(
     ctx: DiscordReplyContext,
     *,
@@ -848,11 +866,42 @@ def handle_reply(
         return KanbanReplyInboxResult(consumed=False, reason="not_a_reply")
 
     board_slug = cfg.board_slug or "default"
+    mirror_path = mirror_db_path(board_slug)
     resolved = resolve_thread_task(
-        mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
+        mirror_path, forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
     )
 
     if resolved is None:
+        # A known epoch-backed thread can be intentionally unresolved when it
+        # has zero/ambiguous active epochs or is quarantined. Preserve routed
+        # human input with a NULL binding, but do not route it to any card.
+        if cfg.conversation_router_enabled and mirror_path.exists():
+            mirror_conn = connect_mirror(mirror_path)
+            try:
+                epoch_count = mirror_conn.execute(
+                    "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?",
+                    (ctx.thread_id,),
+                ).fetchone()[0]
+                directive = directive_for_text(ctx.content)
+                words = (ctx.content or "").strip().split(None, 1)
+                first_word = words[0].rstrip(":").lower() if words else ""
+                explicit = log_command is not None or first_word in _SUPPORTED_ACTIONS
+                if epoch_count and (directive is not None or not explicit):
+                    event = record_conversation_event(
+                        mirror_conn, discord_message_id=ctx.message_id,
+                        thread_id=ctx.thread_id, binding_key=None,
+                        event_class=("directive.user" if directive else "conversation.human"),
+                        author_label=ctx.author_label, content=ctx.content,
+                        replied_to_message_id=ctx.reply_to_message_id,
+                    )
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable",
+                        action=(f"directive:{directive.intent}" if directive else "conversation"),
+                        owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+            finally:
+                mirror_conn.close()
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
 
     task_id, resolved_board_slug = resolved
@@ -873,10 +922,22 @@ def handle_reply(
             if cfg.conversation_router_enabled and directive is not None:
                 event = record_conversation_event(
                     mirror_conn, discord_message_id=ctx.message_id,
-                    thread_id=ctx.thread_id, binding_key=str(task_id),
+                    thread_id=ctx.thread_id, binding_key=None,
+                    legacy_binding_key=str(task_id),
                     event_class="directive.user", author_label=ctx.author_label,
                     content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
                 )
+                event_task_id = _event_bound_task_id(
+                    mirror_conn, thread_id=ctx.thread_id,
+                    binding_key=event.binding_key, legacy_task_id=str(task_id),
+                )
+                if event_task_id is None:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable",
+                        action=f"directive:{directive.intent}", owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+                task_id = event_task_id
                 task = kb.get_task(conn, str(task_id))
                 owner = str(getattr(task, "assignee", "") or "") if task else ""
                 route = resolve_profile_route(ctx, owner=owner, config=cfg)
@@ -905,10 +966,22 @@ def handle_reply(
             if cfg.conversation_router_enabled and not explicit:
                 event = record_conversation_event(
                     mirror_conn, discord_message_id=ctx.message_id,
-                    thread_id=ctx.thread_id, binding_key=str(task_id),
+                    thread_id=ctx.thread_id, binding_key=None,
+                    legacy_binding_key=str(task_id),
                     event_class="conversation.human", author_label=ctx.author_label,
                     content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
                 )
+                event_task_id = _event_bound_task_id(
+                    mirror_conn, thread_id=ctx.thread_id,
+                    binding_key=event.binding_key, legacy_task_id=str(task_id),
+                )
+                if event_task_id is None:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable", action="conversation",
+                        owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+                task_id = event_task_id
                 task = kb.get_task(conn, str(task_id))
                 owner = str(getattr(task, "assignee", "") or "").strip()
                 route = resolve_profile_route(ctx, owner=owner, config=cfg)

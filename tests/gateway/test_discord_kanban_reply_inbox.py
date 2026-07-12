@@ -912,6 +912,101 @@ def test_conversation_router_records_plain_comment_and_targets_card_owner(
         mirror_conn.close()
 
 
+def test_router_captures_epoch_key_and_current_log_selects_that_event(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "epoch-route-home"
+    (hermes_home / "profiles" / "ops").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    epoch_key = "binding-epoch-not-the-task-id"
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        mirror_conn.execute(
+            """INSERT INTO mirror_binding_epochs
+               (binding_key,thread_id,board_slug,task_id,sequence,started_at,state)
+               VALUES (?,?,?,?,1,1,'open')""",
+            (epoch_key, THREAD_ID, "default", tid),
+        )
+        mirror_conn.commit()
+    finally:
+        mirror_conn.close()
+
+    routed = handle_reply(
+        replace(ctx(message_id="epoch-conversation", content="Capture this epoch."),
+                reply_to_message_id=None, reply_to_text=None),
+        config=replace(inbox_config, conversation_router_enabled=True,
+                       conversation_router_ingress_bot_id="999"),
+    )
+    assert routed.reason == "conversation_routed"
+    assert routed.task_id == tid
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        event = mirror_conn.execute(
+            "SELECT binding_key FROM mirror_conversation_events WHERE discord_message_id=?",
+            ("epoch-conversation",),
+        ).fetchone()
+        assert event["binding_key"] == epoch_key
+        assert event["binding_key"] != tid
+    finally:
+        mirror_conn.close()
+
+    logged = handle_reply(
+        replace(ctx(message_id="epoch-log", content="!log"),
+                reply_to_message_id=None, reply_to_text=None),
+        config=replace(inbox_config, conversation_log_enabled=True),
+    )
+    assert logged.reason == "handled"
+    conn = kb.connect(db_path)
+    try:
+        assert "Capture this epoch." in kb.list_comments(conn, tid)[0].body
+    finally:
+        conn.close()
+
+
+def test_router_preserves_null_bound_event_and_fails_closed_when_quarantined(
+    kanban_db, inbox_config
+):
+    _db_path, tid = kanban_db
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        mirror_conn.execute(
+            """INSERT INTO mirror_binding_epochs
+               (binding_key,thread_id,board_slug,task_id,sequence,started_at,state)
+               VALUES ('quarantined-epoch',?,'default',?,1,1,'open')""",
+            (THREAD_ID, tid),
+        )
+        mirror_conn.execute(
+            """INSERT INTO mirror_thread_quarantine
+               (thread_id,needs_repair,quarantined_at,updated_at)
+               VALUES (?,1,1,1)""",
+            (THREAD_ID,),
+        )
+        mirror_conn.commit()
+    finally:
+        mirror_conn.close()
+
+    result = handle_reply(
+        replace(ctx(message_id="quarantined-conversation", content="Preserve, do not route."),
+                reply_to_message_id=None, reply_to_text=None),
+        config=replace(inbox_config, conversation_router_enabled=True,
+                       conversation_router_ingress_bot_id="999"),
+    )
+    assert result.consumed is True
+    assert result.reason == "binding_unavailable"
+    assert result.task_id is None
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        event = mirror_conn.execute(
+            "SELECT binding_key,content FROM mirror_conversation_events WHERE discord_message_id=?",
+            ("quarantined-conversation",),
+        ).fetchone()
+        assert event["binding_key"] is None
+        assert event["content"] == "Preserve, do not route."
+    finally:
+        mirror_conn.close()
+
+
 def test_conversation_router_preserves_event_but_fails_closed_for_missing_owner_profile(
     kanban_db, inbox_config, tmp_path, monkeypatch
 ):

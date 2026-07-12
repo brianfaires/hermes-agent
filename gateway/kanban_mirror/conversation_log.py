@@ -93,6 +93,7 @@ def record_conversation_event(
     content: str,
     replied_to_message_id: str | None = None,
     discord_created_at: int | None = None,
+    legacy_binding_key: str | None = None,
 ) -> ConversationEvent:
     """Insert once and return the original immutable event on replay."""
     message_id = str(discord_message_id or "").strip()
@@ -103,13 +104,23 @@ def record_conversation_event(
         raise ValueError("content is required")
     if event_class not in EXPORTABLE_EVENT_CLASSES and not event_class.startswith(("mirror.", "system.")):
         raise ValueError(f"unsupported conversation event class: {event_class}")
+    # Hold the mirror write lock across epoch resolution and insertion so a
+    # concurrent transition cannot move the thread between those two steps.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     # Capture the epoch active at creation. Zero/ambiguous bindings remain NULL:
     # the event is preserved while current-card operations fail closed.
     if binding_key is None:
         from gateway.kanban_mirror.state import active_thread_binding
 
         binding = active_thread_binding(conn, thread_id)
-        binding_key = binding.binding_key if binding is not None else None
+        if binding is not None:
+            binding_key = binding.binding_key
+        elif legacy_binding_key is not None:
+            epoch_count = conn.execute(
+                "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?", (thread_id,)
+            ).fetchone()[0]
+            binding_key = str(legacy_binding_key) if not epoch_count else None
     conn.execute(
         """
         INSERT OR IGNORE INTO mirror_conversation_events (
