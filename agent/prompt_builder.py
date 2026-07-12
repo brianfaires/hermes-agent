@@ -341,16 +341,10 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "in doubt and the calls are independent, batch them."
 )
 
-# OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
-# where GPT models abandon work on partial results, skip prerequisite lookups,
-# hallucinate instead of using tools, and declare "done" without verification.
-# Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
-# Also applied to xAI Grok — same failure modes in practice (claims completion
-# without tool calls, suggests workarounds instead of using existing tools,
-# replies with plans/suggestions instead of executing). The body is
-# family-agnostic; the OPENAI_ prefix reflects origin, not exclusivity.
-OPENAI_MODEL_EXECUTION_GUIDANCE = (
-    "# Execution discipline\n"
+# Model execution policies are assembled from a persistence strategy plus shared
+# grounding/safety guidance.  Keep routing data-driven so a model or family can
+# receive a narrow override without changing established behavior elsewhere.
+_LEGACY_TOOL_PERSISTENCE_GUIDANCE = (
     "<tool_persistence>\n"
     "- Use tools whenever they improve correctness, completeness, or grounding.\n"
     "- Do not stop early when another tool call would materially improve the result.\n"
@@ -358,8 +352,24 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "strategy before giving up.\n"
     "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
     "the result.\n"
-    "</tool_persistence>\n"
-    "\n"
+    "</tool_persistence>"
+)
+
+_BOUNDED_TOOL_PERSISTENCE_GUIDANCE = (
+    "<tool_persistence>\n"
+    "- Use tools only as needed to complete the user's explicit request.\n"
+    "- Verification must be proportional to the task. For simple, reversible tasks, "
+    "perform at most one direct verification.\n"
+    "- Do not investigate adjacent issues or optional improvements.\n"
+    "- After the requested result is confirmed, stop and return the result.\n"
+    "- Continue only when the requested task remains incomplete, a tool failed, "
+    "the result is ambiguous, or a stated acceptance criterion remains unmet.\n"
+    "- If a necessary tool returns empty or partial results, retry with a different "
+    "query or strategy before giving up.\n"
+    "</tool_persistence>"
+)
+
+_MODEL_EXECUTION_COMMON_GUIDANCE = (
     "<mandatory_tool_use>\n"
     "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
     "- Arithmetic, math, calculations → use terminal or execute_code\n"
@@ -408,6 +418,31 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
 )
+
+OPENAI_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline\n"
+    f"{_LEGACY_TOOL_PERSISTENCE_GUIDANCE}\n\n"
+    f"{_MODEL_EXECUTION_COMMON_GUIDANCE}"
+)
+BOUNDED_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline\n"
+    f"{_BOUNDED_TOOL_PERSISTENCE_GUIDANCE}\n\n"
+    f"{_MODEL_EXECUTION_COMMON_GUIDANCE}"
+)
+
+_MODEL_EXECUTION_GUIDANCE_POLICIES = (
+    (("gpt-5.6-sol", "gpt-5.6-terra"), BOUNDED_MODEL_EXECUTION_GUIDANCE),
+    (("gpt", "codex", "grok"), OPENAI_MODEL_EXECUTION_GUIDANCE),
+)
+
+
+def resolve_model_execution_guidance(model: str) -> str | None:
+    """Return the first matching execution policy for a model name."""
+    model_lower = (model or "").lower()
+    for markers, guidance in _MODEL_EXECUTION_GUIDANCE_POLICIES:
+        if any(marker in model_lower for marker in markers):
+            return guidance
+    return None
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
