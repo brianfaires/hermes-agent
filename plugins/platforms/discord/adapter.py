@@ -1330,9 +1330,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
 
-                # Initial on_ready can precede gateway-wide identity validation;
-                # readiness validation calls this again after assigning ownership.
-                adapter_self.start_kanban_ingress_workers()
+                # Discord may emit on_ready more than once on RESUME/reconnect.
+                # Ownership is gateway-wide, so ask the runner to re-check every
+                # multiplex identity rather than claiming it locally.
+                runner = getattr(adapter_self, "gateway_runner", None)
+                revalidate = getattr(runner, "_revalidate_kanban_router_readiness", None)
+                if callable(revalidate):
+                    await revalidate()
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
@@ -1341,6 +1345,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 if adapter_self._auto_voice_channel_id() is not None:
                     asyncio.create_task(adapter_self._sync_auto_voice_presence())
+
+            @self._client.event
+            async def on_disconnect():
+                # discord.py retains this adapter while reconnecting, but its
+                # authenticated identity is unavailable. Drain only its ingress
+                # workers; unrelated profile adapters remain untouched.
+                adapter_self._ready_event.clear()
+                await adapter_self._stop_kanban_ingress_runtime()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1589,24 +1601,7 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        await self._kanban_supervisor.stop()
-        self._kanban_inbound_task = None
-        if self._kanban_backfill_task and not self._kanban_backfill_task.done():
-            self._kanban_backfill_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._kanban_backfill_task
-        for task in self._kanban_thread_backfills.values():
-            if not task.done():
-                task.cancel()
-        if self._kanban_thread_backfills:
-            await asyncio.gather(*self._kanban_thread_backfills.values(), return_exceptions=True)
-        self._kanban_thread_backfills.clear()
-        self._kanban_backfilled_threads.clear()
-        self._kanban_backfill_task = None
-        if self._kanban_mirror_conn is not None:
-            self._kanban_mirror_conn.close()
-        self._kanban_mirror_conn = None
-        self._kanban_ingestor = None
+        await self._stop_kanban_ingress_runtime()
 
         self._running = False
         self._client = None
@@ -1616,6 +1611,24 @@ class DiscordAdapter(BasePlatformAdapter):
         self._release_platform_lock()
 
         logger.info("[%s] Disconnected", self.name)
+
+    async def _stop_kanban_ingress_runtime(self) -> None:
+        """Revoke and drain this adapter's ingress runtime, restartably."""
+        self._kanban_router_ingress_identity = None
+        await self._kanban_supervisor.stop()
+        self._kanban_inbound_task = None
+        self._kanban_backfill_task = None
+        for task in self._kanban_thread_backfills.values():
+            if not task.done():
+                task.cancel()
+        if self._kanban_thread_backfills:
+            await asyncio.gather(*self._kanban_thread_backfills.values(), return_exceptions=True)
+        self._kanban_thread_backfills.clear()
+        self._kanban_backfilled_threads.clear()
+        if self._kanban_mirror_conn is not None:
+            self._kanban_mirror_conn.close()
+        self._kanban_mirror_conn = None
+        self._kanban_ingestor = None
 
     def _command_sync_state_path(self) -> _Path:
         from hermes_constants import get_hermes_home

@@ -6133,6 +6133,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         logger.info("✓ %s reconnected successfully", platform.value)
 
+                        # on_ready precedes installation in self.adapters. Re-run
+                        # against the authoritative replacement map before workers
+                        # or outbound recovery can resume.
+                        if platform == Platform.DISCORD:
+                            await self._revalidate_kanban_router_readiness()
+
                         # Rebuild channel directory with the new adapter
                         try:
                             from gateway.channel_directory import build_channel_directory
@@ -6759,6 +6765,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._kanban_router_ingress_profile = ingress_profile
         ingress.start_kanban_ingress_workers()
         return ingress_profile
+
+    async def _revalidate_kanban_router_readiness(self) -> str | None:
+        """Serialize reconnect-time, gateway-wide Discord identity validation."""
+        lock = getattr(self, "_kanban_readiness_lock", None)
+        if lock is None:
+            lock = self._kanban_readiness_lock = asyncio.Lock()
+        async with lock:
+            try:
+                ingress = self._validate_kanban_router_readiness()
+            except MultiplexConfigError as exc:
+                # Partial reconnects and swapped identities stay fail closed. A
+                # later on_ready retries after the remaining identity is present.
+                logger.warning("Kanban router reconnect readiness pending: %s", exc)
+                return None
+            if ingress:
+                self._start_kanban_router_runtime()
+            return ingress
 
     def _start_kanban_router_runtime(self, *, interval: float = 5.0,
                                      health_interval: float = 30.0) -> None:

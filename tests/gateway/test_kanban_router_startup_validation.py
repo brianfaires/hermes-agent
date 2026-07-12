@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +95,47 @@ def test_validation_invokes_ingress_workers_and_clears_stopped_adapter(monkeypat
     assert ingress.starts == 2  # each revalidation reaches the idempotent adapter API
     assert primary._kanban_router_ingress_identity is None
     assert stopped._kanban_router_ingress_identity is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_revalidation_is_serialized_and_fail_closed(monkeypatch):
+    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", cfg)
+    monkeypatch.setattr("gateway.kanban_mirror.config.load_mirror_config",
+                        lambda: SimpleNamespace(enabled=False))
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
+
+    class Adapter:
+        def __init__(self, user):
+            self._running = True
+            self._client = SimpleNamespace(user=SimpleNamespace(id=user))
+            self.starts = 0
+            self._kanban_router_ingress_identity = None
+
+        def start_kanban_ingress_workers(self):
+            self.starts += 1
+
+    primary, ingress = Adapter("111"), Adapter("222")
+    runner = SimpleNamespace(
+        config=SimpleNamespace(multiplex_profiles=True), _gateway_profile_name="default",
+        adapters={Platform.DISCORD: primary},
+        _profile_adapters={"owner": {Platform.DISCORD: ingress}},
+        _start_kanban_router_runtime=lambda: None,
+    )
+    for method in ("_discord_adapter_for_profile", "_kanban_profile_adapters",
+                   "_all_kanban_profile_adapters", "_validate_kanban_router_readiness",
+                   "_revalidate_kanban_router_readiness"):
+        setattr(runner, method, getattr(GatewayRunner, method).__get__(runner))
+
+    results = await asyncio.gather(*(
+        runner._revalidate_kanban_router_readiness() for _ in range(3)
+    ))
+    assert results == ["owner", "owner", "owner"]
+    assert ingress._kanban_router_ingress_identity == ("owner", "222")
+
+    ingress._client.user.id = "wrong"
+    assert await runner._revalidate_kanban_router_readiness() is None
+    assert ingress._kanban_router_ingress_identity is None
+    assert primary._kanban_router_ingress_identity is None
 
 
 def test_daemon_advanced_gates_require_binding_backfill_and_legacy_remains_off():
