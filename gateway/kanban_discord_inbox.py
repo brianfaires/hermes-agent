@@ -148,6 +148,29 @@ _TEXT_ACTION_ALIASES: dict[str, str] = {
 }
 
 
+_DIRECTIVE_EMOJIS: dict[str, str] = {
+    "approve": "✅",
+    "pause": "⏸",
+    "close": "🗑",
+    "watch": "👀",
+    "rerun": "🔁",
+    "reject": "🚫",
+    "context": "❔",
+    "review": "🧐",
+    "expand": "🤔",
+}
+
+
+def directive_for_text(text: str) -> ParsedKanbanReaction | None:
+    """Resolve a canonical ``!directive`` token; unknown commands are conversation."""
+    body = (text or "").strip()
+    if not body.startswith("!"):
+        return None
+    token = body.split(None, 1)[0][1:].casefold()
+    emoji = _DIRECTIVE_EMOJIS.get(token)
+    return _REACTION_INTENTS.get(emoji) if emoji is not None else None
+
+
 def text_action_for_command(text: str) -> ParsedKanbanReaction | None:
     """Resolve an exact bare action after trimming edge whitespace/punctuation."""
     command = (text or "").casefold()
@@ -568,8 +591,10 @@ def _handle_text_action(
     board_slug: str,
     ctx: DiscordReplyContext,
     action: ParsedKanbanReaction,
+    target_profile: str | None = None,
+    action_prefix: str = "text",
 ) -> KanbanReplyInboxResult:
-    source_key = f"text:{ctx.thread_id}:{ctx.message_id}"
+    source_key = f"{action_prefix}:{ctx.thread_id}:{ctx.message_id}"
     ensure_receipts(mirror_conn)
     mirror_conn.execute("BEGIN IMMEDIATE")
     if receipt_exists(mirror_conn, ctx.message_id):
@@ -596,8 +621,8 @@ def _handle_text_action(
     instruction = kb.create_owner_instruction(
         conn,
         task_id=task_id,
-        assignee=task.assignee or "unassigned",
-        source="discord_text_command",
+        assignee=target_profile or task.assignee or "unassigned",
+        source="discord_directive" if action_prefix == "directive" else "discord_text_command",
         source_key=source_key,
         actor=_reply_author(ctx),
         body=body,
@@ -638,7 +663,7 @@ def _handle_text_action(
         thread_id=ctx.thread_id,
         task_id=task_id,
         author_id=ctx.author_id,
-        action=f"text:{action.intent}",
+        action=f"{action_prefix}:{action.intent}",
         replied_to_message_id=ctx.reply_to_message_id,
         replied_to_kanban_comment_id=_find_replied_to_comment_id(ctx.reply_to_message_id, mirror_conn=mirror_conn),
         kanban_comment_id=comment_id,
@@ -647,7 +672,7 @@ def _handle_text_action(
         consumed=True,
         reason="handled",
         task_id=task_id,
-        action=f"text:{action.intent}",
+        action=f"{action_prefix}:{action.intent}",
         kanban_comment_id=comment_id,
         owner_instruction_id=instruction.id,
         owner_instruction_status=instruction.status,
@@ -796,10 +821,42 @@ def handle_reply(
     try:
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
-            text_action = text_action_for_command(ctx.content)
+            directive = directive_for_text(ctx.content) if cfg.conversation_router_enabled else None
+            text_action = (
+                directive
+                if directive is not None
+                else (None if cfg.conversation_router_enabled else text_action_for_command(ctx.content))
+            )
             words = (ctx.content or "").strip().split(None, 1)
             first_word = words[0].rstrip(":").lower() if words else ""
             explicit = log_command is not None or text_action is not None or first_word in _SUPPORTED_ACTIONS
+            if cfg.conversation_router_enabled and directive is not None:
+                event = record_conversation_event(
+                    mirror_conn, discord_message_id=ctx.message_id,
+                    thread_id=ctx.thread_id, binding_key=str(task_id),
+                    event_class="directive.user", author_label=ctx.author_label,
+                    content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                )
+                task = kb.get_task(conn, str(task_id))
+                owner = str(getattr(task, "assignee", "") or "") if task else ""
+                route = resolve_profile_route(ctx, owner=owner, config=cfg)
+                if route.profile is None:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason=route.error or "invalid_profile",
+                        task_id=str(task_id), action=f"directive:{directive.intent}",
+                        owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+                return _handle_text_action(
+                    conn,
+                    mirror_conn,
+                    task_id=str(task_id),
+                    board_slug=resolved_board_slug,
+                    ctx=ctx,
+                    action=directive,
+                    target_profile=route.profile,
+                    action_prefix="directive",
+                )
             if cfg.conversation_router_enabled and not explicit:
                 event = record_conversation_event(
                     mirror_conn, discord_message_id=ctx.message_id,

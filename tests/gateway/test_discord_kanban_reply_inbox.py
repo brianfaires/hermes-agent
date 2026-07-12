@@ -13,6 +13,7 @@ from gateway.kanban_discord_inbox import (
     KanbanReplyInboxConfig,
     context_from_discord_message,
     context_from_discord_reaction,
+    directive_for_text,
     handle_reply,
     load_config,
     maybe_handle_discord_message,
@@ -1230,3 +1231,88 @@ async def test_disabled_inbox_never_consumes_for_ingress_arbitration():
     )
     assert result.consumed is False
     assert result.reason == "disabled"
+
+
+def test_directive_parser_uses_reaction_intents_and_leaves_unknown_commands_as_conversation():
+    assert directive_for_text("!approve").intent == reaction_intent_for_emoji("✅").intent
+    assert directive_for_text("!pause until review").intent == "pause"
+    assert directive_for_text("!RERUN").intent == "rerun_request"
+    assert directive_for_text("!log") is None
+    assert directive_for_text("!unknown") is None
+    assert directive_for_text("approve") is None
+
+
+def test_router_directive_creates_targeted_owner_request_without_direct_status_mutation(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "directive-home"
+    for profile in ("ops", "reviewer"):
+        (hermes_home / "profiles" / profile).mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    before = kb.connect(db_path)
+    try:
+        before_status = kb.get_task(before, tid).status
+    finally:
+        before.close()
+    directive_ctx = replace(
+        ctx(message_id="directive-pause", content="!pause until Reviewer responds"),
+        mentioned_user_ids=("222",),
+    )
+    config = replace(
+        inbox_config,
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+        profile_bot_user_ids=(("222", "reviewer"),),
+    )
+
+    result = handle_reply(directive_ctx, config=config)
+    duplicate = handle_reply(directive_ctx, config=config)
+
+    assert result.consumed is True
+    assert result.action == "directive:pause"
+    assert result.owner_instruction_id is not None
+    assert duplicate.reason == "duplicate"
+    conn = kb.connect(db_path)
+    try:
+        assert kb.get_task(conn, tid).status == before_status
+        instruction = conn.execute(
+            "SELECT * FROM task_owner_instructions WHERE id = ?",
+            (result.owner_instruction_id,),
+        ).fetchone()
+        assert instruction["assignee"] == "reviewer"
+        assert instruction["source"] == "discord_directive"
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "Instruction: pause" in comments[0].body
+    finally:
+        conn.close()
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        event = mirror_conn.execute(
+            "SELECT event_class FROM mirror_conversation_events WHERE discord_message_id = ?",
+            ("directive-pause",),
+        ).fetchone()
+        assert event["event_class"] == "directive.user"
+    finally:
+        mirror_conn.close()
+
+
+def test_router_treats_bare_action_alias_as_conversation(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    _db_path, _tid = kanban_db
+    hermes_home = tmp_path / "bare-action-home"
+    (hermes_home / "profiles" / "ops").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    result = handle_reply(
+        replace(ctx(message_id="bare-yes", content="yes"), reply_to_message_id=None),
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+    assert result.consumed is False
+    assert result.action == "conversation"
+    assert result.route_profile == "ops"
