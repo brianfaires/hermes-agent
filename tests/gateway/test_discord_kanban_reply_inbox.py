@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +20,7 @@ from gateway.kanban_discord_inbox import (
     maybe_handle_discord_reaction,
     maybe_handle_discord_reaction_remove,
 )
+from gateway.kanban_mirror.conversation_log import record_conversation_event
 from gateway.kanban_mirror.state import (
     add_member,
     connect_mirror,
@@ -660,3 +664,195 @@ async def test_adapter_rejects_bot_reaction_by_default(monkeypatch):
 
     assert consumed is False
     assert called is False
+
+
+def _record_log_event(
+    *,
+    message_id: str,
+    task_id: str,
+    event_class: str = "conversation.human",
+    author: str = "Brian",
+    content: str,
+):
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        return record_conversation_event(
+            mirror_conn,
+            discord_message_id=message_id,
+            thread_id=THREAD_ID,
+            binding_key=task_id,
+            event_class=event_class,
+            author_label=author,
+            content=content,
+            discord_created_at=100,
+        )
+    finally:
+        mirror_conn.close()
+
+
+def test_log_gate_disabled_preserves_legacy_reply_comment(kanban_db, inbox_config):
+    db_path, tid = kanban_db
+    result = handle_reply(ctx(message_id="log-disabled", content="!log"), config=inbox_config)
+    assert result.action == "comment"
+    conn = kb.connect(db_path)
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "!log" in comments[0].body
+    finally:
+        conn.close()
+
+
+def test_top_level_log_exports_current_human_and_agent_conversation(kanban_db, inbox_config):
+    db_path, tid = kanban_db
+    _record_log_event(message_id="old", task_id="old-task", content="old binding")
+    _record_log_event(message_id="human", task_id=tid, content="human decision")
+    _record_log_event(
+        message_id="agent", task_id=tid, event_class="conversation.agent",
+        author="Ops", content="agent work result",
+    )
+    _record_log_event(
+        message_id="ack", task_id=tid, event_class="mirror.ack",
+        author="Kanban", content="mechanical acknowledgement",
+    )
+    command_ctx = replace(
+        ctx(message_id="log-current", content="!log Final decision."),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+    result = handle_reply(
+        command_ctx, config=replace(inbox_config, conversation_log_enabled=True)
+    )
+    assert result.action == "log"
+    assert result.reason == "handled"
+
+    conn = kb.connect(db_path)
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        body = comments[0].body
+        assert "human decision" in body
+        assert "agent work result" in body
+        assert "Final decision." in body
+        assert "old binding" not in body
+        assert "mechanical acknowledgement" not in body
+    finally:
+        conn.close()
+
+
+def test_reply_log_exports_only_replied_message_and_is_idempotent(kanban_db, inbox_config):
+    db_path, tid = kanban_db
+    _record_log_event(message_id=REPLY_TO_ID, task_id=tid, content="selected agent result")
+    _record_log_event(message_id="other", task_id=tid, content="not selected")
+    log_ctx = ctx(message_id="log-reply", content="!log Use this result.")
+    config = replace(inbox_config, conversation_log_enabled=True)
+
+    first = handle_reply(log_ctx, config=config)
+    duplicate = handle_reply(log_ctx, config=config)
+    assert first.reason == "handled"
+    assert duplicate.reason == "duplicate"
+    assert duplicate.kanban_comment_id == first.kanban_comment_id
+
+    conn = kb.connect(db_path)
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "selected agent result" in comments[0].body
+        assert "Use this result." in comments[0].body
+        assert "not selected" not in comments[0].body
+    finally:
+        conn.close()
+
+
+def test_log_all_exports_unsent_events_across_bindings(kanban_db, inbox_config):
+    db_path, tid = kanban_db
+    _record_log_event(message_id="old", task_id="old-task", content="discovery discussion")
+    _record_log_event(message_id="current", task_id=tid, content="implementation discussion")
+    command_ctx = replace(
+        ctx(message_id="log-all", content="!log all"),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+    result = handle_reply(
+        command_ctx, config=replace(inbox_config, conversation_log_enabled=True)
+    )
+    assert result.reason == "handled"
+
+    conn = kb.connect(db_path)
+    try:
+        body = kb.list_comments(conn, tid)[0].body
+        assert "discovery discussion" in body
+        assert "implementation discussion" in body
+    finally:
+        conn.close()
+
+
+def test_log_recovers_cross_database_crash_without_duplicate_comment(
+    kanban_db, inbox_config, monkeypatch
+):
+    import gateway.kanban_discord_inbox as inbox
+
+    db_path, tid = kanban_db
+    _record_log_event(message_id="source", task_id=tid, content="durable source")
+    command_ctx = replace(
+        ctx(message_id="log-crash", content="!log"),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+    config = replace(inbox_config, conversation_log_enabled=True)
+    real_mark = inbox.mark_log_delivery
+    calls = 0
+
+    def crash_after_comment(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1 and kwargs.get("status") == "delivered":
+            raise RuntimeError("simulated mirror receipt crash")
+        return real_mark(*args, **kwargs)
+
+    monkeypatch.setattr(inbox, "mark_log_delivery", crash_after_comment)
+    with pytest.raises(RuntimeError, match="simulated mirror receipt crash"):
+        handle_reply(command_ctx, config=config)
+    monkeypatch.setattr(inbox, "mark_log_delivery", real_mark)
+
+    recovered = handle_reply(command_ctx, config=config)
+    assert recovered.reason == "handled"
+    conn = kb.connect(db_path)
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "durable source" in comments[0].body
+    finally:
+        conn.close()
+
+
+def test_marked_comment_insert_is_atomic_across_concurrent_connections(kanban_db):
+    db_path, tid = kanban_db
+    barrier = Barrier(2)
+    marker = "[discord-log-operation:concurrent-test]"
+    body = f"concurrent transcript\n\n{marker}"
+
+    def insert_once():
+        conn = kb.connect(db_path)
+        try:
+            barrier.wait(timeout=5)
+            return kb.add_comment_once(
+                conn,
+                tid,
+                author="discord:42",
+                body=body,
+                idempotency_marker=marker,
+            )
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: insert_once(), range(2)))
+
+    assert sorted(created for _comment_id, created in results) == [False, True]
+    assert len({comment_id for comment_id, _created in results}) == 1
+    conn = kb.connect(db_path)
+    try:
+        assert len(kb.list_comments(conn, tid)) == 1
+    finally:
+        conn.close()

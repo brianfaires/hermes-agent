@@ -7,6 +7,7 @@ normal chat dispatcher out of those messages.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import sqlite3
@@ -16,6 +17,11 @@ from typing import Any, Literal
 
 from hermes_cli import kanban_db as kb
 
+from gateway.kanban_mirror.conversation_log import (
+    freeze_log_delivery,
+    mark_log_delivery,
+    parse_log_command,
+)
 from gateway.kanban_mirror.state import (
     connect_mirror,
     ensure_receipts,
@@ -44,6 +50,8 @@ class KanbanReplyInboxConfig:
     ack: bool = True
     board_slug: str | None = None
     allow_thread_level_messages: bool = False
+    # Independent of legacy reply ingestion and deliberately off by default.
+    conversation_log_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,6 +227,7 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
         ack=_as_bool(inbox_cfg.get("ack"), True),
         board_slug=(str(inbox_cfg.get("board_slug")).strip() or None) if inbox_cfg.get("board_slug") is not None else None,
         allow_thread_level_messages=_as_bool(inbox_cfg.get("allow_thread_level_messages"), False),
+        conversation_log_enabled=_as_bool(inbox_cfg.get("conversation_log_enabled"), False),
     )
 
 
@@ -605,6 +614,69 @@ def _handle_text_action(
     )
 
 
+def _handle_log_command(
+    conn: sqlite3.Connection,
+    mirror_conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    ctx: DiscordReplyContext,
+) -> KanbanReplyInboxResult:
+    """Freeze and deliver one explicit conversation export exactly once."""
+    command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
+    if command is None:  # guarded by caller
+        raise ValueError("not a log command")
+    operation_id = "discord-log:" + hashlib.sha256(
+        f"{ctx.message_id}\0{task_id}".encode("utf-8")
+    ).hexdigest()
+    delivery = freeze_log_delivery(
+        mirror_conn,
+        operation_id=operation_id,
+        trigger_discord_message_id=ctx.message_id,
+        thread_id=ctx.thread_id,
+        task_id=task_id,
+        command=command,
+        binding_key=task_id,
+    )
+    if delivery is None:
+        return KanbanReplyInboxResult(
+            consumed=True, reason="nothing_to_log", task_id=task_id, action="log",
+            ack=f"No unsent conversation found for Kanban card {task_id}.",
+        )
+    if delivery.status == "delivered":
+        return KanbanReplyInboxResult(
+            consumed=True, reason="duplicate", task_id=task_id, action="log",
+            kanban_comment_id=delivery.kanban_comment_id,
+        )
+
+    # The marker lives in Kanban itself, closing the crash window between the
+    # side effect and mirror.db's delivered update.
+    marker = f"[discord-log-operation:{operation_id}]"
+    try:
+        comment_id, _created = kb.add_comment_once(
+            conn,
+            task_id,
+            author=_reply_author(ctx),
+            body=f"{delivery.payload}\n\n{marker}",
+            idempotency_marker=marker,
+        )
+    except Exception as exc:
+        mark_log_delivery(
+            mirror_conn, operation_id=operation_id, status="failed", error=str(exc)
+        )
+        raise
+    mark_log_delivery(
+        mirror_conn,
+        operation_id=operation_id,
+        status="delivered",
+        kanban_comment_id=comment_id,
+    )
+    return KanbanReplyInboxResult(
+        consumed=True, reason="handled", task_id=task_id, action="log",
+        kanban_comment_id=comment_id,
+        ack=f"Logged Discord conversation on Kanban card {task_id} as comment #{comment_id}.",
+    )
+
+
 def handle_reply(
     ctx: DiscordReplyContext,
     *,
@@ -615,7 +687,9 @@ def handle_reply(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
     if not cfg.forum_channel_ids or ctx.forum_channel_id not in cfg.forum_channel_ids:
         return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
-    if not ctx.reply_to_message_id and not cfg.allow_thread_level_messages:
+    log_command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
+    log_enabled = cfg.conversation_log_enabled and log_command is not None
+    if not ctx.reply_to_message_id and not cfg.allow_thread_level_messages and not log_enabled:
         return KanbanReplyInboxResult(consumed=False, reason="not_a_reply")
 
     board_slug = cfg.board_slug or "default"
@@ -632,6 +706,13 @@ def handle_reply(
     try:
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
+            if log_enabled:
+                return _handle_log_command(
+                    conn,
+                    mirror_conn,
+                    task_id=str(task_id),
+                    ctx=ctx,
+                )
             text_action = text_action_for_command(ctx.content)
             if text_action is not None:
                 return _handle_text_action(

@@ -2583,6 +2583,49 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # Comments & events
 # ---------------------------------------------------------------------------
 
+def add_comment_once(
+    conn: sqlite3.Connection,
+    task_id: str,
+    author: str,
+    body: str,
+    *,
+    idempotency_marker: str,
+) -> tuple[int, bool]:
+    """Atomically create a marked comment or return the existing comment.
+
+    The marker is transport-owned provenance embedded in ``body``.  Holding an
+    IMMEDIATE transaction across lookup and insert prevents concurrent gateway
+    retries from creating duplicate comments.
+    """
+    if not body or not body.strip():
+        raise ValueError("comment body is required")
+    if not author or not author.strip():
+        raise ValueError("comment author is required")
+    marker = str(idempotency_marker or "").strip()
+    if not marker or marker not in body:
+        raise ValueError("idempotency marker must be present in comment body")
+    now = int(time.time())
+    with write_txn(conn):
+        if not conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        existing = conn.execute(
+            "SELECT id FROM task_comments WHERE task_id = ? AND instr(body, ?) > 0 "
+            "ORDER BY id LIMIT 1",
+            (task_id, marker),
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"]), False
+        cur = conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (task_id, author.strip(), body.strip(), now),
+        )
+        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
+        return int(cur.lastrowid or 0), True
+
+
 def add_comment(
     conn: sqlite3.Connection, task_id: str, author: str, body: str
 ) -> int:
