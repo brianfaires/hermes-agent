@@ -25,6 +25,20 @@ class ObservedThread:
 
 
 @dataclass(frozen=True)
+class ExpectedThread:
+    title: str
+    tags: tuple[str, ...]
+    terminal: bool = False
+
+
+@dataclass(frozen=True)
+class ObservedDigest:
+    thread_id: str
+    content: str
+    pinned: bool
+
+
+@dataclass(frozen=True)
 class ReconciliationFinding:
     finding_key: str
     severity: str
@@ -43,7 +57,7 @@ _QUARANTINE_CODES = {
     "binding.open_count", "binding.card_missing", "binding.mapping_missing",
     "thread.starter_mapping_mismatch",
     "starter.revision_mismatch", "starter.changed_without_transition_confirmation",
-    "transition.confirmation_missing",
+    "transition.confirmation_missing", "thread.premature_archive", "digest.thread_mismatch",
 }
 
 
@@ -102,10 +116,14 @@ def resolve_thread_quarantine(conn: sqlite3.Connection, thread_id: str, *, now: 
 
 
 def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mapping[str, ObservedThread],
-                           cards: Iterable[tuple[str, str]], now: int | None = None) -> list[ReconciliationFinding]:
+                           cards: Iterable[tuple[str, str]], now: int | None = None,
+                           expected_threads: Mapping[str, ExpectedThread] | None = None,
+                           observed_digest: ObservedDigest | None = None,
+                           digest_observation_complete: bool = True) -> list[ReconciliationFinding]:
     """Atomically reconcile supplied snapshots; never performs a live repair."""
     stamp = int(time.time()) if now is None else int(now)
     known_cards = {(str(board), str(task)) for board, task in cards}
+    expected_threads = expected_threads or {}
     detected: dict[tuple[str, str, str | None, str | None], tuple[str, dict]] = {}
     # Serialize the state snapshot and finding update.  Otherwise an older scan
     # can commit after a newer scan and re-open stale quarantine evidence.
@@ -151,6 +169,50 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
         if active is not None and observed is not None and active["starter_revision_hash"] is not None and observed.starter_revision_hash != active["starter_revision_hash"]:
             add("error", "starter.revision_mismatch", thread, active["binding_key"], active["task_id"], expected_hash=active["starter_revision_hash"], observed_hash=observed.starter_revision_hash)
 
+        expected = expected_threads.get(thread)
+        lifecycle = conn.execute("SELECT * FROM mirror_terminal_lifecycles WHERE thread_id=? ORDER BY prepared_at DESC LIMIT 1", (thread,)).fetchone()
+        if expected is not None and observed is not None:
+            binding = active["binding_key"] if active else None; task = active["task_id"] if active else None
+            if observed.title != expected.title:
+                add("warning", "thread.title_mismatch", thread, binding, task, expected=expected.title, observed=observed.title)
+            if set(observed.tags) != set(expected.tags):
+                add("warning", "thread.tags_mismatch", thread, binding, task, expected=sorted(expected.tags), observed=sorted(observed.tags))
+            done = "done" in {tag.lower() for tag in observed.tags}
+            if expected.terminal and not done:
+                add("warning", "thread.done_tag_missing", thread, binding, task)
+            if not expected.terminal and done:
+                add("warning", "thread.done_tag_unexpected", thread, binding, task)
+            completed = expected.terminal and lifecycle is not None and lifecycle["state"] == "archived"
+            if observed.archived and not completed:
+                add("critical", "thread.premature_archive", thread, binding, task, lifecycle_state=lifecycle["state"] if lifecycle else None)
+            if completed and not observed.archived:
+                add("error", "thread.unexpected_reopen", thread, binding, task)
+            elif lifecycle is not None and lifecycle["state"] == "tag_confirmed" and stamp >= int(lifecycle["archive_due_at"] or stamp + 1) and not observed.archived:
+                add("warning", "thread.terminal_unarchived", thread, binding, task, archive_due_at=lifecycle["archive_due_at"])
+
+        if lifecycle is not None and lifecycle["state"] not in {"prepared", "summary_confirmed", "cancelled"}:
+            digest = json.loads(lifecycle["frozen_payload"])["digest"]
+            marker = f"<!-- terminal:{thread} -->"
+            date = digest["date_range"].get("end") or digest["date_range"].get("start") or "?"
+            expected_line = f"- [{date}]({digest.get('thread_link')}) — {digest.get('outcome') or 'completed'}"
+            if observed_digest is None and digest_observation_complete:
+                add("warning", "digest.entry_missing", thread, lifecycle["binding_key"], active["task_id"] if active else None,
+                    reason="digest observation unavailable")
+            if observed_digest is not None:
+                binding = lifecycle["binding_key"]; task = active["task_id"] if active else None
+                if observed_digest.thread_id == thread:
+                    add("critical", "digest.thread_mismatch", thread, binding, task, digest_thread_id=observed_digest.thread_id)
+                lines = observed_digest.content.splitlines(); pos = next((i for i, line in enumerate(lines) if line == marker), None)
+                line = lines[pos + 1] if pos is not None and pos + 1 < len(lines) else None
+                if line is None:
+                    add("warning", "digest.entry_missing", thread, binding, task)
+                elif line != expected_line:
+                    if str(digest.get("thread_link")) not in line: add("error", "digest.thread_link_mismatch", thread, binding, task)
+                    if str(digest.get("outcome") or "completed") not in line: add("warning", "digest.outcome_mismatch", thread, binding, task)
+                    if f"[{date}]" not in line: add("warning", "digest.date_hash_mismatch", thread, binding, task, expected_hash=hashlib.sha256(str(date).encode()).hexdigest())
+                    add("warning", "digest.entry_stale", thread, binding, task)
+                if not observed_digest.pinned: add("warning", "digest.unpinned", thread, binding, task)
+
     # Optional additive delivery tables may be initialized by their owners.
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "mirror_discord_outbox" in tables:
@@ -164,13 +226,21 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
     observed_codes = {
         "thread.starter_mapping_mismatch", "starter.revision_mismatch",
         "starter.changed_without_transition_confirmation", "transition.confirmation_missing",
+        "thread.title_mismatch", "thread.tags_mismatch", "thread.done_tag_missing",
+        "thread.done_tag_unexpected", "thread.premature_archive", "thread.unexpected_reopen",
+        "thread.terminal_unarchived",
     }
+    digest_codes = {"digest.thread_mismatch", "digest.entry_missing", "digest.thread_link_mismatch",
+                    "digest.outcome_mismatch", "digest.date_hash_mismatch", "digest.entry_stale", "digest.unpinned"}
     for row in conn.execute("SELECT * FROM mirror_reconciliation_findings WHERE resolved_at IS NULL"):
         if row["code"] in observed_codes and row["thread_id"] not in observed_threads:
             evidence = json.loads(row["evidence"])
             detected[(row["thread_id"], row["code"], row["binding_key"], row["task_id"])] = (
                 row["severity"], evidence,
             )
+        if row["code"] in digest_codes and (not digest_observation_complete or observed_digest is None):
+            evidence = json.loads(row["evidence"])
+            detected[(row["thread_id"], row["code"], row["binding_key"], row["task_id"])] = (row["severity"], evidence)
 
     try:
         seen_keys = []

@@ -68,7 +68,8 @@ from gateway.kanban_mirror import writer
 from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
 from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
 from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
-from gateway.kanban_mirror.reconciliation import ObservedThread, reconcile_mirror_state
+from gateway.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
+                                                   reconcile_mirror_state)
 from gateway.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
@@ -132,11 +133,37 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         except Exception as exc:
             logger.warning("kanban mirror: reconciliation observation failed for %s: %s", thread_id, exc)
             log.append(f"reconciliation: PARTIAL thread={thread_id}")
+    state = load_mirror_state(conn)
+    expected: dict[str, ExpectedThread] = {}
+    for initiative in state.values():
+        if initiative.kind != "post" or not initiative.thread_id:
+            continue
+        member_cards = [snapshot.cards[task_id] for task_id in initiative.members if task_id in snapshot.cards]
+        if len(member_cards) != len(initiative.members):
+            continue
+        terminal = bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        expected[initiative.thread_id] = ExpectedThread(
+            post_title(initiative, snapshot), tuple(_tags_for(initiative, snapshot)), terminal,
+        )
+    observed_digest = None; digest_complete = True
+    digest = get_digest(conn)
+    if digest is not None and digest.thread_id and digest.starter_message_id:
+        try:
+            digest_channel = await asyncio.to_thread(client.get_channel, digest.thread_id)
+            digest_message = await asyncio.to_thread(client.get_message, digest.thread_id, digest.starter_message_id)
+            observed_digest = ObservedDigest(str(digest.thread_id), str(digest_message.get("content") or ""),
+                bool(digest_channel.get("pinned") or (int(digest_channel.get("flags") or 0) & 2)))
+        except Exception as exc:
+            logger.warning("kanban mirror: reconciliation digest snapshot unavailable: %s", exc)
+            log.append("reconciliation: PARTIAL digest"); digest_complete = False
     findings = await asyncio.to_thread(reconcile_mirror_state, conn, observed_threads=observed,
-                                       cards=((cfg.board, task_id) for task_id in snapshot.cards))
+                                       cards=((cfg.board, task_id) for task_id in snapshot.cards),
+                                       expected_threads=expected, observed_digest=observed_digest,
+                                       digest_observation_complete=digest_complete)
     quarantine_codes = {"binding.open_count", "binding.card_missing", "binding.mapping_missing",
                         "thread.starter_mapping_mismatch", "starter.revision_mismatch",
-                        "starter.changed_without_transition_confirmation", "transition.confirmation_missing"}
+                        "starter.changed_without_transition_confirmation", "transition.confirmation_missing",
+                        "thread.premature_archive", "digest.thread_mismatch"}
     grouped: dict[str, list] = {}
     for finding in findings:
         if finding.code in quarantine_codes:

@@ -2,9 +2,9 @@ import asyncio
 
 from gateway.kanban_mirror.config import MirrorConfig
 from gateway.kanban_mirror.daemon import _observe_and_reconcile
-from gateway.kanban_mirror.reconciliation import resolve_thread_quarantine
+from gateway.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
 from gateway.kanban_mirror.state import (
-    BoardSnapshot, add_member, backfill_legacy_bindings, connect_mirror,
+    BoardSnapshot, Card, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, set_thread,
 )
 
@@ -75,3 +75,17 @@ def test_partial_thread_snapshot_does_not_resolve_and_other_thread_continues(tmp
     assert is_thread_quarantined(conn, "broken")
     assert is_thread_quarantined(conn, "good")
     assert len(client.sent) == 2
+
+
+def test_daemon_builds_live_metadata_expectations_without_false_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    client = FakeClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert "thread.tags_mismatch" in codes
+    assert not is_thread_quarantined(conn, "thread")
+    assert client.sent == {}

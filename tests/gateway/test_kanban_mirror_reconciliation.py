@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from gateway.kanban_mirror.conversation_log import record_conversation_event
 from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue
 from gateway.kanban_mirror.reconciliation import (
-    ObservedThread, list_reconciliation_findings, reconcile_mirror_state,
-    reconciliation_report, resolve_thread_quarantine,
+    ExpectedThread, ObservedDigest, ObservedThread, list_reconciliation_findings,
+    reconcile_mirror_state, reconciliation_report, resolve_thread_quarantine,
 )
 from gateway.kanban_mirror.state import (
     active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
@@ -111,3 +111,64 @@ def test_concurrent_scans_have_one_durable_finding(tmp_path):
         assert list(pool.map(scan, (10, 20))) == [1, 1]
     conn = connect_mirror(path)
     assert conn.execute("SELECT count(*) FROM mirror_reconciliation_findings").fetchone()[0] == 1
+
+
+def add_lifecycle(conn, state="tag_confirmed", due=5):
+    binding = active_thread_binding(conn, "thread")
+    payload = {"summary": {}, "digest": {"thread_id": "thread", "outcome": "shipped",
+        "date_range": {"end": "2026-07-12"}, "thread_link": "https://discord/thread"}}
+    import json
+    conn.execute("""INSERT INTO mirror_terminal_lifecycles
+        (lifecycle_key,thread_id,binding_key,frozen_payload,frozen_hash,state,latest_activity_at,
+         archive_due_at,prepared_at,updated_at) VALUES ('life','thread',?,?,?,?,0,?,1,1)""",
+        (binding.binding_key, json.dumps(payload), "hash", state, due))
+    conn.commit()
+
+
+def test_live_metadata_drift_is_stable_and_only_premature_archive_quarantines(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    expected = {"thread": ExpectedThread("Expected", ("active",), False)}
+    live = {"thread": ObservedThread("thread", "starter", None, title="Wrong", tags=("done",), archived=True)}
+    first = reconcile_mirror_state(conn, observed_threads=live, cards=[("board", "task")],
+                                   expected_threads=expected, now=10)
+    assert {f.code for f in first} >= {"thread.title_mismatch", "thread.tags_mismatch",
+        "thread.done_tag_unexpected", "thread.premature_archive"}
+    assert is_thread_quarantined(conn, "thread")
+    keys = {f.code: f.finding_key for f in first}
+    second = reconcile_mirror_state(conn, observed_threads=live, cards=[("board", "task")],
+                                    expected_threads=expected, now=20)
+    assert {f.code: f.finding_key for f in second} == keys
+
+
+def test_terminal_stages_digest_drift_partial_retention_and_resolution(tmp_path):
+    conn = seed(tmp_path / "mirror.db"); add_lifecycle(conn)
+    expected = {"thread": ExpectedThread("Card", ("active", "done"), True)}
+    live = {"thread": ObservedThread("thread", "starter", None, title="Card", tags=("active",), archived=False)}
+    digest = ObservedDigest("digest", "<!-- terminal:thread -->\n- [wrong](https://wrong) — wrong", False)
+    findings = reconcile_mirror_state(conn, observed_threads=live, cards=[("board", "task")],
+        expected_threads=expected, observed_digest=digest, now=10)
+    codes = {f.code for f in findings}
+    assert {"thread.done_tag_missing", "thread.terminal_unarchived", "digest.entry_stale",
+        "digest.thread_link_mismatch", "digest.outcome_mismatch", "digest.date_hash_mismatch",
+        "digest.unpinned"} <= codes
+    assert not is_thread_quarantined(conn, "thread")
+    partial = reconcile_mirror_state(conn, observed_threads={}, cards=[("board", "task")],
+        expected_threads=expected, observed_digest=None, digest_observation_complete=False, now=20)
+    assert codes <= {f.code for f in partial}
+    good_line = "<!-- terminal:thread -->\n- [2026-07-12](https://discord/thread) — shipped"
+    clean_live = {"thread": ObservedThread("thread", "starter", None, title="Card",
+        tags=("active", "done"), archived=True)}
+    conn.execute("UPDATE mirror_terminal_lifecycles SET state='archived'"); conn.commit()
+    assert reconcile_mirror_state(conn, observed_threads=clean_live, cards=[("board", "task")],
+        expected_threads=expected, observed_digest=ObservedDigest("digest", good_line, True), now=30) == []
+    assert all(f.resolved_at == 30 for f in list_reconciliation_findings(conn))
+
+
+def test_completed_lifecycle_reopen_is_report_only(tmp_path):
+    conn = seed(tmp_path / "mirror.db"); add_lifecycle(conn, "archived")
+    live = {"thread": ObservedThread("thread", "starter", None, title="Card", tags=("done",), archived=False)}
+    findings = reconcile_mirror_state(conn, observed_threads=live, cards=[("board", "task")],
+        expected_threads={"thread": ExpectedThread("Card", ("done",), True)},
+        observed_digest=ObservedDigest("digest", "<!-- terminal:thread -->\n- [2026-07-12](https://discord/thread) — shipped", True))
+    assert {f.code for f in findings} == {"thread.unexpected_reopen"}
+    assert not is_thread_quarantined(conn, "thread")
