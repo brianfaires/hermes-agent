@@ -5432,6 +5432,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             _secondary_connected = await self._start_secondary_profile_adapters()
             connected_count += _secondary_connected
+            self._validate_kanban_router_readiness()
         except MultiplexConfigError as e:
             # Invalid multiplexer config — abort startup cleanly so the operator
             # fixes config.yaml rather than running a half-wired gateway.
@@ -6703,12 +6704,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 profiles[profile] = adapter
         return profiles
 
+    def _validate_kanban_router_readiness(self) -> str | None:
+        """Validate configured ownership against live Discord bot identities."""
+        from gateway.kanban_discord_inbox import load_config, validate_router_config
+        from gateway.kanban_mirror.config import load_mirror_config
+        cfg = load_config()
+        if not (cfg.enabled and cfg.conversation_router_enabled):
+            return None
+        try:
+            ingress_profile = validate_router_config(
+                cfg, multiplex_profiles=bool(getattr(self.config, "multiplex_profiles", False)),
+                mirror_config=load_mirror_config(),
+            )
+        except ValueError as exc:
+            raise MultiplexConfigError(str(exc)) from exc
+        adapters = self._kanban_profile_adapters()
+        errors = []
+        for bot_id, profile in cfg.profile_bot_user_ids:
+            adapter = adapters.get(profile)
+            if adapter is None:
+                errors.append(f"Discord adapter for profile '{profile}' is missing or disconnected")
+                continue
+            actual = str(getattr(getattr(getattr(adapter, "_client", None), "user", None), "id", "") or "")
+            if not actual:
+                errors.append(f"Discord adapter for profile '{profile}' has no connected user identity")
+            elif actual != bot_id:
+                errors.append(f"Discord bot user ID does not match profile '{profile}'")
+        if errors:
+            raise MultiplexConfigError("Discord conversation router readiness failed: " + "; ".join(errors))
+        for adapter in adapters.values():
+            adapter._kanban_router_ready = True
+        self._kanban_router_ingress_profile = ingress_profile
+        return ingress_profile
+
     def _start_kanban_router_runtime(self, *, interval: float = 5.0,
                                      health_interval: float = 30.0) -> None:
         """Idempotently attach router recovery and health to the ingress gateway."""
         from gateway.kanban_discord_inbox import load_config as load_inbox_config
         cfg = load_inbox_config()
-        ingress = self._discord_adapter_for_profile(self._gateway_profile_name)
+        ingress_profile = getattr(self, "_kanban_router_ingress_profile", self._gateway_profile_name)
+        ingress = self._discord_adapter_for_profile(ingress_profile) if ingress_profile else None
         board_slug = cfg.board_slug or "default"
         enabled = bool(cfg.enabled and cfg.conversation_router_enabled and ingress)
         if not enabled:
@@ -6727,7 +6762,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 while self._running:
                     current = load_inbox_config()
-                    ingress_connected = self._discord_adapter_for_profile(self._gateway_profile_name) is not None
+                    ingress_connected = self._discord_adapter_for_profile(ingress_profile) is not None
                     active = bool(
                         current.enabled and current.conversation_router_enabled
                         and (current.board_slug or "default") == board_slug and ingress_connected
@@ -6794,7 +6829,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 while self._running:
                     current = load_inbox_config()
-                    ingress_connected = self._discord_adapter_for_profile(self._gateway_profile_name) is not None
+                    ingress_connected = self._discord_adapter_for_profile(ingress_profile) is not None
                     active = bool(current.enabled and current.conversation_router_enabled and ingress_connected)
                     snapshot = health_snapshot(
                         conn, router_enabled=active, ingress_connected=ingress_connected,

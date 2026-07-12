@@ -6012,6 +6012,9 @@ class DiscordAdapter(BasePlatformAdapter):
         cfg = load_config()
         if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
             return cfg, None
+        # Fenced until gateway startup validates all connected bot identities.
+        if not getattr(self, "_kanban_router_ready", False):
+            return cfg, None
         if self._kanban_ingestor is None:
             from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
             from gateway.kanban_mirror.state import connect_mirror, mirror_db_path

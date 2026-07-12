@@ -67,7 +67,7 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
     cfg = kanban_cfg.get("discord_mirror") if isinstance(kanban_cfg, dict) else {}
     if not isinstance(cfg, dict):
         cfg = {}
-    return MirrorConfig(
+    result = MirrorConfig(
         enabled=bool(cfg.get("enabled", False)),
         board=str(cfg.get("board") or "default").strip(),
         forum_channel_id=str(cfg.get("forum_channel_id") or "").strip(),
@@ -84,3 +84,9 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
         terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
         reconciliation_enabled=bool(cfg.get("reconciliation_enabled", False)),
     )
+    if (result.reconciliation_enabled or result.terminal_lifecycle_enabled) and not result.binding_transitions_enabled:
+        raise ValueError(
+            "kanban.discord_mirror binding_transitions_enabled is required when "
+            "reconciliation_enabled or terminal_lifecycle_enabled is enabled"
+        )
+    return result

@@ -314,6 +314,51 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
     )
 
 
+def validate_router_config(cfg: KanbanReplyInboxConfig, *, multiplex_profiles: bool,
+                           profile_exists_fn=None, mirror_config=None) -> str | None:
+    """Return the ingress profile or raise an actionable, secret-free error."""
+    if not (cfg.enabled and cfg.conversation_router_enabled):
+        return None
+    errors: list[str] = []
+    if not multiplex_profiles:
+        errors.append("gateway.multiplex_profiles must be enabled")
+    if not cfg.conversation_router_ingress_bot_id:
+        errors.append("conversation_router_ingress_bot_id is required")
+    elif not cfg.conversation_router_ingress_bot_id.isdigit():
+        errors.append("conversation_router_ingress_bot_id must be numeric")
+    if not cfg.board_slug:
+        errors.append("board_slug is required")
+    if not cfg.forum_channel_ids:
+        errors.append("forum_channel_ids must contain at least one Forum")
+    pairs = tuple(cfg.profile_bot_user_ids)
+    bot_ids = [bot_id for bot_id, _ in pairs]
+    profiles = [profile for _, profile in pairs]
+    if not pairs:
+        errors.append("profile_bot_user_ids must map every router bot to a profile")
+    if len(bot_ids) != len(set(bot_ids)):
+        errors.append("profile_bot_user_ids contains duplicate bot IDs")
+    if len(profiles) != len(set(profiles)):
+        errors.append("profile_bot_user_ids contains duplicate profiles")
+    if profile_exists_fn is None:
+        from hermes_cli.profiles import profile_exists as profile_exists_fn
+    missing = sorted({profile for profile in profiles if not profile_exists_fn(profile)})
+    if missing:
+        errors.append("mapped profiles do not exist: " + ", ".join(missing))
+    ingress_matches = [profile for bot_id, profile in pairs
+                       if bot_id == cfg.conversation_router_ingress_bot_id]
+    if cfg.conversation_router_ingress_bot_id and not ingress_matches:
+        errors.append("ingress bot ID must be present in profile_bot_user_ids")
+    if mirror_config is not None and getattr(mirror_config, "enabled", False):
+        if str(getattr(mirror_config, "board", "")) != cfg.board_slug:
+            errors.append("router board_slug must match kanban.discord_mirror.board")
+        forum = str(getattr(mirror_config, "forum_channel_id", ""))
+        if forum not in cfg.forum_channel_ids:
+            errors.append("router Forums must include kanban.discord_mirror.forum_channel_id")
+    if errors:
+        raise ValueError("Discord conversation router configuration invalid: " + "; ".join(errors))
+    return ingress_matches[0]
+
+
 def parse_instruction(text: str, *, config: KanbanReplyInboxConfig | None = None) -> ParsedKanbanInstruction:
     """Parse a Phase-1 Kanban inbox command.
 
