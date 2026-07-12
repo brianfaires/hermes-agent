@@ -6037,7 +6037,10 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction
 
-            result = await maybe_handle_discord_reaction(payload)
+            result = await maybe_handle_discord_reaction(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+            )
         except Exception:
             logger.warning(
                 "[%s] Discord Kanban reaction inbox failed; continuing normal dispatch for message_id=%s",
@@ -6085,7 +6088,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 return False
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction_remove
-            result = await maybe_handle_discord_reaction_remove(payload)
+            result = await maybe_handle_discord_reaction_remove(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+            )
         except Exception:
             logger.warning(
                 "[%s] Discord Kanban reaction removal failed for message_id=%s",

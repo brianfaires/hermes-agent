@@ -607,7 +607,7 @@ async def test_adapter_consumes_mapped_reaction_without_normal_dispatch(monkeypa
     from gateway.kanban_discord_inbox import KanbanReplyInboxResult
     from plugins.platforms.discord.adapter import DiscordAdapter
 
-    async def fake_handle(payload):
+    async def fake_handle(payload, **_kwargs):
         return KanbanReplyInboxResult(consumed=True, reason="handled", task_id="t_123", action="reaction:approve")
 
     monkeypatch.setattr("gateway.kanban_discord_inbox.maybe_handle_discord_reaction", fake_handle)
@@ -1252,6 +1252,8 @@ def test_router_directive_creates_targeted_owner_request_without_direct_status_m
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     before = kb.connect(db_path)
     try:
+        with kb.write_txn(before):
+            before.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
         before_status = kb.get_task(before, tid).status
     finally:
         before.close()
@@ -1275,6 +1277,8 @@ def test_router_directive_creates_targeted_owner_request_without_direct_status_m
     assert duplicate.reason == "duplicate"
     conn = kb.connect(db_path)
     try:
+        assert kb.get_task(conn, tid).status == before_status
+        assert kb.route_pending_owner_instructions(conn) == 0
         assert kb.get_task(conn, tid).status == before_status
         instruction = conn.execute(
             "SELECT * FROM task_owner_instructions WHERE id = ?",
@@ -1316,3 +1320,91 @@ def test_router_treats_bare_action_alias_as_conversation(
     assert result.consumed is False
     assert result.action == "conversation"
     assert result.route_profile == "ops"
+
+
+@pytest.mark.asyncio
+async def test_non_ingress_reaction_performs_no_owner_instruction_write(
+    kanban_db, inbox_config
+):
+    db_path, tid = kanban_db
+    config = replace(
+        inbox_config,
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+    )
+    result = await maybe_handle_discord_reaction(
+        reaction_payload(message_id="reaction-source"),
+        config=config,
+        current_bot_id="other",
+    )
+    assert result.consumed is True
+    assert result.reason == "not_ingress_bot"
+    conn = kb.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_owner_instructions WHERE task_id = ?", (tid,)
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        assert not receipt_exists(
+            mirror_conn, "reaction:2002:reaction-source:42:✅"
+        )
+    finally:
+        mirror_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_ingress_reaction_routes_to_validated_owner_without_status_mutation(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "reaction-owner-home"
+    (hermes_home / "profiles" / "ops").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    conn = kb.connect(db_path)
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+        before_status = kb.get_task(conn, tid).status
+    finally:
+        conn.close()
+    result = await maybe_handle_discord_reaction(
+        reaction_payload(message_id="reaction-ingress"),
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+        current_bot_id="999",
+    )
+    assert result.action == "reaction:approve"
+    conn = kb.connect(db_path)
+    try:
+        assert kb.get_task(conn, tid).status == before_status
+        assert kb.route_pending_owner_instructions(conn) == 0
+        assert kb.get_task(conn, tid).status == before_status
+        instruction = conn.execute(
+            "SELECT assignee FROM task_owner_instructions WHERE id = ?",
+            (result.owner_instruction_id,),
+        ).fetchone()
+        assert instruction["assignee"] == "ops"
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_non_ingress_reaction_remove_does_not_change_generation(inbox_config):
+    payload = reaction_payload(message_id="reaction-remove")
+    result = await maybe_handle_discord_reaction_remove(
+        payload,
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+        current_bot_id="other",
+    )
+    assert result.consumed is True
+    assert result.reason == "not_ingress_bot"

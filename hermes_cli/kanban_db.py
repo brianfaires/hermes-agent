@@ -2743,7 +2743,9 @@ def route_queued_owner_instructions(conn: sqlite3.Connection) -> int:
     """Route instructions deferred behind an active run, without racing it."""
     ids = [int(r["id"]) for r in conn.execute(
         "SELECT i.id FROM task_owner_instructions i JOIN tasks t ON t.id=i.task_id "
-        "WHERE i.status='queued' AND t.status!='running' ORDER BY i.created_at,i.id"
+        "WHERE i.status='queued' AND t.status!='running' "
+        "AND i.source NOT IN ('discord_directive','discord_router_reaction') "
+        "ORDER BY i.created_at,i.id"
     ).fetchall()]
     for instruction_id in ids:
         route_owner_instruction(conn, instruction_id)
@@ -2754,7 +2756,9 @@ def route_pending_owner_instructions(conn: sqlite3.Connection) -> int:
     """Route pending instructions onto ordinary card dispatch."""
     rows = conn.execute(
         "SELECT id,body FROM task_owner_instructions "
-        "WHERE status='pending' ORDER BY created_at,id"
+        "WHERE status='pending' "
+        "AND source NOT IN ('discord_directive','discord_router_reaction') "
+        "ORDER BY created_at,id"
     ).fetchall()
     for row in rows:
         intent = next(

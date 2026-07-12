@@ -507,19 +507,38 @@ def handle_reaction(
         task = kb.get_task(conn, task_id)
         if task is None:
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+        target_assignee = task.assignee or "unassigned"
+        if cfg.conversation_router_enabled:
+            try:
+                from hermes_cli.profiles import normalize_profile_name, profile_exists
+                target_assignee = normalize_profile_name(target_assignee)
+                if not profile_exists(target_assignee):
+                    raise ValueError("profile does not exist")
+            except Exception:
+                mirror_conn.rollback()
+                return KanbanReplyInboxResult(
+                    consumed=True,
+                    reason="invalid_profile",
+                    task_id=task_id,
+                    action=f"reaction:{ctx.intent}",
+                    ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                )
         generation = reaction_generation(mirror_conn, ctx.reaction_key)
         source_key = (
             ctx.reaction_key
             if generation == 0
             else f"{ctx.reaction_key}:generation:{generation}"
         )
+        reaction_source = (
+            "discord_router_reaction" if cfg.conversation_router_enabled else "discord_reaction"
+        )
         unresolved = conn.execute(
             """SELECT id,source_key FROM task_owner_instructions
-               WHERE task_id=? AND source='discord_reaction'
+               WHERE task_id=? AND source=?
                  AND status IN ('pending','queued','unroutable')
                  AND (source_key=? OR source_key LIKE ?)
                ORDER BY id DESC LIMIT 1""",
-            (task_id, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
+            (task_id, reaction_source, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
         ).fetchone()
         if unresolved is not None:
             source_key = str(unresolved["source_key"])
@@ -528,8 +547,8 @@ def handle_reaction(
             instruction = kb.create_owner_instruction(
                 conn,
                 task_id=task_id,
-                assignee=task.assignee or "unassigned",
-                source="discord_reaction",
+                assignee=target_assignee,
+                source=reaction_source,
                 source_key=source_key,
                 actor=_reaction_author(ctx),
                 body=_reaction_followup_body(ctx, task_id),
@@ -542,11 +561,13 @@ def handle_reaction(
             comment_body = (_reaction_comment_body(ctx, replied_to_comment_id, source_key)
                             + f"\nOwner instruction: #{instruction.id} ({instruction.status})")
             comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
-        routed_status = kb.route_owner_instruction(
-            conn, instruction.id,
-            explicit_rerun=ctx.intent == "rerun_request",
-            passive=ctx.intent == "watch",
-        )
+        routed_status = instruction.status
+        if not cfg.conversation_router_enabled:
+            routed_status = kb.route_owner_instruction(
+                conn, instruction.id,
+                explicit_rerun=ctx.intent == "rerun_request",
+                passive=ctx.intent == "watch",
+            )
         instruction = kb.get_owner_instruction(conn, instruction.id)
         assert instruction is not None
         mark_reaction_active(mirror_conn, ctx.reaction_key)
@@ -648,11 +669,13 @@ def _handle_text_action(
             "Lifecycle routing: original card (or passive watch)",
         ]),
     )
-    routed_status = kb.route_owner_instruction(
-        conn, instruction.id,
-        explicit_rerun=action.intent == "rerun_request",
-        passive=action.intent == "watch",
-    )
+    routed_status = instruction.status
+    if action_prefix != "directive":
+        routed_status = kb.route_owner_instruction(
+            conn, instruction.id,
+            explicit_rerun=action.intent == "rerun_request",
+            passive=action.intent == "watch",
+        )
     instruction = kb.get_owner_instruction(conn, instruction.id)
     assert instruction is not None
     record_receipt(
@@ -1044,26 +1067,52 @@ def handle_reaction_remove(
     )
 
 
+def _reaction_ingress_rejection(
+    cfg: KanbanReplyInboxConfig,
+    current_bot_id: str | None,
+) -> KanbanReplyInboxResult | None:
+    if not cfg.enabled or not cfg.conversation_router_enabled:
+        return None
+    ingress_bot_id = cfg.conversation_router_ingress_bot_id
+    if ingress_bot_id and str(current_bot_id or "") == ingress_bot_id:
+        return None
+    return KanbanReplyInboxResult(
+        consumed=True,
+        reason="not_ingress_bot",
+        action="reaction",
+        ingress_bot_id=ingress_bot_id,
+    )
+
+
 async def maybe_handle_discord_reaction_remove(
     payload: Any,
     *,
     config: KanbanReplyInboxConfig | None = None,
+    current_bot_id: str | None = None,
 ) -> KanbanReplyInboxResult:
     ctx = context_from_discord_reaction(payload)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
-    return await asyncio.to_thread(handle_reaction_remove, ctx, config=config or load_config())
+    cfg = config or load_config()
+    rejected = _reaction_ingress_rejection(cfg, current_bot_id)
+    if rejected is not None:
+        return rejected
+    return await asyncio.to_thread(handle_reaction_remove, ctx, config=cfg)
 
 
 async def maybe_handle_discord_reaction(
     payload: Any,
     *,
     config: KanbanReplyInboxConfig | None = None,
+    current_bot_id: str | None = None,
 ) -> KanbanReplyInboxResult:
     ctx = context_from_discord_reaction(payload)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
     cfg = config or load_config()
+    rejected = _reaction_ingress_rejection(cfg, current_bot_id)
+    if rejected is not None:
+        return rejected
     try:
         return await asyncio.to_thread(handle_reaction, ctx, config=cfg)
     except ValueError as exc:
