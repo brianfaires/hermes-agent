@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -24,6 +25,11 @@ class DiscordInbound:
     created_at: int | None = None
     replied_to_message_id: str | None = None
     relevant: bool = True
+    forum_channel_id: str | None = None
+    author_id: str | None = None
+    mentioned_user_ids: tuple[str, ...] = ()
+    replied_to_author_id: str | None = None
+    replied_to_author_is_bot: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,11 +155,20 @@ class DiscordBackfillIngestor:
                 if event_row is None or str(event_row["thread_id"]) != thread_id:
                     raise ValueError("Discord message identity belongs to another thread")
                 event_id = event_row["id"]
+                payload = json.dumps({
+                    "message_id": message_id, "thread_id": thread_id, "content": content,
+                    "author_label": message.author_label or "unknown", "author_id": message.author_id,
+                    "created_at": message.created_at, "replied_to_message_id": message.replied_to_message_id,
+                    "forum_channel_id": message.forum_channel_id,
+                    "mentioned_user_ids": list(message.mentioned_user_ids),
+                    "replied_to_author_id": message.replied_to_author_id,
+                    "replied_to_author_is_bot": message.replied_to_author_is_bot,
+                }, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
                 self.conn.execute("""INSERT INTO mirror_discord_inbound_state
                     (discord_message_id,thread_id,conversation_event_id,classification,processing_status,
-                     observed_via,observed_at,processed_at) VALUES (?,?,?,?,?,?,?,?)""",
+                     observed_via,observed_at,processed_at,payload) VALUES (?,?,?,?,?,?,?,?,?)""",
                     (message_id, thread_id, event_id, classification, status, via, now,
-                     now if status == "processed" else None))
+                     now if status == "processed" else None, payload))
             current = self.cursor(thread_id)
             if current is None or _snowflake(message_id) > _snowflake(current):
                 self.conn.execute("""INSERT INTO mirror_discord_thread_cursors

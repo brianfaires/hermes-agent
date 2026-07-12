@@ -1122,6 +1122,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
         self._kanban_backfill_task: Optional[asyncio.Task] = None
+        self._kanban_inbound_task: Optional[asyncio.Task] = None
         self._kanban_ingestor = None
         self._kanban_mirror_conn = None
         self._kanban_backfilled_threads: set[str] = set()
@@ -1334,6 +1335,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 adapter_self._kanban_backfill_task = asyncio.create_task(
                     adapter_self._backfill_kanban_mirror_threads()
                 )
+                if adapter_self._kanban_inbound_task is None or adapter_self._kanban_inbound_task.done():
+                    adapter_self._kanban_inbound_task = asyncio.create_task(
+                        adapter_self._run_kanban_pending_inbound()
+                    )
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
@@ -1371,7 +1376,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return
 
-                if _kanban_observed and not _kanban_relevant:
+                if _kanban_observed:
+                    # Relevant mirrored input is dispatched only by the durable
+                    # pending runner; noise was durably completed at ingestion.
                     return
 
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
@@ -1587,6 +1594,11 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
+        if self._kanban_inbound_task and not self._kanban_inbound_task.done():
+            self._kanban_inbound_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._kanban_inbound_task
+        self._kanban_inbound_task = None
         if self._kanban_backfill_task and not self._kanban_backfill_task.done():
             self._kanban_backfill_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -6021,6 +6033,8 @@ class DiscordAdapter(BasePlatformAdapter):
         channel = getattr(message, "channel", None)
         author = getattr(message, "author", None)
         reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference is not None else None
+        replied_author = getattr(resolved, "author", None)
         created_at = getattr(message, "created_at", None)
         timestamp = int(created_at.timestamp()) if created_at is not None else None
         return DiscordInbound(
@@ -6031,7 +6045,69 @@ class DiscordAdapter(BasePlatformAdapter):
             created_at=timestamp,
             replied_to_message_id=(str(getattr(reference, "message_id", "") or "") or None),
             relevant=relevant,
+            forum_channel_id=str(getattr(channel, "parent_id", "") or "") or None,
+            author_id=str(getattr(author, "id", "") or "") or None,
+            mentioned_user_ids=tuple(str(getattr(u, "id")) for u in (getattr(message, "mentions", None) or ()) if getattr(u, "id", None)),
+            replied_to_author_id=str(getattr(replied_author, "id", "") or "") or None,
+            replied_to_author_is_bot=bool(getattr(replied_author, "bot", False)),
         )
+
+    async def _run_kanban_pending_inbound(self) -> None:
+        delay = 0.25
+        while self._running and not self._disconnecting:
+            try:
+                cfg, _ = await self._kanban_runtime()
+                if not (cfg.enabled and cfg.conversation_router_enabled):
+                    return
+                handler = getattr(self, "_kanban_pending_handler", self._process_kanban_pending_inbound)
+                if self._kanban_mirror_conn is None:
+                    delay = min(5.0, delay * 2)
+                else:
+                    from gateway.kanban_mirror.inbound import PendingInboundRunner
+                    count = await PendingInboundRunner(self._kanban_mirror_conn, handler).run_once()
+                    delay = 0.05 if count else min(2.0, delay * 1.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[%s] durable Kanban inbound runner failed", self.name)
+                delay = min(5.0, delay * 2)
+            await asyncio.sleep(delay)
+
+    async def _process_kanban_pending_inbound(self, pending):
+        from gateway.kanban_discord_inbox import DiscordReplyContext, handle_reply
+        from gateway.kanban_mirror.inbound import ProcessResult
+        from gateway.platforms.base import MessageEvent, MessageType
+        p = pending.payload
+        ctx = DiscordReplyContext(
+            message_id=pending.message_id, author_id=p.get("author_id"),
+            author_label=p.get("author_label") or "unknown",
+            forum_channel_id=p.get("forum_channel_id") or "", thread_id=pending.thread_id,
+            content=p.get("content") or "", reply_to_message_id=p.get("replied_to_message_id"),
+            mentioned_user_ids=tuple(p.get("mentioned_user_ids") or ()),
+            replied_to_author_id=p.get("replied_to_author_id"),
+            replied_to_author_is_bot=bool(p.get("replied_to_author_is_bot")),
+        )
+        result = await asyncio.to_thread(handle_reply, ctx)
+        retry_reasons = {"binding_unavailable", "unmapped_thread", "missing_task", "invalid_profile", "ambiguous_owner", "ambiguous_profile_mentions"}
+        if result.reason in retry_reasons:
+            return ProcessResult("retry", detail=result.reason)
+        if result.reason != "conversation_routed":
+            return ProcessResult("disposition", disposition=result.reason, detail=result.ack)
+        source = self.build_source(
+            pending.thread_id, chat_type="group", user_id=p.get("author_id"),
+            user_name=p.get("author_label"), thread_id=pending.thread_id,
+            parent_chat_id=p.get("forum_channel_id"), message_id=pending.message_id,
+        )
+        source.profile = result.route_profile
+        event = MessageEvent(
+            text=p.get("content") or "", message_type=MessageType.TEXT, source=source,
+            message_id=pending.message_id, reply_to_message_id=p.get("replied_to_message_id"),
+            channel_context=result.card_context, outbound_profile=result.route_profile,
+            outbound_profiles=result.route_profiles, correlation_id=result.correlation_id,
+            route_marker="discord-kanban-conversation",
+        )
+        await self._dispatch_message_event(event)
+        return ProcessResult("routed", correlation_id=result.correlation_id)
 
     async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
         """Fakeable discord.py history seam used by durable reconnect recovery."""

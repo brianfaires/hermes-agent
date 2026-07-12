@@ -319,10 +319,23 @@ CREATE TABLE IF NOT EXISTS mirror_discord_inbound_state (
   observed_via TEXT NOT NULL,
   observed_at INTEGER NOT NULL,
   processed_at INTEGER,
+  payload TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  lease_expires_at INTEGER,
+  last_error TEXT,
+  correlation_id TEXT,
   FOREIGN KEY(conversation_event_id) REFERENCES mirror_conversation_events(id)
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_discord_inbound_pending
 ON mirror_discord_inbound_state(thread_id, processing_status, observed_at);
+CREATE TABLE IF NOT EXISTS mirror_discord_inbound_dispositions (
+  discord_message_id TEXT PRIMARY KEY,
+  correlation_id TEXT,
+  disposition TEXT NOT NULL,
+  detail TEXT,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS mirror_conversation_deliveries (
   operation_id TEXT PRIMARY KEY,
   trigger_discord_message_id TEXT NOT NULL,

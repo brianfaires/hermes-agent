@@ -28,6 +28,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "mirror_conversation_events": {"binding_key": "TEXT", "replied_to_message_id": "TEXT", "discord_created_at": "INTEGER"},
     "mirror_discord_thread_cursors": {"backlog_limited": "INTEGER NOT NULL DEFAULT 0"},
+    "mirror_discord_inbound_state": {
+        "payload": "TEXT", "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at": "INTEGER", "lease_expires_at": "INTEGER",
+        "last_error": "TEXT", "correlation_id": "TEXT",
+    },
     "mirror_discord_outbox": {
         "next_attempt_at": "INTEGER", "lease_owner": "TEXT", "lease_expires_at": "INTEGER",
         "confirmation_needed_at": "INTEGER", "quarantined_at": "INTEGER",
