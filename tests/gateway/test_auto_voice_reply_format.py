@@ -39,8 +39,8 @@ class TestAutoVoiceReplyFormat:
 
         assert requested_paths
         assert requested_paths[0].endswith(".ogg")
-        adapter.send_voice.assert_awaited_once()
-        assert adapter.send_voice.await_args.kwargs["audio_path"].endswith(".ogg")
+        adapter.play_tts.assert_awaited_once()
+        assert adapter.play_tts.await_args.kwargs["audio_path"].endswith(".ogg")
 
     @pytest.mark.asyncio
     async def test_non_telegram_auto_voice_reply_keeps_mp3_default(self):
@@ -68,8 +68,8 @@ class TestAutoVoiceReplyFormat:
 
         assert requested_paths
         assert requested_paths[0].endswith(".mp3")
-        adapter.send_voice.assert_awaited_once()
-        assert adapter.send_voice.await_args.kwargs["audio_path"].endswith(".mp3")
+        adapter.play_tts.assert_awaited_once()
+        assert adapter.play_tts.await_args.kwargs["audio_path"].endswith(".mp3")
 
 
 def _make_runner() -> GatewayRunner:
@@ -83,6 +83,7 @@ def _make_runner() -> GatewayRunner:
 def _make_adapter(platform: Platform) -> MagicMock:
     adapter = MagicMock()
     adapter.platform = platform
+    adapter.play_tts = AsyncMock()
     adapter.send_voice = AsyncMock()
     return adapter
 

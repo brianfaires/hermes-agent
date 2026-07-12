@@ -86,7 +86,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
         return values
-    for raw in path.read_text(errors="ignore").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
