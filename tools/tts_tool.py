@@ -2665,13 +2665,13 @@ def stream_tts_to_speaker(
         output_stream = None
         voice_id = DEFAULT_ELEVENLABS_VOICE_ID
         model_id = DEFAULT_ELEVENLABS_STREAMING_MODEL_ID
+        voice_settings = None
 
         tts_config = _load_tts_config()
         el_config = tts_config.get("elevenlabs", {})
         voice_id = el_config.get("voice_id", voice_id)
         model_id = el_config.get("streaming_model_id",
                                  el_config.get("model_id", model_id))
-        voice_settings = _elevenlabs_voice_settings(el_config, tts_config)
         # Per-sentence cap for the streaming path. Look up the cap against
         # the *streaming* model_id (defaults to eleven_flash_v2_5 = 40k chars),
         # not the sync model_id. A user override
@@ -2688,6 +2688,7 @@ def stream_tts_to_speaker(
             try:
                 ElevenLabs = _import_elevenlabs()
                 client = ElevenLabs(api_key=api_key)
+                voice_settings = _elevenlabs_voice_settings(el_config, tts_config)
             except ImportError:
                 logger.warning("elevenlabs package not installed; streaming TTS disabled")
 
@@ -2739,7 +2740,7 @@ def stream_tts_to_speaker(
             if len(cleaned) > stream_max_len:
                 cleaned = cleaned[:stream_max_len]
             try:
-                convert_kwargs = dict(
+                convert_kwargs: dict[str, Any] = dict(
                     text=cleaned,
                     voice_id=voice_id,
                     model_id=model_id,
