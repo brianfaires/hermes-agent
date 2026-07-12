@@ -19,6 +19,9 @@ class ObservedThread:
     starter_message_id: str | None
     starter_revision_hash: str | None
     transition_message_ids: frozenset[str] = frozenset()
+    title: str | None = None
+    tags: tuple[str, ...] = ()
+    archived: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,24 @@ def reconciliation_report(conn: sqlite3.Connection) -> dict:
         "by_severity": {severity: sum(f.severity == severity for f in findings)
                         for severity in ("critical", "error", "warning")},
     }
+
+
+def resolve_thread_quarantine(conn: sqlite3.Connection, thread_id: str, *, now: int | None = None) -> bool:
+    """Clear a latched quarantine only after a reconciliation scan is clean."""
+    stamp = int(time.time()) if now is None else int(now)
+    thread = str(thread_id)
+    marks = ",".join("?" for _ in _QUARANTINE_CODES)
+    if conn.execute(
+        f"SELECT 1 FROM mirror_reconciliation_findings WHERE thread_id=? AND resolved_at IS NULL AND code IN ({marks}) LIMIT 1",
+        (thread, *_QUARANTINE_CODES),
+    ).fetchone():
+        return False
+    changed = conn.execute(
+        "UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? WHERE thread_id=? AND resolved_at IS NULL",
+        (stamp, stamp, thread),
+    ).rowcount
+    conn.commit()
+    return bool(changed)
 
 
 def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mapping[str, ObservedThread],
@@ -172,12 +193,13 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
         bad_threads = {thread for (thread, code, _, _), _ in detected.items() if code in _QUARANTINE_CODES}
         for thread in bad_threads:
             conn.execute("""INSERT INTO mirror_thread_quarantine(thread_id,needs_repair,quarantined_at,updated_at)
-                VALUES (?,1,?,?) ON CONFLICT(thread_id) DO UPDATE SET needs_repair=1,updated_at=excluded.updated_at,resolved_at=NULL""", (thread, stamp, stamp))
-        if bad_threads:
-            marks = ",".join("?" for _ in bad_threads)
-            conn.execute(f"UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? WHERE resolved_at IS NULL AND thread_id NOT IN ({marks})", (stamp, stamp, *bad_threads))
-        else:
-            conn.execute("UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? WHERE resolved_at IS NULL", (stamp, stamp))
+                VALUES (?,1,?,?) ON CONFLICT(thread_id) DO UPDATE SET
+                needs_repair=1,
+                quarantined_at=CASE WHEN mirror_thread_quarantine.resolved_at IS NOT NULL
+                                    THEN excluded.quarantined_at ELSE mirror_thread_quarantine.quarantined_at END,
+                updated_at=excluded.updated_at,resolved_at=NULL""", (thread, stamp, stamp))
+        # Quarantine remains latched after a clean scan.  Explicit operator
+        # acknowledgement through resolve_thread_quarantine is required.
         conn.commit()
     except Exception:
         conn.rollback(); raise

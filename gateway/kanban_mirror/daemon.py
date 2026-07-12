@@ -68,6 +68,7 @@ from gateway.kanban_mirror import writer
 from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
 from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
 from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
+from gateway.kanban_mirror.reconciliation import ObservedThread, reconcile_mirror_state
 from gateway.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,94 @@ logger = logging.getLogger(__name__)
 def _canonical_hash(payload: dict) -> str:
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _is_quarantined(conn: sqlite3.Connection, thread_id: str | None) -> bool:
+    return bool(thread_id and conn.execute(
+        "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL", (thread_id,)
+    ).fetchone())
+
+
+async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
+                                 conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                 log: list[str]) -> None:
+    """Read live Discord state independently per mapped thread and reconcile it."""
+    rows = conn.execute("SELECT thread_id,starter_message_id FROM mirror_initiatives "
+                        "WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
+    try:
+        forum = await asyncio.to_thread(client.get_channel, cfg.forum_channel_id)
+        tag_names = {str(t.get("id")): str(t.get("name")) for t in forum.get("available_tags", [])}
+    except Exception as exc:
+        logger.warning("kanban mirror: reconciliation forum snapshot unavailable: %s", exc)
+        log.append("reconciliation: PARTIAL forum")
+        tag_names = {}
+        forum_complete = False
+    else:
+        forum_complete = True
+    observed: dict[str, ObservedThread] = {}
+    for row in rows:
+        thread_id, starter_id = str(row["thread_id"]), str(row["starter_message_id"] or "")
+        if not forum_complete:
+            log.append(f"reconciliation: PARTIAL thread={thread_id}")
+            continue
+        try:
+            channel = await asyncio.to_thread(client.get_channel, thread_id)
+            starter = await asyncio.to_thread(client.get_message, thread_id, starter_id)
+            tags = tuple(tag_names[x] for x in channel.get("applied_tags", []) if x in tag_names)
+            payload = {"title": str(channel.get("name") or ""),
+                       "body": str(starter.get("content") or ""), "tags": list(tags)}
+            existing: set[str] = set()
+            message_ids = [str(r[0]) for r in conn.execute(
+                "SELECT transition_message_id FROM mirror_binding_transitions "
+                "WHERE thread_id=? AND transition_message_id IS NOT NULL", (thread_id,))]
+            for message_id in message_ids:
+                try:
+                    await asyncio.to_thread(client.get_message, thread_id, message_id)
+                    existing.add(message_id)
+                except DiscordAPIError as exc:
+                    if exc.status != 404:
+                        raise
+            metadata = channel.get("thread_metadata") or {}
+            observed[thread_id] = ObservedThread(
+                thread_id, starter_id, _canonical_hash(payload), frozenset(existing), payload["title"], tags,
+                bool(metadata.get("archived", channel.get("archived", False))),
+            )
+        except Exception as exc:
+            logger.warning("kanban mirror: reconciliation observation failed for %s: %s", thread_id, exc)
+            log.append(f"reconciliation: PARTIAL thread={thread_id}")
+    findings = await asyncio.to_thread(reconcile_mirror_state, conn, observed_threads=observed,
+                                       cards=((cfg.board, task_id) for task_id in snapshot.cards))
+    quarantine_codes = {"binding.open_count", "binding.card_missing", "binding.mapping_missing",
+                        "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+                        "starter.changed_without_transition_confirmation", "transition.confirmation_missing"}
+    grouped: dict[str, list] = {}
+    for finding in findings:
+        if finding.code in quarantine_codes:
+            grouped.setdefault(finding.thread_id, []).append(finding)
+    for thread_id, conflicts in grouped.items():
+        row = conn.execute("SELECT quarantined_at FROM mirror_thread_quarantine "
+                           "WHERE thread_id=? AND resolved_at IS NULL", (thread_id,)).fetchone()
+        if row is None:
+            continue
+        quarantined_at = int(row[0])
+        if conn.execute("SELECT 1 FROM mirror_repair_notices WHERE thread_id=? AND quarantined_at=?",
+                        (thread_id, quarantined_at)).fetchone():
+            continue
+        identity = hashlib.sha256("|".join(sorted(f.finding_key for f in conflicts)).encode()).hexdigest()
+        nonce = hashlib.sha256(f"mirror-repair:{thread_id}:{quarantined_at}".encode()).hexdigest()[:25]
+        details = "; ".join(f"{f.code}: {json.dumps(f.evidence, sort_keys=True)}" for f in conflicts)
+        content = ("[Mirror repair notice — non-conversational]\nConflict: " + details +
+                   "\nSafe action: repair Discord/Kanban state without remapping, archiving, or deleting this thread; "
+                   "run a complete scan, then call resolve_thread_quarantine().")
+        try:
+            response = await asyncio.to_thread(client.send_message, thread_id, content=content, nonce=nonce)
+            conn.execute("INSERT OR IGNORE INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
+                         (thread_id, quarantined_at, identity, nonce, str(response.get("id") or ""), int(time.time())))
+            conn.commit()
+            log.append(f"reconciliation: QUARANTINED thread={thread_id}")
+        except Exception as exc:
+            logger.warning("kanban mirror: repair notice failed for %s: %s", thread_id, exc)
+            log.append(f"reconciliation: NOTICE_FAILED thread={thread_id}")
 
 
 class DiscordTransitionPublisher:
@@ -137,6 +226,9 @@ async def _recover_binding_transitions(cfg: MirrorConfig, client: DiscordClient 
         return
     publisher = DiscordTransitionPublisher(client, cfg, conn)
     for transition in await asyncio.to_thread(resumable_binding_transitions, conn):
+        if cfg.reconciliation_enabled and _is_quarantined(conn, transition.thread_id):
+            log.append(f"binding_transition: BLOCKED quarantined thread={transition.thread_id}")
+            continue
         await asyncio.to_thread(
             run_binding_transition, conn, publisher, transition_key=transition.transition_key,
             thread_id=transition.thread_id, old_card_metadata=transition.old_card_metadata,
@@ -945,6 +1037,8 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
     _LAST_PROSE_PASS = now_mono
 
     for initiative in state.values():
+        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
+            continue
         if initiative.kind != "post" or initiative.archived_at is not None:
             continue
         if not initiative.brief_stale or not initiative.thread_id:
@@ -1092,6 +1186,8 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                                       state: dict[str, Initiative], log: list[str]) -> None:
     publisher = DiscordLifecyclePublisher(client, cfg, conn)
     for initiative in state.values():
+        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
+            continue
         if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
             continue
         binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
@@ -1132,27 +1228,39 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
                dry_run: bool = False, allow_llm: bool = True) -> list[str]:
     log: list[str] = []
+    try:
+        snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
+    except sqlite3.OperationalError as exc:
+        logger.warning("kanban mirror: board snapshot unavailable (locked/busy?): %s", exc)
+        return log
+    if cfg.reconciliation_enabled and not dry_run and client is not None:
+        try:
+            await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)
+        except Exception:
+            logger.exception("kanban mirror: live reconciliation failed closed")
+            log.append("reconciliation: FAILED")
     if not dry_run:
         try:
             await _recover_binding_transitions(cfg, client, mirror_conn, log)
         except Exception:
             logger.exception("kanban mirror: binding transition recovery failed closed")
             log.append("binding_transition: recovery failed")
-    try:
-        snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
-    except sqlite3.OperationalError as exc:
-        logger.warning("kanban mirror: board snapshot unavailable (locked/busy?): %s", exc)
-        return log
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     digest = await asyncio.to_thread(get_digest, mirror_conn)
     note_keys = await asyncio.to_thread(load_note_keys, mirror_conn)
-    if not dry_run and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log):
+    if (not dry_run and not cfg.reconciliation_enabled
+            and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log)):
         state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     now = int(time.time())
     ops = plan(snapshot, state, digest, note_keys, cfg, now)
 
     for op in ops:
+        initiative = state.get(str(op.data.get("initiative_id") or ""))
+        if (cfg.reconciliation_enabled and initiative is not None
+                and _is_quarantined(mirror_conn, initiative.thread_id)):
+            log.append(f"{op.kind}: BLOCKED quarantined thread={initiative.thread_id}")
+            continue
         try:
             if op.kind == "curate":
                 await _do_curate(cfg, client, mirror_conn, snapshot, state, op, dry_run, allow_llm, log)
@@ -1406,7 +1514,14 @@ async def run_mirror_daemon(is_running: Callable[[], bool]) -> None:
         return
     client = DiscordClient(token)
     conn = connect_mirror(mirror_db_path(cfg.board))
-    await reconcile(cfg, client, conn)
+    if cfg.reconciliation_enabled:
+        try:
+            snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
+            await _observe_and_reconcile(cfg, client, conn, snapshot, [])
+        except Exception:
+            logger.exception("kanban mirror: startup live reconciliation failed closed")
+    else:
+        await reconcile(cfg, client, conn)
     while is_running():
         try:
             await tick(cfg, client, conn)

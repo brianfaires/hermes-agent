@@ -262,6 +262,12 @@ CREATE TABLE IF NOT EXISTS mirror_thread_quarantine (
   updated_at INTEGER NOT NULL,
   resolved_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS mirror_repair_notices (
+  thread_id TEXT NOT NULL, quarantined_at INTEGER NOT NULL,
+  finding_identity TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL, published_at INTEGER NOT NULL,
+  PRIMARY KEY(thread_id, quarantined_at)
+);
 CREATE TABLE IF NOT EXISTS mirror_terminal_lifecycles (
   lifecycle_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, binding_key TEXT NOT NULL,
   frozen_payload TEXT NOT NULL, frozen_hash TEXT NOT NULL,

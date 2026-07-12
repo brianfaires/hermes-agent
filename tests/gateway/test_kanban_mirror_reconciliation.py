@@ -6,7 +6,7 @@ from gateway.kanban_mirror.conversation_log import record_conversation_event
 from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue
 from gateway.kanban_mirror.reconciliation import (
     ObservedThread, list_reconciliation_findings, reconcile_mirror_state,
-    reconciliation_report,
+    reconciliation_report, resolve_thread_quarantine,
 )
 from gateway.kanban_mirror.state import (
     active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
@@ -41,6 +41,8 @@ def test_findings_are_idempotent_update_evidence_and_preserve_resolved_history(t
     assert reconcile_mirror_state(conn, observed_threads=observed(), cards=[("board", "task")], now=30) == []
     history = list_reconciliation_findings(conn)
     assert len(history) == 1 and history[0].resolved_at == 30
+    assert is_thread_quarantined(conn, "thread")  # clean scan alone is not acknowledgement
+    assert resolve_thread_quarantine(conn, "thread", now=31)
     assert not is_thread_quarantined(conn, "thread")
 
 
