@@ -84,10 +84,15 @@ def health_snapshot(conn: sqlite3.Connection, *, router_enabled: bool,
     stamp = int(time.time()) if now is None else int(now)
     scalar = lambda sql, args=(): conn.execute(sql, args).fetchone()[0]
     pending_in = scalar("SELECT COUNT(*) FROM mirror_discord_inbound_state WHERE processing_status='pending'")
+    failed_in = scalar("SELECT COUNT(*) FROM mirror_discord_inbound_state WHERE processing_status='pending' AND attempt_count>0")
     oldest_in = scalar("SELECT MIN(observed_at) FROM mirror_discord_inbound_state WHERE processing_status='pending'")
     out = {row[0]: row[1] for row in conn.execute(
         "SELECT status,COUNT(*) FROM mirror_discord_outbox WHERE status!='delivered' GROUP BY status")}
     oldest_out = scalar("SELECT MIN(created_at) FROM mirror_discord_outbox WHERE status!='delivered'")
+    logs = {row[0]: row[1] for row in conn.execute(
+        "SELECT status,COUNT(*) FROM mirror_conversation_delivery_chunks WHERE status!='delivered' GROUP BY status")}
+    oldest_log = scalar("""SELECT MIN(d.created_at) FROM mirror_conversation_delivery_chunks c
+      JOIN mirror_conversation_deliveries d USING(operation_id) WHERE c.status!='delivered'""")
     profiles = {row[0] for row in conn.execute(
         "SELECT DISTINCT target_profile FROM mirror_discord_outbox WHERE status!='delivered'") if row[0]}
     cursor_lag = scalar("SELECT COUNT(*) FROM mirror_discord_inbound_state WHERE processing_status='pending'")
@@ -101,11 +106,16 @@ def health_snapshot(conn: sqlite3.Connection, *, router_enabled: bool,
         "discord_ingress_connected": bool(ingress_connected),
         "profile_adapters": {p: bool(adapters.get(p) and getattr(adapters[p], "is_connected", False)) for p in sorted(profiles)},
         "cursor": {"lag": min(cursor_lag, backlog_limit), "backlog_limited": cursor_lag > backlog_limit},
-        "pending_inbound": {"count": pending_in, "oldest_age_seconds": None if oldest_in is None else max(0, stamp-oldest_in)},
+        "pending_inbound": {"count": pending_in, "failed": failed_in,
+                            "oldest_age_seconds": None if oldest_in is None else max(0, stamp-oldest_in)},
         "outbox": {"pending": out.get("pending", 0), "failed": out.get("failed", 0),
                    "confirmation_needed": out.get("confirmation_needed", 0),
+                   "quarantined": out.get("quarantined", 0),
                    "oldest_age_seconds": None if oldest_out is None else max(0, stamp-oldest_out),
                    "leases": scalar("SELECT COUNT(*) FROM mirror_discord_outbox WHERE lease_expires_at>?", (stamp,))},
+        "log_deliveries": {"pending": logs.get("pending", 0), "failed": logs.get("failed", 0),
+                           "oldest_age_seconds": None if oldest_log is None else max(0, stamp-oldest_log),
+                           "leases": scalar("SELECT COUNT(*) FROM mirror_conversation_delivery_chunks WHERE lease_expires_at>?", (stamp,))},
         "pending_transitions": scalar("SELECT COUNT(*) FROM mirror_transition_recovery WHERE status NOT IN ('delivered','quarantined')"),
         "findings": {"open": scalar("SELECT COUNT(*) FROM mirror_reconciliation_findings WHERE resolved_at IS NULL"),
                      "quarantined": scalar("SELECT COUNT(*) FROM mirror_thread_quarantine WHERE resolved_at IS NULL")},

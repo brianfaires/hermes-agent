@@ -62,7 +62,8 @@ def test_health_snapshot_is_bounded_content_free_and_disabled_is_silent(tmp_path
     result = health_snapshot(conn, router_enabled=True, ingress_connected=True,
                              adapters={"ops": adapter}, supervisor=supervisor,
                              now=100, backlog_limit=0)
-    assert result["pending_inbound"] == {"count": 1, "oldest_age_seconds": 20}
+    assert result["pending_inbound"] == {"count": 1, "failed": 0, "oldest_age_seconds": 20}
+    assert result["log_deliveries"] == {"pending": 0, "failed": 0, "oldest_age_seconds": None, "leases": 0}
     assert result["outbox"]["pending"] == 1
     assert result["outbox"]["oldest_age_seconds"] == 30
     assert result["cursor"] == {"lag": 0, "backlog_limited": True}
