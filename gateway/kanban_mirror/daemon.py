@@ -1288,6 +1288,17 @@ async def _initiate_automatic_successors(cfg: MirrorConfig, client: DiscordClien
             continue
         if len(eligible) != 1:
             continue
+        # A clean scan resolves the machine finding, but quarantine remains
+        # latched until explicit operator acknowledgement.  Never mutate the
+        # starter/binding in the scan which establishes cleanliness.
+        stamp = int(time.time())
+        conn.execute("""UPDATE mirror_reconciliation_findings SET resolved_at=?,last_seen_at=?
+            WHERE thread_id=? AND code='successor.selection_ambiguous' AND resolved_at IS NULL""",
+            (stamp, stamp, initiative.thread_id))
+        conn.commit()
+        if _is_quarantined(conn, initiative.thread_id):
+            log.append(f"automatic_successor: BLOCKED quarantined thread={initiative.thread_id}")
+            continue
         successor = snapshot.cards[eligible[0]]
         advanced = Initiative(initiative.id, str(successor.title or successor.id), initiative.kind,
             initiative.thread_id, initiative.starter_message_id, None, None, {}, initiative.published_hash,

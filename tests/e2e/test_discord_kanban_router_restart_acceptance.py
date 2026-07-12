@@ -19,7 +19,8 @@ from gateway.kanban_discord_inbox import (
     validate_router_config,
 )
 from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.daemon import _recover_binding_transitions
+from gateway.kanban_mirror.daemon import _initiate_automatic_successors, _recover_binding_transitions
+from gateway.kanban_mirror.reconciliation import reconcile_mirror_state, resolve_thread_quarantine
 from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
 from gateway.kanban_mirror.recovery import run_outbound_recovery
 from gateway.kanban_mirror.state import (
@@ -32,6 +33,7 @@ from gateway.kanban_mirror.state import (
     mirror_db_path,
     prepare_binding_transition,
     set_thread,
+    BoardSnapshot, Card, is_thread_quarantined, load_mirror_state,
 )
 from hermes_cli import kanban_db as kb
 
@@ -60,6 +62,13 @@ class DiscordTransport:
 
     def get_message(self, channel_id, message_id):
         return dict(self.messages[(channel_id, message_id)])
+
+    def update_forum_tags(self, channel_id, tags):
+        realized = []
+        for index, tag in enumerate(tags):
+            realized.append({**tag, "id": tag.get("id", f"created-{index}")})
+        self.forum["available_tags"] = realized
+        return dict(self.forum)
 
     def update_message(self, channel_id, message_id, *, content):
         self.events.append(("starter", content))
@@ -218,3 +227,44 @@ async def test_conversation_outbox_log_and_transition_resume_across_restart(isol
     assert [event[0] for event in transport.events[-3:]] == ["transition", "starter", "thread"]
     assert len(transport.by_nonce) == 1
     second.close()
+
+
+@pytest.mark.asyncio
+async def test_fanout_quarantine_needs_clean_restart_and_explicit_resolution(isolated_router):
+    """An ambiguous successor can neither alter the starter nor self-clear quarantine."""
+    _home, old, _new = isolated_router
+    def card(task_id, status):
+        return Card(task_id, task_id, "body", status, "high", "reviewer", None,
+                    None, None, "1", "2" if status == "done" else None, None, None)
+    bad = BoardSnapshot(
+        {old: card(old, "done"), "a": card("a", "running"), "b": card("b", "running")},
+        {old: ("a", "b")}, {"a": (old,), "b": (old,)}, {}, {},
+    )
+    cfg = MirrorConfig(board="acceptance", forum_channel_id="forum-1",
+                       automatic_successor_enabled=True, reconciliation_enabled=True)
+    discord = DiscordTransport()
+    conn = connect_mirror(mirror_db_path("acceptance"))
+    starter_before = dict(discord.messages[("thread-1", "thread-1")])
+    await _initiate_automatic_successors(cfg, discord, conn, bad, load_mirror_state(conn), [])
+    assert is_thread_quarantined(conn, "thread-1")
+    assert discord.messages[("thread-1", "thread-1")] == starter_before
+    assert not resolve_thread_quarantine(conn, "thread-1", now=10)
+    conn.close()
+
+    # Recreate daemon state/DB connection.  A now-unambiguous scan marks the
+    # finding clean but remains fail-closed until explicit acknowledgement.
+    clean = BoardSnapshot({old: card(old, "done"), "a": card("a", "running")},
+                          {old: ("a",)}, {"a": (old,)}, {}, {})
+    restarted = connect_mirror(mirror_db_path("acceptance"))
+    # The reconciliation scan is the durable clean observation; it does not
+    # itself acknowledge or mutate the quarantined thread.
+    reconcile_mirror_state(restarted, observed_threads={},
+                           cards=[("acceptance", old), ("acceptance", "a")], now=15)
+    assert is_thread_quarantined(restarted, "thread-1")
+    assert discord.messages[("thread-1", "thread-1")] == starter_before
+    assert resolve_thread_quarantine(restarted, "thread-1", now=20)
+    await _initiate_automatic_successors(cfg, discord, restarted, clean,
+                                         load_mirror_state(restarted), [])
+    assert active_thread_binding(restarted, "thread-1").task_id == "a"
+    assert [event[0] for event in discord.events[-3:]] == ["transition", "starter", "thread"]
+    restarted.close()
