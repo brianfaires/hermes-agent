@@ -51,6 +51,7 @@ class MirrorConfig:
     binding_transitions_enabled: bool = False
     terminal_lifecycle_enabled: bool = False
     reconciliation_enabled: bool = False
+    automatic_successor_enabled: bool = False
 
     def valid(self) -> bool:
         return bool(self.enabled and self.board and self.forum_channel_id)
@@ -83,10 +84,11 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
         binding_transitions_enabled=bool(cfg.get("binding_transitions_enabled", False)),
         terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
         reconciliation_enabled=bool(cfg.get("reconciliation_enabled", False)),
+        automatic_successor_enabled=bool(cfg.get("automatic_successor_enabled", False)),
     )
-    if (result.reconciliation_enabled or result.terminal_lifecycle_enabled) and not result.binding_transitions_enabled:
+    if (result.reconciliation_enabled or result.terminal_lifecycle_enabled or result.automatic_successor_enabled) and not result.binding_transitions_enabled:
         raise ValueError(
             "kanban.discord_mirror binding_transitions_enabled is required when "
-            "reconciliation_enabled or terminal_lifecycle_enabled is enabled"
+            "reconciliation_enabled, terminal_lifecycle_enabled, or automatic_successor_enabled is enabled"
         )
     return result

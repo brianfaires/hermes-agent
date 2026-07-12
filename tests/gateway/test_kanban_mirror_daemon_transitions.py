@@ -2,11 +2,12 @@ import asyncio
 
 from gateway.kanban_mirror.config import MirrorConfig
 from gateway.kanban_mirror.daemon import (
-    DiscordTransitionPublisher, _recover_binding_transitions, _starter_identity_authorized,
+    DiscordTransitionPublisher, _initiate_automatic_successors, _recover_binding_transitions,
+    _starter_identity_authorized,
 )
 from gateway.kanban_mirror.state import (
-    active_thread_binding, add_member, connect_mirror,
-    create_initiative, get_binding_transition, prepare_binding_transition, set_thread,
+    BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
+    create_initiative, get_binding_transition, load_mirror_state, prepare_binding_transition, set_thread,
 )
 
 
@@ -15,7 +16,9 @@ class FakeDiscordClient:
         self.messages = {("thread", "thread"): {"id": "thread", "content": "old"}}
         self.thread = {"id": "thread", "name": "Old", "applied_tags": ["doing-id"]}
         self.forum = {"id": "forum", "available_tags": [
-            {"id": "doing-id", "name": "doing"}, {"id": "active-id", "name": "active"}
+            {"id": "doing-id", "name": "doing"}, {"id": "active-id", "name": "active"},
+            {"id": "ready-id", "name": "ready"}, {"id": "waiting-id", "name": "waiting"},
+            {"id": "ops-id", "name": "ops"}
         ]}
         self.by_nonce = {}
         self.events = []
@@ -88,3 +91,38 @@ def test_startup_backfill_and_pending_resume_without_duplicate_epoch(tmp_path):
     assert active_thread_binding(conn, "thread").task_id == "new"
     assert conn.execute("SELECT count(*) FROM mirror_binding_epochs").fetchone()[0] == 2
     assert len(client.by_nonce) == 1
+
+
+def _card(task, status, owner="ops"):
+    return Card(task, task.title(), "body", status, "normal", owner, None, None, None,
+                "1", "2" if status == "done" else None, None, None)
+
+
+def test_automatic_successor_orders_transition_and_is_restart_idempotent(tmp_path):
+    conn = seed(tmp_path / "auto.db"); backfill_legacy_bindings(conn, "board")
+    snap = BoardSnapshot({"old": _card("old", "done"), "new": _card("new", "ready")},
+                         {"old": ["new"]}, {"new": ["old"]}, {}, {})
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", binding_transitions_enabled=True,
+                       automatic_successor_enabled=True)
+    client = FakeDiscordClient()
+    asyncio.run(_initiate_automatic_successors(cfg, client, conn, snap, load_mirror_state(conn), []))
+    asyncio.run(_initiate_automatic_successors(cfg, client, conn, snap, load_mirror_state(conn), []))
+    assert active_thread_binding(conn, "thread").task_id == "new"
+    assert [event[0] for event in client.events] == ["publish", "starter", "thread"]
+    assert len(client.by_nonce) == 1
+    assert conn.execute("SELECT task_id FROM mirror_members").fetchone()[0] == "new"
+
+
+def test_automatic_successor_fanout_fails_closed_with_stable_finding(tmp_path):
+    conn = seed(tmp_path / "fan.db"); backfill_legacy_bindings(conn, "board")
+    cards = {"old": _card("old", "done"), "a": _card("a", "ready"), "b": _card("b", "ready")}
+    snap = BoardSnapshot(cards, {"old": ["b", "a"]}, {"a": ["old"], "b": ["old"]}, {}, {})
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", binding_transitions_enabled=True,
+                       automatic_successor_enabled=True)
+    client = FakeDiscordClient()
+    for _ in range(2):
+        asyncio.run(_initiate_automatic_successors(cfg, client, conn, snap, load_mirror_state(conn), []))
+    assert conn.execute("SELECT task_id FROM mirror_binding_epochs WHERE state='open'").fetchone()[0] == "old"
+    assert not client.by_nonce
+    rows = conn.execute("SELECT code FROM mirror_reconciliation_findings WHERE resolved_at IS NULL").fetchall()
+    assert [row[0] for row in rows] == ["successor.selection_ambiguous"]

@@ -58,6 +58,7 @@ _QUARANTINE_CODES = {
     "thread.starter_mapping_mismatch",
     "starter.revision_mismatch", "starter.changed_without_transition_confirmation",
     "transition.confirmation_missing", "thread.premature_archive", "digest.thread_mismatch",
+    "successor.selection_ambiguous",
 }
 
 
@@ -233,6 +234,11 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
     digest_codes = {"digest.thread_mismatch", "digest.entry_missing", "digest.thread_link_mismatch",
                     "digest.outcome_mismatch", "digest.date_hash_mismatch", "digest.entry_stale", "digest.unpinned"}
     for row in conn.execute("SELECT * FROM mirror_reconciliation_findings WHERE resolved_at IS NULL"):
+        if row["code"] == "successor.selection_ambiguous":
+            evidence = json.loads(row["evidence"])
+            detected[(row["thread_id"], row["code"], row["binding_key"], row["task_id"])] = (
+                row["severity"], evidence,
+            )
         if row["code"] in observed_codes and row["thread_id"] not in observed_threads:
             evidence = json.loads(row["evidence"])
             detected[(row["thread_id"], row["code"], row["binding_key"], row["task_id"])] = (

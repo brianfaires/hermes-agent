@@ -805,11 +805,21 @@ def confirm_binding_transition(conn: sqlite3.Connection, transition_key: str, tr
         if len(rows) != 1 or rows[0]["binding_key"] != transition.old_binding_key:
             raise ValueError("authoritative binding changed or is ambiguous")
         old, now = _binding_from_row(rows[0]), _now(); new = transition.new_card_metadata
+        mappings = conn.execute(
+            "SELECT i.id FROM mirror_initiatives i JOIN mirror_members m ON m.initiative_id=i.id "
+            "WHERE i.thread_id=? AND m.task_id=?", (transition.thread_id, old.task_id),
+        ).fetchall()
+        if len(mappings) != 1:
+            raise ValueError("authoritative initiative membership is ambiguous")
+        if conn.execute("SELECT 1 FROM mirror_members WHERE task_id=?", (str(new["task_id"]),)).fetchone():
+            raise ValueError("successor is already mapped to an initiative")
         conn.execute("UPDATE mirror_binding_epochs SET state='closed',ended_at=?,transition_message_id=? WHERE binding_key=?", (now, message_id, old.binding_key))
         conn.execute("""INSERT INTO mirror_binding_epochs
             (binding_key,thread_id,board_slug,task_id,sequence,started_at,state) VALUES (?,?,?,?,?,?,'open')""",
             (transition.new_binding_key, transition.thread_id, str(new["board_slug"]), str(new["task_id"]), old.sequence + 1, now))
         conn.execute("UPDATE mirror_binding_transitions SET state='message_confirmed',transition_message_id=?,confirmed_at=? WHERE transition_key=? AND state='prepared'", (message_id, now, transition_key))
+        conn.execute("UPDATE mirror_members SET task_id=?,last_status=NULL,last_sig=NULL WHERE initiative_id=? AND task_id=?",
+                     (str(new["task_id"]), mappings[0]["id"], old.task_id))
         result = get_binding_transition(conn, transition_key)
         conn.commit(); return result
     except Exception:

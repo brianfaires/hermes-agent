@@ -122,7 +122,23 @@ def request_binding_transition(
     thread_id: str, old_card_metadata: dict, successor_card_metadata: dict,
     transition_payload: dict, frozen_starter_payload: dict,
 ) -> BindingTransition:
-    """Explicit API: the caller must choose and fully describe the successor."""
+    """Explicit API: the caller must choose and fully describe the successor.
+
+    An operator choice resolves only a prior automatic-selection ambiguity;
+    unrelated quarantine remains latched and continues to fail closed.
+    """
+    other = conn.execute(
+        "SELECT 1 FROM mirror_reconciliation_findings WHERE thread_id=? AND resolved_at IS NULL "
+        "AND code!='successor.selection_ambiguous' LIMIT 1", (thread_id,),
+    ).fetchone()
+    if other is None:
+        import time
+        now = int(time.time())
+        conn.execute("UPDATE mirror_reconciliation_findings SET resolved_at=? WHERE thread_id=? "
+                     "AND code='successor.selection_ambiguous' AND resolved_at IS NULL", (now, thread_id))
+        conn.execute("UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? "
+                     "WHERE thread_id=? AND resolved_at IS NULL", (now, now, thread_id))
+        conn.commit()
     return run_binding_transition(
         conn, publisher, transition_key=transition_key, thread_id=thread_id,
         old_card_metadata=old_card_metadata, new_card_metadata=successor_card_metadata,

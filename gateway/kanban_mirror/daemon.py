@@ -65,7 +65,7 @@ from gateway.kanban_mirror.state import (
     set_thread,
 )
 from gateway.kanban_mirror import writer
-from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
+from gateway.kanban_mirror.transitions import TransitionReceipt, request_binding_transition, run_binding_transition
 from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
 from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
 from gateway.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
@@ -163,7 +163,8 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
     quarantine_codes = {"binding.open_count", "binding.card_missing", "binding.mapping_missing",
                         "thread.starter_mapping_mismatch", "starter.revision_mismatch",
                         "starter.changed_without_transition_confirmation", "transition.confirmation_missing",
-                        "thread.premature_archive", "digest.thread_mismatch"}
+                        "thread.premature_archive", "digest.thread_mismatch",
+                        "successor.selection_ambiguous"}
     grouped: dict[str, list] = {}
     for finding in findings:
         if finding.code in quarantine_codes:
@@ -1208,6 +1209,102 @@ def _terminal_chain(snapshot: BoardSnapshot, task_id: str) -> list[dict]:
              "status": snapshot.cards[cid].status} for cid in ordered if cid in snapshot.cards]
 
 
+def _record_successor_finding(conn: sqlite3.Connection, thread: str, binding: str,
+                              task: str, evidence: dict) -> None:
+    code = "successor.selection_ambiguous"; stamp = int(time.time())
+    identity = json.dumps([code, thread, binding, task], separators=(",", ":"))
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    payload = json.dumps({"thread_id": thread, **evidence}, sort_keys=True, separators=(",", ":"))
+    evidence_hash = hashlib.sha256(payload.encode()).hexdigest()
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES (?,'error',?,?,?,?,?,?,?,?) ON CONFLICT(finding_key) DO UPDATE SET
+        evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,last_seen_at=excluded.last_seen_at,resolved_at=NULL""",
+        (key, code, thread, binding, task, payload, evidence_hash, stamp, stamp))
+    conn.execute("""INSERT INTO mirror_thread_quarantine(thread_id,needs_repair,quarantined_at,updated_at)
+        VALUES (?,1,?,?) ON CONFLICT(thread_id) DO UPDATE SET needs_repair=1,updated_at=excluded.updated_at,
+        quarantined_at=CASE WHEN resolved_at IS NOT NULL THEN excluded.quarantined_at ELSE quarantined_at END,
+        resolved_at=NULL""", (thread, stamp, stamp))
+    conn.commit()
+
+
+def _card_metadata(board: str, card: Any) -> dict:
+    return {"board_slug": board, "task_id": card.id, "title": str(card.title or card.id),
+            "status": str(card.status or ""), "owner": str(card.assignee or ""),
+            "body": str(card.body or ""), "priority": str(card.priority or "")}
+
+
+def _reachable_cycle(snapshot: BoardSnapshot, root: str) -> bool:
+    visiting: set[str] = set(); visited: set[str] = set()
+    def visit(node: str) -> bool:
+        if node in visiting: return True
+        if node in visited: return False
+        visiting.add(node)
+        if any(visit(child) for child in snapshot.children.get(node, ())): return True
+        visiting.remove(node); visited.add(node); return False
+    return visit(root)
+
+
+async def _initiate_automatic_successors(cfg: MirrorConfig, client: DiscordClient,
+                                         conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                         state: dict[str, Initiative], log: list[str]) -> None:
+    if not cfg.automatic_successor_enabled:
+        return
+    publisher = DiscordTransitionPublisher(client, cfg, conn)
+    mapped = {str(r[0]): (str(r[1]), str(r[2] or "")) for r in conn.execute(
+        "SELECT m.task_id,m.initiative_id,i.thread_id FROM mirror_members m JOIN mirror_initiatives i ON i.id=m.initiative_id")}
+    for initiative in state.values():
+        if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
+            continue
+        binding = active_thread_binding(conn, initiative.thread_id)
+        current = snapshot.cards.get(binding.task_id) if binding else None
+        if binding is None or current is None or not is_terminal(str(current.status or "")):
+            continue
+        children = sorted(set(snapshot.children.get(current.id, ())))
+        descendants = [x["task_id"] for x in _terminal_chain(snapshot, current.id)[:-1]
+                       if not is_terminal(str(x["status"] or ""))]
+        eligible: list[str] = []; rejected: dict[str, list[str]] = {}
+        cycle = _reachable_cycle(snapshot, current.id)
+        for child_id in children:
+            child = snapshot.cards.get(child_id); why: list[str] = []
+            if child is None: why.append("card_missing")
+            else:
+                if is_terminal(str(child.status or "")): why.append("terminal")
+                parents = sorted(set(snapshot.parents.get(child_id, ())))
+                if current.id not in parents: why.append("edge_inconsistent")
+                if any(p not in snapshot.cards or not is_terminal(str(snapshot.cards[p].status or "")) for p in parents):
+                    why.append("parents_not_terminal")
+                if not str(child.assignee or "").strip(): why.append("owner_missing")
+                membership = mapped.get(child_id)
+                if membership: why.append("already_mapped" if membership[1] == initiative.thread_id else "cross_thread_mapping")
+                if len(initiative.members) != 1 or current.id not in initiative.members: why.append("ambiguous_membership")
+            if child is not None and not why: eligible.append(child_id)
+            rejected[child_id] = why
+        if cycle or (descendants and len(eligible) != 1):
+            _record_successor_finding(conn, initiative.thread_id, binding.binding_key, current.id,
+                {"direct_children": children, "eligible": eligible, "rejections": rejected,
+                 "nonterminal_descendants": sorted(descendants), "cycle": cycle})
+            log.append(f"automatic_successor: BLOCKED thread={initiative.thread_id}")
+            continue
+        if len(eligible) != 1:
+            continue
+        successor = snapshot.cards[eligible[0]]
+        advanced = Initiative(initiative.id, str(successor.title or successor.id), initiative.kind,
+            initiative.thread_id, initiative.starter_message_id, None, None, {}, initiative.published_hash,
+            True, None, None, initiative.created_at, int(time.time()),
+            {successor.id: MemberState(successor.id, None, None)})
+        starter = {"title": post_title(advanced, snapshot),
+                   "body": render_post(advanced, snapshot, cfg.max_post_chars, int(time.time())),
+                   "tags": list(_tags_for(advanced, snapshot))}
+        key = f"auto:{binding.binding_key}:{successor.id}"
+        note = {"content": f"Work advanced from **{current.title or current.id}** (`{current.id}`) to **{successor.title or successor.id}** (`{successor.id}`)."}
+        await asyncio.to_thread(request_binding_transition, conn, publisher, transition_key=key,
+            thread_id=initiative.thread_id, old_card_metadata=_card_metadata(cfg.board, current),
+            successor_card_metadata=_card_metadata(cfg.board, successor), transition_payload=note,
+            frozen_starter_payload=starter)
+        log.append(f"automatic_successor: {current.id} -> {successor.id}")
+
+
 async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                                       conn: sqlite3.Connection, snapshot: BoardSnapshot,
                                       state: dict[str, Initiative], log: list[str]) -> None:
@@ -1223,6 +1320,9 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
         chain = _terminal_chain(snapshot, binding.task_id)
         # An absent card is ambiguity, not completion.
         if not chain or chain[-1]["task_id"] != binding.task_id:
+            continue
+        # Dependency descendants are continuations, not containment.
+        if any(not is_terminal(str(item["status"] or "")) for item in chain[:-1]):
             continue
         try:
             activity = await _latest_thread_activity_ts(client, initiative.thread_id)
@@ -1274,6 +1374,13 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             log.append("binding_transition: recovery failed")
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
+    if not dry_run and client is not None and cfg.automatic_successor_enabled:
+        try:
+            await _initiate_automatic_successors(cfg, client, mirror_conn, snapshot, state, log)
+        except Exception:
+            logger.exception("kanban mirror: automatic successor initiation failed closed")
+            log.append("automatic_successor: FAILED")
+        state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     digest = await asyncio.to_thread(get_digest, mirror_conn)
     note_keys = await asyncio.to_thread(load_note_keys, mirror_conn)
     if (not dry_run and not cfg.reconciliation_enabled
