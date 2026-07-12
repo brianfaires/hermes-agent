@@ -6808,7 +6808,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 conn.close()
 
         self._kanban_mirror_supervisor.start("outbound-recovery", recover)
-        if cfg.conversation_log_enabled:
+        if bool(getattr(cfg, "conversation_log_enabled", False)):
             self._kanban_mirror_supervisor.start("log-delivery-recovery", recover_logs)
         self._kanban_mirror_supervisor.start("health-publication", publish_health)
 
