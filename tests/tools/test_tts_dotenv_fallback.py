@@ -46,6 +46,7 @@ class TestDotenvFallbackPerProvider:
         from tools import tts_tool
 
         with patch.object(tts_tool, "get_env_value", return_value="el-dotenv-key"), \
+             patch.object(tts_tool, "_elevenlabs_voice_settings", return_value=None), \
              patch.object(tts_tool, "_import_elevenlabs") as mock_import:
             mock_client = MagicMock()
             mock_client.text_to_speech.convert.return_value = iter([b"audio"])
