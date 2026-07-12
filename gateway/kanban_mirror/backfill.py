@@ -129,7 +129,9 @@ class DiscordBackfillIngestor:
                 "malformed" if malformed else "noise" if not message.relevant else
                 "quarantined" if quarantined else "unmapped" if binding is None else "pending"
             )
-            status = "pending" if classification == "pending" else "processed"
+            # Unroutable human input is not acknowledged: reconciliation may
+            # make a quarantined or missing/ambiguous binding routable later.
+            status = "pending" if classification in {"pending", "quarantined", "unmapped"} else "processed"
             existing = self.conn.execute(
                 "SELECT 1 FROM mirror_discord_inbound_state WHERE discord_message_id=?", (message_id,)
             ).fetchone()
@@ -165,7 +167,7 @@ class DiscordBackfillIngestor:
         except Exception:
             self.conn.rollback()
             raise
-        if existing is None and status == "pending" and self.processor is not None:
+        if existing is None and classification == "pending" and self.processor is not None:
             try:
                 result = self.processor(message, classification)
                 if inspect.isawaitable(result):

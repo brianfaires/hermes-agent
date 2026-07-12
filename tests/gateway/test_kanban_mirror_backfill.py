@@ -91,7 +91,7 @@ async def test_noise_malformed_unmapped_quarantine_preserved_and_advanced(conn):
     await ingestor.ingest_live(message(13, "unmapped"))
     await ingestor.ingest_live(message(14, "q"))
     rows = conn.execute("SELECT classification,processing_status FROM mirror_discord_inbound_state ORDER BY CAST(discord_message_id AS INT)").fetchall()
-    assert [tuple(r) for r in rows] == [("noise", "processed"), ("malformed", "processed"), ("unmapped", "processed"), ("quarantined", "processed")]
+    assert [tuple(r) for r in rows] == [("noise", "processed"), ("malformed", "processed"), ("unmapped", "pending"), ("quarantined", "pending")]
     assert conn.execute("SELECT COUNT(*) FROM mirror_conversation_events").fetchone()[0] == 4
 
 

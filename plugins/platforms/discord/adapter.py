@@ -1121,6 +1121,11 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        self._kanban_backfill_task: Optional[asyncio.Task] = None
+        self._kanban_ingestor = None
+        self._kanban_mirror_conn = None
+        self._kanban_backfilled_threads: set[str] = set()
+        self._kanban_thread_backfills: Dict[str, asyncio.Task] = {}
         # True while disconnect() is intentionally closing discord.py. The
         # bot task's done callback uses this to distinguish an operator/service
         # shutdown from a runtime websocket crash.
@@ -1322,6 +1327,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
 
+                # on_ready also fires after Discord reconnect/RESUME. Recovery
+                # is bounded and runs independently from unrelated channels.
+                if adapter_self._kanban_backfill_task and not adapter_self._kanban_backfill_task.done():
+                    adapter_self._kanban_backfill_task.cancel()
+                adapter_self._kanban_backfill_task = asyncio.create_task(
+                    adapter_self._backfill_kanban_mirror_threads()
+                )
+
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
@@ -1341,6 +1354,10 @@ class DiscordAdapter(BasePlatformAdapter):
                     except asyncio.TimeoutError:
                         pass
 
+                # Durable observation precedes the process-local RESUME dedupe
+                # and every routing/filtering decision for configured mirrors.
+                _kanban_observed, _kanban_relevant = await adapter_self._observe_kanban_message(message)
+
                 # Dedup: Discord RESUME replays events after reconnects (#4777)
                 if adapter_self._dedup.is_duplicate(str(message.id)):
                     return
@@ -1352,6 +1369,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Ignore Discord system messages (thread renames, pins, member joins, etc.)
                 # Allow both default and reply types — replies have a distinct MessageType.
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
+                    return
+
+                if _kanban_observed and not _kanban_relevant:
                     return
 
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
@@ -1389,6 +1409,10 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 _kanban_route = await self._maybe_handle_kanban_inbox(message)
                 if _kanban_route.consumed:
+                    return
+                # Configured mirrored Forums are fail closed. Only a resolved
+                # owner/profile route may enter ordinary chat dispatch.
+                if _kanban_observed and _kanban_route.reason != "conversation_routed":
                     return
                 if not self._is_kanban_ingress(_kanban_route):
                     return
@@ -1562,6 +1586,23 @@ class DiscordAdapter(BasePlatformAdapter):
                 await self._post_connect_task
             except asyncio.CancelledError:
                 pass
+
+        if self._kanban_backfill_task and not self._kanban_backfill_task.done():
+            self._kanban_backfill_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._kanban_backfill_task
+        for task in self._kanban_thread_backfills.values():
+            if not task.done():
+                task.cancel()
+        if self._kanban_thread_backfills:
+            await asyncio.gather(*self._kanban_thread_backfills.values(), return_exceptions=True)
+        self._kanban_thread_backfills.clear()
+        self._kanban_backfilled_threads.clear()
+        self._kanban_backfill_task = None
+        if self._kanban_mirror_conn is not None:
+            self._kanban_mirror_conn.close()
+        self._kanban_mirror_conn = None
+        self._kanban_ingestor = None
 
         self._running = False
         self._client = None
@@ -5953,6 +5994,122 @@ class DiscordAdapter(BasePlatformAdapter):
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
+
+    async def _kanban_runtime(self):
+        """Return the config-gated durable ingestor, initialized lazily."""
+        from gateway.kanban_discord_inbox import load_config
+
+        cfg = load_config()
+        if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
+            return cfg, None
+        if self._kanban_ingestor is None:
+            from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
+            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+
+            self._kanban_mirror_conn = connect_mirror(mirror_db_path(cfg.board_slug or "default"))
+            self._kanban_ingestor = DiscordBackfillIngestor(
+                self._kanban_mirror_conn,
+                page_size=int(self.config.extra.get("kanban_backfill_page_size", 100)),
+                max_pages=int(self.config.extra.get("kanban_backfill_max_pages", 10)),
+                max_age_seconds=int(self.config.extra.get("kanban_backfill_max_age_seconds", 7 * 86400)),
+            )
+        return cfg, self._kanban_ingestor
+
+    def _discord_inbound(self, message: Any, *, relevant: bool):
+        from gateway.kanban_mirror.backfill import DiscordInbound
+
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        reference = getattr(message, "reference", None)
+        created_at = getattr(message, "created_at", None)
+        timestamp = int(created_at.timestamp()) if created_at is not None else None
+        return DiscordInbound(
+            message_id=str(message.id), thread_id=str(channel.id),
+            content=getattr(message, "content", None),
+            author_label=(str(getattr(author, "display_name", "") or "").strip()
+                          or str(getattr(author, "name", "") or "").strip() or "unknown"),
+            created_at=timestamp,
+            replied_to_message_id=(str(getattr(reference, "message_id", "") or "") or None),
+            relevant=relevant,
+        )
+
+    async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
+        """Fakeable discord.py history seam used by durable reconnect recovery."""
+        from gateway.kanban_mirror.backfill import HistoryPage
+
+        channel = self._client.get_channel(int(thread_id)) if self._client else None
+        if channel is None and self._client and hasattr(self._client, "fetch_channel"):
+            channel = await self._client.fetch_channel(int(thread_id))
+        if channel is None:
+            raise LookupError(f"Discord mirror thread unavailable: {thread_id}")
+        kwargs = {"limit": limit, "oldest_first": True}
+        if after is not None:
+            kwargs["after"] = discord.Object(id=int(after))
+        messages = [item async for item in channel.history(**kwargs)]
+        converted = [
+            self._discord_inbound(
+                item,
+                relevant=(
+                    not bool(getattr(getattr(item, "author", None), "bot", False))
+                    and bool(getattr(item, "content", None))
+                    and getattr(item, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+                ),
+            )
+            for item in messages
+        ]
+        return HistoryPage(converted, has_more=len(messages) >= limit)
+
+    async def fetch_after(self, thread_id: str, after: str | None, limit: int):
+        return await self._fetch_kanban_history_page(thread_id, after, limit)
+
+    async def _backfill_kanban_thread(self, thread_id: str) -> None:
+        cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None or thread_id in self._kanban_backfilled_threads:
+            return
+        try:
+            await ingestor.backfill(thread_id, self)
+        except Exception:
+            logger.warning("[%s] Discord mirror backfill failed for thread_id=%s; will retry", self.name, thread_id, exc_info=True)
+            return
+        self._kanban_backfilled_threads.add(thread_id)
+
+    async def _ensure_kanban_thread_backfill(self, thread_id: str) -> None:
+        task = self._kanban_thread_backfills.get(thread_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._backfill_kanban_thread(thread_id))
+            self._kanban_thread_backfills[thread_id] = task
+        await task
+
+    async def _backfill_kanban_mirror_threads(self) -> None:
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return
+        # A reconnect must retry every registered thread from its durable cursor.
+        self._kanban_backfilled_threads.clear()
+        rows = self._kanban_mirror_conn.execute(
+            "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+        ).fetchall()
+        await asyncio.gather(*(self._ensure_kanban_thread_backfill(str(row[0])) for row in rows))
+
+    async def _observe_kanban_message(self, message: Any) -> tuple[bool, bool]:
+        cfg, ingestor = await self._kanban_runtime()
+        channel = getattr(message, "channel", None)
+        parent_id = str(getattr(channel, "parent_id", "") or "")
+        if ingestor is None or parent_id not in cfg.forum_channel_ids:
+            return False, False
+        thread_id = str(getattr(channel, "id", "") or "")
+        if not thread_id:
+            return False, False
+        # Finish older ordered history first. The ingestor's per-thread lock also
+        # serializes a reconnect fetch racing this live gateway event.
+        await self._ensure_kanban_thread_backfill(thread_id)
+        relevant = (
+            not bool(getattr(getattr(message, "author", None), "bot", False))
+            and bool(getattr(message, "content", None))
+            and getattr(message, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+        )
+        await ingestor.ingest_live(self._discord_inbound(message, relevant=relevant))
+        return True, relevant
 
     def _is_kanban_ingress(self, result: Any) -> bool:
         """Allow routed conversation dispatch only on the designated bot."""
