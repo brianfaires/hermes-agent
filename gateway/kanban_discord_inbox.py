@@ -55,6 +55,7 @@ class KanbanReplyInboxConfig:
     conversation_log_enabled: bool = False
     conversation_router_enabled: bool = False
     conversation_router_ingress_bot_id: str | None = None
+    profile_bot_user_ids: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,17 @@ class DiscordReplyContext:
     content: str
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
+    mentioned_user_ids: tuple[str, ...] = ()
+    replied_to_author_id: str | None = None
+    replied_to_author_is_bot: bool = False
+
+
+@dataclass(frozen=True)
+class ProfileRoute:
+    profile: str | None
+    basis: Literal["explicit_mention", "reply_to_profile_bot", "card_owner", "none"]
+    mentioned_profiles: tuple[str, ...] = ()
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +222,24 @@ def _as_id_set(value: Any) -> frozenset[str]:
     return frozenset(part.strip() for part in str(value).split(",") if part.strip())
 
 
+def _as_profile_bot_pairs(value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ValueError("profile_bot_user_ids must be a mapping")
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    pairs: list[tuple[str, str]] = []
+    for raw_bot_id, raw_profile in value.items():
+        bot_id = str(raw_bot_id or "").strip()
+        profile = normalize_profile_name(str(raw_profile or ""))
+        if not bot_id.isdigit():
+            raise ValueError("profile bot user IDs must be numeric")
+        validate_profile_name(profile)
+        pairs.append((bot_id, profile))
+    return tuple(sorted(pairs))
+
+
 def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxConfig:
     """Load ``discord.kanban_reply_inbox`` from config.yaml-shaped data."""
     if raw_config is None:
@@ -238,6 +268,7 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
         conversation_router_ingress_bot_id=(
             str(inbox_cfg.get("conversation_router_ingress_bot_id") or "").strip() or None
         ),
+        profile_bot_user_ids=_as_profile_bot_pairs(inbox_cfg.get("profile_bot_user_ids")),
     )
 
 
@@ -687,6 +718,50 @@ def _handle_log_command(
     )
 
 
+def resolve_profile_route(
+    ctx: DiscordReplyContext,
+    *,
+    owner: str | None,
+    config: KanbanReplyInboxConfig,
+) -> ProfileRoute:
+    """Resolve an explicit mention, replied bot, or card owner to one profile."""
+    from hermes_cli.profiles import normalize_profile_name, profile_exists
+
+    bot_profiles = dict(config.profile_bot_user_ids)
+    mentioned = tuple(
+        dict.fromkeys(
+            bot_profiles[user_id]
+            for user_id in ctx.mentioned_user_ids
+            if user_id in bot_profiles
+        )
+    )
+    if len(mentioned) > 1:
+        return ProfileRoute(
+            profile=None,
+            basis="none",
+            mentioned_profiles=mentioned,
+            error="ambiguous_profile_mentions",
+        )
+    if len(mentioned) == 1:
+        candidate, basis = mentioned[0], "explicit_mention"
+    elif (
+        ctx.replied_to_author_is_bot
+        and ctx.replied_to_author_id
+        and ctx.replied_to_author_id in bot_profiles
+    ):
+        candidate, basis = bot_profiles[ctx.replied_to_author_id], "reply_to_profile_bot"
+    else:
+        candidate = normalize_profile_name(owner) if owner else ""
+        basis = "card_owner"
+    if not candidate or not profile_exists(candidate):
+        return ProfileRoute(profile=None, basis="none", mentioned_profiles=mentioned, error="invalid_profile")
+    return ProfileRoute(
+        profile=normalize_profile_name(candidate),
+        basis=basis,
+        mentioned_profiles=mentioned,
+    )
+
+
 def handle_reply(
     ctx: DiscordReplyContext,
     *,
@@ -734,24 +809,27 @@ def handle_reply(
                 )
                 task = kb.get_task(conn, str(task_id))
                 owner = str(getattr(task, "assignee", "") or "").strip()
-                try:
-                    from hermes_cli.profiles import normalize_profile_name, profile_exists
-                    owner = normalize_profile_name(owner) if owner else ""
-                    owner_valid = bool(owner) and profile_exists(owner)
-                except Exception:
-                    owner_valid = False
+                route = resolve_profile_route(ctx, owner=owner, config=cfg)
                 ingress_bot_id = cfg.conversation_router_ingress_bot_id
-                if not owner_valid or not ingress_bot_id:
+                if route.profile is None or not ingress_bot_id:
+                    reason = route.error or "ambiguous_owner"
                     return KanbanReplyInboxResult(
-                        consumed=True, reason="ambiguous_owner", task_id=str(task_id),
+                        consumed=True, reason=reason, task_id=str(task_id),
                         action="conversation", owner_instruction_id=event.id,
                         ingress_bot_id=ingress_bot_id,
+                        ack=(
+                            "Rejected: mention exactly one configured profile bot."
+                            if reason == "ambiguous_profile_mentions" else None
+                        ),
                     )
                 return KanbanReplyInboxResult(
                     consumed=False, reason="conversation_routed", task_id=str(task_id),
                     action="conversation", owner_instruction_id=event.id,
-                    route_profile=owner,
-                    card_context=f"Kanban card {task_id} (board {resolved_board_slug}, owner profile {owner}).",
+                    route_profile=route.profile,
+                    card_context=(
+                        f"Kanban card {task_id} (board {resolved_board_slug}, "
+                        f"target profile {route.profile}, route basis {route.basis})."
+                    ),
                     ingress_bot_id=ingress_bot_id,
                 )
             if log_enabled:
@@ -794,11 +872,23 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
     reference = getattr(message, "reference", None)
     reply_to_message_id = None
     reply_to_text = None
+    replied_to_author_id = None
+    replied_to_author_is_bot = False
     if reference is not None:
         raw_mid = getattr(reference, "message_id", None)
         reply_to_message_id = str(raw_mid) if raw_mid is not None else None
-        resolved = getattr(reference, "resolved", None)
+        resolved = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
         reply_to_text = getattr(resolved, "content", None) if resolved is not None else None
+        replied_author = getattr(resolved, "author", None)
+        replied_to_author_id = str(getattr(replied_author, "id", "") or "") or None
+        replied_to_author_is_bot = bool(getattr(replied_author, "bot", False))
+    mentioned_user_ids = tuple(
+        dict.fromkeys(
+            str(getattr(mentioned, "id", "") or "")
+            for mentioned in (getattr(message, "mentions", None) or ())
+            if str(getattr(mentioned, "id", "") or "")
+        )
+    )
     author = getattr(message, "author", None)
     author_id = str(getattr(author, "id", "") or "") or None
     author_label = (
@@ -820,6 +910,9 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
         content=content,
         reply_to_message_id=reply_to_message_id,
         reply_to_text=reply_to_text,
+        mentioned_user_ids=mentioned_user_ids,
+        replied_to_author_id=replied_to_author_id,
+        replied_to_author_is_bot=replied_to_author_is_bot,
     )
 
 
@@ -828,11 +921,27 @@ async def maybe_handle_discord_message(
     *,
     config: KanbanReplyInboxConfig | None = None,
     mark_nonconversational=None,
+    current_bot_id: str | None = None,
 ) -> KanbanReplyInboxResult:
     ctx = context_from_discord_message(message)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="not_thread_message")
     cfg = config or load_config()
+    if (
+        cfg.enabled
+        and cfg.conversation_router_enabled
+        and ctx.forum_channel_id in cfg.forum_channel_ids
+        and (
+            not cfg.conversation_router_ingress_bot_id
+            or str(current_bot_id or "") != cfg.conversation_router_ingress_bot_id
+        )
+    ):
+        return KanbanReplyInboxResult(
+            consumed=True,
+            reason="not_ingress_bot",
+            action="conversation",
+            ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+        )
     try:
         result = handle_reply(ctx, config=cfg)
     except ValueError as exc:

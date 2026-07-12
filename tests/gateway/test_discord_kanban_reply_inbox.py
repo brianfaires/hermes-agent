@@ -11,11 +11,14 @@ from gateway.config import PlatformConfig
 from gateway.kanban_discord_inbox import (
     DiscordReplyContext,
     KanbanReplyInboxConfig,
+    context_from_discord_message,
     context_from_discord_reaction,
     handle_reply,
     load_config,
+    maybe_handle_discord_message,
     parse_instruction,
     reaction_intent_for_emoji,
+    resolve_profile_route,
     text_action_for_command,
     maybe_handle_discord_reaction,
     maybe_handle_discord_reaction_remove,
@@ -886,7 +889,8 @@ def test_conversation_router_records_plain_comment_and_targets_card_owner(
     assert result.task_id == tid
     assert result.route_profile == "ops"
     assert f"Kanban card {tid}" in result.card_context
-    assert "owner profile ops" in result.card_context
+    assert "target profile ops" in result.card_context
+    assert "route basis card_owner" in result.card_context
 
     conn = kb.connect(db_path)
     try:
@@ -929,7 +933,7 @@ def test_conversation_router_preserves_event_but_fails_closed_for_missing_owner_
     )
 
     assert result.consumed is True
-    assert result.reason == "ambiguous_owner"
+    assert result.reason == "invalid_profile"
     assert result.route_profile is None
     conn = kb.connect(db_path)
     try:
@@ -1037,3 +1041,192 @@ async def test_adapter_fails_closed_for_router_error_in_configured_forum(monkeyp
     assert result.consumed is True
     assert result.reason == "conversation_router_error"
     assert result.ingress_bot_id == "999"
+
+
+@pytest.mark.asyncio
+async def test_adapter_error_falls_through_when_inbox_disabled(monkeypatch):
+    import gateway.kanban_discord_inbox as inbox
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("simulated disabled handler failure")
+
+    monkeypatch.setattr(inbox, "maybe_handle_discord_message", fail)
+    monkeypatch.setattr(
+        inbox,
+        "load_config",
+        lambda: KanbanReplyInboxConfig(
+            enabled=False,
+            forum_channel_ids=frozenset({FORUM_ID}),
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
+    message = SimpleNamespace(
+        id="disabled-failed-message",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+    )
+    result = await adapter._maybe_handle_kanban_inbox(message)
+    assert result.consumed is False
+    assert result.reason == "error"
+
+
+def test_profile_bot_mapping_loads_normalized_profiles_and_rejects_malformed():
+    cfg = load_config(
+        {
+            "discord": {
+                "kanban_reply_inbox": {
+                    "profile_bot_user_ids": {"111": "Ops", "222": "Reviewer"}
+                }
+            }
+        }
+    )
+    assert cfg.profile_bot_user_ids == (("111", "ops"), ("222", "reviewer"))
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(
+            {"discord": {"kanban_reply_inbox": {"profile_bot_user_ids": ["111"]}}}
+        )
+    with pytest.raises(ValueError, match="must be numeric"):
+        load_config(
+            {"discord": {"kanban_reply_inbox": {"profile_bot_user_ids": {"bot": "ops"}}}}
+        )
+
+
+def test_discord_context_captures_mentions_and_replied_bot_identity():
+    replied = SimpleNamespace(
+        content="Reviewer answer",
+        author=SimpleNamespace(id="222", bot=True),
+    )
+    message = SimpleNamespace(
+        id="500",
+        content="@Ops take a look",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+        author=SimpleNamespace(id="42", display_name="Brian", name="Brian"),
+        mentions=[SimpleNamespace(id="111"), SimpleNamespace(id="111")],
+        reference=SimpleNamespace(message_id="400", resolved=replied),
+    )
+    context = context_from_discord_message(message)
+    assert context is not None
+    assert context.mentioned_user_ids == ("111",)
+    assert context.replied_to_author_id == "222"
+    assert context.replied_to_author_is_bot is True
+    assert context.reply_to_text == "Reviewer answer"
+
+
+def test_profile_route_precedence_and_ambiguity(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "route-home"
+    for profile in ("ops", "reviewer", "researcher"):
+        (hermes_home / "profiles" / profile).mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    config = KanbanReplyInboxConfig(
+        profile_bot_user_ids=(("111", "ops"), ("222", "reviewer"), ("333", "researcher"))
+    )
+
+    owner = resolve_profile_route(ctx(), owner="Ops", config=config)
+    assert (owner.profile, owner.basis) == ("ops", "card_owner")
+    reply = resolve_profile_route(
+        replace(
+            ctx(), replied_to_author_id="222", replied_to_author_is_bot=True,
+        ),
+        owner="ops",
+        config=config,
+    )
+    assert (reply.profile, reply.basis) == ("reviewer", "reply_to_profile_bot")
+    mentioned = resolve_profile_route(
+        replace(
+            ctx(), mentioned_user_ids=("333",),
+            replied_to_author_id="222", replied_to_author_is_bot=True,
+        ),
+        owner="ops",
+        config=config,
+    )
+    assert (mentioned.profile, mentioned.basis) == ("researcher", "explicit_mention")
+    ambiguous = resolve_profile_route(
+        replace(ctx(), mentioned_user_ids=("111", "222")),
+        owner="ops",
+        config=config,
+    )
+    assert ambiguous.profile is None
+    assert ambiguous.error == "ambiguous_profile_mentions"
+
+
+def test_explicit_profile_mention_overrides_card_owner(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    _db_path, tid = kanban_db
+    hermes_home = tmp_path / "mention-home"
+    for profile in ("ops", "reviewer"):
+        (hermes_home / "profiles" / profile).mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    result = handle_reply(
+        replace(
+            ctx(message_id="mention-route", content="Reviewer, inspect this"),
+            reply_to_message_id=None,
+            reply_to_text=None,
+            mentioned_user_ids=("222",),
+        ),
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+            profile_bot_user_ids=(("222", "reviewer"),),
+        ),
+    )
+    assert result.consumed is False
+    assert result.task_id == tid
+    assert result.route_profile == "reviewer"
+    assert "route basis explicit_mention" in result.card_context
+
+
+@pytest.mark.asyncio
+async def test_non_ingress_bot_performs_no_router_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
+    config = KanbanReplyInboxConfig(
+        enabled=True,
+        forum_channel_ids=frozenset({FORUM_ID}),
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+    )
+    message = SimpleNamespace(
+        id="non-ingress",
+        content="plain conversation",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+        author=SimpleNamespace(id="42", display_name="Brian", name="Brian"),
+        mentions=[],
+        reference=None,
+    )
+    result = await maybe_handle_discord_message(
+        message,
+        config=config,
+        current_bot_id="other",
+    )
+    assert result.consumed is True
+    assert result.reason == "not_ingress_bot"
+    path = mirror_db_path("default")
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_inbox_never_consumes_for_ingress_arbitration():
+    config = KanbanReplyInboxConfig(
+        enabled=False,
+        forum_channel_ids=frozenset({FORUM_ID}),
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+    )
+    message = SimpleNamespace(
+        id="disabled-ingress",
+        content="plain conversation",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+        author=SimpleNamespace(id="42", display_name="Brian", name="Brian"),
+        mentions=[],
+        reference=None,
+    )
+    result = await maybe_handle_discord_message(
+        message,
+        config=config,
+        current_bot_id="other",
+    )
+    assert result.consumed is False
+    assert result.reason == "disabled"

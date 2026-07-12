@@ -5970,6 +5970,7 @@ class DiscordAdapter(BasePlatformAdapter):
             result = await maybe_handle_discord_message(
                 message,
                 mark_nonconversational=self._nonconversational_messages.mark_many,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
             )
         except Exception:
             logger.warning(
@@ -5994,7 +5995,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 if value is not None
             }
             fail_closed = bool(
-                cfg.conversation_router_enabled
+                cfg.enabled
+                and cfg.conversation_router_enabled
                 and cfg.forum_channel_ids
                 and channel_ids.intersection(cfg.forum_channel_ids)
             )
