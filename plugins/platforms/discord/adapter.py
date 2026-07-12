@@ -6554,6 +6554,8 @@ class DiscordAdapter(BasePlatformAdapter):
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
         _card_context = getattr(kanban_route, "card_context", None)
         if _card_context:
+            if getattr(kanban_route, "action", None) == "conversation":
+                _card_context = _card_context + "\n[Hermes mirrored Kanban conversation route]"
             _channel_context = "\n\n".join(part for part in (_card_context, _channel_context) if part)
 
         reply_to_id = None

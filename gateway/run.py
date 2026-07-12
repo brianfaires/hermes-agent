@@ -6663,6 +6663,74 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
         return candidate
 
+    @staticmethod
+    def _is_mirrored_kanban_conversation_event(event: Any, source: Any) -> bool:
+        """Recognize the router's frozen response surface, not ordinary Discord."""
+        return bool(
+            event
+            and getattr(source, "platform", None) == Platform.DISCORD
+            and getattr(event, "outbound_profile", None)
+            and getattr(event, "correlation_id", None)
+            and "[Hermes mirrored Kanban conversation route]" in str(
+                getattr(event, "channel_context", "") or ""
+            )
+        )
+
+    async def _deliver_mirrored_kanban_response(
+        self, *, event: MessageEvent, source: SessionSource, content: str,
+    ) -> bool:
+        """Freeze, durably enqueue, confirm-send, and ledger one agent reply."""
+        from gateway.kanban_mirror.context import resolve_mirrored_kanban_thread
+        from gateway.kanban_mirror.conversation_log import record_conversation_event
+        from gateway.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue
+        from gateway.kanban_mirror.state import active_thread_binding, connect_mirror, mirror_db_path
+
+        thread_id = str(getattr(source, "thread_id", None) or source.chat_id or "").strip()
+        profile = str(getattr(event, "outbound_profile", "") or "").strip()
+        resolved = resolve_mirrored_kanban_thread(thread_id)
+        if resolved is None or resolved.initiative_kind == "ambiguous":
+            logger.error("Mirrored response cannot resolve one durable mirror DB for thread %s", thread_id)
+            return False
+        conn = connect_mirror(mirror_db_path(resolved.board_slug))
+        try:
+            binding = active_thread_binding(conn, thread_id)
+            binding_key = binding.binding_key if binding is not None else None
+            envelope = OutboundEnvelope(
+                profile=profile,
+                thread_id=thread_id,
+                reply_to_message_id=str(getattr(event, "message_id", "") or "") or None,
+                content=content,
+                attachments=(),
+                correlation_id=str(getattr(event, "correlation_id", "") or ""),
+            )
+            operation_id = enqueue(conn, envelope)
+            adapter = self._adapter_for_source(source, require_profile_adapter=True)
+
+            async def _send(target, payload):
+                return await target.send(
+                    payload["thread_id"], payload["content"],
+                    reply_to=payload.get("reply_to_message_id"),
+                    metadata={"thread_id": payload["thread_id"], "suppress_embeds": True},
+                )
+
+            def _record_confirmed(discord_message_id: str) -> None:
+                record_conversation_event(
+                    conn,
+                    discord_message_id=discord_message_id,
+                    thread_id=thread_id,
+                    binding_key=binding_key,
+                    event_class="conversation.agent",
+                    author_label=profile,
+                    content=content,
+                    replied_to_message_id=envelope.reply_to_message_id,
+                )
+
+            return await deliver(
+                conn, operation_id, adapter, send=_send, on_confirmed=_record_confirmed,
+            )
+        finally:
+            conn.close()
+
     async def _start_secondary_profile_adapters(self) -> int:
         """Bring up adapters for every non-active profile this gateway serves.
 
@@ -9783,6 +9851,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
+
+            # This text-only surface is owned exclusively by the durable outbox.
+            # Attachments/media remain represented in frozen text but are not sent
+            # as side effects until a later attachment-aware outbox slice exists.
+            if self._is_mirrored_kanban_conversation_event(event, source):
+                if response:
+                    if getattr(event, "media_urls", None) or "MEDIA:" in response:
+                        logger.warning(
+                            "Mirrored Kanban response media delivery is fail-closed; queuing frozen text only"
+                        )
+                    await self._deliver_mirrored_kanban_response(
+                        event=event, source=source, content=response,
+                    )
+                return None
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
@@ -13707,6 +13789,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        _mirrored_outbox_turn = self._is_mirrored_kanban_conversation_event(event, source)
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -14608,8 +14691,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
-            _want_stream_deltas = _streaming_enabled
-            _want_interim_messages = interim_assistant_messages_enabled
+            _want_stream_deltas = _streaming_enabled and not _mirrored_outbox_turn
+            _want_interim_messages = interim_assistant_messages_enabled and not _mirrored_outbox_turn
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
@@ -14816,7 +14899,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
-            agent.status_callback = _status_callback_sync
+            agent.status_callback = None if _mirrored_outbox_turn else _status_callback_sync
             # Credits / out-of-band notices (usage bands, depletion, restored).
             # Messaging has no persistent status bar, so each notice is a
             # standalone push: render to a single plaintext line and deliver via
@@ -14846,7 +14929,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     log_message="notice_callback delivery scheduling error",
                 )
 
-            agent.notice_callback = _notice_callback_sync
+            agent.notice_callback = None if _mirrored_outbox_turn else _notice_callback_sync
             agent.notice_clear_callback = None
             agent.event_callback = _event_callback_sync
             agent.reasoning_config = reasoning_config
@@ -15521,7 +15604,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # Start progress message sender if enabled
         progress_task = None
-        if tool_progress_enabled:
+        if tool_progress_enabled and not _mirrored_outbox_turn:
             progress_task = asyncio.create_task(send_progress_messages())
 
         # Start stream consumer task — polls for consumer creation since it
@@ -15536,7 +15619,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 await asyncio.sleep(0.05)
 
-        stream_task = asyncio.create_task(_start_stream_consumer())
+        if not _mirrored_outbox_turn:
+            stream_task = asyncio.create_task(_start_stream_consumer())
         
         # Track this agent as running for this session (for interrupt support)
         # We do this in a callback after the agent is created

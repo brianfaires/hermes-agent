@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.platforms.base import Platform
+from gateway.run import GatewayRunner
 from gateway.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue, get
 from gateway.kanban_mirror.state import connect_mirror
 
@@ -118,3 +120,45 @@ async def test_live_claim_prevents_concurrent_duplicate_send(conn):
         conn, operation_id, SimpleNamespace(is_connected=True), send=sender
     ) is False
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_executable_mirrored_response_uses_profile_outbox_and_agent_ledger(tmp_path, monkeypatch):
+    db_path = tmp_path / "live-mirror.db"
+    from gateway.kanban_mirror import context as context_mod, state as state_mod
+    monkeypatch.setattr(context_mod, "resolve_mirrored_kanban_thread", lambda _: SimpleNamespace(board_slug="fixture", initiative_kind="single"))
+    monkeypatch.setattr(state_mod, "mirror_db_path", lambda _: db_path)
+    monkeypatch.setattr(state_mod, "active_thread_binding", lambda *_: SimpleNamespace(binding_key="binding-at-creation"))
+    sent = []
+
+    class ProfileAdapter:
+        is_connected = True
+        async def send(self, chat_id, content, **kwargs):
+            sent.append((chat_id, content, kwargs))
+            return SimpleNamespace(success=True, message_id="confirmed-agent-77")
+
+    adapter = ProfileAdapter()
+    runner = SimpleNamespace(_adapter_for_source=lambda *_a, **_k: adapter)
+    source = SimpleNamespace(platform=Platform.DISCORD, thread_id="thread-9", chat_id="thread-9")
+    event = SimpleNamespace(outbound_profile="reviewer", correlation_id="discord:turn-9", message_id="human-9", channel_context="[Hermes mirrored Kanban conversation route]\ncard")
+    assert await GatewayRunner._deliver_mirrored_kanban_response(runner, event=event, source=source, content="frozen final text")
+    assert sent[0][0:2] == ("thread-9", "frozen final text")
+    db = connect_mirror(db_path)
+    try:
+        out = db.execute("SELECT * FROM mirror_discord_outbox").fetchone()
+        ledger = db.execute("SELECT * FROM mirror_conversation_events WHERE discord_message_id='confirmed-agent-77'").fetchone()
+        assert out["status"] == "delivered" and out["target_profile"] == "reviewer"
+        assert ledger["event_class"] == "conversation.agent"
+        assert ledger["binding_key"] == "binding-at-creation"
+        assert ledger["author_label"] == "reviewer"
+    finally:
+        db.close()
+
+
+def test_only_stable_mirrored_marker_selects_outbox_surface():
+    source = SimpleNamespace(platform=Platform.DISCORD)
+    routed = SimpleNamespace(outbound_profile="ops", correlation_id="discord:x", channel_context="[Hermes mirrored Kanban conversation route]")
+    ordinary = SimpleNamespace(outbound_profile=None, correlation_id=None, channel_context="normal history")
+    assert GatewayRunner._is_mirrored_kanban_conversation_event(routed, source)
+    assert not GatewayRunner._is_mirrored_kanban_conversation_event(ordinary, source)
+    assert not GatewayRunner._is_mirrored_kanban_conversation_event(routed, SimpleNamespace(platform=Platform.TELEGRAM))

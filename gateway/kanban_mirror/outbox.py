@@ -120,6 +120,7 @@ async def deliver(
     adapter: Any | None,
     *,
     send: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+    on_confirmed: Callable[[str], None] | None = None,
 ) -> bool:
     """Attempt one frozen delivery; unavailable/failed adapters remain pending."""
     row = get(conn, operation_id)
@@ -155,6 +156,8 @@ async def deliver(
         message_id = getattr(result, "message_id", None)
         if not success or not message_id:
             raise RuntimeError(getattr(result, "error", None) or "Discord send was not confirmed")
+        if on_confirmed is not None:
+            on_confirmed(str(message_id))
     except Exception as exc:
         conn.execute(
             """UPDATE mirror_discord_outbox SET status='pending',attempt_count=attempt_count+1,
