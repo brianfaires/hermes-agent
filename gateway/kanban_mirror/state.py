@@ -262,6 +262,17 @@ CREATE TABLE IF NOT EXISTS mirror_thread_quarantine (
   updated_at INTEGER NOT NULL,
   resolved_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS mirror_terminal_lifecycles (
+  lifecycle_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, binding_key TEXT NOT NULL,
+  frozen_payload TEXT NOT NULL, frozen_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared','summary_confirmed','digest_confirmed','tag_confirmed','archived','cancelled')),
+  summary_message_id TEXT, summary_confirmed_at INTEGER,
+  digest_entry_id TEXT, digest_confirmed_at INTEGER, tag_confirmed_at INTEGER,
+  latest_activity_at INTEGER NOT NULL, archive_due_at INTEGER, archived_at INTEGER,
+  last_error TEXT, prepared_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_terminal_lifecycles_current
+ON mirror_terminal_lifecycles(thread_id) WHERE state NOT IN ('archived','cancelled');
 """
 
 RECEIPTS_SCHEMA_SQL = """
