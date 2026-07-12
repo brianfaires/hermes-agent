@@ -1415,7 +1415,7 @@ def test_directive_parser_uses_reaction_intents_and_leaves_unknown_commands_as_c
     assert directive_for_text("approve") is None
 
 
-def test_router_directive_creates_targeted_owner_request_without_direct_status_mutation(
+def test_router_directive_routes_target_profile_without_parser_kanban_mutation(
     kanban_db, inbox_config, tmp_path, monkeypatch
 ):
     db_path, tid = kanban_db
@@ -1444,24 +1444,19 @@ def test_router_directive_creates_targeted_owner_request_without_direct_status_m
     result = handle_reply(directive_ctx, config=config)
     duplicate = handle_reply(directive_ctx, config=config)
 
-    assert result.consumed is True
+    assert result.consumed is False
+    assert result.reason == "conversation_routed"
     assert result.action == "directive:pause"
-    assert result.owner_instruction_id is not None
-    assert duplicate.reason == "duplicate"
+    assert result.route_profile == "reviewer"
+    assert result.route_profiles == ("reviewer",)
+    assert result.correlation_id == duplicate.correlation_id
     conn = kb.connect(db_path)
     try:
         assert kb.get_task(conn, tid).status == before_status
-        assert kb.route_pending_owner_instructions(conn) == 0
-        assert kb.get_task(conn, tid).status == before_status
-        instruction = conn.execute(
-            "SELECT * FROM task_owner_instructions WHERE id = ?",
-            (result.owner_instruction_id,),
-        ).fetchone()
-        assert instruction["assignee"] == "reviewer"
-        assert instruction["source"] == "discord_directive"
-        comments = kb.list_comments(conn, tid)
-        assert len(comments) == 1
-        assert "Instruction: pause" in comments[0].body
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_owner_instructions WHERE task_id = ?", (tid,)
+        ).fetchone()[0] == 0
+        assert kb.list_comments(conn, tid) == []
     finally:
         conn.close()
     mirror_conn = connect_mirror(mirror_db_path("default"))
@@ -1556,13 +1551,13 @@ async def test_ingress_reaction_routes_to_validated_owner_without_status_mutatio
     conn = kb.connect(db_path)
     try:
         assert kb.get_task(conn, tid).status == before_status
-        assert kb.route_pending_owner_instructions(conn) == 0
-        assert kb.get_task(conn, tid).status == before_status
-        instruction = conn.execute(
-            "SELECT assignee FROM task_owner_instructions WHERE id = ?",
-            (result.owner_instruction_id,),
-        ).fetchone()
-        assert instruction["assignee"] == "ops"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_owner_instructions WHERE task_id=?", (tid,)
+        ).fetchone()[0] == 0
+        assert kb.list_comments(conn, tid) == []
+        assert result.reason == "conversation_routed"
+        assert result.route_profile == "ops"
+        assert result.correlation_id
     finally:
         conn.close()
 

@@ -6105,7 +6105,9 @@ class DiscordAdapter(BasePlatformAdapter):
             message_id=pending.message_id, reply_to_message_id=p.get("replied_to_message_id"),
             channel_context=result.card_context, outbound_profile=result.route_profile,
             outbound_profiles=result.route_profiles, correlation_id=result.correlation_id,
-            route_marker="discord-kanban-conversation",
+            route_marker=("discord-kanban-directive" if result.action and
+                          result.action.startswith("directive:") else
+                          "discord-kanban-conversation"),
         )
         await self._dispatch_message_event(event)
         return ProcessResult("routed", correlation_id=result.correlation_id)
@@ -6316,6 +6318,27 @@ class DiscordAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
             return False
+        if result.reason == "conversation_routed" and result.route_profile:
+            from gateway.platforms.base import MessageEvent, MessageType
+            source = self.build_source(
+                str(getattr(payload, "channel_id", "")), chat_type="group",
+                user_id=user_id, user_name=getattr(member, "display_name", None),
+                thread_id=str(getattr(payload, "channel_id", "")),
+                parent_chat_id=str(getattr(channel, "parent_id", "") or ""),
+                message_id=result.correlation_id,
+            )
+            source.profile = result.route_profile
+            await self._dispatch_message_event(MessageEvent(
+                text=(f"Discord Kanban reaction directive: {result.action}. "
+                      f"Reacted message: {getattr(payload, 'message_id', '')}."),
+                message_type=MessageType.TEXT, source=source,
+                message_id=result.correlation_id, channel_context=result.card_context,
+                outbound_profile=result.route_profile,
+                outbound_profiles=result.route_profiles,
+                correlation_id=result.correlation_id,
+                route_marker="discord-kanban-directive",
+            ))
+            return True
         if result.consumed:
             logger.info(
                 "[%s] Discord reaction consumed by Kanban inbox: message_id=%s thread=%s task_id=%s action=%s reason=%s",
@@ -6832,18 +6855,23 @@ class DiscordAdapter(BasePlatformAdapter):
             channel_context=_channel_context,
             outbound_profile=(
                 getattr(kanban_route, "route_profile", None)
-                if getattr(kanban_route, "action", None) == "conversation"
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
                 else None
             ),
             outbound_profiles=(
                 getattr(kanban_route, "route_profiles", ())
-                if getattr(kanban_route, "action", None) == "conversation"
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
                 else ()
             ),
             correlation_id=getattr(kanban_route, "correlation_id", None),
             route_marker=(
-                "discord-kanban-conversation"
-                if getattr(kanban_route, "action", None) == "conversation"
+                ("discord-kanban-directive" if
+                 str(getattr(kanban_route, "action", "")).startswith("directive:") else
+                 "discord-kanban-conversation")
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
                 else None
             ),
         )

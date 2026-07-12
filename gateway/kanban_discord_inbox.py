@@ -573,6 +573,32 @@ def handle_reaction(
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
         target_assignee = task.assignee or "unassigned"
         if cfg.conversation_router_enabled:
+            directive = ParsedKanbanReaction(ctx.emoji, ctx.intent, ctx.meaning)
+            turn_ctx = DiscordReplyContext(
+                message_id=ctx.reaction_key, author_id=ctx.author_id,
+                author_label=ctx.author_label, forum_channel_id=ctx.forum_channel_id,
+                thread_id=ctx.thread_id,
+                content=f"{ctx.emoji} {ctx.intent} (reaction to Discord message {ctx.message_id})",
+                reply_to_message_id=ctx.message_id,
+            )
+            event = record_conversation_event(
+                mirror_conn, discord_message_id=ctx.reaction_key,
+                thread_id=ctx.thread_id, binding_key=None,
+                legacy_binding_key=task_id, event_class="directive.user",
+                author_label=ctx.author_label, author_id=ctx.author_id,
+                content=turn_ctx.content, replied_to_message_id=ctx.message_id,
+            )
+            route = resolve_profile_route(turn_ctx, owner=str(target_assignee), config=cfg)
+            result = _routed_turn_result(
+                ctx=turn_ctx, task_id=task_id, board_slug=resolved_board_slug,
+                event_id=event.id, route=route,
+                ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                directive=directive,
+            )
+            return KanbanReplyInboxResult(
+                **{**result.__dict__, "action": f"reaction:{ctx.intent}"}
+            )
+        if cfg.conversation_router_enabled:
             try:
                 from hermes_cli.profiles import normalize_profile_name, profile_exists
                 target_assignee = normalize_profile_name(target_assignee)
@@ -932,6 +958,37 @@ def _event_bound_task_id(
     return str(legacy_task_id) if not epoch_count else None
 
 
+def _routed_turn_result(*, ctx: DiscordReplyContext, task_id: str, board_slug: str,
+                        event_id: int, route: ProfileRoute,
+                        ingress_bot_id: str | None,
+                        directive: ParsedKanbanReaction | None = None) -> KanbanReplyInboxResult:
+    """Describe an agent turn without mutating the Kanban card."""
+    action = f"directive:{directive.intent}" if directive else "conversation"
+    if route.profile is None or not ingress_bot_id:
+        return KanbanReplyInboxResult(
+            consumed=True, reason=route.error or "ambiguous_owner", task_id=task_id,
+            action=action, owner_instruction_id=event_id, ingress_bot_id=ingress_bot_id,
+        )
+    correlation = "discord:" + hashlib.sha256(
+        f"{ctx.thread_id}\0{ctx.message_id}".encode("utf-8")
+    ).hexdigest()
+    extra = ""
+    if directive:
+        owner_only = directive.intent in {"approve", "pause", "close_request", "rerun_request", "reject"}
+        extra = (f" This is a Discord Kanban directive ({directive.intent}: {directive.meaning})."
+                 " You may accept, refuse, or ask for clarification."
+                 + (" Card mutation is owner-authorized only; advisory targets must not mutate it."
+                    if owner_only else ""))
+    return KanbanReplyInboxResult(
+        consumed=False, reason="conversation_routed", task_id=task_id, action=action,
+        owner_instruction_id=event_id, route_profile=route.profile,
+        route_profiles=route.profiles, correlation_id=correlation,
+        card_context=(f"Kanban card {task_id} (board {board_slug}, target profiles "
+                      f"{', '.join(route.profiles)}, route basis {route.basis}).{extra}"),
+        ingress_bot_id=ingress_bot_id,
+    )
+
+
 def handle_reply(
     ctx: DiscordReplyContext,
     *,
@@ -1034,27 +1091,11 @@ def handle_reply(
                 task = kb.get_task(conn, str(task_id))
                 owner = str(getattr(task, "assignee", "") or "") if task else ""
                 route = resolve_profile_route(ctx, owner=owner, config=cfg)
-                if route.profile is None or len(route.profiles) > 1:
-                    return KanbanReplyInboxResult(
-                        consumed=True,
-                        reason=(
-                            "ambiguous_profile_mentions"
-                            if len(route.profiles) > 1
-                            else route.error or "invalid_profile"
-                        ),
-                        task_id=str(task_id), action=f"directive:{directive.intent}",
-                        owner_instruction_id=event.id,
-                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
-                    )
-                return _handle_text_action(
-                    conn,
-                    mirror_conn,
-                    task_id=str(task_id),
-                    board_slug=resolved_board_slug,
-                    ctx=ctx,
-                    action=directive,
-                    target_profile=route.profile,
-                    action_prefix="directive",
+                return _routed_turn_result(
+                    ctx=ctx, task_id=str(task_id), board_slug=resolved_board_slug,
+                    event_id=event.id, route=route,
+                    ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    directive=directive,
                 )
             if cfg.conversation_router_enabled and not explicit:
                 event = record_conversation_event(
