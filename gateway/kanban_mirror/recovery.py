@@ -80,6 +80,8 @@ async def run_outbound_recovery(conn: sqlite3.Connection, *, worker_id: str,
             conn.commit(); continue
           mid=getattr(reply,'message_id',None)
           if getattr(reply,'success',False) and mid:
+            from .conversation_log import record_conversation_event
+            record_conversation_event(conn,discord_message_id=str(mid),thread_id=payload['thread_id'],binding_key=payload.get('binding_key'),event_class='conversation.agent',author_label=payload['profile'],content=payload['content'],replied_to_message_id=payload.get('reply_to_message_id'),commit=False)
             conn.execute("UPDATE mirror_discord_outbox SET status='delivered',attempt_count=attempt_count+1,last_error=NULL,discord_message_id=?,delivered_at=?,updated_at=?,lease_owner=NULL,lease_expires_at=NULL WHERE operation_id=? AND lease_owner=?",(str(mid),now,now,item['op'],worker_id)); stats['delivered']+=1
           elif getattr(reply,'success',False):
             conn.execute("UPDATE mirror_discord_outbox SET status='confirmation_needed',attempt_count=attempt_count+1,last_error='send outcome requires confirmation',confirmation_needed_at=?,updated_at=?,lease_owner=NULL,lease_expires_at=NULL WHERE operation_id=? AND lease_owner=?",(now,now,item['op'],worker_id)); stats['confirmation_needed']+=1

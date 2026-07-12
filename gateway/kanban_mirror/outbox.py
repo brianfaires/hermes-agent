@@ -58,6 +58,7 @@ class OutboundEnvelope:
     content: str
     attachments: tuple[str, ...]
     correlation_id: str
+    binding_key: str | None = None
 
     def frozen_json(self) -> str:
         return json.dumps(
@@ -68,6 +69,7 @@ class OutboundEnvelope:
                 "profile": self.profile,
                 "reply_to_message_id": self.reply_to_message_id,
                 "thread_id": self.thread_id,
+                "binding_key": self.binding_key,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -120,7 +122,7 @@ async def deliver(
     adapter: Any | None,
     *,
     send: Callable[[Any, dict[str, Any]], Awaitable[Any]],
-    on_confirmed: Callable[[str], None] | None = None,
+    on_confirmed: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> bool:
     """Attempt one frozen delivery; unavailable/failed adapters remain pending."""
     row = get(conn, operation_id)
@@ -154,15 +156,25 @@ async def deliver(
         result = await send(adapter, payload)
         success = bool(getattr(result, "success", False))
         message_id = getattr(result, "message_id", None)
-        if not success or not message_id:
-            raise RuntimeError(getattr(result, "error", None) or "Discord send was not confirmed")
+        if not success:
+            conn.execute(
+                "UPDATE mirror_discord_outbox SET status='pending',attempt_count=attempt_count+1,last_error=?,updated_at=? WHERE operation_id=? AND status='sending'",
+                (getattr(result, "error", None) or "Discord send failed", now, operation_id),
+            )
+            conn.commit()
+            return False
+        if not message_id:
+            raise RuntimeError("send outcome requires confirmation")
         if on_confirmed is not None:
-            on_confirmed(str(message_id))
+            on_confirmed(str(message_id), payload)
     except Exception as exc:
+        # Discard any partial confirmation/ledger work before durably parking
+        # the uncertain external side effect.
+        conn.rollback()
         conn.execute(
-            """UPDATE mirror_discord_outbox SET status='pending',attempt_count=attempt_count+1,
-               last_error=?,updated_at=? WHERE operation_id=? AND status='sending'""",
-            (str(exc), now, operation_id),
+            """UPDATE mirror_discord_outbox SET status='confirmation_needed',attempt_count=attempt_count+1,
+               last_error=?,confirmation_needed_at=?,updated_at=? WHERE operation_id=? AND status='sending'""",
+            (str(exc), now, now, operation_id),
         )
         conn.commit()
         return False
@@ -174,3 +186,13 @@ async def deliver(
     )
     conn.commit()
     return True
+
+
+def fail_closed(conn: sqlite3.Connection, operation_id: str, reason: str) -> None:
+    """Park an envelope that this text-only sender cannot safely send."""
+    now = int(time.time())
+    conn.execute(
+        "UPDATE mirror_discord_outbox SET status='confirmation_needed',last_error=?,confirmation_needed_at=?,updated_at=? WHERE operation_id=? AND status!='delivered'",
+        (reason, now, now, operation_id),
+    )
+    conn.commit()

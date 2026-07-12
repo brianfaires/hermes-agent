@@ -1480,6 +1480,8 @@ class MessageEvent:
     outbound_profile: Optional[str] = None
     outbound_profiles: tuple[str, ...] = ()
     correlation_id: Optional[str] = None
+    # Dedicated runtime discriminator; never inferred from prompt/context text.
+    route_marker: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.

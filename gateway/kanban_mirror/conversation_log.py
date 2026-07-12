@@ -94,6 +94,7 @@ def record_conversation_event(
     replied_to_message_id: str | None = None,
     discord_created_at: int | None = None,
     legacy_binding_key: str | None = None,
+    commit: bool = True,
 ) -> ConversationEvent:
     """Insert once and return the original immutable event on replay."""
     message_id = str(discord_message_id or "").strip()
@@ -141,7 +142,8 @@ def record_conversation_event(
             int(time.time()),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     row = conn.execute(
         "SELECT * FROM mirror_conversation_events WHERE discord_message_id = ?",
         (message_id,),

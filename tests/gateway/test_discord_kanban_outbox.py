@@ -36,6 +36,7 @@ def test_enqueue_freezes_exact_payload_and_is_idempotent(conn):
     payload = json.loads(row["payload"])
     assert payload == {
         "attachments": ["artifact.txt"],
+        "binding_key": None,
         "content": "exact response",
         "correlation_id": "discord:stable-turn",
         "profile": "reviewer",
@@ -83,7 +84,10 @@ async def test_retry_uses_frozen_payload_and_marks_success_only_when_confirmed(c
 
     adapter = SimpleNamespace(is_connected=True)
     assert await deliver(conn, operation_id, adapter, send=unconfirmed) is False
-    assert get(conn, operation_id)["status"] == "pending"
+    assert get(conn, operation_id)["status"] == "confirmation_needed"
+    # Operators may explicitly resolve uncertainty before a manual retry.
+    conn.execute("UPDATE mirror_discord_outbox SET status='pending',confirmation_needed_at=NULL WHERE operation_id=?", (operation_id,))
+    conn.commit()
 
     async def confirmed(_adapter, payload):
         seen.append(payload)
@@ -138,9 +142,9 @@ async def test_executable_mirrored_response_uses_profile_outbox_and_agent_ledger
             return SimpleNamespace(success=True, message_id="confirmed-agent-77")
 
     adapter = ProfileAdapter()
-    runner = SimpleNamespace(_adapter_for_source=lambda *_a, **_k: adapter)
+    runner = SimpleNamespace(_discord_adapter_for_profile=lambda profile: adapter if profile == "reviewer" else None)
     source = SimpleNamespace(platform=Platform.DISCORD, thread_id="thread-9", chat_id="thread-9")
-    event = SimpleNamespace(outbound_profile="reviewer", correlation_id="discord:turn-9", message_id="human-9", channel_context="[Hermes mirrored Kanban conversation route]\ncard")
+    event = SimpleNamespace(outbound_profile="reviewer", correlation_id="discord:turn-9", message_id="human-9", media_urls=[], route_marker="discord-kanban-conversation")
     assert await GatewayRunner._deliver_mirrored_kanban_response(runner, event=event, source=source, content="frozen final text")
     assert sent[0][0:2] == ("thread-9", "frozen final text")
     db = connect_mirror(db_path)
@@ -156,9 +160,9 @@ async def test_executable_mirrored_response_uses_profile_outbox_and_agent_ledger
 
 
 def test_only_stable_mirrored_marker_selects_outbox_surface():
-    source = SimpleNamespace(platform=Platform.DISCORD)
-    routed = SimpleNamespace(outbound_profile="ops", correlation_id="discord:x", channel_context="[Hermes mirrored Kanban conversation route]")
-    ordinary = SimpleNamespace(outbound_profile=None, correlation_id=None, channel_context="normal history")
+    source = SimpleNamespace(platform=Platform.DISCORD, thread_id="thread-x")
+    routed = SimpleNamespace(outbound_profile="ops", correlation_id="discord:x", route_marker="discord-kanban-conversation")
+    ordinary = SimpleNamespace(outbound_profile=None, correlation_id=None, route_marker=None)
     assert GatewayRunner._is_mirrored_kanban_conversation_event(routed, source)
     assert not GatewayRunner._is_mirrored_kanban_conversation_event(ordinary, source)
-    assert not GatewayRunner._is_mirrored_kanban_conversation_event(routed, SimpleNamespace(platform=Platform.TELEGRAM))
+    assert not GatewayRunner._is_mirrored_kanban_conversation_event(routed, SimpleNamespace(platform=Platform.TELEGRAM, thread_id="thread-x"))

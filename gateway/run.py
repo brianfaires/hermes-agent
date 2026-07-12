@@ -6663,6 +6663,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
         return candidate
 
+    def _discord_adapter_for_profile(self, profile: str) -> Optional[BasePlatformAdapter]:
+        """Resolve exactly one Discord bot identity, with no source fallback."""
+        profile = str(profile or "").strip()
+        if not profile:
+            return None
+        candidate = (
+            self.adapters.get(Platform.DISCORD)
+            if profile == self._gateway_profile_name
+            else self._profile_adapters.get(profile, {}).get(Platform.DISCORD)
+        )
+        return candidate if candidate is not None and getattr(candidate, "_running", False) else None
+
     @staticmethod
     def _is_mirrored_kanban_conversation_event(event: Any, source: Any) -> bool:
         """Recognize the router's frozen response surface, not ordinary Discord."""
@@ -6671,9 +6683,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and getattr(source, "platform", None) == Platform.DISCORD
             and getattr(event, "outbound_profile", None)
             and getattr(event, "correlation_id", None)
-            and "[Hermes mirrored Kanban conversation route]" in str(
-                getattr(event, "channel_context", "") or ""
-            )
+            and getattr(event, "route_marker", None) == "discord-kanban-conversation"
+            and str(getattr(source, "thread_id", "") or "").strip()
         )
 
     async def _deliver_mirrored_kanban_response(
@@ -6682,7 +6693,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Freeze, durably enqueue, confirm-send, and ledger one agent reply."""
         from gateway.kanban_mirror.context import resolve_mirrored_kanban_thread
         from gateway.kanban_mirror.conversation_log import record_conversation_event
-        from gateway.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue
+        from gateway.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue, fail_closed
         from gateway.kanban_mirror.state import active_thread_binding, connect_mirror, mirror_db_path
 
         thread_id = str(getattr(source, "thread_id", None) or source.chat_id or "").strip()
@@ -6702,9 +6713,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 content=content,
                 attachments=(),
                 correlation_id=str(getattr(event, "correlation_id", "") or ""),
+                binding_key=binding_key,
             )
             operation_id = enqueue(conn, envelope)
-            adapter = self._adapter_for_source(source, require_profile_adapter=True)
+            if getattr(event, "media_urls", None) or "MEDIA:" in content or len(content) > 1900:
+                fail_closed(conn, operation_id, "unsupported mirrored media or oversized response")
+                return False
+            adapter = self._discord_adapter_for_profile(profile)
 
             async def _send(target, payload):
                 return await target.send(
@@ -6713,16 +6728,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     metadata={"thread_id": payload["thread_id"], "suppress_embeds": True},
                 )
 
-            def _record_confirmed(discord_message_id: str) -> None:
+            def _record_confirmed(discord_message_id: str, payload: dict[str, Any]) -> None:
                 record_conversation_event(
                     conn,
                     discord_message_id=discord_message_id,
-                    thread_id=thread_id,
-                    binding_key=binding_key,
+                    thread_id=payload["thread_id"],
+                    binding_key=payload.get("binding_key"),
                     event_class="conversation.agent",
-                    author_label=profile,
-                    content=content,
-                    replied_to_message_id=envelope.reply_to_message_id,
+                    author_label=payload["profile"],
+                    content=payload["content"],
+                    replied_to_message_id=payload.get("reply_to_message_id"),
+                    commit=False,
                 )
 
             return await deliver(
@@ -8866,10 +8882,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 had_activity = getattr(session_entry, 'reset_had_activity', False)
                 # Suspended sessions always notify (they were explicitly stopped
                 # or crashed mid-operation) — skip the policy check.
-                should_notify = reset_reason == "suspended" or (
+                should_notify = (not self._is_mirrored_kanban_conversation_event(event, source)) and (
+                    reset_reason == "suspended" or (
                     policy.notify
                     and had_activity
                     and platform_name not in policy.notify_exclude_platforms
+                    )
                 )
                 if should_notify:
                     adapter = self._adapter_for_source(source)
@@ -13417,6 +13435,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_key: str = None,
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
+        buffer_only: bool = False,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of
         running a local AIAgent.
@@ -13514,7 +13533,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
 
-        if _streaming_enabled:
+        if _streaming_enabled and not buffer_only:
             try:
                 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self._adapter_for_source(source)
@@ -13558,8 +13577,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if _stream_consumer:
             stream_task = asyncio.create_task(_stream_consumer.run())
 
-        # Send typing indicator
-        _adapter = self._adapter_for_source(source)
+        # Typing is the sole permissible pre-final side effect and must use the
+        # same exact bot identity as the frozen route.
+        _adapter = (
+            self._discord_adapter_for_profile(str(getattr(source, "profile", "") or ""))
+            if buffer_only else self._adapter_for_source(source)
+        )
         if _adapter:
             try:
                 await _adapter.send_typing(source.chat_id, metadata=_thread_metadata)
@@ -13801,6 +13824,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event_message_id,
+                buffer_only=_mirrored_outbox_turn,
             )
 
         from run_agent import AIAgent
