@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -129,3 +130,61 @@ async def test_real_adapter_live_backfill_overlap_uses_stable_message_id(runtime
     assert conn.execute(
         "SELECT COUNT(*) FROM mirror_discord_inbound_state WHERE discord_message_id='401'"
     ).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allowed_users,allowed_roles,roles,expected,reason", [
+    ({"7"}, set(), [], True, "allowed_user"),
+    (set(), {42}, [42], True, "allowed_role"),
+    ({"8"}, {42}, [41], False, "user_and_role_not_allowed"),
+])
+async def test_mirrored_ingress_freezes_exact_user_role_authorization(
+    runtime, allowed_users, allowed_roles, roles, expected, reason,
+):
+    adapter, conn, _ingestor = runtime
+    _bind(conn, "10")
+    adapter._kanban_backfilled_threads.add("10")
+    adapter._allowed_user_ids = allowed_users
+    adapter._allowed_role_ids = allowed_roles
+    guild = SimpleNamespace(id=99, get_member=lambda _uid: None)
+    message = _message(501)
+    message.guild = guild
+    message.author.guild = guild
+    message.author.roles = [SimpleNamespace(id=value) for value in roles]
+    await adapter._observe_kanban_message(message)
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM mirror_discord_inbound_state WHERE discord_message_id='501'"
+    ).fetchone()[0])
+    assert payload["authorized"] is expected
+    assert payload["authorization_reason"] == reason
+    assert payload["authorization_policy"]["ingress_adapter"] == adapter.name
+
+
+@pytest.mark.asyncio
+async def test_restart_replay_keeps_frozen_unauthorized_disposition(runtime, monkeypatch):
+    from gateway.kanban_mirror.inbound import PendingInboundRunner
+
+    adapter, conn, _ingestor = runtime
+    _bind(conn, "10")
+    adapter._kanban_backfilled_threads.add("10")
+    adapter._allowed_user_ids = {"8"}
+    await adapter._observe_kanban_message(_message(601))
+    dispatched = False
+
+    async def forbidden_dispatch(_event):
+        nonlocal dispatched
+        dispatched = True
+
+    monkeypatch.setattr(adapter, "_dispatch_message_event", forbidden_dispatch)
+    adapter._allowed_user_ids = {"7"}  # changed after simulated restart
+    runner = PendingInboundRunner(conn, adapter._process_kanban_pending_inbound, clock=lambda: 2_000)
+    assert await runner.run_once() == 1
+    row = conn.execute(
+        "SELECT processing_status FROM mirror_discord_inbound_state WHERE discord_message_id='601'"
+    ).fetchone()
+    disposition = conn.execute(
+        "SELECT disposition FROM mirror_discord_inbound_dispositions WHERE discord_message_id='601'"
+    ).fetchone()
+    assert row[0] == "processed"
+    assert disposition[0] == "unauthorized"
+    assert dispatched is False

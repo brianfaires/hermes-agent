@@ -6849,13 +6849,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @staticmethod
     def _is_mirrored_kanban_conversation_event(event: Any, source: Any) -> bool:
-        """Recognize the router's frozen response surface, not ordinary Discord."""
+        """Recognize durable mirrored routes, not ordinary Discord traffic."""
         return bool(
             event
             and getattr(source, "platform", None) == Platform.DISCORD
             and getattr(event, "outbound_profile", None)
             and getattr(event, "correlation_id", None)
-            and getattr(event, "route_marker", None) == "discord-kanban-conversation"
+            and getattr(event, "route_marker", None) in {
+                "discord-kanban-conversation", "discord-kanban-directive",
+            }
             and str(getattr(source, "thread_id", "") or "").strip()
         )
 

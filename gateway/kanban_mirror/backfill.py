@@ -30,6 +30,11 @@ class DiscordInbound:
     mentioned_user_ids: tuple[str, ...] = ()
     replied_to_author_id: str | None = None
     replied_to_author_is_bot: bool = False
+    # Frozen by the configured ingress adapter; replay must not reinterpret
+    # authorization using whichever multiplexed adapter later claims the row.
+    authorized: bool = True
+    authorization_reason: str = "open_policy"
+    authorization_policy: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +168,9 @@ class DiscordBackfillIngestor:
                     "mentioned_user_ids": list(message.mentioned_user_ids),
                     "replied_to_author_id": message.replied_to_author_id,
                     "replied_to_author_is_bot": message.replied_to_author_is_bot,
+                    "authorized": message.authorized,
+                    "authorization_reason": message.authorization_reason,
+                    "authorization_policy": message.authorization_policy or {},
                 }, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
                 self.conn.execute("""INSERT INTO mirror_discord_inbound_state
                     (discord_message_id,thread_id,conversation_event_id,classification,processing_status,

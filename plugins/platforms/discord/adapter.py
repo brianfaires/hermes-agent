@@ -6038,6 +6038,21 @@ class DiscordAdapter(BasePlatformAdapter):
         replied_author = getattr(resolved, "author", None)
         created_at = getattr(message, "created_at", None)
         timestamp = int(created_at.timestamp()) if created_at is not None else None
+        user_id = str(getattr(author, "id", "") or "")
+        guild = getattr(message, "guild", None)
+        is_dm = isinstance(channel, discord.DMChannel) or guild is None
+        allowed_users = getattr(self, "_allowed_user_ids", set()) or set()
+        allowed_roles = getattr(self, "_allowed_role_ids", set()) or set()
+        authorized = self._is_allowed_user(user_id, author, guild=guild, is_dm=is_dm)
+        if user_id in allowed_users:
+            authorization_reason = "allowed_user"
+        elif authorized and allowed_roles:
+            authorization_reason = "allowed_role"
+        elif authorized:
+            authorization_reason = "open_policy"
+        else:
+            authorization_reason = "user_and_role_not_allowed"
+        client_user = getattr(getattr(self, "_client", None), "user", None)
         return DiscordInbound(
             message_id=str(message.id), thread_id=str(channel.id),
             content=getattr(message, "content", None),
@@ -6051,6 +6066,16 @@ class DiscordAdapter(BasePlatformAdapter):
             mentioned_user_ids=tuple(str(getattr(u, "id")) for u in (getattr(message, "mentions", None) or ()) if getattr(u, "id", None)),
             replied_to_author_id=str(getattr(replied_author, "id", "") or "") or None,
             replied_to_author_is_bot=bool(getattr(replied_author, "bot", False)),
+            authorized=authorized,
+            authorization_reason=authorization_reason,
+            authorization_policy={
+                "ingress_adapter": self.name,
+                "ingress_bot_id": str(getattr(client_user, "id", "") or ""),
+                "guild_id": str(getattr(guild, "id", "") or ""),
+                "is_dm": is_dm,
+                "allowed_user_ids": sorted(str(value) for value in allowed_users),
+                "allowed_role_ids": sorted(str(value) for value in allowed_roles),
+            },
         )
 
     async def _run_kanban_pending_inbound(self) -> None:
@@ -6079,6 +6104,11 @@ class DiscordAdapter(BasePlatformAdapter):
         from gateway.kanban_mirror.inbound import ProcessResult
         from gateway.platforms.base import MessageEvent, MessageType
         p = pending.payload
+        if p.get("authorized") is not True:
+            return ProcessResult(
+                "disposition", disposition="unauthorized",
+                detail=str(p.get("authorization_reason") or "authorization denied"),
+            )
         ctx = DiscordReplyContext(
             message_id=pending.message_id, author_id=p.get("author_id"),
             author_label=p.get("author_label") or "unknown",
@@ -6198,6 +6228,13 @@ class DiscordAdapter(BasePlatformAdapter):
         thread_id = str(getattr(channel, "id", "") or "")
         if not thread_id:
             return False, False
+        # Observation happens on every multiplexed bot, but only the designated
+        # ingress identity may persist the authoritative authorization decision.
+        ingress_bot_id = str(getattr(cfg, "conversation_router_ingress_bot_id", "") or "")
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        if ingress_bot_id and current_bot_id != ingress_bot_id:
+            return True, False
         # Finish older ordered history first. The ingestor's per-thread lock also
         # serializes a reconnect fetch racing this live gateway event.
         await self._ensure_kanban_thread_backfill(thread_id)

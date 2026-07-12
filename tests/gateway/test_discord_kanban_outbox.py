@@ -164,5 +164,10 @@ def test_only_stable_mirrored_marker_selects_outbox_surface():
     routed = SimpleNamespace(outbound_profile="ops", correlation_id="discord:x", route_marker="discord-kanban-conversation")
     ordinary = SimpleNamespace(outbound_profile=None, correlation_id=None, route_marker=None)
     assert GatewayRunner._is_mirrored_kanban_conversation_event(routed, source)
+    directive = SimpleNamespace(
+        outbound_profile="ops", correlation_id="discord:directive-x",
+        route_marker="discord-kanban-directive",
+    )
+    assert GatewayRunner._is_mirrored_kanban_conversation_event(directive, source)
     assert not GatewayRunner._is_mirrored_kanban_conversation_event(ordinary, source)
     assert not GatewayRunner._is_mirrored_kanban_conversation_event(routed, SimpleNamespace(platform=Platform.TELEGRAM, thread_id="thread-x"))
