@@ -1332,15 +1332,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # on_ready also fires after Discord reconnect/RESUME. Recovery
                 # is bounded and runs independently from unrelated channels.
-                if adapter_self._kanban_backfill_task and not adapter_self._kanban_backfill_task.done():
-                    adapter_self._kanban_backfill_task.cancel()
-                adapter_self._kanban_backfill_task = asyncio.create_task(
-                    adapter_self._backfill_kanban_mirror_threads()
-                )
                 cfg, _runtime = await adapter_self._kanban_runtime()
                 if cfg.enabled and cfg.conversation_router_enabled:
                     adapter_self._kanban_inbound_task = adapter_self._kanban_supervisor.start(
                         "pending-inbound", adapter_self._run_kanban_pending_inbound
+                    )
+                    adapter_self._kanban_backfill_task = adapter_self._kanban_supervisor.start(
+                        "reconnect-backfill", adapter_self._run_kanban_reconnect_backfill
                     )
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
@@ -6166,6 +6164,25 @@ class DiscordAdapter(BasePlatformAdapter):
             "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
         ).fetchall()
         await asyncio.gather(*(self._ensure_kanban_thread_backfill(str(row[0])) for row in rows))
+
+    async def _run_kanban_reconnect_backfill(self) -> None:
+        """Autonomously retry failed reconnect scans from durable cursors."""
+        while self._running and not self._disconnecting:
+            cfg, ingestor = await self._kanban_runtime()
+            if not (cfg.enabled and cfg.conversation_router_enabled) or ingestor is None:
+                return
+            rows = self._kanban_mirror_conn.execute(
+                "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+            ).fetchall()
+            await asyncio.gather(*(
+                self._ensure_kanban_thread_backfill(str(row[0])) for row in rows
+                if str(row[0]) not in self._kanban_backfilled_threads
+            ))
+            await asyncio.sleep(2.0)
+
+    def kanban_supervisor_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Expose content-free adapter worker health to the gateway."""
+        return self._kanban_supervisor.snapshot()
 
     async def _observe_kanban_message(self, message: Any) -> tuple[bool, bool]:
         cfg, ingestor = await self._kanban_runtime()

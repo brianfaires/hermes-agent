@@ -52,7 +52,13 @@ def test_health_snapshot_is_bounded_content_free_and_disabled_is_silent(tmp_path
       (operation_id,correlation_id,target_profile,thread_id,payload,payload_hash,status,created_at,updated_at)
       VALUES ('o','c','ops','t','secret outbound','h','pending',70,70)""")
     conn.commit()
-    adapter = type("Adapter", (), {"is_connected": False})()
+    adapter = type("Adapter", (), {
+        "is_connected": False,
+        "kanban_supervisor_snapshot": lambda self: {
+            "pending-inbound": {"state": "running", "restarts": 1, "last_error": "boom"},
+            "reconnect-backfill": {"state": "backoff", "restarts": 2, "last_error": "fetch"},
+        },
+    })()
     result = health_snapshot(conn, router_enabled=True, ingress_connected=True,
                              adapters={"ops": adapter}, supervisor=supervisor,
                              now=100, backlog_limit=0)
@@ -61,4 +67,6 @@ def test_health_snapshot_is_bounded_content_free_and_disabled_is_silent(tmp_path
     assert result["outbox"]["oldest_age_seconds"] == 30
     assert result["cursor"] == {"lag": 0, "backlog_limited": True}
     assert result["profile_adapters"] == {"ops": False}
+    assert result["adapter_supervisors"]["ops"]["pending-inbound"]["restarts"] == 1
+    assert result["adapter_supervisors"]["ops"]["reconnect-backfill"]["state"] == "backoff"
     assert "secret" not in repr(result)

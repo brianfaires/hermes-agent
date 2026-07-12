@@ -91,6 +91,11 @@ def health_snapshot(conn: sqlite3.Connection, *, router_enabled: bool,
     profiles = {row[0] for row in conn.execute(
         "SELECT DISTINCT target_profile FROM mirror_discord_outbox WHERE status!='delivered'") if row[0]}
     cursor_lag = scalar("SELECT COUNT(*) FROM mirror_discord_inbound_state WHERE processing_status='pending'")
+    adapter_workers: dict[str, Any] = {}
+    for profile, adapter in sorted(adapters.items()):
+        snapshot = getattr(adapter, "kanban_supervisor_snapshot", lambda: {})()
+        if snapshot:
+            adapter_workers[profile] = snapshot
     return {
         "router_enabled": True,
         "discord_ingress_connected": bool(ingress_connected),
@@ -106,4 +111,5 @@ def health_snapshot(conn: sqlite3.Connection, *, router_enabled: bool,
                      "quarantined": scalar("SELECT COUNT(*) FROM mirror_thread_quarantine WHERE resolved_at IS NULL")},
         "lifecycle_pending": scalar("SELECT COUNT(*) FROM mirror_terminal_lifecycles WHERE state NOT IN ('archived','cancelled')"),
         "supervisor": supervisor.snapshot(),
+        "adapter_supervisors": adapter_workers,
     }

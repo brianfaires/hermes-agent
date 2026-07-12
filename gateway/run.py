@@ -6709,7 +6709,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from gateway.kanban_discord_inbox import load_config as load_inbox_config
         cfg = load_inbox_config()
         ingress = self._discord_adapter_for_profile(self._gateway_profile_name)
-        enabled = bool(cfg.enabled and cfg.conversation_router_enabled and cfg.board_slug and ingress)
+        board_slug = cfg.board_slug or "default"
+        enabled = bool(cfg.enabled and cfg.conversation_router_enabled and ingress)
         if not enabled:
             try:
                 from gateway.status import write_runtime_status
@@ -6717,19 +6718,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
             return
-        self._kanban_router_board_slug = cfg.board_slug
+        self._kanban_router_board_slug = board_slug
 
         async def recover() -> None:
             from gateway.kanban_mirror.recovery import run_outbound_recovery
             from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
-            conn = connect_mirror(mirror_db_path(cfg.board_slug))
+            conn = connect_mirror(mirror_db_path(board_slug))
             try:
                 while self._running:
                     current = load_inbox_config()
                     ingress_connected = self._discord_adapter_for_profile(self._gateway_profile_name) is not None
                     active = bool(
                         current.enabled and current.conversation_router_enabled
-                        and current.board_slug == cfg.board_slug and ingress_connected
+                        and (current.board_slug or "default") == board_slug and ingress_connected
                     )
                     if not active:
                         await asyncio.sleep(interval)
@@ -6751,11 +6752,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             finally:
                 conn.close()
 
+        async def recover_logs() -> None:
+            from hermes_cli import kanban_db as kb
+            from gateway.kanban_mirror.conversation_log import recover_log_deliveries
+            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+            mirror_conn = connect_mirror(mirror_db_path(board_slug))
+            board_conn = kb.connect(board=board_slug)
+            worker_id = f"gateway-log-{id(self):x}"
+            try:
+                while self._running:
+                    current = load_inbox_config()
+                    active = bool(
+                        current.enabled and current.conversation_router_enabled
+                        and current.conversation_log_enabled
+                        and (current.board_slug or "default") == board_slug
+                    )
+                    if active:
+                        def write_comment(task_id, payload, marker):
+                            comment_id, _created = kb.add_comment_once(
+                                board_conn, task_id,
+                                author="discord:conversation-log-recovery",
+                                body=f"{payload}\n\n{marker}",
+                                idempotency_marker=marker,
+                            )
+                            return comment_id
+                        # Consume frozen chunks only; never replay the command.
+                        recover_log_deliveries(
+                            mirror_conn, worker_id=worker_id,
+                            write_comment=write_comment,
+                        )
+                    await asyncio.sleep(interval)
+            finally:
+                board_conn.close()
+                mirror_conn.close()
+
         async def publish_health() -> None:
             from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
             from gateway.kanban_mirror.supervision import health_snapshot
             from gateway.status import write_runtime_status
-            conn = connect_mirror(mirror_db_path(cfg.board_slug))
+            conn = connect_mirror(mirror_db_path(board_slug))
             try:
                 while self._running:
                     current = load_inbox_config()
@@ -6773,6 +6808,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 conn.close()
 
         self._kanban_mirror_supervisor.start("outbound-recovery", recover)
+        if cfg.conversation_log_enabled:
+            self._kanban_mirror_supervisor.start("log-delivery-recovery", recover_logs)
         self._kanban_mirror_supervisor.start("health-publication", publish_health)
 
     @staticmethod
