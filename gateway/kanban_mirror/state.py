@@ -424,8 +424,9 @@ def connect_mirror(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(SCHEMA_SQL)
-    conn.commit()
+    from .schema import initialize_mirror_schema
+
+    initialize_mirror_schema(conn)
     return conn
 
 
@@ -898,8 +899,10 @@ def resolve_thread_task(
 
 
 def ensure_receipts(conn: sqlite3.Connection) -> None:
-    conn.executescript(RECEIPTS_SCHEMA_SQL)
-    conn.commit()
+    """Compatibility entry point; the unified boundary owns receipt DDL."""
+    from .schema import initialize_mirror_schema
+
+    initialize_mirror_schema(conn)
 
 
 def receipt_exists(conn: sqlite3.Connection, discord_message_id: str) -> bool:

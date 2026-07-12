@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib, json, sqlite3, time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
-from .outbox import ensure_outbox_schema
 from .state import get_binding_transition
 from .transitions import run_binding_transition
 
@@ -20,10 +19,9 @@ class DeliveryHealth:
     next_due_at: int | None; lease_count: int; profile_availability: dict[str,bool]
 
 def ensure_schema(conn: sqlite3.Connection, now: int) -> None:
-    ensure_outbox_schema(conn); conn.executescript(SQL)
-    conn.execute("""INSERT OR IGNORE INTO mirror_transition_recovery
-      SELECT transition_key,frozen_hash,thread_id,'pending',0,NULL,NULL,NULL,NULL,prepared_at,prepared_at,NULL
-      FROM mirror_binding_transitions WHERE state!='starter_verified'"""); conn.commit()
+    """Compatibility boundary for recovery callers; ``now`` is retained for API stability."""
+    from .schema import initialize_mirror_schema
+    initialize_mirror_schema(conn)
 
 def _finding(conn, op, thread, error, now):
     evidence=json.dumps({'operation_id':op,'error':error},sort_keys=True,separators=(',',':'))

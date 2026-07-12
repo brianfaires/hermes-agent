@@ -37,17 +37,10 @@ _CLAIM_LEASE_SECONDS = 300
 
 
 def ensure_outbox_schema(conn: sqlite3.Connection) -> None:
-    """Create the outbox and add recovery columns to older databases."""
-    conn.executescript(OUTBOX_SCHEMA_SQL)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(mirror_discord_outbox)")}
-    for name, declaration in {
-        "next_attempt_at": "INTEGER", "lease_owner": "TEXT",
-        "lease_expires_at": "INTEGER", "confirmation_needed_at": "INTEGER",
-        "quarantined_at": "INTEGER",
-    }.items():
-        if name not in columns:
-            conn.execute(f"ALTER TABLE mirror_discord_outbox ADD COLUMN {name} {declaration}")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_mirror_discord_outbox_due ON mirror_discord_outbox(status,next_attempt_at,created_at)")
+    """Compatibility entry point; the unified boundary owns outbox DDL."""
+    from .schema import initialize_mirror_schema
+
+    initialize_mirror_schema(conn)
 
 
 @dataclass(frozen=True)
