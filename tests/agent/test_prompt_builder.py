@@ -1483,6 +1483,15 @@ class TestOpenAIModelExecutionGuidance:
         assert "verification" in text or "verify" in text
         assert "correctness" in text
 
+    def test_guidance_bounds_verification_without_abandoning_incomplete_work(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "proportional" in text
+        assert "at most one direct verification" in text
+        assert "adjacent issues" in text
+        assert "requested result is confirmed" in text
+        assert "requested task remains incomplete" in text
+        assert "keep calling tools until" not in text
+
     def test_guidance_covers_missing_context(self):
         text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
         assert "missing_context" in text or "missing context" in text
