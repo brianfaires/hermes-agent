@@ -239,6 +239,29 @@ CREATE TABLE IF NOT EXISTS mirror_binding_transitions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_transitions_pending_thread
 ON mirror_binding_transitions(thread_id) WHERE state = 'prepared';
+CREATE TABLE IF NOT EXISTS mirror_reconciliation_findings (
+  finding_key TEXT PRIMARY KEY,
+  severity TEXT NOT NULL,
+  code TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  binding_key TEXT,
+  task_id TEXT,
+  evidence TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  UNIQUE(code, thread_id, binding_key, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_reconciliation_findings_open
+ON mirror_reconciliation_findings(resolved_at, severity, thread_id);
+CREATE TABLE IF NOT EXISTS mirror_thread_quarantine (
+  thread_id TEXT PRIMARY KEY,
+  needs_repair INTEGER NOT NULL DEFAULT 1,
+  quarantined_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
 """
 
 RECEIPTS_SCHEMA_SQL = """
@@ -600,11 +623,22 @@ def _binding_from_row(row: sqlite3.Row) -> BindingEpoch:
 
 def active_thread_binding(conn: sqlite3.Connection, thread_id: str) -> BindingEpoch | None:
     """Return the sole open epoch, failing closed if state is ambiguous."""
+    if is_thread_quarantined(conn, thread_id):
+        return None
     rows = conn.execute(
         "SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open' ORDER BY sequence",
         (str(thread_id),),
     ).fetchall()
     return _binding_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def is_thread_quarantined(conn: sqlite3.Connection, thread_id: str) -> bool:
+    """Whether card-dependent routing/export must fail closed for a thread."""
+    row = conn.execute(
+        "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL",
+        (str(thread_id),),
+    ).fetchone()
+    return row is not None
 
 
 def _canonical(value: dict) -> str:
@@ -786,6 +820,14 @@ def resolve_thread_task(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_binding_epochs'"
             ).fetchone()
             if has_epochs:
+                quarantined = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_thread_quarantine'"
+                ).fetchone()
+                if quarantined and conn.execute(
+                    "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL",
+                    (thread_id,),
+                ).fetchone():
+                    return None
                 epoch_rows = conn.execute(
                     "SELECT task_id,board_slug,state FROM mirror_binding_epochs WHERE thread_id=?",
                     (thread_id,),
