@@ -6704,6 +6704,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 profiles[profile] = adapter
         return profiles
 
+    def _all_kanban_profile_adapters(self) -> dict[str, BasePlatformAdapter]:
+        """Snapshot Discord identities including stopped/disconnected adapters."""
+        profiles: dict[str, BasePlatformAdapter] = {}
+        primary = self.adapters.get(Platform.DISCORD)
+        if primary is not None:
+            profiles[self._gateway_profile_name] = primary
+        for profile, platform_adapters in getattr(self, "_profile_adapters", {}).items():
+            adapter = platform_adapters.get(Platform.DISCORD)
+            if adapter is not None:
+                profiles[profile] = adapter
+        return profiles
+
     def _validate_kanban_router_readiness(self) -> str | None:
         """Validate configured ownership against live Discord bot identities."""
         from gateway.kanban_discord_inbox import load_config, validate_router_config
@@ -6711,9 +6723,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cfg = load_config()
         # Readiness is identity-bearing and must never survive a failed
         # revalidation (for example, bots swapped during reconnect).
-        adapters = self._kanban_profile_adapters()
-        for adapter in adapters.values():
+        all_adapters = self._all_kanban_profile_adapters()
+        for profile, adapter in all_adapters.items():
             adapter._kanban_router_ingress_identity = None
+            adapter._kanban_router_profile = profile
+        adapters = self._kanban_profile_adapters()
         if not (cfg.enabled and cfg.conversation_router_enabled):
             return None
         try:
@@ -6743,6 +6757,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         ingress._kanban_router_ingress_identity = (ingress_profile, ingress_bot_id)
         self._kanban_router_ingress_profile = ingress_profile
+        ingress.start_kanban_ingress_workers()
         return ingress_profile
 
     def _start_kanban_router_runtime(self, *, interval: float = 5.0,

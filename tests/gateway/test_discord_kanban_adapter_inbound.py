@@ -204,6 +204,9 @@ async def test_only_validated_ingress_backfills_and_freezes_its_policy(tmp_path,
     def make(bot_id, allowed):
         item = discord_adapter.DiscordAdapter(PlatformConfig(enabled=True, token="fixture"))
         item._client = SimpleNamespace(user=SimpleNamespace(id=bot_id))
+        item._running = True
+        item._disconnecting = False
+        item._ready_event.set()
         item._kanban_mirror_conn = conn
         item._kanban_ingestor = ingestor
         item._allowed_user_ids = allowed
@@ -213,6 +216,7 @@ async def test_only_validated_ingress_backfills_and_freezes_its_policy(tmp_path,
     ingress = make("222", {"8"})
     non_ingress._kanban_router_ingress_identity = None
     ingress._kanban_router_ingress_identity = ("owner", "222")
+    ingress._kanban_router_profile = "owner"
     fetches = {"non_ingress": 0, "ingress": 0}
 
     async def non_ingress_fetch(*_args):
@@ -248,9 +252,27 @@ async def test_only_validated_ingress_backfills_and_freezes_its_policy(tmp_path,
     assert not dispatched
 
     ingress._client.user.id = "111"
-    with pytest.raises(RuntimeError, match="identity lost"):
-        await ingress._backfill_kanban_mirror_threads()
-    ingress._client.user = None
-    with pytest.raises(RuntimeError, match="identity lost"):
-        await ingress._kanban_runtime()
+    await ingress._backfill_kanban_mirror_threads()
+    assert ingress._kanban_router_ingress_identity is None
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_validated_ingress_worker_start_is_idempotent():
+    adapter = discord_adapter.DiscordAdapter(PlatformConfig(enabled=True, token="fixture"))
+    adapter._client = SimpleNamespace(user=SimpleNamespace(id="222"))
+    adapter._running = True
+    adapter._disconnecting = False
+    adapter._ready_event.set()
+    adapter._kanban_router_profile = "owner"
+    adapter._kanban_router_ingress_identity = ("owner", "222")
+
+    adapter.start_kanban_ingress_workers()
+    inbound = adapter._kanban_inbound_task
+    backfill = adapter._kanban_backfill_task
+    adapter.start_kanban_ingress_workers()
+
+    assert adapter._kanban_inbound_task is inbound
+    assert adapter._kanban_backfill_task is backfill
+    assert set(adapter._kanban_supervisor._tasks) == {"pending-inbound", "reconnect-backfill"}
+    await adapter._kanban_supervisor.stop()

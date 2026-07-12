@@ -43,13 +43,15 @@ def test_live_readiness_accepts_secondary_ingress_and_rejects_swapped_ids(monkey
                         lambda: SimpleNamespace(enabled=False))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
     def adapter(user):
-        return SimpleNamespace(_running=True, _client=SimpleNamespace(user=SimpleNamespace(id=user)))
+        return SimpleNamespace(_running=True, _client=SimpleNamespace(user=SimpleNamespace(id=user)),
+                               starts=0, start_kanban_ingress_workers=lambda: None)
     runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True),
                              _gateway_profile_name="default",
                              adapters={Platform.DISCORD: adapter("111")},
                              _profile_adapters={"owner": {Platform.DISCORD: adapter("222")}})
     runner._discord_adapter_for_profile = GatewayRunner._discord_adapter_for_profile.__get__(runner)
     runner._kanban_profile_adapters = GatewayRunner._kanban_profile_adapters.__get__(runner)
+    runner._all_kanban_profile_adapters = GatewayRunner._all_kanban_profile_adapters.__get__(runner)
     validate = GatewayRunner._validate_kanban_router_readiness.__get__(runner)
     assert validate() == "owner"
     assert runner._kanban_router_ingress_profile == "owner"
@@ -60,6 +62,38 @@ def test_live_readiness_accepts_secondary_ingress_and_rejects_swapped_ids(monkey
     with pytest.raises(MultiplexConfigError, match="does not match"):
         validate()
     assert runner._profile_adapters["owner"][Platform.DISCORD]._kanban_router_ingress_identity is None
+
+
+def test_validation_invokes_ingress_workers_and_clears_stopped_adapter(monkeypatch):
+    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", cfg)
+    monkeypatch.setattr("gateway.kanban_mirror.config.load_mirror_config",
+                        lambda: SimpleNamespace(enabled=False))
+    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
+
+    class Adapter:
+        def __init__(self, user, running=True):
+            self._running = running
+            self._client = SimpleNamespace(user=SimpleNamespace(id=user))
+            self._kanban_router_ingress_identity = ("stale", user)
+            self.starts = 0
+
+        def start_kanban_ingress_workers(self):
+            self.starts += 1
+
+    primary, ingress, stopped = Adapter("111"), Adapter("222"), Adapter("333", False)
+    runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True),
+                             _gateway_profile_name="default",
+                             adapters={Platform.DISCORD: primary},
+                             _profile_adapters={"owner": {Platform.DISCORD: ingress},
+                                                "stopped": {Platform.DISCORD: stopped}})
+    for method in ("_discord_adapter_for_profile", "_kanban_profile_adapters",
+                   "_all_kanban_profile_adapters", "_validate_kanban_router_readiness"):
+        setattr(runner, method, getattr(GatewayRunner, method).__get__(runner))
+    runner._validate_kanban_router_readiness()
+    runner._validate_kanban_router_readiness()
+    assert ingress.starts == 2  # each revalidation reaches the idempotent adapter API
+    assert primary._kanban_router_ingress_identity is None
+    assert stopped._kanban_router_ingress_identity is None
 
 
 def test_daemon_advanced_gates_require_binding_backfill_and_legacy_remains_off():

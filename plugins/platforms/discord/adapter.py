@@ -1330,28 +1330,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
 
-                # on_ready also fires after Discord reconnect/RESUME. Recovery
-                # is bounded and runs independently from unrelated channels.
-                try:
-                    cfg, runtime = await adapter_self._kanban_runtime()
-                except RuntimeError:
-                    # Preserve unrelated reconnect initialization, but put the
-                    # identity failure under supervision so health reports it.
-                    logger.error("[%s] Discord Kanban ingress identity validation failed", adapter_self.name,
-                                 exc_info=True)
-                    adapter_self._kanban_backfill_task = adapter_self._kanban_supervisor.start(
-                        "reconnect-backfill", adapter_self._run_kanban_reconnect_backfill
-                    )
-                    cfg = None
-                    runtime = None
-                if (cfg is not None and cfg.enabled and cfg.conversation_router_enabled
-                        and runtime is not None):
-                    adapter_self._kanban_inbound_task = adapter_self._kanban_supervisor.start(
-                        "pending-inbound", adapter_self._run_kanban_pending_inbound
-                    )
-                    adapter_self._kanban_backfill_task = adapter_self._kanban_supervisor.start(
-                        "reconnect-backfill", adapter_self._run_kanban_reconnect_backfill
-                    )
+                # Initial on_ready can precede gateway-wide identity validation;
+                # readiness validation calls this again after assigning ownership.
+                adapter_self.start_kanban_ingress_workers()
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
@@ -1580,6 +1561,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True
+        self._kanban_router_ingress_identity = None
         # Cancel the bot task before closing the client.  If connect() timed out
         # and returned False, the background client.start() task may still be
         # running; calling client.close() alone is not enough to stop it because
@@ -6031,13 +6013,19 @@ class DiscordAdapter(BasePlatformAdapter):
         if not identity:
             return cfg, None
         profile, expected_bot_id = identity
-        actual_bot_id = str(
-            getattr(getattr(getattr(self, "_client", None), "user", None), "id", "") or ""
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
         )
-        if not actual_bot_id or actual_bot_id != str(expected_bot_id):
-            raise RuntimeError(
-                f"Discord Kanban ingress identity lost for profile '{profile}'"
-            )
+        actual_bot_id = str(
+            getattr(getattr(client, "user", None), "id", "") or ""
+        )
+        if (profile != getattr(self, "_kanban_router_profile", None)
+                or not self._running or self._disconnecting or not ready
+                or not actual_bot_id or actual_bot_id != str(expected_bot_id)):
+            self._kanban_router_ingress_identity = None
+            return cfg, None
         if self._kanban_ingestor is None:
             from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
             from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
@@ -6050,6 +6038,26 @@ class DiscordAdapter(BasePlatformAdapter):
                 max_age_seconds=int(self.config.extra.get("kanban_backfill_max_age_seconds", 7 * 86400)),
             )
         return cfg, self._kanban_ingestor
+
+    def start_kanban_ingress_workers(self) -> None:
+        """Idempotently start durable workers for a validated, ready ingress."""
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
+        )
+        actual = str(getattr(getattr(client, "user", None), "id", "") or "")
+        if (not identity or identity[0] != getattr(self, "_kanban_router_profile", None)
+                or actual != str(identity[1]) or not self._running
+                or self._disconnecting or not ready):
+            return
+        self._kanban_inbound_task = self._kanban_supervisor.start(
+            "pending-inbound", self._run_kanban_pending_inbound
+        )
+        self._kanban_backfill_task = self._kanban_supervisor.start(
+            "reconnect-backfill", self._run_kanban_reconnect_backfill
+        )
 
     def _discord_inbound(self, message: Any, *, relevant: bool):
         from gateway.kanban_mirror.backfill import DiscordInbound
