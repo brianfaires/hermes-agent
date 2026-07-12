@@ -42,6 +42,7 @@ def _make_runner():
     runner.hooks.emit = AsyncMock()
     runner.hooks.loaded_hooks = []
     runner._session_db = None
+    runner._gateway_profile_home = gateway_run._hermes_home
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)
     return runner
 
