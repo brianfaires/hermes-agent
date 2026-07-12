@@ -207,6 +207,25 @@ CREATE TABLE IF NOT EXISTS mirror_notes (
   message_id TEXT,
   posted_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mirror_binding_epochs (
+  binding_key TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  board_slug TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  transition_message_id TEXT,
+  starter_revision_hash TEXT,
+  state TEXT NOT NULL DEFAULT 'open',
+  UNIQUE(thread_id, sequence),
+  CHECK ((state = 'open' AND ended_at IS NULL) OR
+         (state != 'open' AND ended_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_epochs_one_open_thread
+ON mirror_binding_epochs(thread_id) WHERE state = 'open';
+CREATE INDEX IF NOT EXISTS idx_mirror_binding_epochs_task
+ON mirror_binding_epochs(board_slug, task_id);
 """
 
 RECEIPTS_SCHEMA_SQL = """
@@ -289,6 +308,20 @@ class Initiative:
     created_at: int
     updated_at: int
     members: dict[str, MemberState] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BindingEpoch:
+    binding_key: str
+    thread_id: str
+    board_slug: str
+    task_id: str
+    sequence: int
+    started_at: int
+    ended_at: int | None
+    transition_message_id: str | None
+    starter_revision_hash: str | None
+    state: str
 
 
 def mirror_db_path(board: str) -> Path:
@@ -524,6 +557,54 @@ def note_exists(conn: sqlite3.Connection, note_key: str) -> bool:
     return row is not None
 
 
+def _binding_from_row(row: sqlite3.Row) -> BindingEpoch:
+    return BindingEpoch(
+        binding_key=str(row["binding_key"]), thread_id=str(row["thread_id"]),
+        board_slug=str(row["board_slug"]), task_id=str(row["task_id"]),
+        sequence=int(row["sequence"]), started_at=int(row["started_at"]),
+        ended_at=row["ended_at"], transition_message_id=row["transition_message_id"],
+        starter_revision_hash=row["starter_revision_hash"], state=str(row["state"]),
+    )
+
+
+def active_thread_binding(conn: sqlite3.Connection, thread_id: str) -> BindingEpoch | None:
+    """Return the sole open epoch, failing closed if state is ambiguous."""
+    rows = conn.execute(
+        "SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open' ORDER BY sequence",
+        (str(thread_id),),
+    ).fetchall()
+    return _binding_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def backfill_legacy_bindings(conn: sqlite3.Connection, board_slug: str) -> int:
+    """Idempotently turn unambiguous one-card thread mappings into epoch one."""
+    board = str(board_slug or "").strip()
+    if not board:
+        raise ValueError("board_slug is required")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        before = conn.total_changes
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO mirror_binding_epochs
+              (binding_key,thread_id,board_slug,task_id,sequence,started_at,state)
+            SELECT 'binding:' || i.thread_id || ':1', i.thread_id, ?, MIN(m.task_id),
+                   1, i.created_at, 'open'
+            FROM mirror_initiatives i JOIN mirror_members m ON m.initiative_id=i.id
+            WHERE i.kind='post' AND i.thread_id IS NOT NULL AND i.thread_id!=''
+              AND NOT EXISTS (SELECT 1 FROM mirror_binding_epochs b WHERE b.thread_id=i.thread_id)
+            GROUP BY i.id, i.thread_id, i.created_at HAVING COUNT(m.task_id)=1
+            """,
+            (board,),
+        )
+        inserted = conn.total_changes - before
+        conn.commit()
+        return inserted
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def resolve_thread_task(
     mirror_path: Path, forum_channel_id: str, thread_id: str
 ) -> tuple[str, str] | None:
@@ -546,28 +627,41 @@ def resolve_thread_task(
     conn.row_factory = sqlite3.Row
     try:
         try:
-            row = conn.execute(
-                "SELECT id FROM mirror_initiatives WHERE thread_id = ?", (thread_id,)
+            has_epochs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_binding_epochs'"
             ).fetchone()
+            if has_epochs:
+                epoch_rows = conn.execute(
+                    "SELECT task_id,board_slug,state FROM mirror_binding_epochs WHERE thread_id=?",
+                    (thread_id,),
+                ).fetchall()
+                if epoch_rows:
+                    open_rows = [row for row in epoch_rows if row["state"] == "open"]
+                    if len(open_rows) != 1:
+                        return None
+                    return (open_rows[0]["task_id"], open_rows[0]["board_slug"])
+            initiatives = conn.execute(
+                "SELECT id FROM mirror_initiatives WHERE thread_id = ?", (thread_id,)
+            ).fetchall()
         except sqlite3.OperationalError:
             # Empty/uninitialized mirror.db (no such table) — treat as no match.
             return None
-        if row is None:
+        if len(initiatives) != 1:
             return None
-        initiative_id = row["id"]
-        member = conn.execute(
+        initiative_id = initiatives[0]["id"]
+        members = conn.execute(
             """
             SELECT task_id FROM mirror_members
             WHERE initiative_id = ?
             ORDER BY rowid ASC
-            LIMIT 1
+            LIMIT 2
             """,
             (initiative_id,),
-        ).fetchone()
-        if member is None:
+        ).fetchall()
+        if len(members) != 1:
             return None
         board_slug = mirror_path.parent.name
-        return (member["task_id"], board_slug)
+        return (members[0]["task_id"], board_slug)
     finally:
         conn.close()
 

@@ -95,6 +95,13 @@ def record_conversation_event(
         raise ValueError("content is required")
     if event_class not in EXPORTABLE_EVENT_CLASSES and not event_class.startswith(("mirror.", "system.")):
         raise ValueError(f"unsupported conversation event class: {event_class}")
+    # Capture the epoch active at creation. Zero/ambiguous bindings remain NULL:
+    # the event is preserved while current-card operations fail closed.
+    if binding_key is None:
+        from gateway.kanban_mirror.state import active_thread_binding
+
+        binding = active_thread_binding(conn, thread_id)
+        binding_key = binding.binding_key if binding is not None else None
     conn.execute(
         """
         INSERT OR IGNORE INTO mirror_conversation_events (
