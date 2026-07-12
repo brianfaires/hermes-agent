@@ -1244,15 +1244,37 @@ class TestToolUseEnforcementConfig:
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
 
     def test_auto_injects_execution_guidance_for_grok(self):
-        """Grok also gets OPENAI_MODEL_EXECUTION_GUIDANCE (verification,
-        mandatory_tool_use, act_dont_ask). Same failure modes as GPT in
-        practice — claims completion without tool calls, suggests workarounds
-        instead of using existing tools.
-        """
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        """Grok retains the legacy persistence policy."""
+        from agent.prompt_builder import (
+            BOUNDED_MODEL_EXECUTION_GUIDANCE,
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+        )
         agent = self._make_agent(model="x-ai/grok-4.3", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert OPENAI_MODEL_EXECUTION_GUIDANCE in prompt
+        assert BOUNDED_MODEL_EXECUTION_GUIDANCE not in prompt
+
+    @pytest.mark.parametrize("model", ["gpt-5.6-sol", "openai/gpt-5.6-terra-pro"])
+    def test_auto_injects_bounded_guidance_for_targeted_models(self, model):
+        from agent.prompt_builder import (
+            BOUNDED_MODEL_EXECUTION_GUIDANCE,
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+        )
+        agent = self._make_agent(model=model, tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert BOUNDED_MODEL_EXECUTION_GUIDANCE in prompt
+        assert OPENAI_MODEL_EXECUTION_GUIDANCE not in prompt
+
+    @pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5", "openai/codex-mini"])
+    def test_older_openai_models_retain_legacy_guidance(self, model):
+        from agent.prompt_builder import (
+            BOUNDED_MODEL_EXECUTION_GUIDANCE,
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+        )
+        agent = self._make_agent(model=model, tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert OPENAI_MODEL_EXECUTION_GUIDANCE in prompt
+        assert BOUNDED_MODEL_EXECUTION_GUIDANCE not in prompt
 
     def test_auto_injects_execution_guidance_for_xai_oauth_model(self):
         """xai-oauth bare model names (no slash) also match the grok pattern."""
