@@ -305,6 +305,12 @@ CREATE TABLE IF NOT EXISTS mirror_conversation_events (
   content TEXT NOT NULL,
   replied_to_message_id TEXT,
   discord_created_at INTEGER,
+  author_id TEXT,
+  discord_message_link TEXT,
+  reply_context TEXT,
+  binding_task_id TEXT,
+  binding_interval TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
   recorded_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_conversation_events_thread_binding
@@ -357,6 +363,22 @@ CREATE TABLE IF NOT EXISTS mirror_conversation_deliveries (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   delivered_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS mirror_conversation_delivery_chunks (
+  operation_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  chunk_count INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  lease_owner TEXT,
+  lease_expires_at INTEGER,
+  last_error TEXT,
+  kanban_comment_id INTEGER,
+  delivered_at INTEGER,
+  PRIMARY KEY (operation_id, chunk_index)
 );
 CREATE TABLE IF NOT EXISTS mirror_conversation_delivery_items (
   operation_id TEXT NOT NULL,

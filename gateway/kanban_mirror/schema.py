@@ -26,7 +26,12 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "brief_stale": "INTEGER NOT NULL DEFAULT 1", "brief_updated_at": "INTEGER",
         "archived_at": "INTEGER", "updated_at": "INTEGER NOT NULL DEFAULT 0",
     },
-    "mirror_conversation_events": {"binding_key": "TEXT", "replied_to_message_id": "TEXT", "discord_created_at": "INTEGER"},
+    "mirror_conversation_events": {
+        "binding_key": "TEXT", "replied_to_message_id": "TEXT", "discord_created_at": "INTEGER",
+        "author_id": "TEXT", "discord_message_link": "TEXT", "reply_context": "TEXT",
+        "binding_task_id": "TEXT", "binding_interval": "TEXT",
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
     "mirror_discord_thread_cursors": {"backlog_limited": "INTEGER NOT NULL DEFAULT 0"},
     "mirror_discord_inbound_state": {
         "payload": "TEXT", "attempt_count": "INTEGER NOT NULL DEFAULT 0",
@@ -133,7 +138,7 @@ def validate_mirror_schema(conn: sqlite3.Connection) -> int:
         "mirror_initiatives", "mirror_members", "mirror_notes", "mirror_inbox_receipts",
         "mirror_reaction_states", "mirror_conversation_events", "mirror_discord_thread_cursors",
         "mirror_discord_inbound_state", "mirror_conversation_deliveries",
-        "mirror_conversation_delivery_items", "mirror_binding_epochs",
+        "mirror_conversation_delivery_items", "mirror_conversation_delivery_chunks", "mirror_binding_epochs",
         "mirror_binding_transitions", "mirror_discord_outbox", "mirror_transition_recovery",
         "mirror_reconciliation_findings", "mirror_thread_quarantine", "mirror_terminal_lifecycles",
     }

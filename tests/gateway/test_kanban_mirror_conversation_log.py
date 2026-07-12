@@ -12,6 +12,8 @@ from gateway.kanban_mirror.conversation_log import (
     render_log_comment,
     resolve_log_targets,
     select_log_events,
+    recover_log_deliveries,
+    split_log_comment,
 )
 from gateway.kanban_mirror.state import connect_mirror
 
@@ -415,4 +417,77 @@ def test_schema_addition_does_not_change_existing_mirror_tables(mirror_conn):
         "mirror_conversation_events",
         "mirror_conversation_deliveries",
         "mirror_conversation_delivery_items",
+        "mirror_conversation_delivery_chunks",
     } <= tables
+
+
+def test_rich_event_and_recoverable_frozen_chunk(mirror_conn):
+    event = record_conversation_event(
+        mirror_conn, discord_message_id="rich", thread_id="thread-1",
+        binding_key="task-current", event_class="directive.agent_disposition",
+        author_label="reviewer", author_id="42", content="accepted",
+        replied_to_message_id="source", reply_context="please review",
+        discord_created_at=123, discord_message_link="https://discord.test/rich",
+        binding_task_id="card-7", binding_interval="100..open",
+        attachments=({"filename": "proof.txt", "url": "https://cdn/proof"},),
+        artifacts=({"name": "report", "sha256": "abc"},),
+    )
+    rendered = render_log_comment([event])
+    assert "reviewer (Discord user 42):" in rendered
+    assert "timestamp: 123" in rendered and "reply to source — please review" in rendered
+    assert "card card-7; interval 100..open" in rendered
+    assert "proof.txt" in rendered and "sha256=abc" in rendered
+    assert split_log_comment(rendered, limit=128) == split_log_comment(rendered, limit=128)
+
+    frozen = freeze_log_delivery(
+        mirror_conn, operation_id="chunk-op", trigger_discord_message_id="cmd",
+        thread_id="thread-1", task_id="card-7", command=log_command("!log"),
+        binding_key="task-current",
+    )
+    assert frozen is not None
+    uncertain = recover_log_deliveries(
+        mirror_conn, worker_id="w1", now=100, write_comment=lambda *_args: None
+    )
+    assert uncertain == {"claimed": 1, "delivered": 0, "failed": 1}
+    row = mirror_conn.execute(
+        "SELECT status,next_attempt_at FROM mirror_conversation_delivery_chunks WHERE operation_id='chunk-op'"
+    ).fetchone()
+    assert row["status"] == "failed" and row["next_attempt_at"] > 100
+    recovered = recover_log_deliveries(
+        mirror_conn, worker_id="w2", now=row["next_attempt_at"],
+        write_comment=lambda *_args: 77,
+    )
+    assert recovered == {"claimed": 1, "delivered": 1, "failed": 0}
+    assert mirror_conn.execute(
+        "SELECT status FROM mirror_conversation_deliveries WHERE operation_id='chunk-op'"
+    ).fetchone()[0] == "delivered"
+
+
+def test_chunking_is_utf8_bounded_and_rehydrates_pre_chunk_delivery(mirror_conn):
+    add_event(mirror_conn, "large", content=("é" * 10_000) + "\n\nend")
+    command = log_command("!log")
+    frozen = freeze_log_delivery(
+        mirror_conn, operation_id="old-op", trigger_discord_message_id="cmd",
+        thread_id="thread-1", task_id="task-current", command=command,
+        binding_key="task-current",
+    )
+    assert frozen is not None
+    chunks = split_log_comment(frozen.payload, limit=128)
+    assert chunks and all(len(chunk.encode("utf-8")) <= 128 for chunk in chunks)
+
+    # Simulate an additive-upgrade database whose delivery predates chunks.
+    mirror_conn.execute(
+        "DELETE FROM mirror_conversation_delivery_chunks WHERE operation_id='old-op'"
+    )
+    mirror_conn.commit()
+    replay = freeze_log_delivery(
+        mirror_conn, operation_id="old-op", trigger_discord_message_id="cmd",
+        thread_id="thread-1", task_id="task-current", command=command,
+        binding_key="task-current",
+    )
+    assert replay == frozen
+    stored = mirror_conn.execute(
+        "SELECT payload FROM mirror_conversation_delivery_chunks "
+        "WHERE operation_id='old-op' ORDER BY chunk_index"
+    ).fetchall()
+    assert "".join(row[0] for row in stored) == frozen.payload

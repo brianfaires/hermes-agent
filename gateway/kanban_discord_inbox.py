@@ -11,6 +11,7 @@ import hashlib
 import logging
 import re
 import sqlite3
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -79,6 +80,9 @@ class DiscordReplyContext:
     mentioned_user_ids: tuple[str, ...] = ()
     replied_to_author_id: str | None = None
     replied_to_author_is_bot: bool = False
+    discord_created_at: int | None = None
+    message_link: str | None = None
+    attachments: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -706,6 +710,16 @@ def _handle_text_action(
         replied_to_kanban_comment_id=_find_replied_to_comment_id(ctx.reply_to_message_id, mirror_conn=mirror_conn),
         kanban_comment_id=comment_id,
     )
+    if action_prefix == "directive":
+        record_conversation_event(
+            mirror_conn, discord_message_id=f"{ctx.message_id}:disposition",
+            thread_id=ctx.thread_id, binding_key=None, legacy_binding_key=task_id,
+            event_class="directive.agent_disposition",
+            author_label=target_profile or "agent",
+            content=f"{action.intent}: owner instruction #{instruction.id} ({instruction.status})",
+            replied_to_message_id=ctx.message_id,
+            reply_context=(ctx.content or "").strip(),
+        )
     return KanbanReplyInboxResult(
         consumed=True,
         reason="handled",
@@ -765,17 +779,45 @@ def _handle_log_command(
         if delivery.status == "delivered":
             comment_id = delivery.kanban_comment_id
             continue
-        marker = f"[discord-log-operation:{operation_id}]"
+        chunks = mirror_conn.execute(
+            """SELECT * FROM mirror_conversation_delivery_chunks
+               WHERE operation_id=? ORDER BY chunk_index""", (operation_id,),
+        ).fetchall()
         try:
-            comment_id, _created = kb.add_comment_once(
-                conn, target.task_id, author=_reply_author(ctx),
-                body=f"{delivery.payload}\n\n{marker}", idempotency_marker=marker,
-            )
+            for chunk in chunks:
+                if chunk["status"] == "delivered":
+                    comment_id = int(chunk["kanban_comment_id"])
+                    continue
+                marker = (
+                    f"[discord-log-operation:{operation_id}:"
+                    f"{chunk['chunk_index'] + 1}/{chunk['chunk_count']}]"
+                )
+                comment_id, _created = kb.add_comment_once(
+                    conn, target.task_id, author=_reply_author(ctx),
+                    body=f"{chunk['payload']}\n\n{marker}", idempotency_marker=marker,
+                )
+                mirror_conn.execute(
+                    """UPDATE mirror_conversation_delivery_chunks
+                       SET status='delivered',attempt_count=attempt_count+1,
+                           kanban_comment_id=?,delivered_at=?,last_error=NULL
+                       WHERE operation_id=? AND chunk_index=?""",
+                    (comment_id, int(time.time()), operation_id, chunk["chunk_index"]),
+                )
+                mirror_conn.commit()
         except Exception as exc:
+            mirror_conn.execute(
+                """UPDATE mirror_conversation_delivery_chunks
+                   SET status='failed',attempt_count=attempt_count+1,last_error=?,next_attempt_at=?
+                   WHERE operation_id=? AND status!='delivered'""",
+                (str(exc), int(time.time()) + 2, operation_id),
+            )
+            mirror_conn.commit()
             mark_log_delivery(
                 mirror_conn, operation_id=operation_id, status="failed", error=str(exc)
             )
             raise
+        # Parent delivery (and therefore its source events) becomes delivered
+        # only after every frozen chunk has a confirmed comment id.
         mark_log_delivery(
             mirror_conn, operation_id=operation_id, status="delivered",
             kanban_comment_id=comment_id,
@@ -893,6 +935,9 @@ def handle_reply(
                         event_class=("directive.user" if directive else "conversation.human"),
                         author_label=ctx.author_label, content=ctx.content,
                         replied_to_message_id=ctx.reply_to_message_id,
+                        author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                        discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                        attachments=ctx.attachments,
                     )
                     return KanbanReplyInboxResult(
                         consumed=True, reason="binding_unavailable",
@@ -926,6 +971,9 @@ def handle_reply(
                     legacy_binding_key=str(task_id),
                     event_class="directive.user", author_label=ctx.author_label,
                     content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                    author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                    discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                    attachments=ctx.attachments,
                 )
                 event_task_id = _event_bound_task_id(
                     mirror_conn, thread_id=ctx.thread_id,
@@ -970,6 +1018,9 @@ def handle_reply(
                     legacy_binding_key=str(task_id),
                     event_class="conversation.human", author_label=ctx.author_label,
                     content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                    author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                    discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                    attachments=ctx.attachments,
                 )
                 event_task_id = _event_bound_task_id(
                     mirror_conn, thread_id=ctx.thread_id,
@@ -1080,6 +1131,18 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
     content = str(getattr(message, "content", "") or "")
     if not message_id:
         return None
+    created = getattr(message, "created_at", None)
+    created_at = int(created.timestamp()) if created is not None else None
+    attachments = tuple(
+        {
+            "id": str(getattr(item, "id", "") or ""),
+            "filename": str(getattr(item, "filename", "") or ""),
+            "url": str(getattr(item, "url", "") or ""),
+            "content_type": getattr(item, "content_type", None),
+            "size": getattr(item, "size", None),
+        }
+        for item in (getattr(message, "attachments", None) or ())
+    )
     return DiscordReplyContext(
         message_id=message_id,
         author_id=author_id,
@@ -1092,6 +1155,9 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
         mentioned_user_ids=mentioned_user_ids,
         replied_to_author_id=replied_to_author_id,
         replied_to_author_is_bot=replied_to_author_is_bot,
+        discord_created_at=created_at,
+        message_link=str(getattr(message, "jump_url", "") or "") or None,
+        attachments=attachments,
     )
 
 
