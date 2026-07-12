@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -42,7 +44,9 @@ from gateway.kanban_mirror.state import (
     BoardSnapshot,
     Initiative,
     MemberState,
+    active_thread_binding,
     add_member,
+    backfill_legacy_bindings,
     clear_archived,
     connect_mirror,
     create_initiative,
@@ -54,15 +58,90 @@ from gateway.kanban_mirror.state import (
     mark_brief_stale,
     mirror_db_path,
     record_note,
+    resumable_binding_transitions,
     set_archived,
     set_member_seen,
     set_prose,
     set_thread,
 )
 from gateway.kanban_mirror import writer
+from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
 from gateway.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_hash(payload: dict) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+class DiscordTransitionPublisher:
+    """Concrete publisher using Discord's durable nonce de-duplication."""
+
+    def __init__(self, client: DiscordClient, cfg: MirrorConfig, conn: sqlite3.Connection | None = None):
+        self.client, self.cfg, self.conn = client, cfg, conn
+
+    def _starter_message_id(self, thread_id: str) -> str:
+        if self.conn is None:
+            return thread_id
+        rows = self.conn.execute(
+            "SELECT starter_message_id FROM mirror_initiatives WHERE thread_id=?", (thread_id,)
+        ).fetchall()
+        if len(rows) != 1 or not str(rows[0][0] or "").strip():
+            raise ValueError("thread does not have one starter message mapping")
+        return str(rows[0][0])
+
+    def publish_transition(self, thread_id: str, payload: dict, *, operation_key: str) -> TransitionReceipt:
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("transition payload requires non-empty content")
+        nonce = hashlib.sha256(operation_key.encode()).hexdigest()[:25]
+        response = self.client.send_message(thread_id, content=content, nonce=nonce)
+        return TransitionReceipt(str(response.get("id") or ""), thread_id, operation_key, _canonical_hash(payload))
+
+    def update_starter(self, thread_id: str, payload: dict) -> None:
+        title, body, tags = payload.get("title"), payload.get("body"), payload.get("tags")
+        if not isinstance(title, str) or not isinstance(body, str) or not isinstance(tags, list):
+            raise ValueError("starter payload requires title, body, and tags")
+        forum = self.client.get_channel(self.cfg.forum_channel_id)
+        lookup, _ = ensure_forum_tags(self.client, forum, [str(tag) for tag in tags])
+        tag_ids = [lookup[str(tag).strip().lower()] for tag in tags if str(tag).strip().lower() in lookup]
+        starter_id = self._starter_message_id(thread_id)
+        self.client.update_message(thread_id, starter_id, content=body)
+        self.client.update_thread(thread_id, name=title, tag_ids=tag_ids)
+
+    def read_starter(self, thread_id: str) -> dict:
+        thread = self.client.get_channel(thread_id)
+        message = self.client.get_message(thread_id, self._starter_message_id(thread_id))
+        forum = self.client.get_channel(self.cfg.forum_channel_id)
+        names = {str(tag.get("id")): str(tag.get("name")) for tag in forum.get("available_tags", [])}
+        return {"title": str(thread.get("name") or ""), "body": str(message.get("content") or ""),
+                "tags": [names[tag] for tag in thread.get("applied_tags", []) if tag in names]}
+
+
+def _starter_identity_authorized(conn: sqlite3.Connection, thread_id: str, represented_task_id: str | None) -> bool:
+    """Fail closed unless a planner edit still represents the confirmed epoch."""
+    binding = active_thread_binding(conn, thread_id)
+    return binding is not None and represented_task_id == binding.task_id
+
+
+async def _recover_binding_transitions(cfg: MirrorConfig, client: DiscordClient | None,
+                                       conn: sqlite3.Connection, log: list[str]) -> None:
+    if not cfg.binding_transitions_enabled:
+        return
+    await asyncio.to_thread(backfill_legacy_bindings, conn, cfg.board)
+    if client is None:
+        return
+    publisher = DiscordTransitionPublisher(client, cfg, conn)
+    for transition in await asyncio.to_thread(resumable_binding_transitions, conn):
+        await asyncio.to_thread(
+            run_binding_transition, conn, publisher, transition_key=transition.transition_key,
+            thread_id=transition.thread_id, old_card_metadata=transition.old_card_metadata,
+            new_card_metadata=transition.new_card_metadata, transition_payload=transition.transition_payload,
+            starter_payload=transition.starter_payload,
+        )
+        log.append(f"binding_transition: resumed {transition.transition_key}")
 
 # Prose-pass rate limiting + per-initiative backoff on write_prose failures.
 _LAST_PROSE_PASS: float = 0.0
@@ -474,6 +553,15 @@ async def _do_edit_post(cfg: MirrorConfig, client: DiscordClient | None, conn: s
     log.append(f"edit_post: {initiative_id} {title!r} tags={tags}")
     if dry_run or client is None or initiative is None or not initiative.thread_id:
         return
+    if cfg.binding_transitions_enabled:
+        represented = pointed_card_id(initiative, snapshot)
+        authorized = await asyncio.to_thread(
+            _starter_identity_authorized, conn, initiative.thread_id, represented
+        )
+        if not authorized:
+            log.append(f"edit_post: BLOCKED identity replacement for {initiative_id}")
+            logger.error("kanban mirror: blocked direct starter identity replacement for %s", initiative_id)
+            return
     try:
         await _publish_edit(client, cfg, initiative, title, body, tags)
     except Exception as exc:
@@ -895,6 +983,14 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
         log.append(f"edit_post(prose): {initiative.id} {title!r}")
         if client is None:
             continue
+        if cfg.binding_transitions_enabled:
+            represented = pointed_card_id(refreshed, snapshot)
+            authorized = await asyncio.to_thread(
+                _starter_identity_authorized, conn, refreshed.thread_id, represented
+            )
+            if not authorized:
+                log.append(f"edit_post(prose): BLOCKED identity replacement for {initiative.id}")
+                continue
         try:
             await _publish_edit(client, cfg, refreshed, title, body, tags)
         except Exception as exc:
@@ -976,6 +1072,12 @@ def _append_closed_thread_policy_counts(log: list[str]) -> None:
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
                dry_run: bool = False, allow_llm: bool = True) -> list[str]:
     log: list[str] = []
+    if not dry_run:
+        try:
+            await _recover_binding_transitions(cfg, client, mirror_conn, log)
+        except Exception:
+            logger.exception("kanban mirror: binding transition recovery failed closed")
+            log.append("binding_transition: recovery failed")
     try:
         snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
     except sqlite3.OperationalError as exc:

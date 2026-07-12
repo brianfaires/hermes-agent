@@ -1,7 +1,6 @@
 """Recoverable controller orchestration for Discord binding transitions.
 
-This module is deliberately not wired into the production daemon yet.  It
-coordinates the durable state machine with a small, fakeable publishing port;
+It coordinates the durable state machine with a small, fakeable publishing port;
 the port must implement idempotent transition publishing by operation key.
 """
 from __future__ import annotations
@@ -116,3 +115,16 @@ def run_binding_transition(
         )
 
     return transition
+
+
+def request_binding_transition(
+    conn: sqlite3.Connection, publisher: TransitionPublisher, *, transition_key: str,
+    thread_id: str, old_card_metadata: dict, successor_card_metadata: dict,
+    transition_payload: dict, frozen_starter_payload: dict,
+) -> BindingTransition:
+    """Explicit API: the caller must choose and fully describe the successor."""
+    return run_binding_transition(
+        conn, publisher, transition_key=transition_key, thread_id=thread_id,
+        old_card_metadata=old_card_metadata, new_card_metadata=successor_card_metadata,
+        transition_payload=transition_payload, starter_payload=frozen_starter_payload,
+    )

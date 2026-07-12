@@ -713,6 +713,14 @@ def pending_binding_transition(conn: sqlite3.Connection, thread_id: str) -> Bind
     return _transition_from_row(rows[0]) if len(rows) == 1 else None
 
 
+def resumable_binding_transitions(conn: sqlite3.Connection) -> list[BindingTransition]:
+    """Return transitions whose Discord/starter side effects still need recovery."""
+    rows = conn.execute(
+        "SELECT * FROM mirror_binding_transitions WHERE state!='starter_verified' ORDER BY prepared_at,transition_key"
+    ).fetchall()
+    return [_transition_from_row(row) for row in rows]
+
+
 def prepare_binding_transition(conn: sqlite3.Connection, *, transition_key: str, thread_id: str,
                                old_card_metadata: dict, new_card_metadata: dict,
                                transition_payload: dict, starter_payload: dict) -> BindingTransition:
