@@ -21,6 +21,7 @@ from gateway.kanban_mirror.conversation_log import (
     freeze_log_delivery,
     mark_log_delivery,
     parse_log_command,
+    record_conversation_event,
 )
 from gateway.kanban_mirror.state import (
     connect_mirror,
@@ -52,6 +53,8 @@ class KanbanReplyInboxConfig:
     allow_thread_level_messages: bool = False
     # Independent of legacy reply ingestion and deliberately off by default.
     conversation_log_enabled: bool = False
+    conversation_router_enabled: bool = False
+    conversation_router_ingress_bot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,9 @@ class KanbanReplyInboxResult:
     owner_instruction_id: int | None = None
     owner_instruction_status: str | None = None
     ack: str | None = None
+    route_profile: str | None = None
+    card_context: str | None = None
+    ingress_bot_id: str | None = None
 
 
 _REACTION_INTENTS: dict[str, ParsedKanbanReaction] = {
@@ -228,6 +234,10 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
         board_slug=(str(inbox_cfg.get("board_slug")).strip() or None) if inbox_cfg.get("board_slug") is not None else None,
         allow_thread_level_messages=_as_bool(inbox_cfg.get("allow_thread_level_messages"), False),
         conversation_log_enabled=_as_bool(inbox_cfg.get("conversation_log_enabled"), False),
+        conversation_router_enabled=_as_bool(inbox_cfg.get("conversation_router_enabled"), False),
+        conversation_router_ingress_bot_id=(
+            str(inbox_cfg.get("conversation_router_ingress_bot_id") or "").strip() or None
+        ),
     )
 
 
@@ -689,7 +699,12 @@ def handle_reply(
         return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
     log_command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
     log_enabled = cfg.conversation_log_enabled and log_command is not None
-    if not ctx.reply_to_message_id and not cfg.allow_thread_level_messages and not log_enabled:
+    if (
+        not ctx.reply_to_message_id
+        and not cfg.allow_thread_level_messages
+        and not log_enabled
+        and not cfg.conversation_router_enabled
+    ):
         return KanbanReplyInboxResult(consumed=False, reason="not_a_reply")
 
     board_slug = cfg.board_slug or "default"
@@ -706,6 +721,39 @@ def handle_reply(
     try:
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
+            text_action = text_action_for_command(ctx.content)
+            words = (ctx.content or "").strip().split(None, 1)
+            first_word = words[0].rstrip(":").lower() if words else ""
+            explicit = log_command is not None or text_action is not None or first_word in _SUPPORTED_ACTIONS
+            if cfg.conversation_router_enabled and not explicit:
+                event = record_conversation_event(
+                    mirror_conn, discord_message_id=ctx.message_id,
+                    thread_id=ctx.thread_id, binding_key=str(task_id),
+                    event_class="conversation.human", author_label=ctx.author_label,
+                    content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                )
+                task = kb.get_task(conn, str(task_id))
+                owner = str(getattr(task, "assignee", "") or "").strip()
+                try:
+                    from hermes_cli.profiles import normalize_profile_name, profile_exists
+                    owner = normalize_profile_name(owner) if owner else ""
+                    owner_valid = bool(owner) and profile_exists(owner)
+                except Exception:
+                    owner_valid = False
+                ingress_bot_id = cfg.conversation_router_ingress_bot_id
+                if not owner_valid or not ingress_bot_id:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="ambiguous_owner", task_id=str(task_id),
+                        action="conversation", owner_instruction_id=event.id,
+                        ingress_bot_id=ingress_bot_id,
+                    )
+                return KanbanReplyInboxResult(
+                    consumed=False, reason="conversation_routed", task_id=str(task_id),
+                    action="conversation", owner_instruction_id=event.id,
+                    route_profile=owner,
+                    card_context=f"Kanban card {task_id} (board {resolved_board_slug}, owner profile {owner}).",
+                    ingress_bot_id=ingress_bot_id,
+                )
             if log_enabled:
                 return _handle_log_command(
                     conn,
@@ -713,7 +761,6 @@ def handle_reply(
                     task_id=str(task_id),
                     ctx=ctx,
                 )
-            text_action = text_action_for_command(ctx.content)
             if text_action is not None:
                 return _handle_text_action(
                     conn,

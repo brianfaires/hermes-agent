@@ -1386,7 +1386,10 @@ class DiscordAdapter(BasePlatformAdapter):
                         return
                     _role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
 
-                if await self._maybe_handle_kanban_inbox(message):
+                _kanban_route = await self._maybe_handle_kanban_inbox(message)
+                if _kanban_route.consumed:
+                    return
+                if not self._is_kanban_ingress(_kanban_route):
                     return
 
                 # Multi-agent filtering: if the message mentions specific bots
@@ -1398,7 +1401,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 # This replaces the older DISCORD_IGNORE_NO_MENTION logic
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
-                if not isinstance(message.channel, discord.DMChannel) and message.mentions:
+                if (
+                    not _kanban_route.route_profile
+                    and not isinstance(message.channel, discord.DMChannel)
+                    and message.mentions
+                ):
                     _self_mentioned = (
                         self._client.user is not None
                         and self._client.user in message.mentions
@@ -1429,7 +1436,11 @@ class DiscordAdapter(BasePlatformAdapter):
                         if "*" not in _free_channels and not (_channel_ids & _free_channels):
                             return
 
-                await self._handle_message(message, role_authorized=_role_authorized)
+                await self._handle_message(
+                    message,
+                    role_authorized=_role_authorized,
+                    kanban_route=_kanban_route,
+                )
 
             @self._client.event
             async def on_raw_reaction_add(payload):
@@ -5942,8 +5953,17 @@ class DiscordAdapter(BasePlatformAdapter):
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
 
-    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage) -> bool:
-        """Consume mapped Discord Forum replies into Kanban before chat dispatch."""
+    def _is_kanban_ingress(self, result: Any) -> bool:
+        """Allow routed conversation dispatch only on the designated bot."""
+        ingress_bot_id = str(getattr(result, "ingress_bot_id", "") or "")
+        if not ingress_bot_id:
+            return True
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        return current_bot_id == ingress_bot_id
+
+    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage):
+        """Inspect mapped Discord Forum replies before chat dispatch."""
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_message
 
@@ -5953,12 +5973,37 @@ class DiscordAdapter(BasePlatformAdapter):
             )
         except Exception:
             logger.warning(
-                "[%s] Discord Kanban inbox failed; continuing normal dispatch for message_id=%s",
+                "[%s] Discord Kanban inbox failed for message_id=%s",
                 self.name,
                 getattr(message, "id", "unknown"),
                 exc_info=True,
             )
-            return False
+            from gateway.kanban_discord_inbox import (
+                KanbanReplyInboxResult,
+                load_config as load_kanban_inbox_config,
+            )
+
+            cfg = load_kanban_inbox_config()
+            channel = getattr(message, "channel", None)
+            channel_ids = {
+                str(value)
+                for value in (
+                    getattr(channel, "id", None),
+                    getattr(channel, "parent_id", None),
+                )
+                if value is not None
+            }
+            fail_closed = bool(
+                cfg.conversation_router_enabled
+                and cfg.forum_channel_ids
+                and channel_ids.intersection(cfg.forum_channel_ids)
+            )
+            return KanbanReplyInboxResult(
+                consumed=fail_closed,
+                reason="conversation_router_error" if fail_closed else "error",
+                action="conversation" if fail_closed else None,
+                ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+            )
         if result.consumed:
             logger.info(
                 "[%s] Discord on_message consumed by Kanban inbox: message_id=%s task_id=%s action=%s reason=%s",
@@ -5968,8 +6013,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 result.action,
                 result.reason,
             )
-            return True
-        return False
+        return result
 
     async def _handle_raw_reaction_add(self, payload: Any) -> bool:
         """Handle supported Discord reaction-add events before normal dispatch."""
@@ -6050,7 +6094,12 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
         return bool(result.consumed)
 
-    async def _handle_message(self, message: DiscordMessage, role_authorized: bool = False) -> None:
+    async def _handle_message(
+        self,
+        message: DiscordMessage,
+        role_authorized: bool = False,
+        kanban_route: Any | None = None,
+    ) -> None:
         """Handle incoming Discord messages."""
         # In server channels (not DMs), require the bot to be @mentioned
         # UNLESS the channel is in the free-response list or the message is
@@ -6156,7 +6205,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 and not self._discord_thread_require_mention()
             )
 
-            if require_mention and not is_free_channel and not in_bot_thread:
+            if (
+                require_mention
+                and not is_free_channel
+                and not in_bot_thread
+                and not getattr(kanban_route, "route_profile", None)
+            ):
                 if self._client.user not in message.mentions and not mention_prefix:
                     return
         # Auto-thread: when enabled, automatically create a thread for every
@@ -6262,6 +6316,8 @@ class DiscordAdapter(BasePlatformAdapter):
             message_id=str(message.id),
             role_authorized=role_authorized,
         )
+        if getattr(kanban_route, "route_profile", None):
+            source.profile = kanban_route.route_profile
 
         # Build media URLs -- download image attachments to local cache so the
         # vision tool can access them reliably (Discord CDN URLs can expire).
@@ -6461,6 +6517,9 @@ class DiscordAdapter(BasePlatformAdapter):
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+        _card_context = getattr(kanban_route, "card_context", None)
+        if _card_context:
+            _channel_context = "\n\n".join(part for part in (_card_context, _channel_context) if part)
 
         reply_to_id = None
         reply_to_text = None

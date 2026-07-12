@@ -856,3 +856,184 @@ def test_marked_comment_insert_is_atomic_across_concurrent_connections(kanban_db
         assert len(kb.list_comments(conn, tid)) == 1
     finally:
         conn.close()
+
+
+def test_conversation_router_records_plain_comment_and_targets_card_owner(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "hermes-home"
+    (hermes_home / "profiles" / "ops").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    route_ctx = replace(
+        ctx(message_id="conversation-1", content="Can we simplify this?"),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+
+    result = handle_reply(
+        route_ctx,
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+
+    assert result.consumed is False
+    assert result.reason == "conversation_routed"
+    assert result.action == "conversation"
+    assert result.task_id == tid
+    assert result.route_profile == "ops"
+    assert f"Kanban card {tid}" in result.card_context
+    assert "owner profile ops" in result.card_context
+
+    conn = kb.connect(db_path)
+    try:
+        assert kb.list_comments(conn, tid) == []
+    finally:
+        conn.close()
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        event = mirror_conn.execute(
+            "SELECT * FROM mirror_conversation_events WHERE discord_message_id = ?",
+            ("conversation-1",),
+        ).fetchone()
+        assert event["binding_key"] == tid
+        assert event["event_class"] == "conversation.human"
+        assert not receipt_exists(mirror_conn, "conversation-1")
+    finally:
+        mirror_conn.close()
+
+
+def test_conversation_router_preserves_event_but_fails_closed_for_missing_owner_profile(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "isolated-hermes-home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    route_ctx = replace(
+        ctx(message_id="conversation-unroutable", content="Who owns this?"),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+
+    result = handle_reply(
+        route_ctx,
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+
+    assert result.consumed is True
+    assert result.reason == "ambiguous_owner"
+    assert result.route_profile is None
+    conn = kb.connect(db_path)
+    try:
+        assert kb.list_comments(conn, tid) == []
+    finally:
+        conn.close()
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        assert mirror_conn.execute(
+            "SELECT 1 FROM mirror_conversation_events WHERE discord_message_id = ?",
+            ("conversation-unroutable",),
+        ).fetchone()
+    finally:
+        mirror_conn.close()
+
+
+def test_conversation_router_keeps_explicit_legacy_command_behavior(kanban_db, inbox_config):
+    db_path, tid = kanban_db
+    result = handle_reply(
+        ctx(message_id="explicit-comment", content="comment durable instruction"),
+        config=replace(inbox_config, conversation_router_enabled=True),
+    )
+    assert result.consumed is True
+    assert result.action == "comment"
+    conn = kb.connect(db_path)
+    try:
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "durable instruction" in comments[0].body
+    finally:
+        conn.close()
+
+
+def test_conversation_router_canonicalizes_owner_profile(
+    kanban_db, inbox_config, tmp_path, monkeypatch
+):
+    db_path, tid = kanban_db
+    hermes_home = tmp_path / "canonical-home"
+    (hermes_home / "profiles" / "ops").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    conn = kb.connect(db_path)
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET assignee = 'Ops' WHERE id = ?", (tid,))
+    finally:
+        conn.close()
+    route_ctx = replace(
+        ctx(message_id="conversation-canonical", content="Route this."),
+        reply_to_message_id=None,
+        reply_to_text=None,
+    )
+    result = handle_reply(
+        route_ctx,
+        config=replace(
+            inbox_config,
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+    assert result.route_profile == "ops"
+    assert result.ingress_bot_id == "999"
+
+
+def test_adapter_allows_only_designated_kanban_ingress_bot():
+    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    route = KanbanReplyInboxResult(
+        consumed=False,
+        reason="conversation_routed",
+        ingress_bot_id="999",
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
+    adapter._client = SimpleNamespace(user=SimpleNamespace(id="999"))
+    assert adapter._is_kanban_ingress(route) is True
+    adapter._client = SimpleNamespace(user=SimpleNamespace(id="other"))
+    assert adapter._is_kanban_ingress(route) is False
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_closed_for_router_error_in_configured_forum(monkeypatch):
+    import gateway.kanban_discord_inbox as inbox
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("simulated persistence failure")
+
+    monkeypatch.setattr(inbox, "maybe_handle_discord_message", fail)
+    monkeypatch.setattr(
+        inbox,
+        "load_config",
+        lambda: KanbanReplyInboxConfig(
+            enabled=True,
+            forum_channel_ids=frozenset({FORUM_ID}),
+            conversation_router_enabled=True,
+            conversation_router_ingress_bot_id="999",
+        ),
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
+    message = SimpleNamespace(
+        id="failed-message",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+    )
+    result = await adapter._maybe_handle_kanban_inbox(message)
+    assert result.consumed is True
+    assert result.reason == "conversation_router_error"
+    assert result.ingress_bot_id == "999"

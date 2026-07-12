@@ -1192,3 +1192,34 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
 
     adapter._fetch_channel_context.assert_not_awaited()
 
+
+@pytest.mark.asyncio
+async def test_kanban_owner_route_bypasses_mention_gate_and_sets_profile_context(
+    adapter, monkeypatch
+):
+    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    parent = FakeForumChannel(channel_id=1001)
+    thread = FakeThread(channel_id=2002, parent=parent)
+    message = make_message(channel=thread, content="plain owner conversation", mentions=[])
+    route = KanbanReplyInboxResult(
+        consumed=False,
+        reason="conversation_routed",
+        task_id="t_owner",
+        action="conversation",
+        route_profile="ops",
+        card_context="Kanban card t_owner (board operations, owner profile ops).",
+        ingress_bot_id="999",
+    )
+
+    await adapter._handle_message(message, kanban_route=route)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "plain owner conversation"
+    assert event.source.profile == "ops"
+    assert event.channel_context.startswith("Kanban card t_owner")
+
