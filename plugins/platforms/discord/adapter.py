@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from copy import copy
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -6555,6 +6556,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 if getattr(kanban_route, "action", None) == "conversation"
                 else None
             ),
+            outbound_profiles=(
+                getattr(kanban_route, "route_profiles", ())
+                if getattr(kanban_route, "action", None) == "conversation"
+                else ()
+            ),
+            correlation_id=getattr(kanban_route, "correlation_id", None),
         )
 
         # Track thread participation so the bot won't require @mention for
@@ -6574,22 +6581,43 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _dispatch_message_event(self, event: MessageEvent) -> None:
-        """Dispatch a routed Kanban turn through the target profile bot."""
-        target_profile = getattr(event, "outbound_profile", None)
-        if not target_profile:
+        """Dispatch a routed Kanban turn through each target profile bot."""
+        target_profiles = getattr(event, "outbound_profiles", ()) or (
+            (event.outbound_profile,) if getattr(event, "outbound_profile", None) else ()
+        )
+        if not target_profiles:
             await self.handle_message(event)
             return
         runner = getattr(self, "gateway_runner", None)
         resolver = getattr(runner, "_adapter_for_source", None)
-        target = resolver(event.source, require_profile_adapter=True) if resolver else None
-        if target is None:
-            logger.error(
-                "[Discord] Kanban outbound profile '%s' has no connected adapter; "
-                "refusing ingress-identity fallback",
-                target_profile,
+        deliveries = []
+        for target_profile in target_profiles:
+            routed_event = copy(event)
+            routed_event.source = copy(event.source)
+            routed_event.source.profile = target_profile
+            routed_event.outbound_profile = target_profile
+            target = resolver(routed_event.source, require_profile_adapter=True) if resolver else None
+            if target is None:
+                logger.error(
+                    "[Discord] Kanban outbound profile '%s' has no connected adapter; "
+                    "refusing ingress-identity fallback",
+                    target_profile,
+                )
+                continue
+            deliveries.append((target_profile, target.handle_message(routed_event)))
+        if len(target_profiles) == 1 and len(deliveries) == 1:
+            await deliveries[0][1]
+        elif deliveries:
+            results = await asyncio.gather(
+                *(delivery for _profile, delivery in deliveries), return_exceptions=True
             )
-            return
-        await target.handle_message(event)
+            for (target_profile, _delivery), result in zip(deliveries, results):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "[Discord] Kanban outbound profile '%s' dispatch failed",
+                        target_profile,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text message batching."""

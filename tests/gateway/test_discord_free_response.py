@@ -1252,3 +1252,27 @@ async def test_non_kanban_event_stays_on_ingress_adapter(adapter):
 
     adapter.handle_message.assert_awaited_once_with(event)
 
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fans_out_with_shared_correlation(adapter):
+    targets = {profile: SimpleNamespace(handle_message=AsyncMock()) for profile in ("ops", "reviewer")}
+    event = SimpleNamespace(
+        source=SimpleNamespace(profile="ops"),
+        outbound_profile="ops",
+        outbound_profiles=("ops", "reviewer"),
+        correlation_id="discord:shared",
+    )
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: targets[source.profile]
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    for profile, target in targets.items():
+        target.handle_message.assert_awaited_once()
+        routed = target.handle_message.await_args.args[0]
+        assert routed.source.profile == profile
+        assert routed.outbound_profile == profile
+        assert routed.correlation_id == "discord:shared"
+    assert event.source.profile == "ops"
+

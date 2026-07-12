@@ -1143,13 +1143,14 @@ def test_profile_route_precedence_and_ambiguity(tmp_path, monkeypatch):
         config=config,
     )
     assert (mentioned.profile, mentioned.basis) == ("researcher", "explicit_mention")
-    ambiguous = resolve_profile_route(
+    fanout = resolve_profile_route(
         replace(ctx(), mentioned_user_ids=("111", "222")),
         owner="ops",
         config=config,
     )
-    assert ambiguous.profile is None
-    assert ambiguous.error == "ambiguous_profile_mentions"
+    assert fanout.profile == "ops"
+    assert fanout.profiles == ("ops", "reviewer")
+    assert fanout.basis == "explicit_mention"
 
 
 def test_explicit_profile_mention_overrides_card_owner(
@@ -1177,6 +1178,8 @@ def test_explicit_profile_mention_overrides_card_owner(
     assert result.consumed is False
     assert result.task_id == tid
     assert result.route_profile == "reviewer"
+    assert result.route_profiles == ("reviewer",)
+    assert result.correlation_id and result.correlation_id.startswith("discord:")
     assert "route basis explicit_mention" in result.card_context
 
 

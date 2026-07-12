@@ -84,6 +84,7 @@ class ProfileRoute:
     profile: str | None
     basis: Literal["explicit_mention", "reply_to_profile_bot", "card_owner", "none"]
     mentioned_profiles: tuple[str, ...] = ()
+    profiles: tuple[str, ...] = ()
     error: str | None = None
 
 
@@ -118,6 +119,8 @@ class KanbanReplyInboxResult:
     owner_instruction_status: str | None = None
     ack: str | None = None
     route_profile: str | None = None
+    route_profiles: tuple[str, ...] = ()
+    correlation_id: str | None = None
     card_context: str | None = None
     ingress_bot_id: str | None = None
 
@@ -772,7 +775,7 @@ def resolve_profile_route(
     owner: str | None,
     config: KanbanReplyInboxConfig,
 ) -> ProfileRoute:
-    """Resolve an explicit mention, replied bot, or card owner to one profile."""
+    """Resolve explicit mentions, a replied bot, or the card owner to profiles."""
     from hermes_cli.profiles import normalize_profile_name, profile_exists
 
     bot_profiles = dict(config.profile_bot_user_ids)
@@ -783,30 +786,25 @@ def resolve_profile_route(
             if user_id in bot_profiles
         )
     )
-    if len(mentioned) > 1:
-        return ProfileRoute(
-            profile=None,
-            basis="none",
-            mentioned_profiles=mentioned,
-            error="ambiguous_profile_mentions",
-        )
-    if len(mentioned) == 1:
-        candidate, basis = mentioned[0], "explicit_mention"
+    if mentioned:
+        candidates, basis = mentioned, "explicit_mention"
     elif (
         ctx.replied_to_author_is_bot
         and ctx.replied_to_author_id
         and ctx.replied_to_author_id in bot_profiles
     ):
-        candidate, basis = bot_profiles[ctx.replied_to_author_id], "reply_to_profile_bot"
+        candidates, basis = (bot_profiles[ctx.replied_to_author_id],), "reply_to_profile_bot"
     else:
-        candidate = normalize_profile_name(owner) if owner else ""
+        candidates = (normalize_profile_name(owner),) if owner else ()
         basis = "card_owner"
-    if not candidate or not profile_exists(candidate):
+    profiles = tuple(normalize_profile_name(candidate) for candidate in candidates)
+    if not profiles or any(not profile_exists(candidate) for candidate in profiles):
         return ProfileRoute(profile=None, basis="none", mentioned_profiles=mentioned, error="invalid_profile")
     return ProfileRoute(
-        profile=normalize_profile_name(candidate),
+        profile=profiles[0],
         basis=basis,
         mentioned_profiles=mentioned,
+        profiles=profiles,
     )
 
 
@@ -863,9 +861,14 @@ def handle_reply(
                 task = kb.get_task(conn, str(task_id))
                 owner = str(getattr(task, "assignee", "") or "") if task else ""
                 route = resolve_profile_route(ctx, owner=owner, config=cfg)
-                if route.profile is None:
+                if route.profile is None or len(route.profiles) > 1:
                     return KanbanReplyInboxResult(
-                        consumed=True, reason=route.error or "invalid_profile",
+                        consumed=True,
+                        reason=(
+                            "ambiguous_profile_mentions"
+                            if len(route.profiles) > 1
+                            else route.error or "invalid_profile"
+                        ),
                         task_id=str(task_id), action=f"directive:{directive.intent}",
                         owner_instruction_id=event.id,
                         ingress_bot_id=cfg.conversation_router_ingress_bot_id,
@@ -906,6 +909,10 @@ def handle_reply(
                     consumed=False, reason="conversation_routed", task_id=str(task_id),
                     action="conversation", owner_instruction_id=event.id,
                     route_profile=route.profile,
+                    route_profiles=route.profiles,
+                    correlation_id="discord:" + hashlib.sha256(
+                        f"{ctx.thread_id}\0{ctx.message_id}".encode("utf-8")
+                    ).hexdigest(),
                     card_context=(
                         f"Kanban card {task_id} (board {resolved_board_slug}, "
                         f"target profile {route.profile}, route basis {route.basis})."

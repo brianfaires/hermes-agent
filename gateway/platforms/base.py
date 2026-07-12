@@ -1478,6 +1478,8 @@ class MessageEvent:
     # Runtime-only outbound identity hint. Discord's Kanban conversation
     # router uses this to select the target profile's connected adapter.
     outbound_profile: Optional[str] = None
+    outbound_profiles: tuple[str, ...] = ()
+    correlation_id: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
