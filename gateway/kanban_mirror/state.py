@@ -226,6 +226,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_epochs_one_open_thread
 ON mirror_binding_epochs(thread_id) WHERE state = 'open';
 CREATE INDEX IF NOT EXISTS idx_mirror_binding_epochs_task
 ON mirror_binding_epochs(board_slug, task_id);
+CREATE TABLE IF NOT EXISTS mirror_binding_transitions (
+  transition_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+  old_binding_key TEXT NOT NULL, new_binding_key TEXT NOT NULL UNIQUE,
+  old_card_metadata TEXT NOT NULL, new_card_metadata TEXT NOT NULL,
+  transition_payload TEXT NOT NULL, starter_payload TEXT NOT NULL,
+  frozen_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared','message_confirmed','starter_verified')),
+  transition_message_id TEXT UNIQUE, prepared_at INTEGER NOT NULL,
+  confirmed_at INTEGER, starter_verified_at INTEGER,
+  FOREIGN KEY(old_binding_key) REFERENCES mirror_binding_epochs(binding_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_transitions_pending_thread
+ON mirror_binding_transitions(thread_id) WHERE state = 'prepared';
 """
 
 RECEIPTS_SCHEMA_SQL = """
@@ -322,6 +335,24 @@ class BindingEpoch:
     transition_message_id: str | None
     starter_revision_hash: str | None
     state: str
+
+
+@dataclass(frozen=True)
+class BindingTransition:
+    transition_key: str
+    thread_id: str
+    old_binding_key: str
+    new_binding_key: str
+    old_card_metadata: dict
+    new_card_metadata: dict
+    transition_payload: dict
+    starter_payload: dict
+    frozen_hash: str
+    state: str
+    transition_message_id: str | None
+    prepared_at: int
+    confirmed_at: int | None
+    starter_verified_at: int | None
 
 
 def mirror_db_path(board: str) -> Path:
@@ -574,6 +605,130 @@ def active_thread_binding(conn: sqlite3.Connection, thread_id: str) -> BindingEp
         (str(thread_id),),
     ).fetchall()
     return _binding_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def _canonical(value: dict) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("transition values must be objects")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _transition_from_row(row: sqlite3.Row) -> BindingTransition:
+    return BindingTransition(
+        transition_key=str(row["transition_key"]), thread_id=str(row["thread_id"]),
+        old_binding_key=str(row["old_binding_key"]), new_binding_key=str(row["new_binding_key"]),
+        old_card_metadata=json.loads(row["old_card_metadata"]), new_card_metadata=json.loads(row["new_card_metadata"]),
+        transition_payload=json.loads(row["transition_payload"]), starter_payload=json.loads(row["starter_payload"]),
+        frozen_hash=str(row["frozen_hash"]), state=str(row["state"]),
+        transition_message_id=row["transition_message_id"], prepared_at=int(row["prepared_at"]),
+        confirmed_at=row["confirmed_at"], starter_verified_at=row["starter_verified_at"])
+
+
+def get_binding_transition(conn: sqlite3.Connection, transition_key: str) -> BindingTransition | None:
+    row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (transition_key,)).fetchone()
+    return _transition_from_row(row) if row is not None else None
+
+
+def pending_binding_transition(conn: sqlite3.Connection, thread_id: str) -> BindingTransition | None:
+    rows = conn.execute("SELECT * FROM mirror_binding_transitions WHERE thread_id=? AND state='prepared'", (str(thread_id),)).fetchall()
+    return _transition_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def prepare_binding_transition(conn: sqlite3.Connection, *, transition_key: str, thread_id: str,
+                               old_card_metadata: dict, new_card_metadata: dict,
+                               transition_payload: dict, starter_payload: dict) -> BindingTransition:
+    """Freeze a recoverable transition while the old epoch remains authoritative."""
+    key, thread = str(transition_key).strip(), str(thread_id).strip()
+    if not key or not thread:
+        raise ValueError("transition_key and thread_id are required")
+    values = tuple(_canonical(v) for v in (old_card_metadata, new_card_metadata, transition_payload, starter_payload))
+    frozen_hash = hashlib.sha256("\0".join(values).encode()).hexdigest()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (key,)).fetchone()
+        if row is not None:
+            result = _transition_from_row(row)
+            if result.thread_id != thread or result.frozen_hash != frozen_hash:
+                raise ValueError("transition retry does not match frozen state")
+            conn.commit(); return result
+        rows = conn.execute("SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open'", (thread,)).fetchall()
+        if len(rows) != 1:
+            raise ValueError("thread does not have exactly one authoritative binding")
+        old = _binding_from_row(rows[0])
+        if (str(old_card_metadata.get("board_slug", "")), str(old_card_metadata.get("task_id", ""))) != (old.board_slug, old.task_id):
+            raise ValueError("old card metadata does not match authoritative binding")
+        new_board, new_task = str(new_card_metadata.get("board_slug", "")), str(new_card_metadata.get("task_id", ""))
+        if not new_board or not new_task or (new_board, new_task) == (old.board_slug, old.task_id):
+            raise ValueError("new card metadata is missing or unchanged")
+        new_key = f"binding:{thread}:{old.sequence + 1}"
+        conn.execute("""INSERT INTO mirror_binding_transitions
+            (transition_key,thread_id,old_binding_key,new_binding_key,old_card_metadata,new_card_metadata,
+             transition_payload,starter_payload,frozen_hash,state,prepared_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'prepared',?)""", (key, thread, old.binding_key, new_key, *values, frozen_hash, _now()))
+        result = get_binding_transition(conn, key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
+
+
+def confirm_binding_transition(conn: sqlite3.Connection, transition_key: str, transition_message_id: str) -> BindingTransition:
+    """Atomically close old/open successor only after a Discord message confirmation."""
+    message_id = str(transition_message_id).strip()
+    if not message_id:
+        raise ValueError("transition_message_id is required")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (transition_key,)).fetchone()
+        if row is None:
+            raise ValueError("unknown transition")
+        transition = _transition_from_row(row)
+        if transition.state != "prepared":
+            if transition.transition_message_id != message_id:
+                raise ValueError("transition was confirmed with a different message")
+            conn.commit(); return transition
+        rows = conn.execute("SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open'", (transition.thread_id,)).fetchall()
+        if len(rows) != 1 or rows[0]["binding_key"] != transition.old_binding_key:
+            raise ValueError("authoritative binding changed or is ambiguous")
+        old, now = _binding_from_row(rows[0]), _now(); new = transition.new_card_metadata
+        conn.execute("UPDATE mirror_binding_epochs SET state='closed',ended_at=?,transition_message_id=? WHERE binding_key=?", (now, message_id, old.binding_key))
+        conn.execute("""INSERT INTO mirror_binding_epochs
+            (binding_key,thread_id,board_slug,task_id,sequence,started_at,state) VALUES (?,?,?,?,?,?,'open')""",
+            (transition.new_binding_key, transition.thread_id, str(new["board_slug"]), str(new["task_id"]), old.sequence + 1, now))
+        conn.execute("UPDATE mirror_binding_transitions SET state='message_confirmed',transition_message_id=?,confirmed_at=? WHERE transition_key=? AND state='prepared'", (message_id, now, transition_key))
+        result = get_binding_transition(conn, transition_key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
+
+
+def authorize_starter_update(conn: sqlite3.Connection, transition_key: str) -> tuple[dict, str]:
+    transition = get_binding_transition(conn, transition_key)
+    if transition is None or transition.state not in {"message_confirmed", "starter_verified"}:
+        raise ValueError("starter update is not authorized")
+    active = active_thread_binding(conn, transition.thread_id)
+    if active is None or active.binding_key != transition.new_binding_key:
+        raise ValueError("successor binding is not authoritative")
+    return transition.starter_payload, hashlib.sha256(_canonical(transition.starter_payload).encode()).hexdigest()
+
+
+def verify_starter_revision(conn: sqlite3.Connection, transition_key: str, revision_hash: str) -> BindingTransition:
+    """Capture a verified live revision hash; retries are idempotent."""
+    _, expected = authorize_starter_update(conn, transition_key)
+    if not revision_hash or revision_hash != expected:
+        raise ValueError("starter revision does not match frozen payload")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        transition = get_binding_transition(conn, transition_key)
+        row = conn.execute("SELECT starter_revision_hash FROM mirror_binding_epochs WHERE binding_key=? AND state='open'", (transition.new_binding_key,)).fetchone()
+        if row is None or (row[0] is not None and row[0] != revision_hash):
+            raise ValueError("starter revision state is ambiguous")
+        now = _now()
+        conn.execute("UPDATE mirror_binding_epochs SET starter_revision_hash=? WHERE binding_key=?", (revision_hash, transition.new_binding_key))
+        conn.execute("UPDATE mirror_binding_transitions SET state='starter_verified',starter_verified_at=COALESCE(starter_verified_at,?) WHERE transition_key=?", (now, transition_key))
+        result = get_binding_transition(conn, transition_key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
 
 
 def backfill_legacy_bindings(conn: sqlite3.Connection, board_slug: str) -> int:
