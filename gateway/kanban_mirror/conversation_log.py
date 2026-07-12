@@ -57,6 +57,14 @@ class FrozenLogDelivery:
     kanban_comment_id: int | None
 
 
+@dataclass(frozen=True)
+class LogDeliveryTarget:
+    """One binding-scoped Kanban destination for a log command."""
+
+    binding_key: str | None
+    task_id: str
+
+
 def parse_log_command(text: str, *, replied_to_message_id: str | None = None) -> LogCommand | None:
     """Parse `!log`; unknown exclamation-prefixed text remains conversation."""
     body = (text or "").strip()
@@ -194,6 +202,59 @@ def select_log_events(
     return [_event_from_row(row) for row in rows]
 
 
+def resolve_log_targets(
+    conn: sqlite3.Connection, *, command: LogCommand, thread_id: str,
+    legacy_task_id: str | None = None,
+) -> list[LogDeliveryTarget]:
+    """Resolve binding destinations without moving old history to the current card."""
+    thread_id = str(thread_id or "").strip()
+    if not thread_id:
+        raise ValueError("thread_id is required")
+    epoch_count = conn.execute(
+        "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?", (thread_id,)
+    ).fetchone()[0]
+    if epoch_count:
+        from gateway.kanban_mirror.state import active_thread_binding
+
+        active = active_thread_binding(conn, thread_id)
+        if active is None:
+            raise ValueError("thread does not have exactly one active binding")
+        if command.mode == "current":
+            return [LogDeliveryTarget(active.binding_key, active.task_id)]
+        if command.mode == "reply":
+            row = conn.execute(
+                """SELECT b.binding_key,b.task_id FROM mirror_conversation_events e
+                   JOIN mirror_binding_epochs b ON b.binding_key=e.binding_key
+                   WHERE e.thread_id=? AND e.discord_message_id=?""",
+                (thread_id, command.replied_to_message_id),
+            ).fetchone()
+            return [] if row is None else [LogDeliveryTarget(str(row[0]), str(row[1]))]
+        rows = conn.execute(
+            """SELECT DISTINCT b.binding_key,b.task_id,b.sequence
+               FROM mirror_binding_epochs b JOIN mirror_conversation_events e ON e.binding_key=b.binding_key
+               WHERE b.thread_id=? ORDER BY b.sequence""", (thread_id,),
+        ).fetchall()
+        return [LogDeliveryTarget(str(row[0]), str(row[1])) for row in rows]
+
+    # Compatibility with the Phase-1 one-card mapping. The thread registry is
+    # the sole authoritative destination when no epochs have been backfilled.
+    legacy_task_id = str(legacy_task_id or "").strip()
+    if not legacy_task_id:
+        raise ValueError("legacy log requires the mapped task_id")
+    if command.mode == "reply":
+        row = conn.execute(
+            "SELECT binding_key FROM mirror_conversation_events WHERE thread_id=? AND discord_message_id=?",
+            (thread_id, command.replied_to_message_id),
+        ).fetchone()
+        keys = [row[0]] if row is not None else []
+    else:
+        # ``None`` deliberately means lifecycle-wide selection for legacy all.
+        keys = [legacy_task_id if command.mode == "current" else None]
+    if command.mode == "all":
+        return [LogDeliveryTarget(None, legacy_task_id)]
+    return [LogDeliveryTarget(str(key), legacy_task_id) for key in keys if key]
+
+
 def render_log_comment(events: Sequence[ConversationEvent], *, note: str = "") -> str:
     """Render a deterministic source-attributed transcript."""
     if not events:
@@ -240,6 +301,7 @@ def freeze_log_delivery(
     task_id: str,
     command: LogCommand,
     binding_key: str | None,
+    scope_all_to_binding: bool = False,
 ) -> FrozenLogDelivery | None:
     """Atomically create or return a byte-stable pending delivery."""
     operation_id = str(operation_id or "").strip()
@@ -267,9 +329,12 @@ def freeze_log_delivery(
                 raise ValueError("operation_id already belongs to a different log request")
             conn.commit()
             return _delivery_from_row(conn, existing)
+        selection_command = command
+        if command.mode == "all" and scope_all_to_binding:
+            selection_command = LogCommand(mode="current", note=command.note)
         events = select_log_events(
             conn,
-            command=command,
+            command=selection_command,
             thread_id=thread_id,
             binding_key=binding_key,
         )

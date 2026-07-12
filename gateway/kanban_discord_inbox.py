@@ -22,6 +22,7 @@ from gateway.kanban_mirror.conversation_log import (
     mark_log_delivery,
     parse_log_command,
     record_conversation_event,
+    resolve_log_targets,
 )
 from gateway.kanban_mirror.state import (
     connect_mirror,
@@ -728,55 +729,62 @@ def _handle_log_command(
     command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
     if command is None:  # guarded by caller
         raise ValueError("not a log command")
-    operation_id = "discord-log:" + hashlib.sha256(
-        f"{ctx.message_id}\0{task_id}".encode("utf-8")
-    ).hexdigest()
-    delivery = freeze_log_delivery(
-        mirror_conn,
-        operation_id=operation_id,
-        trigger_discord_message_id=ctx.message_id,
-        thread_id=ctx.thread_id,
-        task_id=task_id,
-        command=command,
-        binding_key=task_id,
+    targets = resolve_log_targets(
+        mirror_conn, command=command, thread_id=ctx.thread_id,
+        legacy_task_id=task_id,
     )
-    if delivery is None:
+    deliveries = []
+    for target in targets:
+        operation_id = "discord-log:" + hashlib.sha256(
+            f"{ctx.message_id}\0{target.task_id}\0{target.binding_key or ''}".encode("utf-8")
+        ).hexdigest()
+        delivery = freeze_log_delivery(
+            mirror_conn, operation_id=operation_id,
+            trigger_discord_message_id=ctx.message_id, thread_id=ctx.thread_id,
+            task_id=target.task_id, command=command,
+            binding_key=target.binding_key,
+            scope_all_to_binding=(command.mode == "all" and target.binding_key is not None),
+        )
+        if delivery is not None:
+            deliveries.append((target, delivery, operation_id))
+    if not deliveries:
         return KanbanReplyInboxResult(
             consumed=True, reason="nothing_to_log", task_id=task_id, action="log",
             ack=f"No unsent conversation found for Kanban card {task_id}.",
         )
-    if delivery.status == "delivered":
+    if all(delivery.status == "delivered" for _target, delivery, _op in deliveries):
         return KanbanReplyInboxResult(
             consumed=True, reason="duplicate", task_id=task_id, action="log",
-            kanban_comment_id=delivery.kanban_comment_id,
+            kanban_comment_id=deliveries[-1][1].kanban_comment_id,
         )
 
-    # The marker lives in Kanban itself, closing the crash window between the
-    # side effect and mirror.db's delivered update.
-    marker = f"[discord-log-operation:{operation_id}]"
-    try:
-        comment_id, _created = kb.add_comment_once(
-            conn,
-            task_id,
-            author=_reply_author(ctx),
-            body=f"{delivery.payload}\n\n{marker}",
-            idempotency_marker=marker,
-        )
-    except Exception as exc:
+    # Each epoch has its own frozen payload and destination. Mark it delivered
+    # only after Kanban confirms the idempotently marked comment.
+    comment_id = None
+    for target, delivery, operation_id in deliveries:
+        if delivery.status == "delivered":
+            comment_id = delivery.kanban_comment_id
+            continue
+        marker = f"[discord-log-operation:{operation_id}]"
+        try:
+            comment_id, _created = kb.add_comment_once(
+                conn, target.task_id, author=_reply_author(ctx),
+                body=f"{delivery.payload}\n\n{marker}", idempotency_marker=marker,
+            )
+        except Exception as exc:
+            mark_log_delivery(
+                mirror_conn, operation_id=operation_id, status="failed", error=str(exc)
+            )
+            raise
         mark_log_delivery(
-            mirror_conn, operation_id=operation_id, status="failed", error=str(exc)
+            mirror_conn, operation_id=operation_id, status="delivered",
+            kanban_comment_id=comment_id,
         )
-        raise
-    mark_log_delivery(
-        mirror_conn,
-        operation_id=operation_id,
-        status="delivered",
-        kanban_comment_id=comment_id,
-    )
+    assert comment_id is not None
     return KanbanReplyInboxResult(
         consumed=True, reason="handled", task_id=task_id, action="log",
         kanban_comment_id=comment_id,
-        ack=f"Logged Discord conversation on Kanban card {task_id} as comment #{comment_id}.",
+        ack=f"Logged Discord conversation on Kanban as {len(deliveries)} binding-scoped comment(s).",
     )
 
 

@@ -10,6 +10,7 @@ from gateway.kanban_mirror.conversation_log import (
     parse_log_command,
     record_conversation_event,
     render_log_comment,
+    resolve_log_targets,
     select_log_events,
 )
 from gateway.kanban_mirror.state import connect_mirror
@@ -342,6 +343,64 @@ def test_current_log_requires_unambiguous_binding(mirror_conn):
             command=log_command("!log"),
             binding_key=None,
         )
+
+
+def test_binding_epoch_targets_keep_lifecycle_history_on_its_own_cards(mirror_conn):
+    mirror_conn.execute(
+        """INSERT INTO mirror_binding_epochs
+           (binding_key,thread_id,board_slug,task_id,sequence,started_at,ended_at,state)
+           VALUES ('epoch-old','thread-1','default','card-old',1,1,2,'closed'),
+                  ('epoch-current','thread-1','default','card-current',2,2,NULL,'open')"""
+    )
+    old = add_event(mirror_conn, "old", binding="epoch-old", content="old discussion")
+    current = add_event(
+        mirror_conn, "current", binding="epoch-current", content="current discussion"
+    )
+
+    current_targets = resolve_log_targets(
+        mirror_conn, command=log_command("!log"), thread_id="thread-1"
+    )
+    assert [(target.binding_key, target.task_id) for target in current_targets] == [
+        ("epoch-current", "card-current")
+    ]
+    all_targets = resolve_log_targets(
+        mirror_conn, command=log_command("!log all"), thread_id="thread-1"
+    )
+    assert [(target.binding_key, target.task_id) for target in all_targets] == [
+        ("epoch-old", "card-old"), ("epoch-current", "card-current")
+    ]
+
+    deliveries = [
+        freeze_log_delivery(
+            mirror_conn, operation_id=f"all-{target.binding_key}",
+            trigger_discord_message_id="command", thread_id="thread-1",
+            task_id=target.task_id, command=log_command("!log all"),
+            binding_key=target.binding_key, scope_all_to_binding=True,
+        )
+        for target in all_targets
+    ]
+    assert deliveries[0] is not None and deliveries[0].event_ids == (old.id,)
+    assert deliveries[1] is not None and deliveries[1].event_ids == (current.id,)
+    assert "current discussion" not in deliveries[0].payload
+    assert "old discussion" not in deliveries[1].payload
+
+
+def test_epoch_log_fails_closed_without_one_active_binding(mirror_conn):
+    mirror_conn.execute(
+        """INSERT INTO mirror_binding_epochs
+           (binding_key,thread_id,board_slug,task_id,sequence,started_at,ended_at,state)
+           VALUES ('epoch-old','thread-1','default','card-old',1,1,2,'closed')"""
+    )
+    event = add_event(mirror_conn, "old", binding="epoch-old")
+    with pytest.raises(ValueError, match="exactly one active binding"):
+        resolve_log_targets(
+            mirror_conn,
+            command=log_command("!log", replied_to_message_id="old"),
+            thread_id="thread-1",
+        )
+    assert mirror_conn.execute(
+        "SELECT COUNT(*) FROM mirror_conversation_delivery_items WHERE event_id=?", (event.id,)
+    ).fetchone()[0] == 0
 
 
 def test_schema_addition_does_not_change_existing_mirror_tables(mirror_conn):
