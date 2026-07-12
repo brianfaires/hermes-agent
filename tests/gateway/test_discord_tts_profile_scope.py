@@ -99,7 +99,10 @@ async def test_final_voice_reply_tts_runs_inside_source_profile_scope(tmp_path, 
     runner = object.__new__(GatewayRunner)
     runner.config = SimpleNamespace(multiplex_profiles=False)
     runner._gateway_profile_home = ops_home.resolve()
+    runner._gateway_profile_name = "ops"
     runner.adapters = {Platform.DISCORD: SimpleNamespace(
+        is_connected=True,
+        _running=True,
         play_in_voice_channel=AsyncMock(),
         is_in_voice_channel=lambda guild_id: False,
         send_voice=AsyncMock(return_value=SendResult(success=True, message_id="voice")),
@@ -138,7 +141,10 @@ async def test_final_voice_reply_uses_adapter_play_tts_when_no_raw_guild(tmp_pat
     runner = object.__new__(GatewayRunner)
     runner.config = SimpleNamespace(multiplex_profiles=False)
     runner._gateway_profile_home = ops_home.resolve()
+    runner._gateway_profile_name = "ops"
     adapter = SimpleNamespace(
+        is_connected=True,
+        _running=True,
         play_tts=AsyncMock(return_value=SendResult(success=True, message_id="voice")),
         send_voice=AsyncMock(return_value=SendResult(success=True, message_id="file")),
     )

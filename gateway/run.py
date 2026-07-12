@@ -3807,18 +3807,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def exit_code(self) -> Optional[int]:
         return self._exit_code
 
-    def _adapter_for_source(self, source: Optional[SessionSource]):
-        """Return the platform adapter bound to an inbound source's profile."""
-        if source is None:
-            return None
-        profile_name = str(getattr(source, "profile", "") or "").strip()
-        if profile_name:
-            profile_adapters = getattr(self, "_profile_adapters", {}).get(profile_name, {})
-            adapter = profile_adapters.get(source.platform)
-            if adapter is not None:
-                return adapter
-        return getattr(self, "adapters", {}).get(source.platform)
-
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:
