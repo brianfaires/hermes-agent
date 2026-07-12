@@ -292,6 +292,26 @@ CREATE TABLE IF NOT EXISTS mirror_conversation_events (
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_conversation_events_thread_binding
 ON mirror_conversation_events(thread_id, binding_key, id);
+CREATE TABLE IF NOT EXISTS mirror_discord_thread_cursors (
+  thread_id TEXT PRIMARY KEY,
+  last_message_id TEXT,
+  last_message_created_at INTEGER,
+  observed_at INTEGER NOT NULL,
+  backlog_limited INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mirror_discord_inbound_state (
+  discord_message_id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  conversation_event_id INTEGER NOT NULL,
+  classification TEXT NOT NULL,
+  processing_status TEXT NOT NULL DEFAULT 'pending',
+  observed_via TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  processed_at INTEGER,
+  FOREIGN KEY(conversation_event_id) REFERENCES mirror_conversation_events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_discord_inbound_pending
+ON mirror_discord_inbound_state(thread_id, processing_status, observed_at);
 CREATE TABLE IF NOT EXISTS mirror_conversation_deliveries (
   operation_id TEXT PRIMARY KEY,
   trigger_discord_message_id TEXT NOT NULL,
