@@ -32,15 +32,20 @@ def _finding(conn, op, thread, error, now):
       evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,last_seen_at=excluded.last_seen_at,resolved_at=NULL""",
       (key,thread,evidence,hashlib.sha256(evidence.encode()).hexdigest(),now,now))
 
-def _claim(conn, worker, now, lease, limit):
+def _claim(conn, worker, now, lease, limit, *, include_transitions=True):
     conn.execute('BEGIN IMMEDIATE')
     try:
-        rows=conn.execute("""SELECT 'discord' kind,operation_id op,target_profile profile,thread_id,created_at FROM mirror_discord_outbox
+        sql="""SELECT 'discord' kind,operation_id op,target_profile profile,thread_id,created_at FROM mirror_discord_outbox
           WHERE status IN ('pending','failed') AND confirmation_needed_at IS NULL AND quarantined_at IS NULL
           AND (next_attempt_at IS NULL OR next_attempt_at<=?) AND COALESCE(lease_expires_at,0)<=?
-          UNION ALL SELECT 'transition',transition_key,NULL,thread_id,created_at FROM mirror_transition_recovery
+          """
+        args=[now,now]
+        if include_transitions:
+          sql += """UNION ALL SELECT 'transition',transition_key,NULL,thread_id,created_at FROM mirror_transition_recovery
           WHERE status IN ('pending','failed') AND quarantined_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at<=?)
-          AND COALESCE(lease_expires_at,0)<=? ORDER BY created_at,op""",(now,now,now,now)).fetchall()
+          AND COALESCE(lease_expires_at,0)<=? """
+          args.extend((now,now))
+        rows=conn.execute(sql+' ORDER BY created_at,op',args).fetchall()
         picked=[]; domains=set()
         for r in rows:
             domain=(r['profile'] or 'controller',r['thread_id'])
@@ -57,8 +62,9 @@ def _claim(conn, worker, now, lease, limit):
 async def run_outbound_recovery(conn: sqlite3.Connection, *, worker_id: str,
  adapters: Mapping[str,Any], send: Callable[[Any,dict],Awaitable[Any]],
  transition_publishers: Mapping[str,Any], clock: Callable[[],float]=time.time,
- limit: int=20, lease_seconds: int=300, base_backoff: int=5, max_backoff: int=3600):
-    now=int(clock()); ensure_schema(conn,now); items=_claim(conn,worker_id,now,lease_seconds,limit)
+ limit: int=20, lease_seconds: int=300, base_backoff: int=5, max_backoff: int=3600,
+ include_transitions: bool=True):
+    now=int(clock()); ensure_schema(conn,now); items=_claim(conn,worker_id,now,lease_seconds,limit,include_transitions=include_transitions)
     stats={'claimed':len(items),'delivered':0,'failed':0,'confirmation_needed':0,'quarantined':0}
     for item in items:
       table='mirror_discord_outbox' if item['kind']=='discord' else 'mirror_transition_recovery'; key='operation_id' if item['kind']=='discord' else 'transition_key'

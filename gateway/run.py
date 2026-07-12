@@ -2636,6 +2636,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # generic fire-and-forget watchers this registry exposes bounded health.
         from gateway.kanban_mirror.supervision import LoopSupervisor
         self._kanban_mirror_supervisor = LoopSupervisor()
+        self._kanban_router_board_slug = None
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -5615,6 +5616,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "reconciliation-lifecycle",
                 lambda: run_mirror_daemon(lambda: self._running),
             )
+        self._start_kanban_router_runtime()
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -6490,6 +6492,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
             await self._kanban_mirror_supervisor.stop()
+            try:
+                from gateway.status import write_runtime_status
+                write_runtime_status(kanban_mirror={})
+            except Exception:
+                pass
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
                     continue
@@ -6686,6 +6693,87 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else self._profile_adapters.get(profile, {}).get(Platform.DISCORD)
         )
         return candidate if candidate is not None and getattr(candidate, "_running", False) else None
+
+    def _kanban_profile_adapters(self) -> dict[str, BasePlatformAdapter]:
+        """Snapshot connected Discord identities by exact profile (never fallback)."""
+        profiles: dict[str, BasePlatformAdapter] = {}
+        for profile in (self._gateway_profile_name, *tuple(getattr(self, "_profile_adapters", {}))):
+            adapter = self._discord_adapter_for_profile(profile)
+            if adapter is not None:
+                profiles[profile] = adapter
+        return profiles
+
+    def _start_kanban_router_runtime(self, *, interval: float = 5.0,
+                                     health_interval: float = 30.0) -> None:
+        """Idempotently attach router recovery and health to the ingress gateway."""
+        from gateway.kanban_discord_inbox import load_config as load_inbox_config
+        cfg = load_inbox_config()
+        ingress = self._discord_adapter_for_profile(self._gateway_profile_name)
+        enabled = bool(cfg.enabled and cfg.conversation_router_enabled and cfg.board_slug and ingress)
+        if not enabled:
+            try:
+                from gateway.status import write_runtime_status
+                write_runtime_status(kanban_mirror={})
+            except Exception:
+                pass
+            return
+        self._kanban_router_board_slug = cfg.board_slug
+
+        async def recover() -> None:
+            from gateway.kanban_mirror.recovery import run_outbound_recovery
+            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+            conn = connect_mirror(mirror_db_path(cfg.board_slug))
+            try:
+                while self._running:
+                    current = load_inbox_config()
+                    ingress_connected = self._discord_adapter_for_profile(self._gateway_profile_name) is not None
+                    active = bool(
+                        current.enabled and current.conversation_router_enabled
+                        and current.board_slug == cfg.board_slug and ingress_connected
+                    )
+                    if not active:
+                        await asyncio.sleep(interval)
+                        continue
+                    adapters = self._kanban_profile_adapters()
+
+                    async def send(target, payload):
+                        return await target.send(
+                            payload["thread_id"], payload["content"],
+                            reply_to=payload.get("reply_to_message_id"),
+                            metadata={"thread_id": payload["thread_id"], "suppress_embeds": True},
+                        )
+
+                    await run_outbound_recovery(
+                        conn, worker_id=f"gateway-{id(self):x}", adapters=adapters,
+                        send=send, transition_publishers={}, include_transitions=False,
+                    )
+                    await asyncio.sleep(interval)
+            finally:
+                conn.close()
+
+        async def publish_health() -> None:
+            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+            from gateway.kanban_mirror.supervision import health_snapshot
+            from gateway.status import write_runtime_status
+            conn = connect_mirror(mirror_db_path(cfg.board_slug))
+            try:
+                while self._running:
+                    current = load_inbox_config()
+                    ingress_connected = self._discord_adapter_for_profile(self._gateway_profile_name) is not None
+                    active = bool(current.enabled and current.conversation_router_enabled and ingress_connected)
+                    snapshot = health_snapshot(
+                        conn, router_enabled=active, ingress_connected=ingress_connected,
+                        adapters=self._kanban_profile_adapters(),
+                        supervisor=self._kanban_mirror_supervisor,
+                    )
+                    write_runtime_status(kanban_mirror=snapshot)
+                    await asyncio.sleep(health_interval)
+            finally:
+                write_runtime_status(kanban_mirror={})
+                conn.close()
+
+        self._kanban_mirror_supervisor.start("outbound-recovery", recover)
+        self._kanban_mirror_supervisor.start("health-publication", publish_health)
 
     @staticmethod
     def _is_mirrored_kanban_conversation_event(event: Any, source: Any) -> bool:
