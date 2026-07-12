@@ -223,6 +223,43 @@ CREATE TABLE IF NOT EXISTS mirror_reaction_states (
   active INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mirror_conversation_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_message_id TEXT NOT NULL UNIQUE,
+  thread_id TEXT NOT NULL,
+  binding_key TEXT,
+  event_class TEXT NOT NULL,
+  author_label TEXT NOT NULL,
+  content TEXT NOT NULL,
+  replied_to_message_id TEXT,
+  discord_created_at INTEGER,
+  recorded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_conversation_events_thread_binding
+ON mirror_conversation_events(thread_id, binding_key, id);
+CREATE TABLE IF NOT EXISTS mirror_conversation_deliveries (
+  operation_id TEXT PRIMARY KEY,
+  trigger_discord_message_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  kanban_comment_id INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  delivered_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS mirror_conversation_delivery_items (
+  operation_id TEXT NOT NULL,
+  event_id INTEGER NOT NULL,
+  PRIMARY KEY (operation_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_conversation_delivery_items_event
+ON mirror_conversation_delivery_items(event_id);
 """
 
 SCHEMA_SQL += RECEIPTS_SCHEMA_SQL
