@@ -26,6 +26,7 @@ from agent.prompt_builder import (
     drain_truncation_warnings,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    BOUNDED_MODEL_EXECUTION_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -1484,7 +1485,7 @@ class TestOpenAIModelExecutionGuidance:
         assert "correctness" in text
 
     def test_guidance_bounds_verification_without_abandoning_incomplete_work(self):
-        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        text = BOUNDED_MODEL_EXECUTION_GUIDANCE.lower()
         assert "proportional" in text
         assert "at most one direct verification" in text
         assert "adjacent issues" in text
