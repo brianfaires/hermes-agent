@@ -38,6 +38,7 @@ from gateway.kanban_mirror.state import (
 
 logger = logging.getLogger(__name__)
 
+_UNRESOLVED_CHANNEL = object()
 _SUPPORTED_ACTIONS = {"comment", "block", "unblock"}
 _COMMAND_USAGE = "Usage: comment <text>, block <reason>, or unblock"
 
@@ -101,6 +102,7 @@ class DiscordReactionContext:
     message_id: str
     author_id: str | None
     author_label: str
+    forum_channel_id: str
     thread_id: str
     emoji: str
     intent: str
@@ -211,13 +213,21 @@ def _reaction_author_label(payload: Any) -> str:
     return user_id or "unknown Discord user"
 
 
-def context_from_discord_reaction(payload: Any) -> DiscordReactionContext | None:
+def context_from_discord_reaction(
+    payload: Any, *, resolved_channel: Any = _UNRESOLVED_CHANNEL
+) -> DiscordReactionContext | None:
     thread_id = str(getattr(payload, "channel_id", "") or "").strip()
     message_id = str(getattr(payload, "message_id", "") or "").strip()
     emoji_raw = str(getattr(getattr(payload, "emoji", None), "name", "") or "").strip()
     reaction = reaction_intent_for_emoji(emoji_raw)
     if not thread_id or not message_id or reaction is None:
         return None
+    channel = (
+        getattr(payload, "channel", None)
+        if resolved_channel is _UNRESOLVED_CHANNEL
+        else resolved_channel
+    )
+    forum_channel_id = str(getattr(channel, "parent_id", "") or "").strip()
     author_id = str(getattr(payload, "user_id", "") or "").strip() or None
     reaction_key = f"reaction:{thread_id}:{message_id}:{author_id or 'unknown'}:{_normalize_emoji(emoji_raw)}"
     return DiscordReactionContext(
@@ -225,6 +235,7 @@ def context_from_discord_reaction(payload: Any) -> DiscordReactionContext | None
         message_id=message_id,
         author_id=author_id,
         author_label=_reaction_author_label(payload),
+        forum_channel_id=forum_channel_id,
         thread_id=thread_id,
         emoji=reaction.emoji,
         intent=reaction.intent,
@@ -491,7 +502,7 @@ def handle_reaction(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
 
     board_slug = cfg.board_slug or "default"
-    resolved = resolve_thread_task(mirror_db_path(board_slug), forum_channel_id="", thread_id=ctx.thread_id)
+    resolved = resolve_thread_task(mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id)
     if resolved is None:
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
 
@@ -578,7 +589,7 @@ def handle_reaction(
             mirror_conn,
             discord_message_id=ctx.reaction_key,
             board_slug=resolved_board_slug,
-            forum_channel_id="",
+            forum_channel_id=ctx.forum_channel_id,
             thread_id=ctx.thread_id,
             task_id=task_id,
             author_id=ctx.author_id,
@@ -1014,10 +1025,21 @@ async def maybe_handle_discord_message(
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="not_thread_message")
     cfg = config or load_config()
-    if (
+    in_mirrored_forum = (
         cfg.enabled
         and cfg.conversation_router_enabled
+        and bool(ctx.forum_channel_id)
         and ctx.forum_channel_id in cfg.forum_channel_ids
+    )
+    # Profile bots publish durable outbox events. Treat their mirrored copies as
+    # already recorded output rather than creating a second ledger event/turn.
+    if in_mirrored_forum and ctx.author_id in dict(cfg.profile_bot_user_ids):
+        return KanbanReplyInboxResult(
+            consumed=True, reason="profile_bot_output", action="conversation",
+            ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+        )
+    if (
+        in_mirrored_forum
         and (
             not cfg.conversation_router_ingress_bot_id
             or str(current_bot_id or "") != cfg.conversation_router_ingress_bot_id
@@ -1055,7 +1077,7 @@ def handle_reaction_remove(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
     board_slug = cfg.board_slug or "default"
     resolved = resolve_thread_task(
-        mirror_db_path(board_slug), forum_channel_id="", thread_id=ctx.thread_id
+        mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
     )
     if resolved is None:
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
@@ -1076,9 +1098,15 @@ def handle_reaction_remove(
 
 def _reaction_ingress_rejection(
     cfg: KanbanReplyInboxConfig,
+    ctx: DiscordReactionContext,
     current_bot_id: str | None,
 ) -> KanbanReplyInboxResult | None:
-    if not cfg.enabled or not cfg.conversation_router_enabled:
+    if (
+        not cfg.enabled
+        or not cfg.conversation_router_enabled
+        or not ctx.forum_channel_id
+        or ctx.forum_channel_id not in cfg.forum_channel_ids
+    ):
         return None
     ingress_bot_id = cfg.conversation_router_ingress_bot_id
     if ingress_bot_id and str(current_bot_id or "") == ingress_bot_id:
@@ -1096,12 +1124,15 @@ async def maybe_handle_discord_reaction_remove(
     *,
     config: KanbanReplyInboxConfig | None = None,
     current_bot_id: str | None = None,
+    resolved_channel: Any = _UNRESOLVED_CHANNEL,
 ) -> KanbanReplyInboxResult:
-    ctx = context_from_discord_reaction(payload)
+    ctx = context_from_discord_reaction(payload, resolved_channel=resolved_channel)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
     cfg = config or load_config()
-    rejected = _reaction_ingress_rejection(cfg, current_bot_id)
+    if ctx.forum_channel_id not in cfg.forum_channel_ids:
+        return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
+    rejected = _reaction_ingress_rejection(cfg, ctx, current_bot_id)
     if rejected is not None:
         return rejected
     return await asyncio.to_thread(handle_reaction_remove, ctx, config=cfg)
@@ -1112,12 +1143,15 @@ async def maybe_handle_discord_reaction(
     *,
     config: KanbanReplyInboxConfig | None = None,
     current_bot_id: str | None = None,
+    resolved_channel: Any = _UNRESOLVED_CHANNEL,
 ) -> KanbanReplyInboxResult:
-    ctx = context_from_discord_reaction(payload)
+    ctx = context_from_discord_reaction(payload, resolved_channel=resolved_channel)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
     cfg = config or load_config()
-    rejected = _reaction_ingress_rejection(cfg, current_bot_id)
+    if ctx.forum_channel_id not in cfg.forum_channel_ids:
+        return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
+    rejected = _reaction_ingress_rejection(cfg, ctx, current_bot_id)
     if rejected is not None:
         return rejected
     try:

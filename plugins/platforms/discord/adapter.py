@@ -6035,12 +6035,25 @@ class DiscordAdapter(BasePlatformAdapter):
         if self._client and self._client.user is not None:
             if user_id == str(getattr(self._client.user, "id", "") or ""):
                 return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction
 
             result = await maybe_handle_discord_reaction(
                 payload,
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
             )
         except Exception:
             logger.warning(
@@ -6087,11 +6100,24 @@ class DiscordAdapter(BasePlatformAdapter):
         if self._client and self._client.user is not None:
             if user_id == str(getattr(self._client.user, "id", "") or ""):
                 return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction_remove
             result = await maybe_handle_discord_reaction_remove(
                 payload,
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
             )
         except Exception:
             logger.warning(

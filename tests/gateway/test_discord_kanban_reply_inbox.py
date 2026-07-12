@@ -106,6 +106,7 @@ def reaction_payload(
         message_id=message_id,
         user_id=user_id,
         channel_id=channel_id,
+        channel=SimpleNamespace(id=channel_id, parent_id=FORUM_ID),
         emoji=SimpleNamespace(name=emoji),
         member=SimpleNamespace(
             display_name=author_label,
@@ -1209,6 +1210,80 @@ async def test_non_ingress_bot_performs_no_router_write(tmp_path, monkeypatch):
     assert result.reason == "not_ingress_bot"
     path = mirror_db_path("default")
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_bot_id", ["999", "other"])
+async def test_profile_bot_output_in_mirrored_forum_is_consumed_without_write(
+    tmp_path, monkeypatch, current_bot_id
+):
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
+    config = KanbanReplyInboxConfig(
+        enabled=True,
+        forum_channel_ids=frozenset({FORUM_ID}),
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+        profile_bot_user_ids=(("222", "reviewer"),),
+    )
+    message = SimpleNamespace(
+        id="profile-output", content="completed review",
+        channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+        author=SimpleNamespace(id="222", bot=True, display_name="Reviewer", name="Reviewer"),
+        mentions=[], reference=None,
+    )
+
+    result = await maybe_handle_discord_message(
+        message, config=config, current_bot_id=current_bot_id
+    )
+
+    assert result.consumed is True
+    assert result.reason == "profile_bot_output"
+    assert not mirror_db_path("default").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_id", ["unrelated-forum", None])
+@pytest.mark.parametrize("current_bot_id", ["999", "other"])
+async def test_reaction_outside_resolved_mirrored_forum_is_untouched_without_write(
+    tmp_path, monkeypatch, parent_id, current_bot_id
+):
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
+    config = KanbanReplyInboxConfig(
+        enabled=True,
+        forum_channel_ids=frozenset({FORUM_ID}),
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+    )
+    channel = SimpleNamespace(id=THREAD_ID, parent_id=parent_id) if parent_id else None
+
+    result = await maybe_handle_discord_reaction(
+        reaction_payload(), config=config, current_bot_id=current_bot_id,
+        resolved_channel=channel,
+    )
+
+    assert result.consumed is False
+    assert result.reason == "forum_not_configured"
+    assert not mirror_db_path("default").exists()
+
+
+@pytest.mark.asyncio
+async def test_non_ingress_mirrored_reaction_is_consumed_without_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
+    config = KanbanReplyInboxConfig(
+        enabled=True,
+        forum_channel_ids=frozenset({FORUM_ID}),
+        conversation_router_enabled=True,
+        conversation_router_ingress_bot_id="999",
+    )
+
+    result = await maybe_handle_discord_reaction(
+        reaction_payload(), config=config, current_bot_id="other",
+        resolved_channel=SimpleNamespace(id=THREAD_ID, parent_id=FORUM_ID),
+    )
+
+    assert result.consumed is True
+    assert result.reason == "not_ingress_bot"
+    assert not mirror_db_path("default").exists()
 
 
 @pytest.mark.asyncio
