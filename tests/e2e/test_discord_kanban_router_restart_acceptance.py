@@ -19,7 +19,12 @@ from gateway.kanban_discord_inbox import (
     validate_router_config,
 )
 from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.daemon import _initiate_automatic_successors, _recover_binding_transitions
+from gateway.kanban_mirror.daemon import (
+    _initiate_automatic_successors,
+    _recover_binding_transitions,
+    _resume_terminal_lifecycles,
+)
+from gateway.kanban_mirror.lifecycle import get_terminal_lifecycle
 from gateway.kanban_mirror.reconciliation import reconcile_mirror_state, resolve_thread_quarantine
 from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
 from gateway.kanban_mirror.recovery import run_outbound_recovery
@@ -82,6 +87,52 @@ class DiscordTransport:
         if tag_ids is not None:
             self.thread["applied_tags"] = tag_ids
         return dict(self.thread)
+
+
+class LifecycleDiscordTransport:
+    """Concrete Discord network boundary whose state survives worker objects."""
+
+    def __init__(self):
+        self.forum = {"id": "forum-1", "available_tags": [{"id": "done-id", "name": "done"}]}
+        self.channels = {
+            "thread-1": {"id": "thread-1", "applied_tags": [], "last_message_id": "human-0", "archived": False},
+            "digest-thread": {"id": "digest-thread", "applied_tags": [], "last_message_id": "digest-starter", "pinned": False},
+        }
+        self.messages = {
+            ("thread-1", "human-0"): {"id": "human-0", "content": "finished", "timestamp": "1970-01-01T00:01:30Z"},
+            ("digest-thread", "digest-starter"): {"id": "digest-starter", "content": "Board digest"},
+        }
+        self.nonces = {}
+        self.operations = []
+
+    def get_channel(self, channel_id):
+        return self.forum if channel_id == "forum-1" else dict(self.channels[channel_id])
+
+    def get_message(self, channel_id, message_id):
+        return dict(self.messages[(channel_id, message_id)])
+
+    def send_message(self, channel_id, *, content, nonce=None):
+        if nonce not in self.nonces:
+            self.operations.append("summary")
+            self.nonces[nonce] = {"id": "summary-1", "content": content}
+        return dict(self.nonces[nonce])
+
+    def update_message(self, channel_id, message_id, *, content):
+        self.operations.append("digest")
+        self.messages[(channel_id, message_id)] = {"id": message_id, "content": content}
+        return dict(self.messages[(channel_id, message_id)])
+
+    def update_thread(self, thread_id, *, tag_ids=None, pinned=None, archive=None, **_kwargs):
+        channel = self.channels[thread_id]
+        if tag_ids is not None:
+            self.operations.append("tag")
+            channel["applied_tags"] = list(tag_ids)
+        if pinned is not None:
+            channel["pinned"] = pinned
+        if archive is not None:
+            self.operations.append("archive")
+            channel["archived"] = archive
+        return dict(channel)
 
 
 @pytest.fixture
@@ -268,3 +319,77 @@ async def test_fanout_quarantine_needs_clean_restart_and_explicit_resolution(iso
     assert active_thread_binding(restarted, "thread-1").task_id == "a"
     assert [event[0] for event in discord.events[-3:]] == ["transition", "starter", "thread"]
     restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_lifecycle_idle_archive_is_exactly_once_across_restarts(
+    isolated_router, monkeypatch
+):
+    """A bounded terminal lifecycle survives worker replacement without replay."""
+    _home, old, _new = isolated_router
+    mirror_path = mirror_db_path("acceptance")
+    setup = connect_mirror(mirror_path)
+    create_initiative(setup, "digest", "Acceptance digest", "digest")
+    set_thread(setup, "digest", "digest-thread", "digest-starter")
+    setup.close()
+
+    terminal = Card(
+        old, "Old", "work", "done", "high", "reviewer", None,
+        None, None, "80", "90", None, "accepted",
+    )
+    snapshot = BoardSnapshot({old: terminal}, {}, {}, {}, {})
+    cfg = MirrorConfig(
+        board="acceptance", forum_channel_id="forum-1", guild_id="guild-1",
+        terminal_lifecycle_enabled=True, done_thread_archive_idle_minutes=1,
+    )
+    discord = LifecycleDiscordTransport()
+    now = {"value": 100}
+    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: now["value"])
+
+    first = connect_mirror(mirror_path)
+    await _resume_terminal_lifecycles(cfg, discord, first, snapshot, load_mirror_state(first), [])
+    lifecycle_key = first.execute("SELECT lifecycle_key FROM mirror_terminal_lifecycles").fetchone()[0]
+    life = get_terminal_lifecycle(first, lifecycle_key)
+    assert life.state == "tag_confirmed" and life.archive_due_at == 150
+    assert discord.operations == ["summary", "digest", "tag"]
+    assert "<!-- terminal:thread-1 -->" in discord.messages[("digest-thread", "digest-starter")]["content"]
+    assert "done-id" in discord.channels["thread-1"]["applied_tags"]
+    first.close()
+
+    # A real routed human event resets idle without replaying completion work.
+    routed = handle_reply(DiscordReplyContext(
+        message_id="human-late", author_id="7", author_label="Fixture Human",
+        forum_channel_id="forum-1", thread_id="thread-1", content="one more note",
+        discord_created_at=130,
+    ), config=load_config())
+    assert routed.reason == "conversation_routed"
+    now["value"] = 140
+    second = connect_mirror(mirror_path)
+    await _resume_terminal_lifecycles(cfg, discord, second, snapshot, load_mirror_state(second), [])
+    life = get_terminal_lifecycle(second, lifecycle_key)
+    assert life.state == "tag_confirmed" and life.latest_activity_at == 130
+    assert life.archive_due_at == 190 and "archive" not in discord.operations
+    second.close()
+
+    # Recreated connections and concrete publisher wrappers honor the new boundary.
+    now["value"] = 189
+    third = connect_mirror(mirror_path)
+    await _resume_terminal_lifecycles(cfg, discord, third, snapshot, load_mirror_state(third), [])
+    assert get_terminal_lifecycle(third, lifecycle_key).state == "tag_confirmed"
+    third.close()
+
+    now["value"] = 190
+    fourth = connect_mirror(mirror_path)
+    await _resume_terminal_lifecycles(cfg, discord, fourth, snapshot, load_mirror_state(fourth), [])
+    assert get_terminal_lifecycle(fourth, lifecycle_key).state == "archived"
+    assert discord.channels["thread-1"]["archived"] is True
+    assert load_mirror_state(fourth)["initiative"].archived_at == 190
+    assert discord.operations == ["summary", "digest", "tag", "archive"]
+    fourth.close()
+
+    now["value"] = 250
+    final = connect_mirror(mirror_path)
+    await _resume_terminal_lifecycles(cfg, discord, final, snapshot, load_mirror_state(final), [])
+    assert get_terminal_lifecycle(final, lifecycle_key).state == "archived"
+    assert discord.operations == ["summary", "digest", "tag", "archive"]
+    final.close()
