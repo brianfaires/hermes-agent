@@ -32,7 +32,7 @@ def get_terminal_lifecycle(conn, key):
 
 def _pending(conn, thread):
     tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    checks=(("mirror_binding_transitions","thread_id=? AND state!='starter_verified'"),("mirror_conversation_deliveries","thread_id=? AND status!='delivered'"),("mirror_discord_outbox","thread_id=? AND status!='delivered'"),("mirror_discord_inbound_state","thread_id=? AND processing_status='pending'"))
+    checks=(("mirror_binding_transitions","thread_id=? AND state!='starter_verified'"),("mirror_conversation_deliveries","thread_id=? AND status!='delivered'"),("mirror_discord_outbox","thread_id=? AND status!='delivered'"),("mirror_discord_inbound_state","thread_id=? AND processing_status!='processed'"))
     return any(t in tables and conn.execute(f"SELECT 1 FROM {t} WHERE {w} LIMIT 1",(thread,)).fetchone() for t,w in checks)
 def _activity(conn,thread,observed):
     row=conn.execute("SELECT MAX(COALESCE(discord_created_at,recorded_at)) FROM mirror_conversation_events WHERE thread_id=? AND (event_class LIKE 'conversation.%' OR event_class='directive.user')",(thread,)).fetchone()
@@ -51,7 +51,7 @@ def run_terminal_lifecycle(conn: sqlite3.Connection,publisher: LifecyclePublishe
         cancel_pending_archive(conn,thread,now=now);return None
     if is_thread_quarantined(conn,thread) or _pending(conn,thread): return None
     summary={"thread_id":thread,"binding_key":binding.binding_key,"card_chain":card_chain,"outcomes":outcomes,"date_range":date_range,"owners":owners,"thread_link":thread_link}
-    digest={"thread_id":thread,"cards":[{"task_id":c.get("task_id"),"title":c.get("title"),"status":c.get("status")} for c in card_chain],"outcomes":outcomes,"date_range":date_range,"owners":owners,"thread_link":thread_link}
+    digest={"thread_id":thread,"outcome":outcomes[-1].get("outcome") if outcomes else "completed","date_range":date_range,"thread_link":thread_link}
     frozen={"summary":summary,"digest":digest}; raw=_json(frozen); fh=_hash(frozen); activity=_activity(conn,thread,observed_activity_at)
     current=conn.execute("SELECT lifecycle_key FROM mirror_terminal_lifecycles WHERE thread_id=? AND state NOT IN ('archived','cancelled')",(thread,)).fetchone()
     if current is not None and current["lifecycle_key"]!=lifecycle_key:
@@ -76,10 +76,16 @@ def run_terminal_lifecycle(conn: sqlite3.Connection,publisher: LifecyclePublishe
         if life.state=="tag_confirmed" and now>=life.archive_due_at:
             # Re-read immediately before the irreversible side effect. Events
             # may have landed while summary/digest/tag publishers were called.
-            latest=_activity(conn,thread,observed_activity_at)
+            live_before=publisher.read_thread_state(thread)
+            live_activity=int(live_before.get("latest_activity_at") or 0) if isinstance(live_before,dict) else 0
+            latest=_activity(conn,thread,max(observed_activity_at,live_activity))
             if latest>life.latest_activity_at:
                 conn.execute("UPDATE mirror_terminal_lifecycles SET latest_activity_at=?,archive_due_at=?,updated_at=? WHERE lifecycle_key=?",(latest,latest+int(idle_seconds),now,lifecycle_key));conn.commit();return get_terminal_lifecycle(conn,lifecycle_key)
-            if is_thread_quarantined(conn,thread) or _pending(conn,thread): return life
+            if is_thread_quarantined(conn,thread) or _pending(conn,thread) or not live_before.get("done"): return life
+            if live_before.get("archived"):
+                # Recover a crash after Discord accepted the archive but before
+                # the local confirmation commit.
+                conn.execute("UPDATE mirror_terminal_lifecycles SET state='archived',archived_at=?,last_error=NULL,updated_at=? WHERE lifecycle_key=?",(now,now,lifecycle_key));conn.commit();return get_terminal_lifecycle(conn,lifecycle_key)
             p={"archived":True};key=lifecycle_key+":archive";r=publisher.archive_thread(thread,p,operation_key=key);_receipt(r,key,thread,p);live=publisher.read_thread_state(thread)
             if not isinstance(live,dict) or not live.get("done") or not live.get("archived"): raise ValueError("live thread does not confirm archive")
             conn.execute("UPDATE mirror_terminal_lifecycles SET state='archived',archived_at=?,last_error=NULL,updated_at=? WHERE lifecycle_key=?",(now,now,lifecycle_key));conn.commit();life=get_terminal_lifecycle(conn,lifecycle_key)

@@ -66,6 +66,8 @@ from gateway.kanban_mirror.state import (
 )
 from gateway.kanban_mirror import writer
 from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
+from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
+from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
 from gateway.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
@@ -1069,6 +1071,64 @@ def _append_closed_thread_policy_counts(log: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _terminal_chain(snapshot: BoardSnapshot, task_id: str) -> list[dict]:
+    """Return descendants first and authoritative bound card last."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    def visit(current: str) -> None:
+        if current in seen:
+            return
+        seen.add(current)
+        for child in sorted(snapshot.children.get(current, [])):
+            visit(child)
+        ordered.append(current)
+    visit(task_id)
+    return [{"task_id": cid, "title": snapshot.cards[cid].title,
+             "status": snapshot.cards[cid].status} for cid in ordered if cid in snapshot.cards]
+
+
+async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
+                                      conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                      state: dict[str, Initiative], log: list[str]) -> None:
+    publisher = DiscordLifecyclePublisher(client, cfg, conn)
+    for initiative in state.values():
+        if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
+            continue
+        binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
+        if binding is None:
+            continue
+        chain = _terminal_chain(snapshot, binding.task_id)
+        # An absent card is ambiguity, not completion.
+        if not chain or chain[-1]["task_id"] != binding.task_id:
+            continue
+        try:
+            activity = await _latest_thread_activity_ts(client, initiative.thread_id)
+            if activity is None:
+                log.append(f"terminal_lifecycle: SKIPPED {initiative.id} (latest activity unknown)")
+                continue
+            outcomes = [{"task_id": cid, "outcome": str(snapshot.cards[cid].result or "completed")}
+                        for cid in [x["task_id"] for x in chain] if cid in snapshot.cards]
+            starts = [str(snapshot.cards[x["task_id"]].created_at) for x in chain if snapshot.cards[x["task_id"]].created_at]
+            ends = [str(snapshot.cards[x["task_id"]].completed_at) for x in chain if snapshot.cards[x["task_id"]].completed_at]
+            life = await asyncio.to_thread(
+                run_terminal_lifecycle, conn, publisher,
+                lifecycle_key=f"terminal:{binding.binding_key}", thread_id=initiative.thread_id,
+                card_chain=chain, outcomes=outcomes,
+                owners=sorted({str(snapshot.cards[x["task_id"]].assignee) for x in chain if snapshot.cards[x["task_id"]].assignee}),
+                date_range={"start": min(starts) if starts else None, "end": max(ends) if ends else None},
+                thread_link=f"https://discord.com/channels/{cfg.guild_id}/{initiative.thread_id}",
+                idle_seconds=max(0, int(cfg.done_thread_archive_idle_minutes * 60)),
+                observed_activity_at=int(activity), clock=lambda: int(time.time()),
+            )
+            if life is not None:
+                log.append(f"terminal_lifecycle: {initiative.id} state={life.state}")
+                if life.state == "archived":
+                    await asyncio.to_thread(set_archived, conn, initiative.id, int(time.time()))
+        except Exception:
+            logger.exception("kanban mirror: terminal lifecycle failed closed for %s", initiative.id)
+            log.append(f"terminal_lifecycle: FAILED {initiative.id}")
+
+
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
                dry_run: bool = False, allow_llm: bool = True) -> list[str]:
     log: list[str] = []
@@ -1103,7 +1163,10 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             elif op.kind == "post_note":
                 await _do_post_note(cfg, client, mirror_conn, snapshot, state, op, dry_run, allow_llm, log)
             elif op.kind == "archive_thread":
-                await _do_archive_thread(cfg, client, mirror_conn, snapshot, state, op, dry_run, log)
+                if cfg.terminal_lifecycle_enabled:
+                    log.append(f"archive_thread: DEFERRED {op.data['initiative_id']} (terminal lifecycle)")
+                else:
+                    await _do_archive_thread(cfg, client, mirror_conn, snapshot, state, op, dry_run, log)
             elif op.kind == "ensure_digest":
                 await _do_ensure_digest(cfg, client, mirror_conn, op, dry_run, log)
             elif op.kind == "mark_stale":
@@ -1120,6 +1183,12 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
 
     if allow_llm and not dry_run:
         await _prose_pass(cfg, client, mirror_conn, snapshot, state, log)
+
+    if cfg.terminal_lifecycle_enabled and not dry_run and client is not None:
+        # Run after ordinary operations so transition, note, outbox, and starter
+        # work gets first chance to drain; lifecycle itself rechecks durable guards.
+        state = await asyncio.to_thread(load_mirror_state, mirror_conn)
+        await _resume_terminal_lifecycles(cfg, client, mirror_conn, snapshot, state, log)
 
     _append_closed_thread_policy_counts(log)
     return log

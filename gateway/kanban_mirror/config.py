@@ -49,6 +49,7 @@ class MirrorConfig:
     done_thread_archive_idle_minutes: float = 60.0
     closed_thread_reply_policy: ClosedThreadPolicy = field(default_factory=ClosedThreadPolicy)
     binding_transitions_enabled: bool = False
+    terminal_lifecycle_enabled: bool = False
 
     def valid(self) -> bool:
         return bool(self.enabled and self.board and self.forum_channel_id)
@@ -79,4 +80,5 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
         done_thread_archive_idle_minutes=float(cfg.get("done_thread_archive_idle_minutes", 60.0)),
         closed_thread_reply_policy=load_closed_thread_policy(cfg.get("closed_thread_reply_policy")),
         binding_transitions_enabled=bool(cfg.get("binding_transitions_enabled", False)),
+        terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
     )
