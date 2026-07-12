@@ -2632,6 +2632,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        # Retains the gated Discord mirror daemon across failures.  Unlike the
+        # generic fire-and-forget watchers this registry exposes bounded health.
+        from gateway.kanban_mirror.supervision import LoopSupervisor
+        self._kanban_mirror_supervisor = LoopSupervisor()
 
 
     def _wire_teams_pipeline_runtime(self) -> None:
@@ -5602,8 +5606,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Start background kanban Discord mirror daemon — self-gates on
         # config (kanban.discord_mirror.enabled) so this is a no-op when
         # disabled, same pattern as the notifier's internal gating.
+        from gateway.kanban_mirror.config import load_mirror_config
         from gateway.kanban_mirror.daemon import run_mirror_daemon
-        asyncio.create_task(run_mirror_daemon(lambda: self._running))
+        # Disabled means no task and no status noise.  The daemon retains its
+        # own token/config validation as a second fail-closed boundary.
+        if load_mirror_config().enabled:
+            self._kanban_mirror_supervisor.start(
+                "reconciliation-lifecycle",
+                lambda: run_mirror_daemon(lambda: self._running),
+            )
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -6478,6 +6489,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
             )
 
+            await self._kanban_mirror_supervisor.stop()
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
                     continue

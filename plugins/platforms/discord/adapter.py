@@ -1123,6 +1123,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self._post_connect_task: Optional[asyncio.Task] = None
         self._kanban_backfill_task: Optional[asyncio.Task] = None
         self._kanban_inbound_task: Optional[asyncio.Task] = None
+        from gateway.kanban_mirror.supervision import LoopSupervisor
+        self._kanban_supervisor = LoopSupervisor()
         self._kanban_ingestor = None
         self._kanban_mirror_conn = None
         self._kanban_backfilled_threads: set[str] = set()
@@ -1335,9 +1337,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 adapter_self._kanban_backfill_task = asyncio.create_task(
                     adapter_self._backfill_kanban_mirror_threads()
                 )
-                if adapter_self._kanban_inbound_task is None or adapter_self._kanban_inbound_task.done():
-                    adapter_self._kanban_inbound_task = asyncio.create_task(
-                        adapter_self._run_kanban_pending_inbound()
+                cfg, _runtime = await adapter_self._kanban_runtime()
+                if cfg.enabled and cfg.conversation_router_enabled:
+                    adapter_self._kanban_inbound_task = adapter_self._kanban_supervisor.start(
+                        "pending-inbound", adapter_self._run_kanban_pending_inbound
                     )
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
@@ -1594,10 +1597,7 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
-        if self._kanban_inbound_task and not self._kanban_inbound_task.done():
-            self._kanban_inbound_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._kanban_inbound_task
+        await self._kanban_supervisor.stop()
         self._kanban_inbound_task = None
         if self._kanban_backfill_task and not self._kanban_backfill_task.done():
             self._kanban_backfill_task.cancel()
