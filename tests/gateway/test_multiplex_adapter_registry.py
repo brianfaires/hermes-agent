@@ -1,6 +1,9 @@
 """Phase 3: secondary-profile adapter registry + same-token conflict detection."""
+from types import SimpleNamespace
+
 import pytest
 
+from gateway.config import Platform
 from gateway.run import GatewayRunner
 
 
@@ -31,6 +34,47 @@ class TestCredentialFingerprint:
             def __init__(self):
                 self.bot_token = "alt-token"
         assert GatewayRunner._adapter_credential_fingerprint(_AltAdapter()) is not None
+
+
+class TestOutboundAdapterResolution:
+    def _runner(self):
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._gateway_profile_name = "ops"
+        runner.adapters = {}
+        runner._profile_adapters = {}
+        return runner
+
+    def test_primary_profile_uses_primary_discord_adapter(self):
+        runner = self._runner()
+        primary = SimpleNamespace(_running=True)
+        runner.adapters[Platform.DISCORD] = primary
+        source = SimpleNamespace(platform=Platform.DISCORD, profile="ops")
+        assert runner._adapter_for_source(source) is primary
+
+    def test_secondary_profile_uses_its_connected_discord_adapter(self):
+        runner = self._runner()
+        primary = SimpleNamespace(_running=True)
+        secondary = SimpleNamespace(_running=True)
+        runner.adapters[Platform.DISCORD] = primary
+        runner._profile_adapters = {"reviewer": {Platform.DISCORD: secondary}}
+        source = SimpleNamespace(platform=Platform.DISCORD, profile="reviewer")
+        assert runner._adapter_for_source(source) is secondary
+
+    @pytest.mark.parametrize("candidate", [None, SimpleNamespace(_running=False)])
+    def test_explicit_discord_profile_never_falls_back(self, candidate):
+        runner = self._runner()
+        runner.adapters[Platform.DISCORD] = SimpleNamespace(_running=True)
+        if candidate is not None:
+            runner._profile_adapters = {"reviewer": {Platform.DISCORD: candidate}}
+        source = SimpleNamespace(platform=Platform.DISCORD, profile="reviewer")
+        assert runner._adapter_for_source(source) is None
+
+    def test_non_discord_profile_preserves_primary_adapter(self):
+        runner = self._runner()
+        primary = SimpleNamespace(_running=True)
+        runner.adapters[Platform.TELEGRAM] = primary
+        source = SimpleNamespace(platform=Platform.TELEGRAM, profile="reviewer")
+        assert runner._adapter_for_source(source) is primary
 
 
 class TestProfileMessageHandler:

@@ -1215,11 +1215,40 @@ async def test_kanban_owner_route_bypasses_mention_gate_and_sets_profile_context
         ingress_bot_id="999",
     )
 
+    target_adapter = SimpleNamespace(handle_message=AsyncMock())
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: target_adapter
+    )
+
     await adapter._handle_message(message, kanban_route=route)
 
-    adapter.handle_message.assert_awaited_once()
-    event = adapter.handle_message.await_args.args[0]
+    adapter.handle_message.assert_not_awaited()
+    target_adapter.handle_message.assert_awaited_once()
+    event = target_adapter.handle_message.await_args.args[0]
     assert event.text == "plain owner conversation"
     assert event.source.profile == "ops"
+    assert event.outbound_profile == "ops"
     assert event.channel_context.startswith("Kanban card t_owner")
+
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fails_closed_without_target_adapter(adapter):
+    source = SimpleNamespace(profile="reviewer")
+    event = SimpleNamespace(source=source, outbound_profile="reviewer")
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: None
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_kanban_event_stays_on_ingress_adapter(adapter):
+    event = SimpleNamespace(source=SimpleNamespace(profile="reviewer"), outbound_profile=None)
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_awaited_once_with(event)
 

@@ -6550,6 +6550,11 @@ class DiscordAdapter(BasePlatformAdapter):
             auto_skill=_skills,
             channel_prompt=_channel_prompt,
             channel_context=_channel_context,
+            outbound_profile=(
+                getattr(kanban_route, "route_profile", None)
+                if getattr(kanban_route, "action", None) == "conversation"
+                else None
+            ),
         )
 
         # Track thread participation so the bot won't require @mention for
@@ -6562,11 +6567,29 @@ class DiscordAdapter(BasePlatformAdapter):
         if msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0:
             self._enqueue_text_event(event)
         else:
-            await self.handle_message(event)
+            await self._dispatch_message_event(event)
 
     # ------------------------------------------------------------------
     # Text message aggregation (handles Discord client-side splits)
     # ------------------------------------------------------------------
+
+    async def _dispatch_message_event(self, event: MessageEvent) -> None:
+        """Dispatch a routed Kanban turn through the target profile bot."""
+        target_profile = getattr(event, "outbound_profile", None)
+        if not target_profile:
+            await self.handle_message(event)
+            return
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_adapter_for_source", None)
+        target = resolver(event.source, require_profile_adapter=True) if resolver else None
+        if target is None:
+            logger.error(
+                "[Discord] Kanban outbound profile '%s' has no connected adapter; "
+                "refusing ingress-identity fallback",
+                target_profile,
+            )
+            return
+        await target.handle_message(event)
 
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text message batching."""
@@ -6635,7 +6658,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # into handle_message → the agent's streaming request,
             # aborting the response the user was waiting on.  The new
             # chunk is handled by the fresh flush task regardless.
-            await asyncio.shield(self.handle_message(event))
+            await asyncio.shield(self._dispatch_message_event(event))
         except asyncio.CancelledError:
             # Only reached if cancel landed before the pop — the shielded
             # handle_message is unaffected either way.  Let the task exit

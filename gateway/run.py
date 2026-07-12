@@ -5322,6 +5322,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if hasattr(adapter, "set_runtime_profile_home"):
                 adapter.set_runtime_profile_home(self._gateway_profile_home)
             adapter.set_message_handler(self._handle_message)
+            if hasattr(adapter, "gateway_runner"):
+                adapter.gateway_runner = self
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -6640,6 +6642,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()
 
+    def _adapter_for_source(
+        self,
+        source: SessionSource,
+        *,
+        require_profile_adapter: bool = False,
+    ) -> Optional[BasePlatformAdapter]:
+        """Resolve the connected adapter that owns a routed profile identity."""
+        primary = self.adapters.get(source.platform)
+        if source.platform != Platform.DISCORD or not source.profile:
+            return primary
+        profile = str(source.profile).strip()
+        if profile == self._gateway_profile_name:
+            candidate = primary
+        else:
+            candidate = self._profile_adapters.get(profile, {}).get(source.platform)
+        if candidate is None or not getattr(candidate, "_running", False):
+            # A Discord source carrying an explicit profile must never fall back
+            # to another bot identity, regardless of which turn path is sending.
+            return None
+        return candidate
+
     async def _start_secondary_profile_adapters(self) -> int:
         """Bring up adapters for every non-active profile this gateway serves.
 
@@ -6759,6 +6782,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_message_handler(
                 self._make_profile_message_handler(profile_name)
             )
+            if hasattr(adapter, "gateway_runner"):
+                adapter.gateway_runner = self
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -8558,7 +8583,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     allowed_root=_msg_cwd,
                 )
                 if _ctx_result.blocked:
-                    _adapter = self.adapters.get(source.platform)
+                    _adapter = self._adapter_for_source(source)
                     if _adapter:
                         await _adapter.send(
                             source.chat_id,
@@ -8779,7 +8804,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     and platform_name not in policy.notify_exclude_platforms
                 )
                 if should_notify:
-                    adapter = self.adapters.get(source.platform)
+                    adapter = self._adapter_for_source(source)
                     if adapter:
                         if reset_reason == "suspended":
                             reason_text = "previous session was stopped or interrupted"
@@ -9125,7 +9150,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             "configuration."
                                         )
                                         try:
-                                            _adapter = self.adapters.get(source.platform)
+                                            _adapter = self._adapter_for_source(source)
                                             if _adapter and source.chat_id:
                                                 await _adapter.send(source.chat_id, _warn_msg, metadata=_hyg_meta)
                                         except Exception as _werr:
@@ -9149,7 +9174,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             "check `auxiliary.compression.model` in config.yaml."
                                         )
                                         try:
-                                            _adapter = self.adapters.get(source.platform)
+                                            _adapter = self._adapter_for_source(source)
                                             if _adapter and source.chat_id:
                                                 await _adapter.send(source.chat_id, _aux_msg, metadata=_hyg_meta)
                                         except Exception as _werr:
@@ -9303,7 +9328,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
         self._bind_adapter_run_generation(
-            self.adapters.get(source.platform),
+            self._adapter_for_source(source),
             session_key,
             run_generation,
         )
@@ -9339,7 +9364,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Stop persistent typing indicator now that the agent is done
             try:
-                _typing_adapter = self.adapters.get(source.platform)
+                _typing_adapter = self._adapter_for_source(source)
                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
                     await _typing_adapter.stop_typing(source.chat_id)
             except Exception:
@@ -9351,7 +9376,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _quick_key or "?",
                     run_generation,
                 )
-                _stale_adapter = self.adapters.get(source.platform)
+                _stale_adapter = self._adapter_for_source(source)
                 if getattr(type(_stale_adapter), "pop_post_delivery_callback", None) is not None:
                     _stale_adapter.pop_post_delivery_callback(
                         _quick_key,
@@ -9777,7 +9802,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # users see the agent "stop responding without explanation."
             if agent_result.get("already_sent") and not agent_result.get("failed"):
                 if response:
-                    _media_adapter = self.adapters.get(source.platform)
+                    _media_adapter = self._adapter_for_source(source)
                     if _media_adapter:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
@@ -9788,7 +9813,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # still surface the runtime metadata on the final reply.
                 if _footer_line:
                     try:
-                        _foot_adapter = self.adapters.get(source.platform)
+                        _foot_adapter = self._adapter_for_source(source)
                         if _foot_adapter:
                             await _foot_adapter.send(
                                 source.chat_id,
@@ -9804,7 +9829,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as e:
             # Stop typing indicator on error too
             try:
-                _err_adapter = self.adapters.get(source.platform)
+                _err_adapter = self._adapter_for_source(source)
                 if _err_adapter and hasattr(_err_adapter, "stop_typing"):
                     await _err_adapter.stop_typing(source.chat_id)
             except Exception:
@@ -13410,7 +13435,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if _streaming_enabled:
             try:
                 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                _adapter = self.adapters.get(source.platform)
+                _adapter = self._adapter_for_source(source)
                 if _adapter:
                     _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
@@ -13452,7 +13477,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             stream_task = asyncio.create_task(_stream_consumer.run())
 
         # Send typing indicator
-        _adapter = self.adapters.get(source.platform)
+        _adapter = self._adapter_for_source(source)
         if _adapter:
             try:
                 await _adapter.send_typing(source.chat_id, metadata=_thread_metadata)
@@ -14461,7 +14486,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("event_callback hook error: %s", _e)
 
         # Bridge sync status_callback → async adapter.send for context pressure
-        _status_adapter = self.adapters.get(source.platform)
+        _status_adapter = self._adapter_for_source(source)
         _status_chat_id = source.chat_id
         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
             # Feishu topics only keep messages inside the topic when they are
@@ -14589,7 +14614,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _want_stream_deltas or _want_interim_consumer:
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                    _adapter = self.adapters.get(source.platform)
+                    _adapter = self._adapter_for_source(source)
                     if _adapter:
                         # Platforms that don't support editing sent messages
                         # (e.g. QQ, WeChat) should skip streaming entirely —
