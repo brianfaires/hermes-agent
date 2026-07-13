@@ -45,7 +45,7 @@ import tempfile
 import time
 import threading
 import uuid
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
 # that imports the SDK on first call/isinstance check. This preserves:
@@ -2651,6 +2651,42 @@ class AIAgent:
         from agent.agent_runtime_helpers import dump_api_request_debug
         return dump_api_request_debug(self, api_kwargs, reason=reason, error=error)
 
+    def _capture_provider_boundary_request(
+        self,
+        api_kwargs: Dict[str, Any],
+        *,
+        endpoint_kind: Optional[str] = None,
+    ) -> Optional[Tuple[Path, Path]]:
+        """Forwarder for the opt-in first provider-request capture."""
+        from agent.agent_runtime_helpers import capture_provider_boundary_request
+
+        return capture_provider_boundary_request(
+            self,
+            api_kwargs,
+            endpoint_kind=endpoint_kind,
+        )
+
+    def _maybe_capture_provider_boundary_request(
+        self,
+        api_kwargs: Dict[str, Any],
+        *,
+        endpoint_kind: Optional[str] = None,
+    ) -> Optional[Tuple[Path, Path]]:
+        """Consume the opt-in one-shot capture at an actual provider boundary."""
+        if not getattr(self, "_provider_boundary_capture_enabled", False):
+            return None
+        if getattr(self, "_provider_boundary_capture_done", False):
+            return None
+        self._provider_boundary_capture_done = True
+        try:
+            return self._capture_provider_boundary_request(
+                api_kwargs,
+                endpoint_kind=endpoint_kind,
+            )
+        except Exception:
+            logger.debug("Provider-boundary request capture failed", exc_info=True)
+            return None
+
     @staticmethod
     def _clean_session_content(content: str) -> str:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
@@ -4811,6 +4847,7 @@ class AIAgent:
             api_kwargs,
             log_prefix=getattr(self, "log_prefix", ""),
             prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
+            before_dispatch=self._maybe_capture_provider_boundary_request,
         )
 
     def _rebuild_anthropic_client(self) -> None:

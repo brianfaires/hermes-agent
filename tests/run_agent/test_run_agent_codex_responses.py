@@ -1,6 +1,12 @@
+import json
+import multiprocessing
+import stat
 import sys
+import time
 import types
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,6 +16,25 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 import run_agent
+
+
+def _capture_request_in_subprocess(logs_dir, ready, result_queue):
+    from agent.agent_runtime_helpers import capture_provider_boundary_request
+
+    ready.set()
+    agent = SimpleNamespace(
+        logs_dir=Path(logs_dir),
+        session_id="subprocess-session",
+        api_mode="chat_completions",
+        base_url="https://example.invalid/v1",
+        _provider_boundary_capture_retention=2,
+        verbose_logging=False,
+    )
+    pair = capture_provider_boundary_request(
+        agent,
+        {"model": "test-model", "messages": []},
+    )
+    result_queue.put([str(path) for path in pair] if pair else None)
 
 
 @pytest.fixture(autouse=True)
@@ -2930,6 +2955,413 @@ def test_dump_api_request_debug_redacts_request_and_error_secrets(monkeypatch, t
     payload = json.loads(dumped_text)
     assert payload["request"]["headers"]["Authorization"].startswith("Bearer sk-ant-p...")
     assert "***" in dumped_text or "..." in dumped_text
+
+
+def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch, tmp_path):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    agent._provider_boundary_capture_retention = 3
+    request = {
+        "model": "gpt-5-codex",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "api_key": {
+                                "type": "string",
+                                "description": "Credential supplied at runtime",
+                                "default": "opaque-tool-schema-default",
+                            }
+                        },
+                    },
+                },
+            }
+        ],
+        "tool_choice": "auto",
+        "metadata": {
+            "api_key": "private-value-for-test",
+            "callback_url": (
+                "https://demo-user:demo-pass@example.invalid/cb"
+                "?token=opaque-value-for-test"
+            ),
+        },
+        "extra_headers": {
+            "Authorization": "Bearer opaque-bearer-value",
+            "Proxy-Authorization": "Basic proxy-secret-value",
+            "X-Api-Key": "other-secret-value",
+            "X-OpenAI-Key": "custom-key-secret-value",
+            "X-Custom-Signature": "signature-secret-value",
+            "Cookie": "session=cookie-secret-value",
+            "Content-Type": "application/json",
+        },
+        "extra_body": {
+            "auth": "opaque-auth-value",
+            "authentication": "opaque-authentication-value",
+            "password": "opaque-password-value",
+            "token": "opaque-token-value",
+            "client_secret": "opaque-client-secret-value",
+            "private_key": "opaque-private-key-value",
+            "api_token": "opaque-api-token-value",
+            "tools": {"password": "opaque-nested-tools-secret"},
+            "functions": {"private_key": "opaque-nested-functions-secret"},
+            "subscription_key": "opaque-subscription-key-secret",
+            "access_key": "opaque-access-key-secret",
+            "db_credentials": "opaque-db-credentials-secret",
+            "my_session_id": "opaque-session-id-secret",
+            "session_cookie": "opaque-session-cookie-secret",
+            "bearer_value": "opaque-bearer-value-secret",
+            "access_tokens": ["opaque-access-token-list-secret"],
+            "refresh_tokens": ["opaque-refresh-token-list-secret"],
+            "api_tokens": ["opaque-api-token-list-secret"],
+        },
+        "functions": [
+            {
+                "name": "legacy_tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "password": {
+                            "type": "string",
+                            "description": "Legacy runtime argument",
+                            "default": "opaque-function-schema-default",
+                        }
+                    },
+                },
+            }
+        ],
+        "metadata": None,
+        "max_tokens": 123,
+        "timeout": object(),
+    }
+
+    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+
+    assert with_tools.name == "with_tools.json"
+    assert prompt_only.name == "prompt_only.json"
+    assert with_tools.parent == prompt_only.parent
+    assert with_tools.parent.name.startswith("capture_")
+    assert with_tools.parent.parent == tmp_path / "request-captures"
+    full_payload = json.loads(with_tools.read_text())
+    prompt_payload = json.loads(prompt_only.read_text())
+    assert full_payload["capture"]["boundary"] == "hermes_provider_dispatch"
+    assert full_payload["capture"]["redaction_applied"] is True
+    assert full_payload["capture"]["provider_sdk_wrappers_included"] is False
+    tool_property = full_payload["request"]["body"]["tools"][0]["function"][
+        "parameters"
+    ]["properties"]["api_key"]
+    assert tool_property["type"] == "string"
+    assert tool_property["description"] == "Credential supplied at runtime"
+    assert tool_property["default"] == "«redacted-secret»"
+    assert "tools" not in prompt_payload["request"]["body"]
+    assert "tool_choice" not in prompt_payload["request"]["body"]
+    function_property = full_payload["request"]["body"]["functions"][0][
+        "parameters"
+    ]["properties"]["password"]
+    assert function_property["type"] == "string"
+    assert function_property["description"] == "Legacy runtime argument"
+    assert function_property["default"] == "«redacted-secret»"
+    assert "functions" not in prompt_payload["request"]["body"]
+    assert "metadata" in full_payload["request"]["body"]
+    assert full_payload["request"]["body"]["metadata"] is None
+    assert full_payload["request"]["body"]["max_tokens"] == 123
+    assert "timeout" not in full_payload["request"]["body"]
+    assert "private-value-for-test" not in with_tools.read_text()
+    assert "private-value-for-test" not in prompt_only.read_text()
+    for sensitive_url_part in (
+        "demo-pass",
+        "opaque-value-for-test",
+    ):
+        assert sensitive_url_part not in with_tools.read_text()
+        assert sensitive_url_part not in prompt_only.read_text()
+    for sensitive_header_part in (
+        "opaque-bearer-value",
+        "proxy-secret-value",
+        "other-secret-value",
+        "custom-key-secret-value",
+        "signature-secret-value",
+        "cookie-secret-value",
+    ):
+        assert sensitive_header_part not in with_tools.read_text()
+        assert sensitive_header_part not in prompt_only.read_text()
+    assert full_payload["request"]["body"]["extra_headers"]["Content-Type"] == (
+        "application/json"
+    )
+    for structured_secret in (
+        "opaque-auth-value",
+        "opaque-authentication-value",
+        "opaque-password-value",
+        "opaque-token-value",
+        "opaque-client-secret-value",
+        "opaque-private-key-value",
+        "opaque-api-token-value",
+        "opaque-nested-tools-secret",
+        "opaque-nested-functions-secret",
+        "opaque-tool-schema-default",
+        "opaque-function-schema-default",
+        "opaque-subscription-key-secret",
+        "opaque-access-key-secret",
+        "opaque-db-credentials-secret",
+        "opaque-session-id-secret",
+        "opaque-session-cookie-secret",
+        "opaque-bearer-value-secret",
+        "opaque-access-token-list-secret",
+        "opaque-refresh-token-list-secret",
+        "opaque-api-token-list-secret",
+    ):
+        assert structured_secret not in with_tools.read_text()
+        assert structured_secret not in prompt_only.read_text()
+    assert stat.S_IMODE(with_tools.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(with_tools.stat().st_mode) == 0o600
+    assert stat.S_IMODE(prompt_only.stat().st_mode) == 0o600
+
+
+def test_codex_stream_captures_final_provider_kwargs(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    agent._provider_boundary_capture_enabled = True
+    agent._provider_boundary_capture_done = False
+    agent._capture_provider_boundary_request = MagicMock()
+    dispatched = {}
+
+    def create(**kwargs):
+        dispatched.update(kwargs)
+        return SimpleNamespace(output=[], status="completed")
+
+    client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    response = agent._run_codex_stream(_codex_request_kwargs(), client=client)
+
+    captured = agent._capture_provider_boundary_request.call_args.args[0]
+    assert captured == dispatched
+    assert captured["stream"] is True
+    assert response.status == "completed"
+
+
+def test_provider_boundary_capture_reports_native_provider_endpoints():
+    from agent.agent_runtime_helpers import _capture_payload
+
+    anthropic_agent = SimpleNamespace(
+        session_id="anthropic-session",
+        api_mode="anthropic_messages",
+        base_url="https://api.anthropic.com",
+        _anthropic_base_url=None,
+    )
+    anthropic_payload = _capture_payload(
+        anthropic_agent,
+        {"model": "claude-test"},
+        artifact="with_tools",
+    )
+    assert anthropic_payload["request"]["url"] == (
+        "https://api.anthropic.com/v1/messages"
+    )
+
+    bedrock_agent = SimpleNamespace(
+        session_id="bedrock-session",
+        api_mode="bedrock_converse",
+        base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        model="anthropic.claude-test-v1:0",
+    )
+    bedrock_payload = _capture_payload(
+        bedrock_agent,
+        {"modelId": "anthropic.claude-test-v1:0"},
+        artifact="with_tools",
+        endpoint_kind="bedrock_converse_stream",
+    )
+    assert bedrock_payload["request"]["url"] == (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/"
+        "model/anthropic.claude-test-v1%3A0/converse-stream"
+    )
+
+
+def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    agent._provider_boundary_capture_retention = 1
+    request = {"model": "gpt-5-codex", "messages": []}
+
+    first_pair = agent._capture_provider_boundary_request(request)
+    second_pair = agent._capture_provider_boundary_request(request)
+
+    assert all(not path.exists() for path in first_pair)
+    assert all(path.exists() for path in second_pair)
+    capture_dir = tmp_path / "request-captures"
+    assert len(list(capture_dir.glob("capture_*"))) == 1
+    assert len(list(capture_dir.glob("capture_*/*.json"))) == 2
+
+
+def test_provider_boundary_capture_retention_keeps_complete_pairs(monkeypatch, tmp_path):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    agent._provider_boundary_capture_retention = 2
+    request = {"model": "gpt-5-codex", "messages": []}
+
+    first_pair = agent._capture_provider_boundary_request(request)
+    capture_dir = tmp_path / "request-captures"
+    orphan = capture_dir / "capture_interrupted"
+    orphan.mkdir()
+    (orphan / "with_tools.json").write_text("{}")
+    staged = capture_dir / ".capture_crashed.staging"
+    staged.mkdir()
+    (staged / "with_tools.json").write_text("{}")
+    second_pair = agent._capture_provider_boundary_request(request)
+
+    assert all(path.exists() for path in first_pair)
+    assert all(path.exists() for path in second_pair)
+    assert not orphan.exists()
+    assert not staged.exists()
+    assert len(list(capture_dir.glob("capture_*"))) == 2
+    assert len(list(capture_dir.glob("capture_*/*.json"))) == 4
+
+
+def test_provider_boundary_capture_never_publishes_half_pair(monkeypatch, tmp_path):
+    from agent import agent_runtime_helpers as helpers
+
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    real_atomic_json_write = helpers.atomic_json_write
+
+    def fail_second_artifact(path, *args, **kwargs):
+        if path.name == "prompt_only.json":
+            raise OSError("simulated crash before second artifact")
+        return real_atomic_json_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(helpers, "atomic_json_write", fail_second_artifact)
+
+    pair = agent._capture_provider_boundary_request(
+        {"model": "gpt-5-codex", "messages": []}
+    )
+
+    capture_dir = tmp_path / "request-captures"
+    assert pair is None
+    assert not list(capture_dir.glob("capture_*"))
+    assert not list(capture_dir.glob(".capture_*.staging"))
+
+
+def test_provider_boundary_capture_redacts_prompt_text_without_breaking_json(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    request = {
+        "model": "gpt-5-codex",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "diagnostic sample\nx-auth-token: opaque-prompt-value\n"
+                    "https://example.invalid/cb?"
+                    "credential=opaque-url-credential&"
+                    "api_token=opaque-url-token&"
+                    "private_key=opaque-url-private-key\n"
+                    "https://bucket.s3.amazonaws.com/object?"
+                    "X-Amz-Credential=opaque-aws-credential&"
+                    "X-Amz-Security-Token=opaque-aws-session&"
+                    "X-Amz-Signature=opaque-aws-signature&"
+                    "public_label=harmless-query-value"
+                ),
+            }
+        ],
+    }
+
+    pair = agent._capture_provider_boundary_request(request)
+
+    assert pair is not None
+    assert all(path.exists() for path in pair)
+    for secret in (
+        "opaque-prompt-value",
+        "opaque-url-credential",
+        "opaque-url-token",
+        "opaque-url-private-key",
+        "opaque-aws-credential",
+        "opaque-aws-session",
+        "opaque-aws-signature",
+        "harmless-query-value",
+    ):
+        assert all(secret not in path.read_text() for path in pair)
+
+
+def test_provider_boundary_capture_serializes_across_processes(tmp_path):
+    from agent.agent_runtime_helpers import _request_capture_process_lock
+
+    capture_dir = tmp_path / "request-captures"
+    capture_dir.mkdir()
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    result_queue = context.Queue()
+
+    with _request_capture_process_lock(capture_dir):
+        process = context.Process(
+            target=_capture_request_in_subprocess,
+            args=(str(tmp_path), ready, result_queue),
+        )
+        process.start()
+        assert ready.wait(timeout=10)
+        time.sleep(0.2)
+        assert process.is_alive()
+
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+    assert process.exitcode == 0
+    pair = result_queue.get(timeout=2)
+    assert pair is not None
+    assert all(Path(path).exists() for path in pair)
+
+
+def test_provider_boundary_capture_is_explicitly_armed_from_config(monkeypatch):
+    import hermes_cli.config
+
+    monkeypatch.setattr(
+        hermes_cli.config,
+        "load_config",
+        lambda: {"request_capture": {"enabled": True, "retention": 7}},
+    )
+
+    agent = _build_agent(monkeypatch)
+
+    assert agent._provider_boundary_capture_enabled is True
+    assert agent._provider_boundary_capture_retention == 7
+    assert agent._provider_boundary_capture_done is False
+
+
+def test_provider_boundary_capture_enablement_fails_closed(monkeypatch):
+    import hermes_cli.config
+
+    monkeypatch.setattr(
+        hermes_cli.config,
+        "load_config",
+        lambda: {"request_capture": {"enabled": "false", "retention": 7}},
+    )
+
+    agent = _build_agent(monkeypatch)
+
+    assert agent._provider_boundary_capture_enabled is False
+
+
+def test_provider_boundary_capture_uses_active_profile_home(monkeypatch, tmp_path):
+    import hermes_cli.config
+
+    profile_home = tmp_path / "profile-home"
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setattr(
+        hermes_cli.config,
+        "load_config",
+        lambda: {"request_capture": {"enabled": True, "retention": 2}},
+    )
+
+    agent = _build_agent(monkeypatch)
+    pair = agent._capture_provider_boundary_request(
+        {"model": "gpt-5-codex", "messages": []}
+    )
+
+    assert pair is not None
+    expected_directory = profile_home / "sessions" / "request-captures"
+    assert all(path.parent.parent == expected_directory for path in pair)
 
 
 # --- Reasoning-only response tests (fix for empty content retry loop) ---

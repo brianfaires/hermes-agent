@@ -2772,6 +2772,7 @@ def create_anthropic_message(
     *,
     log_prefix: str = "",
     prefer_stream: bool = True,
+    before_dispatch=None,
 ) -> Any:
     """Create an Anthropic message, aggregating via stream when available.
 
@@ -2790,6 +2791,8 @@ def create_anthropic_message(
         stream_kwargs = dict(api_kwargs)
         stream_kwargs.pop("stream", None)
         try:
+            if before_dispatch is not None:
+                before_dispatch(stream_kwargs)
             with stream_fn(**stream_kwargs) as stream:
                 return stream.get_final_message()
         except Exception as exc:
@@ -2804,4 +2807,6 @@ def create_anthropic_message(
 
     create_kwargs = dict(api_kwargs)
     create_kwargs.pop("stream", None)
+    if before_dispatch is not None:
+        before_dispatch(create_kwargs)
     return messages_api.create(**create_kwargs)

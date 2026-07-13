@@ -25,16 +25,34 @@ _SENSITIVE_QUERY_PARAMS = frozenset({
     "token",
     "api_key",
     "apikey",
+    "api_token",
     "client_secret",
+    "credential",
+    "credentials",
+    "access_key",
+    "subscription_key",
+    "client_key",
+    "consumer_key",
+    "connection_string",
+    "authentication",
+    "authorization",
     "password",
+    "passwd",
+    "passphrase",
     "auth",
     "jwt",
     "session",
     "secret",
+    "private_key",
     "key",
     "code",           # OAuth authorization codes
     "signature",      # pre-signed URL signatures
-    "x-amz-signature",
+    "x_amz_credential",
+    "x_amz_security_token",
+    "x_amz_signature",
+    "x_goog_credential",
+    "x_goog_signature",
+    "awsaccesskeyid",
 })
 
 # Sensitive form-urlencoded / JSON body key names (case-insensitive exact match).
@@ -439,7 +457,11 @@ def _canonical_url_param_name(name: str) -> str:
     return decoded.casefold().replace("-", "_")
 
 
-def _redact_strict_url_credentials(text: str) -> str:
+def _redact_strict_url_credentials(
+    text: str,
+    *,
+    redact_all_query_values: bool = False,
+) -> str:
     """Redact credentials from absolute, relative, and network URL references.
 
     This is intentionally stricter than display/log redaction and is used only
@@ -448,7 +470,11 @@ def _redact_strict_url_credentials(text: str) -> str:
     values and URL userinfo.
     """
     def _redact_param(match: re.Match) -> str:
-        if _canonical_url_param_name(match.group(2)) not in _SENSITIVE_QUERY_PARAMS:
+        if (
+            not redact_all_query_values
+            and _canonical_url_param_name(match.group(2))
+            not in _SENSITIVE_QUERY_PARAMS
+        ):
             return match.group(0)
         return f"{match.group(1)}{match.group(2)}=***"
 
@@ -547,6 +573,7 @@ def redact_sensitive_text(
     code_file: bool = False,
     file_read: bool = False,
     redact_url_credentials: bool = False,
+    redact_all_url_query_values: bool = False,
 ) -> str:
     """Apply all redaction patterns to a block of text.
 
@@ -559,6 +586,8 @@ def redact_sensitive_text(
     additionally redact credential-named query parameters and ``user:pass@``
     URL userinfo. The default remains False because actionable OAuth callback,
     magic-link, and pre-signed URLs must survive ordinary tool flows unchanged.
+    Set redact_all_url_query_values=True only for strict persistence boundaries;
+    it preserves URL structure and parameter names while masking every value.
 
     Set code_file=True to skip the ENV-assignment and JSON-field regex
     patterns when the text is known to be source code (e.g. MAX_TOKENS=***
@@ -725,7 +754,10 @@ def redact_sensitive_text(
     # left to pass through per #34029.
 
     if redact_url_credentials:
-        text = _redact_strict_url_credentials(text)
+        text = _redact_strict_url_credentials(
+            text,
+            redact_all_query_values=redact_all_url_query_values,
+        )
 
     # Form-urlencoded bodies (only triggers on clean k=v&k=v inputs).
     if "&" in text and "=" in text:

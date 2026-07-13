@@ -181,12 +181,19 @@ class TestStreamingAccumulator:
         )
         agent.api_mode = "chat_completions"
         agent._interrupt_requested = False
+        agent._provider_boundary_capture_enabled = True
+        agent._provider_boundary_capture_done = False
+        agent._capture_provider_boundary_request = MagicMock()
 
         response = agent._interruptible_streaming_api_call({})
 
         assert response.choices[0].message.content == "ok"
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         assert call_kwargs["stream_options"] == {"include_usage": True}
+        captured_kwargs = agent._capture_provider_boundary_request.call_args.args[0]
+        assert captured_kwargs["stream"] is True
+        assert captured_kwargs["stream_options"] == {"include_usage": True}
+        assert agent._provider_boundary_capture_done is True
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")

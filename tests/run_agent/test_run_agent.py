@@ -4327,6 +4327,41 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
+    def test_provider_boundary_capture_runs_once_on_first_dispatch(self, agent):
+        self._setup_agent(agent)
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc]),
+            _mock_response(content="Done searching", finish_reason="stop"),
+        ]
+        agent._provider_boundary_capture_enabled = True
+        agent._provider_boundary_capture_done = False
+
+        def execution_middleware(request, terminal_call, **_kwargs):
+            final_request = dict(request)
+            final_request["metadata"] = {"stage": "final-provider"}
+            return terminal_call(final_request)
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_capture_provider_boundary_request") as capture,
+            patch(
+                "hermes_cli.middleware.run_llm_execution_middleware",
+                side_effect=execution_middleware,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search something")
+
+        assert result["api_calls"] == 2
+        capture.assert_called_once()
+        assert capture.call_args.args[0]["metadata"] == {
+            "stage": "final-provider"
+        }
+        assert agent._provider_boundary_capture_done is True
+
     def test_tool_call_none_args_verbose_logging_does_not_crash(self, agent):
         self._setup_agent(agent)
         agent.verbose_logging = True

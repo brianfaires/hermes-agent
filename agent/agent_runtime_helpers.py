@@ -25,9 +25,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
+import shutil
 import threading
 import time
+from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -42,6 +46,7 @@ from agent.turn_context import drop_stale_api_content
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 
 logger = logging.getLogger(__name__)
+_REQUEST_CAPTURE_LOCK = threading.Lock()
 
 
 # Max consecutive successful credential-pool token refreshes of the SAME entry
@@ -1592,6 +1597,558 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
 
 
 
+def _request_body_for_debug(api_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    body = copy.deepcopy(api_kwargs)
+    body.pop("timeout", None)
+    return body
+
+
+def _request_debug_url(
+    agent,
+    body: Optional[Dict[str, Any]] = None,
+    *,
+    endpoint_kind: Optional[str] = None,
+) -> str:
+    base_url = str(getattr(agent, "base_url", "") or "").rstrip("/")
+    api_mode = getattr(agent, "api_mode", "chat_completions")
+
+    if api_mode == "anthropic_messages":
+        base_url = str(
+            getattr(agent, "_anthropic_base_url", None) or base_url
+        ).rstrip("/")
+        if base_url.endswith("/v1/messages"):
+            return base_url
+        if base_url.endswith("/v1"):
+            return f"{base_url}/messages"
+        return f"{base_url}/v1/messages"
+
+    if api_mode == "bedrock_converse":
+        from urllib.parse import quote
+
+        if not base_url:
+            region = getattr(agent, "_bedrock_region", "us-east-1")
+            base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
+        model_id = (body or {}).get("modelId") or getattr(agent, "model", "unknown")
+        operation = (
+            "converse-stream"
+            if endpoint_kind == "bedrock_converse_stream"
+            else "converse"
+        )
+        return f"{base_url}/model/{quote(str(model_id), safe='')}/{operation}"
+
+    suffix = "/responses" if api_mode == "codex_responses" else "/chat/completions"
+    return base_url if base_url.endswith(suffix) else f"{base_url}{suffix}"
+
+
+_STRUCTURED_SECRET_KEYS = {
+    "auth",
+    "authentication",
+    "authorization",
+    "proxyauthorization",
+    "cookie",
+    "setcookie",
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "secret",
+    "clientsecret",
+    "privatekey",
+    "apitoken",
+    "credential",
+    "credentials",
+    "accesskey",
+    "secretaccesskey",
+    "subscriptionkey",
+    "clientkey",
+    "consumerkey",
+    "signingkey",
+    "encryptionkey",
+    "accountkey",
+    "serviceaccountkey",
+    "awsaccesskeyid",
+    "awssecretaccesskey",
+    "connectionstring",
+    "bearer",
+    "session",
+    "sessionid",
+}
+_STRUCTURED_SECRET_KEY_SUFFIXES = (
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "secret",
+    "privatekey",
+    "credential",
+    "apikey",
+    "authtoken",
+    "accesstoken",
+    "refreshtoken",
+    "securitytoken",
+    "sessiontoken",
+    "secretkey",
+    "key",
+    "keys",
+    "signature",
+)
+_HEADER_CONTAINER_KEYS = {
+    "headers",
+    "extraheaders",
+    "defaultheaders",
+    "requestheaders",
+}
+_HEADER_SECRET_MARKERS = (
+    "auth",
+    "token",
+    "key",
+    "cookie",
+    "secret",
+    "signature",
+    "credential",
+)
+_STRUCTURED_SECRET_MARKERS = (
+    "credential",
+    "bearer",
+    "session",
+    "cookie",
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "signature",
+)
+_NONSECRET_TOKEN_FIELDS = {
+    "maxtokens",
+    "maxcompletiontokens",
+    "maxoutputtokens",
+    "mintokens",
+    "numtokens",
+    "inputtokens",
+    "outputtokens",
+    "prompttokens",
+    "completiontokens",
+    "reasoningtokens",
+    "cachedtokens",
+    "totaltokens",
+    "tokencount",
+    "inputtokencount",
+    "outputtokencount",
+    "prompttokencount",
+    "completiontokencount",
+    "reasoningtokencount",
+    "cachedtokencount",
+    "totaltokencount",
+    "tokenbudget",
+}
+_SCHEMA_SECRET_VALUE_KEYS = {
+    "default",
+    "example",
+    "examples",
+    "const",
+    "enum",
+}
+
+
+def _is_structured_secret_key(normalized: str, *, header_context: bool) -> bool:
+    return (
+        normalized in _STRUCTURED_SECRET_KEYS
+        or normalized.endswith(_STRUCTURED_SECRET_KEY_SUFFIXES)
+        or any(marker in normalized for marker in _STRUCTURED_SECRET_MARKERS)
+        or normalized.startswith("auth")
+        or (
+            "token" in normalized
+            and normalized not in _NONSECRET_TOKEN_FIELDS
+        )
+        or (
+            header_context
+            and any(marker in normalized for marker in _HEADER_SECRET_MARKERS)
+        )
+    )
+
+
+def _redact_schema_secret_literal(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _redact_schema_secret_literal(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_schema_secret_literal(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_schema_secret_literal(item) for item in value)
+    return "«redacted-secret»"
+
+
+def _redact_structured_credentials(
+    value: Any,
+    *,
+    header_context: bool = False,
+    schema_context: bool = False,
+    schema_properties_context: bool = False,
+    sensitive_schema_property: bool = False,
+    path: Tuple[str, ...] = (),
+) -> Any:
+    """Redact credential fields while preserving tool-schema structure."""
+
+    if isinstance(value, Mapping):
+        redacted: Dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            child_path = (*path, normalized)
+            enters_provider_schema = (
+                not schema_context
+                and path[-2:] == ("request", "body")
+                and normalized in {"tools", "functions"}
+            )
+
+            if schema_context and schema_properties_context:
+                child_sensitive = _is_structured_secret_key(
+                    normalized,
+                    header_context=False,
+                )
+                redacted[key] = _redact_structured_credentials(
+                    item,
+                    schema_context=True,
+                    sensitive_schema_property=child_sensitive,
+                    path=child_path,
+                )
+            elif (
+                schema_context
+                and sensitive_schema_property
+                and normalized in _SCHEMA_SECRET_VALUE_KEYS
+            ):
+                redacted[key] = _redact_schema_secret_literal(item)
+            elif not schema_context and _is_structured_secret_key(
+                normalized,
+                header_context=header_context,
+            ):
+                redacted[key] = "«redacted-secret»"
+            else:
+                child_schema_context = schema_context or enters_provider_schema
+                redacted[key] = _redact_structured_credentials(
+                    item,
+                    header_context=(
+                        not child_schema_context
+                        and (header_context or normalized in _HEADER_CONTAINER_KEYS)
+                    ),
+                    schema_context=child_schema_context,
+                    schema_properties_context=(
+                        child_schema_context and normalized == "properties"
+                    ),
+                    sensitive_schema_property=sensitive_schema_property,
+                    path=child_path,
+                )
+        return redacted
+    if isinstance(value, list):
+        return [
+            _redact_structured_credentials(
+                item,
+                header_context=header_context,
+                schema_context=schema_context,
+                schema_properties_context=schema_properties_context,
+                sensitive_schema_property=sensitive_schema_property,
+                path=path,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        if (
+            header_context
+            and not schema_context
+            and len(value) == 2
+            and isinstance(value[0], str)
+        ):
+            normalized = re.sub(r"[^a-z0-9]", "", value[0].lower())
+            if _is_structured_secret_key(normalized, header_context=True):
+                return value[0], "«redacted-secret»"
+        return tuple(
+            _redact_structured_credentials(
+                item,
+                header_context=header_context,
+                schema_context=schema_context,
+                schema_properties_context=schema_properties_context,
+                sensitive_schema_property=sensitive_schema_property,
+                path=path,
+            )
+            for item in value
+        )
+    return value
+
+
+def _redact_request_values(value: Any) -> Any:
+    """Redact string values without applying regexes to JSON syntax."""
+
+    from agent.redact import redact_sensitive_text
+
+    if isinstance(value, Mapping):
+        return {key: _redact_request_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_request_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_request_values(item) for item in value)
+    if isinstance(value, str):
+        return redact_sensitive_text(
+            value,
+            force=True,
+            redact_url_credentials=True,
+            redact_all_url_query_values=True,
+        )
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_sensitive_text(
+        str(value),
+        force=True,
+        redact_url_credentials=True,
+        redact_all_url_query_values=True,
+    )
+
+
+def _redact_request_payload(
+    payload: Dict[str, Any],
+    *,
+    redact_structured_credentials: bool = False,
+) -> Dict[str, Any]:
+    structured = (
+        _redact_structured_credentials(payload)
+        if redact_structured_credentials
+        else payload
+    )
+    return _redact_request_values(structured)
+
+
+def _capture_payload(
+    agent,
+    body: Dict[str, Any],
+    *,
+    artifact: str,
+    endpoint_kind: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "session_id": agent.session_id,
+        "capture": {
+            "boundary": "hermes_provider_dispatch",
+            "artifact": artifact,
+            "redaction_applied": True,
+            "transport_only_keys_omitted": ["timeout"],
+            "provider_sdk_wrappers_included": False,
+            "note": (
+                "Hermes-visible provider request kwargs captured immediately before "
+                "dispatch; sensitive values are redacted before persistence."
+            ),
+        },
+        "request": {
+            "method": "POST",
+            "url": _request_debug_url(
+                agent,
+                body,
+                endpoint_kind=endpoint_kind,
+            ),
+            "body": body,
+        },
+    }
+
+
+@contextmanager
+def _request_capture_process_lock(directory: Path):
+    """Serialize pair publication and pruning across OS processes."""
+
+    lock_path = directory / ".request-capture.lock"
+    lock_path.touch(mode=0o600, exist_ok=True)
+    try:
+        lock_path.chmod(0o600)
+    except OSError:
+        pass
+
+    handle = open(lock_path, "a+b")
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b" ")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired and os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif acquired:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _fsync_capture_directory(directory: Path) -> None:
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _cleanup_staged_captures(directory: Path) -> None:
+    for staged in directory.glob(".capture_*.staging"):
+        if staged.is_dir():
+            shutil.rmtree(staged, ignore_errors=True)
+
+
+def _prune_provider_boundary_captures(directory: Path, retention: int) -> None:
+    max_pairs = max(1, min(int(retention), 1000))
+    complete: List[Tuple[int, Path]] = []
+    stale: List[Path] = []
+
+    for capture in directory.glob("capture_*"):
+        if not capture.is_dir():
+            stale.append(capture)
+            continue
+        with_tools = capture / "with_tools.json"
+        prompt_only = capture / "prompt_only.json"
+        if not with_tools.is_file() or not prompt_only.is_file():
+            stale.append(capture)
+            continue
+        try:
+            newest_mtime = max(
+                with_tools.stat().st_mtime_ns,
+                prompt_only.stat().st_mtime_ns,
+            )
+        except FileNotFoundError:
+            continue
+        complete.append((newest_mtime, capture))
+
+    complete.sort(key=lambda item: item[0], reverse=True)
+    stale.extend(capture for _mtime, capture in complete[max_pairs:])
+
+    # Remove pre-directory artifacts from development builds of this feature.
+    stale.extend(directory.glob("request_capture_*.json"))
+    for path in stale:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def capture_provider_boundary_request(
+    agent,
+    api_kwargs: Dict[str, Any],
+    *,
+    endpoint_kind: Optional[str] = None,
+) -> Optional[Tuple[Path, Path]]:
+    """Persist one redacted provider request as an atomically published pair."""
+
+    staging_dir: Optional[Path] = None
+    published_pair: Optional[Tuple[Path, Path]] = None
+    try:
+        body_with_tools = _request_body_for_debug(api_kwargs)
+        body_prompt_only = copy.deepcopy(body_with_tools)
+        for key in (
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "functions",
+            "function_call",
+        ):
+            body_prompt_only.pop(key, None)
+
+        with_tools_payload = _redact_request_payload(
+            _capture_payload(
+                agent,
+                body_with_tools,
+                artifact="with_tools",
+                endpoint_kind=endpoint_kind,
+            ),
+            redact_structured_credentials=True,
+        )
+        prompt_only_payload = _redact_request_payload(
+            _capture_payload(
+                agent,
+                body_prompt_only,
+                artifact="prompt_only",
+                endpoint_kind=endpoint_kind,
+            ),
+            redact_structured_credentials=True,
+        )
+
+        capture_dir = agent.logs_dir / "request-captures"
+        with _REQUEST_CAPTURE_LOCK:
+            capture_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                capture_dir.chmod(0o700)
+            except OSError:
+                # Windows ACLs do not implement POSIX modes. The directory is
+                # still profile-local; POSIX profiles enforce 0700 above.
+                pass
+            with _request_capture_process_lock(capture_dir):
+                _cleanup_staged_captures(capture_dir)
+                safe_sid = _ra()._safe_session_filename_component(agent.session_id)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                capture_id = f"{safe_sid}_{timestamp}_{time.time_ns()}"
+                staging_dir = capture_dir / f".capture_{capture_id}.staging"
+                final_dir = capture_dir / f"capture_{capture_id}"
+                staging_dir.mkdir(mode=0o700)
+                try:
+                    staging_dir.chmod(0o700)
+                except OSError:
+                    pass
+
+                staged_with_tools = staging_dir / "with_tools.json"
+                staged_prompt_only = staging_dir / "prompt_only.json"
+                atomic_json_write(
+                    staged_with_tools,
+                    with_tools_payload,
+                    mode=0o600,
+                    default=str,
+                )
+                atomic_json_write(
+                    staged_prompt_only,
+                    prompt_only_payload,
+                    mode=0o600,
+                    default=str,
+                )
+                _fsync_capture_directory(staging_dir)
+                os.replace(staging_dir, final_dir)
+                staging_dir = None
+                _fsync_capture_directory(capture_dir)
+
+                published_pair = (
+                    final_dir / "with_tools.json",
+                    final_dir / "prompt_only.json",
+                )
+                _prune_provider_boundary_captures(
+                    capture_dir,
+                    getattr(agent, "_provider_boundary_capture_retention", 20),
+                )
+        return published_pair
+    except Exception as capture_error:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if published_pair is not None and all(path.exists() for path in published_pair):
+            return published_pair
+        if getattr(agent, "verbose_logging", False):
+            logger.warning("Failed to capture provider-boundary request: %s", capture_error)
+        return None
+
+
 def dump_api_request_debug(
     agent,
     api_kwargs: Dict[str, Any],
@@ -1607,9 +2164,7 @@ def dump_api_request_debug(
     retries are not useful.
     """
     try:
-        body = copy.deepcopy(api_kwargs)
-        body.pop("timeout", None)
-        body = {k: v for k, v in body.items() if v is not None}
+        body = _request_body_for_debug(api_kwargs)
 
         api_key = None
         try:
@@ -1623,7 +2178,7 @@ def dump_api_request_debug(
             "reason": reason,
             "request": {
                 "method": "POST",
-                "url": f"{agent.base_url.rstrip('/')}{'/responses' if agent.api_mode == 'codex_responses' else '/chat/completions'}",
+                "url": _request_debug_url(agent),
                 "headers": {
                     "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
                     "Content-Type": "application/json",
@@ -1670,9 +2225,7 @@ def dump_api_request_debug(
         # Run the serialized dump through the same scrubber used for logs/tool
         # output, then hand the resulting payload back to the shared atomic
         # JSON writer so request dumps keep the same write semantics as before.
-        from agent.redact import redact_sensitive_text
-        _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
-        _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
+        _redacted_payload = _redact_request_payload(dump_payload)
         atomic_json_write(dump_file, _redacted_payload, default=str)
 
         agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
@@ -3456,6 +4009,7 @@ __all__ = [
     "drop_thinking_only_and_merge_users",
     "restore_primary_runtime",
     "extract_reasoning",
+    "capture_provider_boundary_request",
     "dump_api_request_debug",
     "anthropic_prompt_cache_policy",
     "create_openai_client",

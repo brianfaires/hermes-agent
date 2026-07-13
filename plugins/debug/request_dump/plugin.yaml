@@ -1,0 +1,4 @@
+name: request-dump
+version: "1.2.0"
+description: "Estimate the newest persisted system prompt with current tools. Redacted provider-boundary capture is a separate request_capture config opt-in."
+author: brian

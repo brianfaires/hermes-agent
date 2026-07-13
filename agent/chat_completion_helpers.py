@@ -369,6 +369,20 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
     return None
 
 
+def _capture_provider_boundary_if_available(
+    agent,
+    api_kwargs: dict,
+    *,
+    endpoint_kind=None,
+) -> None:
+    callback = getattr(agent, "_maybe_capture_provider_boundary_request", None)
+    if callable(callback):
+        if endpoint_kind is None:
+            callback(api_kwargs)
+        else:
+            callback(api_kwargs, endpoint_kind=endpoint_kind)
+
+
 def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     """Run one non-streaming LLM request for the active api_mode and return it.
 
@@ -415,6 +429,11 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         api_kwargs.pop("__bedrock_converse__", None)
         client = _get_bedrock_runtime_client(region)
         try:
+            _capture_provider_boundary_if_available(
+                agent,
+                api_kwargs,
+                endpoint_kind="bedrock_converse",
+            )
             raw_response = client.converse(**api_kwargs)
         except Exception as _bedrock_exc:
             # Evict the cached client on stale-connection failures
@@ -427,8 +446,10 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
         # MoA is a virtual chat-completions provider backed by the
         # in-process MoAClient facade. Do not rebuild a request-local
         # OpenAI client from the virtual runtime metadata.
+        _capture_provider_boundary_if_available(agent, api_kwargs)
         return agent.client.chat.completions.create(**api_kwargs)
     request_client = make_client("chat_completion_request")
+    _capture_provider_boundary_if_available(agent, api_kwargs)
     return request_client.chat.completions.create(**api_kwargs)
 
 
@@ -2318,6 +2339,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs.pop("__bedrock_converse__", None)
                 client = _get_bedrock_runtime_client(region)
                 try:
+                    _capture_provider_boundary_if_available(
+                        agent,
+                        api_kwargs,
+                        endpoint_kind="bedrock_converse_stream",
+                    )
                     raw_response = client.converse_stream(**api_kwargs)
                 except Exception as _bedrock_exc:
                     # IAM policies scoped to bedrock:InvokeModel only (no
@@ -2679,6 +2705,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
+        _capture_provider_boundary_if_available(agent, stream_kwargs)
         stream = request_client.chat.completions.create(**stream_kwargs)
         # Claim the delta sink for THIS attempt (#65991). If a prior attempt's
         # stream is somehow still alive (a stale-stream reconnect whose socket
@@ -3102,6 +3129,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             api_kwargs, log_prefix=getattr(agent, "log_prefix", "")
         )
         # Use the Anthropic SDK's streaming context manager
+        _capture_provider_boundary_if_available(agent, api_kwargs)
         with request_client.messages.stream(**api_kwargs) as stream:
             # The Anthropic SDK exposes the raw httpx response on
             # ``stream.response``.  Snapshot diagnostic headers

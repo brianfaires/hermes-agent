@@ -3181,6 +3181,16 @@ DEFAULT_CONFIG = {
         "fresh_final_after_seconds": 0.0,
     },
 
+    # Optional first provider-request capture for request-context diagnostics.
+    # Disabled by default because artifacts contain full prompts/messages after
+    # secret redaction. Writes one with-tools and one prompt-only JSON file under
+    # the active profile's sessions/request-captures directory, then prunes old
+    # pairs to the configured retention bound.
+    "request_capture": {
+        "enabled": False,
+        "retention": 20,
+    },
+
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.
     # state.db accumulates every session, message, tool call, and FTS5 index
     # entry forever.  Without auto-pruning, a heavy user (gateway + cron)

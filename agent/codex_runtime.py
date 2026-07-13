@@ -1215,6 +1215,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_kwargs["stream"] = True
 
         try:
+            capture = getattr(agent, "_maybe_capture_provider_boundary_request", None)
+            if callable(capture):
+                capture(stream_kwargs)
             event_stream = active_client.responses.create(**stream_kwargs)
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:

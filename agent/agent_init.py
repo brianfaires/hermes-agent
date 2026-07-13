@@ -1374,6 +1374,20 @@ def init_agent(
     except Exception:
         _agent_cfg = {}
 
+    _request_capture_cfg = _agent_cfg.get("request_capture") or {}
+    agent._provider_boundary_capture_enabled = (
+        _request_capture_cfg.get("enabled", False) is True
+    )
+    try:
+        _capture_retention = int(_request_capture_cfg.get("retention", 20))
+    except (TypeError, ValueError):
+        _capture_retention = 20
+    agent._provider_boundary_capture_retention = max(
+        1,
+        min(_capture_retention, 1000),
+    )
+    agent._provider_boundary_capture_done = False
+
     # Codex commentary visibility (display.show_commentary, default true).
     # When true, completed Codex phase=commentary messages are delivered as
     # visible mid-turn updates through the interim message path. When false,
