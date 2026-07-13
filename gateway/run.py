@@ -6498,7 +6498,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
             )
 
-            await self._kanban_mirror_supervisor.stop()
+            _kanban_mirror_supervisor = getattr(self, "_kanban_mirror_supervisor", None)
+            if _kanban_mirror_supervisor is not None:
+                await _kanban_mirror_supervisor.stop()
             try:
                 from gateway.status import write_runtime_status
                 write_runtime_status(kanban_mirror={})
@@ -6788,7 +6790,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Idempotently attach router recovery and health to the ingress gateway."""
         from gateway.kanban_discord_inbox import load_config as load_inbox_config
         cfg = load_inbox_config()
-        ingress_profile = getattr(self, "_kanban_router_ingress_profile", self._gateway_profile_name)
+        ingress_profile = getattr(
+            self,
+            "_kanban_router_ingress_profile",
+            getattr(self, "_gateway_profile_name", ""),
+        )
         ingress = self._discord_adapter_for_profile(ingress_profile) if ingress_profile else None
         board_slug = cfg.board_slug or "default"
         enabled = bool(cfg.enabled and cfg.conversation_router_enabled and ingress)
