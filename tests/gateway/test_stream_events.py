@@ -9,6 +9,7 @@ can't render it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from gateway.stream_dispatch import GatewayEventDispatcher
@@ -108,6 +109,7 @@ def test_tool_preview_truncated_to_cap():
 
 def test_file_tool_path_previews_are_shortened_before_truncation():
     lines = []
+    repo_path = Path.home() / ".hermes/hermes-agent/gateway/platforms/base.py"
     d = GatewayEventDispatcher(
         _base_adapter(), _FakeSink(),
         enqueue_tool_line=lines.append, tool_mode="all", preview_max_len=80,
@@ -115,16 +117,17 @@ def test_file_tool_path_previews_are_shortened_before_truncation():
     d.dispatch(
         ToolCallChunk(
             tool_name="read_file",
-            preview="/home/brian/.hermes/hermes-agent/gateway/platforms/base.py",
-            args={"path": "/home/brian/.hermes/hermes-agent/gateway/platforms/base.py"},
+            preview=str(repo_path),
+            args={"path": str(repo_path)},
         )
     )
     assert "hermes-agent/gateway/platforms/base.py" in lines[0]
-    assert "/home/brian/.hermes/hermes-agent" not in lines[0]
+    assert str(Path.home() / ".hermes/hermes-agent") not in lines[0]
 
 
 def test_file_tool_verbose_args_are_shortened():
     lines = []
+    home = Path.home()
     d = GatewayEventDispatcher(
         _base_adapter(), _FakeSink(),
         enqueue_tool_line=lines.append, tool_mode="verbose", preview_max_len=0,
@@ -133,14 +136,14 @@ def test_file_tool_verbose_args_are_shortened():
         ToolCallChunk(
             tool_name="write_file",
             args={
-                "path": "/home/brian/projects/report.txt",
-                "content": "see /home/brian/.hermes/hermes-agent/agent/display.py",
+                "path": str(home / "projects/report.txt"),
+                "content": f"see {home}/.hermes/hermes-agent/agent/display.py",
             },
         )
     )
     assert "~/projects/report.txt" in lines[0]
     assert "hermes-agent/agent/display.py" in lines[0]
-    assert "/home/brian/" not in lines[0]
+    assert f"{home}/" not in lines[0]
 
 
 def test_terminal_display_strips_pipefail_boilerplate():
