@@ -25,11 +25,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from hermes_cli.timeouts import get_provider_request_timeout
 from agent.prompt_builder import format_steer_marker
@@ -1157,6 +1159,7 @@ def dump_api_request_debug(
     *,
     reason: str,
     error: Optional[Exception] = None,
+    capture: bool = False,
 ) -> Optional[Path]:
     """
     Dump a debug-friendly HTTP request record for the active inference API.
@@ -1216,7 +1219,8 @@ def dump_api_request_debug(
             dump_payload["error"] = error_info
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        dump_file = agent.logs_dir / f"request_dump_{agent.session_id}_{timestamp}.json"
+        prefix = "request_capture_with_tools" if capture and body.get("tools") else ("request_capture" if capture else "request_dump")
+        dump_file = agent.logs_dir / f"{prefix}_{agent.session_id}_{timestamp}.json"
 
         # Redact secrets before persisting/printing. This dump captures the
         # full request body (system prompt, tool defs, context-embedded
@@ -1229,6 +1233,20 @@ def dump_api_request_debug(
         _serialized = json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
         _redacted_payload = json.loads(redact_sensitive_text(_serialized, force=True))
         atomic_json_write(dump_file, _redacted_payload, default=str)
+        if capture:
+            request_body = _redacted_payload["request"]["body"]
+            body_text = json.dumps(request_body, ensure_ascii=False, default=str)
+            ranked = sorted([
+                (len(json.dumps(t, ensure_ascii=False, default=str)),
+                 t.get("function", {}).get("name") or t.get("name") or "(unnamed)")
+                for t in request_body.get("tools") or []
+            ], reverse=True)
+            u = urlsplit(str(agent.base_url)); safe_url = f"{u.scheme}://{u.netloc}{u.path}"
+            lines = ["Hermes one-shot request capture", f"request_file: {dump_file.name}", f"session_id: {agent.session_id}", f"gateway_session_key: {getattr(agent, '_gateway_session_key', None)}", f"profile: {os.environ.get('HERMES_PROFILE', 'default')}", f"hermes_home: {os.environ.get('HERMES_HOME', str(Path.home() / '.hermes'))}", f"model: {agent.model}", f"model_family: {str(agent.model).split('/', 1)[-1].split('-', 1)[0]}", f"provider: {agent.provider}", f"api_mode: {agent.api_mode}", f"base_url: {safe_url}", f"platform_source: {getattr(agent, 'platform', None)}", f"cwd_project_context: {os.getcwd()}", f"enabled_toolsets: {getattr(agent, 'enabled_toolsets', None)}", f"disabled_toolsets: {getattr(agent, 'disabled_toolsets', None)}", f"tool_count: {len(ranked)}", f"request_body_chars: {len(body_text)}", f"request_body_approx_tokens: {max(1, len(body_text)//4)}", f"tool_definitions_chars: {sum(x[0] for x in ranked)}", f"tool_definitions_approx_tokens: {sum(x[0] for x in ranked)//4}", f"prompt_caching: {getattr(agent, '_use_prompt_caching', None)}", f"native_cache_layout: {getattr(agent, '_use_native_cache_layout', None)}", f"ephemeral_system_prompt: {bool(getattr(agent, 'ephemeral_system_prompt', None))}", f"prefill_messages: {len(getattr(agent, 'prefill_messages', None) or [])}", f"reasoning_config: {getattr(agent, 'reasoning_config', None)}", f"request_override_keys: {sorted((getattr(agent, 'request_overrides', None) or {}).keys())}", "tools_by_serialized_size_chars:"]
+            lines.extend(f"  {size:>8}  {name}" for size, name in ranked)
+            summary_file = dump_file.with_suffix(".summary.txt")
+            summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.chmod(dump_file, 0o600); os.chmod(summary_file, 0o600)
 
         agent._vprint(f"{agent.log_prefix}🧾 Request debug dump written to: {dump_file}")
 

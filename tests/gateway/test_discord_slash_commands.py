@@ -185,12 +185,27 @@ async def test_auto_registered_command_dispatches_correctly(adapter):
     adapter._run_simple_slash = AsyncMock()
     adapter._register_slash_commands()
 
-    # /debug has no args — test parameterless dispatch
+    # /debug keeps its parameterless behavior despite accepting an optional action.
     debug_cmd = adapter._client.tree.commands["debug"]
     interaction = SimpleNamespace()
     adapter._run_simple_slash.reset_mock()
     await debug_cmd.callback(interaction)
     adapter._run_simple_slash.assert_awaited_once_with(interaction, "/debug")
+
+
+@pytest.mark.asyncio
+async def test_auto_registered_debug_capture_request_dispatches_correctly(adapter):
+    """Discord's native /debug action must reach the gateway command parser."""
+    adapter._run_simple_slash = AsyncMock()
+    adapter._register_slash_commands()
+
+    debug_cmd = adapter._client.tree.commands["debug"]
+    interaction = SimpleNamespace()
+    await debug_cmd.callback(interaction, action="capture-request")
+
+    adapter._run_simple_slash.assert_awaited_once_with(
+        interaction, "/debug capture-request"
+    )
 
 
 @pytest.mark.asyncio

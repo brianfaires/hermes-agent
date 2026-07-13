@@ -3685,6 +3685,12 @@ class GatewaySlashCommandsMixin:
         NOT full log files, to protect conversation privacy.  Users who need
         full log uploads should use ``hermes debug share`` from the CLI.
         """
+        if event.get_command_args().strip().lower() == "capture-request":
+            from agent.request_capture import arm_request_capture
+            arm_request_capture(self._session_key_for_source(event.source))
+            return ("🧾 Request capture armed for this session. The next API request "
+                    "will be captured locally, then capture will disarm.")
+
         import asyncio
         from hermes_cli.debug import (
             _capture_dump, collect_debug_report,

@@ -1061,7 +1061,11 @@ def run_conversation(
                 except Exception:
                     pass
 
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                from agent.request_capture import consume_request_capture
+                capture_request = consume_request_capture(getattr(agent, "_gateway_session_key", None) or agent.session_id)
+                if capture_request:
+                    agent._dump_api_request_debug(api_kwargs, reason="one_shot_capture", capture=True)
+                elif env_var_enabled("HERMES_DUMP_REQUESTS"):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
 
                 # Always prefer the streaming path — even without stream

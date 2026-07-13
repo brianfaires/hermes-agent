@@ -4371,7 +4371,13 @@ class DiscordAdapter(BasePlatformAdapter):
             desc = (_description or f"Run /{_name}")[:100]
             has_args = bool(_args_hint)
 
-            if has_args:
+            if _name == "debug":
+                @discord.app_commands.describe(action="Optional debug action (capture-request)")
+                async def handler(interaction: discord.Interaction, action: str = ""):
+                    await self._run_simple_slash(
+                        interaction, f"/debug {action}".strip()
+                    )
+            elif has_args:
                 def _make_args_handler(__name: str, __hint: str):
                     @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
                     async def _handler(interaction: discord.Interaction, args: str = ""):
