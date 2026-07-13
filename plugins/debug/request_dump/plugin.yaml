@@ -1,0 +1,4 @@
+name: request-dump
+version: "1.1.0"
+description: "Dump the newest persisted system prompt with an estimate of current assembled tool definitions. Enable with `hermes plugins enable debug/request_dump`."
+author: brian
