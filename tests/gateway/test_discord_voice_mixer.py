@@ -155,6 +155,64 @@ def _make_adapter(fx_cfg=None):
     return adapter
 
 
+class TestInstallVoiceMixer:
+    @pytest.mark.asyncio
+    async def test_installs_discord_audio_source_wrapper(self, monkeypatch):
+        import plugins.platforms.discord.adapter as discord_adapter
+        from plugins.platforms.discord.adapter import DiscordAdapter
+
+        class _FakeAudioSource:
+            pass
+
+        monkeypatch.setattr(discord_adapter.discord, "AudioSource", _FakeAudioSource, raising=False)
+        adapter = _make_adapter()
+        adapter._get_ambient_pcm = MagicMock(return_value=None)
+        vc = MagicMock()
+        vc.is_playing.return_value = False
+
+        def _strict_play(source, *, after=None):
+            # Match discord.py VoiceClient.play's contract: it rejects objects
+            # that merely look like AudioSource but do not inherit from it.
+            if not isinstance(source, _FakeAudioSource):
+                raise TypeError(f"source must be an AudioSource not {source.__class__.__name__}")
+
+        vc.play.side_effect = _strict_play
+
+        await DiscordAdapter._install_voice_mixer(adapter, 111, vc)
+
+        source = vc.play.call_args.args[0]
+        assert isinstance(source, _FakeAudioSource)
+        assert adapter._voice_mixers[111].__class__.__name__ == "VoiceMixer"
+
+    @pytest.mark.asyncio
+    async def test_join_does_not_start_continuous_idle_audio(self, monkeypatch):
+        """Joining a VC must not transmit an ambient loop while Hermes is idle."""
+        import plugins.platforms.discord.adapter as discord_adapter
+        from plugins.platforms.discord.adapter import DiscordAdapter
+
+        adapter = _make_adapter()
+        adapter._voice_session_generations = {}
+        adapter._reset_voice_timeout = MagicMock()
+        adapter._schedule_stt_warmup = MagicMock()
+        adapter._voice_listen_loop = AsyncMock()
+
+        vc = MagicMock()
+        channel = MagicMock()
+        channel.guild.id = 111
+        channel.connect = AsyncMock(return_value=vc)
+
+        receiver = MagicMock()
+        monkeypatch.setattr(discord_adapter, "DISCORD_AVAILABLE", True)
+        monkeypatch.setattr(discord_adapter, "VoiceReceiver", MagicMock(return_value=receiver))
+        install_mixer = AsyncMock()
+        monkeypatch.setattr(adapter, "_install_voice_mixer", install_mixer)
+
+        assert await DiscordAdapter.join_voice_channel(adapter, channel) is True
+
+        install_mixer.assert_not_awaited()
+        vc.play.assert_not_called()
+
+
 class TestVoiceMixerActive:
     def test_false_when_no_mixer(self):
         adapter = _make_adapter()
@@ -262,3 +320,29 @@ class TestPlayAckInVoice:
             ok = await adapter.play_ack_in_voice(111, phrase="Testing one two.")
         assert ok is True
         mixer.play_speech.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ack_temp_path_is_profile_scoped(self, tmp_path, monkeypatch):
+        adapter = _make_adapter()
+        adapter._voice_mixers[111] = MagicMock()
+        adapter._reset_voice_timeout = MagicMock()
+
+        ack_file = tmp_path / "ack.mp3"
+        ack_file.write_bytes(b"id3")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "ops"))
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "tmp"))
+
+        seen = {}
+        import json as _json
+
+        def _tts(**kwargs):
+            seen["output_path"] = kwargs["output_path"]
+            return _json.dumps({"success": True, "file_path": str(ack_file)})
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=_tts), \
+                patch.object(vm, "decode_to_pcm", return_value=b"\x00" * vm.FRAME_SIZE):
+            ok = await adapter.play_ack_in_voice(111, phrase="Testing one two.")
+
+        assert ok is True
+        assert os.path.dirname(seen["output_path"]) == str(tmp_path / "tmp" / "hermes_voice" / "ops")
+        assert os.path.basename(seen["output_path"]).startswith("ack_")
