@@ -28,7 +28,11 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    # This fork receives routine GitHub Actions updates through upstream sync.
+    # Keep the ecosystem declaration for documentation, but disable scheduled
+    # version-update PRs here. Dependabot alerts/security updates are controlled
+    # separately in repository settings and remain available.
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
       - "github-actions"
