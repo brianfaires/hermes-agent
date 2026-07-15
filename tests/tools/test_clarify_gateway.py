@@ -64,6 +64,15 @@ class TestClarifyPrimitive:
         assert entry.awaiting_text is False
         assert cm.get_pending_for_session("sk3") is None
 
+    def test_voice_capture_finds_button_choice_without_enabling_text_capture(self):
+        """A spoken answer must resolve a button clarify before it interrupts work."""
+        from tools import clarify_gateway as cm
+
+        entry = cm.register("id-voice", "sk-voice", "Pick", ["X", "Y"])
+
+        assert cm.get_pending_for_session("sk-voice") is None
+        assert cm.get_pending_for_voice_capture("sk-voice") is entry
+
     def test_other_button_flips_to_text_mode(self):
         """mark_awaiting_text makes get_pending_for_session find the entry."""
         from tools import clarify_gateway as cm

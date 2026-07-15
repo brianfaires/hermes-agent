@@ -24,6 +24,8 @@ from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
+from gateway.temp_audio import gateway_tts_temp_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,12 +90,6 @@ _DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
 _DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
 
-def _normalize_discord_stt_alias_text(text: str) -> str:
-    """Normalize a spoken transcript or configured STT alias for exact matching."""
-    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
 def _discord_config_id_set(raw: Any) -> set[str]:
     """Normalize a Discord channel policy value to a set of string IDs."""
     if isinstance(raw, list):
@@ -134,6 +130,11 @@ def _discord_outbound_scope_allowed(channel_ids: set[str], allowed_channels: set
         return False, "channel not in DISCORD_ALLOWED_CHANNELS"
     return True, "allowed"
 
+
+def _normalize_discord_stt_alias_text(text: str) -> str:
+    """Normalize a spoken transcript or configured STT alias for exact matching."""
+    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _format_discord_inline_code_span(body: str) -> str:
@@ -498,8 +499,12 @@ class VoiceReceiver:
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
 
-        # Debug logging counter (instance-level to avoid cross-instance races)
+        # Debug counters for first-join receive diagnostics.  Warnings are
+        # rate-limited, but these counters let logs explain whether a missing
+        # transcript died in NaCl, Opus, buffering, or silence detection.
         self._packet_debug_count = 0
+        self._rtp_stats: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._last_stats_log: Dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -612,21 +617,40 @@ class VoiceReceiver:
         if ssrc == self._bot_ssrc:
             return
 
-        # Calculate dynamic RTP header size (RFC 9335 / rtpsize mode)
+        # Calculate dynamic RTP header size (RFC 3550).  Discord voice packets
+        # can arrive in two subtly different AEAD layouts while the socket is
+        # settling after a join/rejoin:
+        #
+        # * normal rtpsize: the RTP extension preamble is cleartext and part of
+        #   the associated data (AAD), so encrypted payload starts after it;
+        # * early/rekey packets observed live: the fixed RTP header is the AAD
+        #   and the extension preamble is encrypted with the payload.
+        #
+        # Treat the normal layout as primary, but fall back to the fixed-header
+        # layout on decrypt failure.  Without this fallback a first utterance
+        # after joining can be dropped before STT ever sees audio.
         cc = first_byte & 0x0F  # CSRC count
         has_extension = bool(first_byte & 0x10)  # extension bit
         has_padding = bool(first_byte & 0x20)  # padding bit (RFC 3550 §5.1)
-        header_size = 12 + (4 * cc) + (4 if has_extension else 0)
+        fixed_header_size = 12 + (4 * cc)
+        header_size = fixed_header_size + (4 if has_extension else 0)
 
         if len(data) < header_size + 4:  # need at least header + nonce
             return
 
-        # Read extension length from preamble (for skipping after decrypt)
+        # Read extension length from preamble when the extension preamble is
+        # cleartext.  Some first-join packets encrypt the extension preamble, so
+        # this value is only trusted for clear-extension candidate layouts.
         ext_data_len = 0
+        ext_full_header_size = header_size
         if has_extension:
             ext_preamble_offset = 12 + (4 * cc)
             ext_words = struct.unpack_from(">H", data, ext_preamble_offset + 2)[0]
             ext_data_len = ext_words * 4
+            # RFC 3550 extension length covers only extension data after the
+            # 4-byte preamble.  Some clients include that data in the AEAD AAD,
+            # while others encrypt it with the Opus payload.
+            ext_full_header_size = header_size + ext_data_len
 
         if self._packet_debug_count <= 10:
             with self._lock:
@@ -636,28 +660,69 @@ class VoiceReceiver:
                 ssrc, seq, known_user, header_size, ext_data_len,
             )
 
-        header = bytes(data[:header_size])
-        payload_with_nonce = data[header_size:]
+        with self._lock:
+            stats = self._rtp_stats[ssrc]
+            stats["packets"] += 1
 
         # --- NaCl transport decrypt (aead_xchacha20_poly1305_rtpsize) ---
-        if len(payload_with_nonce) < 4:
-            return
-        nonce = bytearray(24)
-        nonce[:4] = payload_with_nonce[-4:]
-        encrypted = bytes(payload_with_nonce[:-4])
-
         try:
-            import nacl.secret  # noqa: E402 — delayed import, only in voice path
-            box = nacl.secret.Aead(self._secret_key)
-            decrypted = box.decrypt(encrypted, header, bytes(nonce))
-        except Exception as e:
-            if self._packet_debug_count <= 10:
-                logger.warning("NaCl decrypt failed: %s (hdr=%d, enc=%d)", e, header_size, len(encrypted))
-            return
+            decrypted, skip_ext_data, layout = self._decrypt_rtp_payload_candidates(
+                data=data,
+                fixed_header_size=fixed_header_size,
+                preamble_header_size=header_size,
+                full_header_size=ext_full_header_size,
+                has_extension=has_extension,
+                ext_data_len=ext_data_len,
+            )
+        except Exception as primary_error:
+            # Discord can rotate or finalize the voice session key after our
+            # socket listener is installed.  A receiver that captured the old
+            # key will then fail every packet for the whole join until the user
+            # leaves/rejoins.  Refresh from the live connection once before
+            # declaring the packet dead.
+            refreshed_secret = self._refresh_secret_key_if_changed()
+            if refreshed_secret:
+                try:
+                    decrypted, skip_ext_data, layout = self._decrypt_rtp_payload_candidates(
+                        data=data,
+                        fixed_header_size=fixed_header_size,
+                        preamble_header_size=header_size,
+                        full_header_size=ext_full_header_size,
+                        has_extension=has_extension,
+                        ext_data_len=ext_data_len,
+                    )
+                    logger.info("NaCl decrypt recovered after voice secret refresh (ssrc=%d)", ssrc)
+                except Exception as retry_error:
+                    primary_error = retry_error
+                    refreshed_secret = False
+
+            if not refreshed_secret:
+                with self._lock:
+                    stats = self._rtp_stats[ssrc]
+                    stats["decrypt_failed"] += 1
+                if self._packet_debug_count <= 10:
+                    enc_len = max(0, len(data) - header_size - 4)
+                    logger.warning(
+                        "NaCl decrypt failed: %s (hdr=%d, enc=%d, ssrc=%d, ext=%s, ext_data=%d)",
+                        primary_error, header_size, enc_len, ssrc, has_extension, ext_data_len,
+                    )
+                self._maybe_log_rtp_stats(ssrc, reason="decrypt_failed")
+                return
+
+        with self._lock:
+            stats = self._rtp_stats[ssrc]
+            stats["decrypted"] += 1
+            stats[f"layout_{layout}"] += 1
+        if self._packet_debug_count <= 10 and layout != "preamble":
+            logger.info(
+                "NaCl decrypt recovered with %s layout (ssrc=%d, hdr=%d)",
+                layout, ssrc,
+                fixed_header_size if layout == "encrypted_extension" else ext_full_header_size,
+            )
 
         # Skip encrypted extension data to get the actual opus payload
-        if ext_data_len and len(decrypted) > ext_data_len:
-            decrypted = decrypted[ext_data_len:]
+        if skip_ext_data and len(decrypted) > skip_ext_data:
+            decrypted = decrypted[skip_ext_data:]
 
         # --- Strip RTP padding (RFC 3550 §5.1) ---
         # When the P bit is set, the last payload byte holds the count of
@@ -712,15 +777,148 @@ class VoiceReceiver:
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
+                stats = self._rtp_stats[ssrc]
+                stats["decoded"] += 1
+                stats["pcm_bytes"] += len(pcm)
         except Exception as e:
             with self._lock:
                 self._decoders.pop(ssrc, None)
+                stats = self._rtp_stats[ssrc]
+                stats["decode_failed"] += 1
             logger.debug(
                 "Opus decode error for SSRC %s; reset decoder: %s",
                 ssrc,
                 e,
             )
             return
+
+    def _decrypt_rtp_payload_candidates(
+        self,
+        *,
+        data: bytes,
+        fixed_header_size: int,
+        preamble_header_size: int,
+        full_header_size: int,
+        has_extension: bool,
+        ext_data_len: int,
+    ) -> tuple[bytes, int, str]:
+        """Try Discord RTP AEAD layouts seen around VC joins/rekeys.
+
+        Discord's sender-side implementation encrypts with whichever RTP
+        header bytes it has already assembled as AAD.  In receive traffic we
+        have observed extension packets where either the fixed RTP header, the
+        extension preamble, or the full extension block is treated as AAD.
+        Trying all sane variants keeps first-join audio from being dropped when
+        clients disagree about extension placement.
+        """
+        candidates: list[tuple[str, int, int, bool]] = []
+
+        def add(name: str, header_size: int, skip_ext: int, encrypted_ext: bool = False) -> None:
+            if header_size < fixed_header_size or header_size + 4 > len(data):
+                return
+            if any(existing[1] == header_size and existing[3] == encrypted_ext for existing in candidates):
+                return
+            candidates.append((name, header_size, skip_ext, encrypted_ext))
+
+        if has_extension:
+            # Full extension block cleartext / AAD: nothing to strip after decrypt.
+            add("full_extension", full_header_size, 0)
+            # Extension preamble cleartext / AAD, extension data encrypted before Opus.
+            add("preamble", preamble_header_size, ext_data_len)
+            # Extension preamble + data encrypted with the Opus payload.
+            add("encrypted_extension", fixed_header_size, 0, encrypted_ext=True)
+        else:
+            add("fixed", fixed_header_size, 0)
+
+        last_error: Optional[Exception] = None
+        for name, header_size, skip_ext, encrypted_ext in candidates:
+            try:
+                decrypted = self._decrypt_rtp_payload(data, header_size)
+                if encrypted_ext:
+                    if len(decrypted) < 4:
+                        raise ValueError("encrypted extension payload shorter than preamble")
+                    words = struct.unpack_from(">H", decrypted, 2)[0]
+                    encrypted_ext_len = words * 4
+                    if len(decrypted) < 4 + encrypted_ext_len:
+                        raise ValueError(
+                            "encrypted extension payload shorter than declared extension data"
+                        )
+                    decrypted = decrypted[4 + encrypted_ext_len:]
+                    skip_ext = 0
+                return decrypted, skip_ext, name
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ValueError("no RTP decrypt candidates")
+
+    def _refresh_secret_key_if_changed(self) -> bool:
+        """Refresh the cached Discord voice secret if the live connection changed.
+
+        VoiceReceiver is installed immediately after ``channel.connect()``.  On
+        some Discord rejoins the first RTP packets arrive after the underlying
+        VoiceConnectionState has rotated/finalized ``secret_key``.  Keeping the
+        constructor-time key makes every packet for that join fail NaCl decrypt.
+        """
+        try:
+            conn = self._vc._connection
+            live_key = bytes(conn.secret_key)
+        except Exception:
+            return False
+        if not live_key or live_key == self._secret_key:
+            return False
+        self._secret_key = live_key
+        try:
+            self._dave_session = conn.dave_session
+        except Exception:
+            pass
+        logger.info("VoiceReceiver refreshed Discord voice secret key")
+        return True
+
+    def _maybe_log_rtp_stats(self, ssrc: int, *, reason: str) -> None:
+        """Rate-limited per-SSRC receive stats for first-join troubleshooting."""
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_stats_log.get(ssrc, 0.0)
+            if now - last < 5.0:
+                return
+            self._last_stats_log[ssrc] = now
+            stats = dict(self._rtp_stats.get(ssrc, {}))
+            user_id = self._ssrc_to_user.get(ssrc, 0)
+            buf_len = len(self._buffers.get(ssrc, b""))
+        logger.info(
+            "Voice RTP stats ssrc=%s user=%s reason=%s packets=%d decrypted=%d "
+            "decoded=%d decrypt_failed=%d decode_failed=%d pcm_bytes=%d buffer=%d "
+            "layouts=%s/%s/%s/%s",
+            ssrc,
+            user_id or "unknown",
+            reason,
+            stats.get("packets", 0),
+            stats.get("decrypted", 0),
+            stats.get("decoded", 0),
+            stats.get("decrypt_failed", 0),
+            stats.get("decode_failed", 0),
+            stats.get("pcm_bytes", 0),
+            buf_len,
+            stats.get("layout_fixed", 0),
+            stats.get("layout_preamble", 0),
+            stats.get("layout_full_extension", 0),
+            stats.get("layout_encrypted_extension", 0),
+        )
+
+    def _decrypt_rtp_payload(self, data: bytes, header_size: int) -> bytes:
+        """Decrypt a Discord RTP packet using ``header_size`` bytes as AAD."""
+        if len(data) < header_size + 4:
+            raise ValueError("packet shorter than RTP header plus nonce")
+        payload_with_nonce = data[header_size:]
+        if len(payload_with_nonce) < 4:
+            raise ValueError("RTP payload shorter than nonce suffix")
+        nonce = bytearray(24)
+        nonce[:4] = payload_with_nonce[-4:]
+        encrypted = bytes(payload_with_nonce[:-4])
+        import nacl.secret  # noqa: E402 — delayed import, only in voice path
+        box = nacl.secret.Aead(self._secret_key)
+        return box.decrypt(encrypted, bytes(data[:header_size]), bytes(nonce))
 
     # ------------------------------------------------------------------
     # Silence detection
@@ -756,6 +954,7 @@ class VoiceReceiver:
         """Return list of (user_id, pcm_bytes) for completed utterances."""
         now = time.monotonic()
         completed = []
+        log_events = []
 
         with self._lock:
             ssrc_user_map = dict(self._ssrc_to_user)
@@ -776,13 +975,19 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         completed.append((user_id, bytes(buf)))
+                        self._rtp_stats[ssrc]["utterances"] += 1
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    log_events.append((ssrc, "utterance_complete"))
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user — discard
+                    self._rtp_stats[ssrc]["stale_discards"] += 1
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    log_events.append((ssrc, "stale_discard"))
 
+        for ssrc, reason in log_events:
+            self._maybe_log_rtp_stats(ssrc, reason=reason)
         return completed
 
     # ------------------------------------------------------------------
@@ -865,6 +1070,7 @@ class DiscordAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = 2000
     _SPLIT_THRESHOLD = 1900  # near the 2000-char split point
     supports_code_blocks = True  # Discord markdown renders fenced code blocks natively
+    voice_reply_text_order = "before_tts"  # post reply text before TTS playback in voice sessions
 
     # Auto-disconnect from voice channel after this many seconds of inactivity
     VOICE_TIMEOUT = 300
@@ -884,12 +1090,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._text_batch_split_delay_seconds = float(os.getenv("HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", "2.0"))
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
-        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
+        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> session/control channel_id
+        self._auto_voice_session_channels: set[str] = set()  # channels bound by presence-triggered auto voice
         self._voice_sources: Dict[int, Dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         # Phase 2: voice listening
         self._voice_receivers: Dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
+        self._voice_session_generations: Dict[int, int] = {}  # guild_id -> stale STT guard
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
         # Resolves the current voice-reply mode ("off"|"voice_only"|"all") for a
@@ -1118,6 +1326,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
                 )
+                if adapter_self._auto_voice_channel_id() is not None:
+                    asyncio.create_task(adapter_self._sync_auto_voice_presence())
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1233,16 +1443,19 @@ class DiscordAdapter(BasePlatformAdapter):
 
             @self._client.event
             async def on_voice_state_update(member, before, after):
-                """Track voice channel join/leave events."""
-                # Only track channels where the bot is connected
+                """Track voice channel join/leave events and auto-manage configured voice presence."""
+                # Ignore the bot itself
+                if member == adapter_self._client.user:
+                    return
+
+                await adapter_self._handle_auto_voice_state_update(member, before, after)
+
+                # Only log channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
                     return
                 guild_id = member.guild.id
                 if guild_id not in bot_guild_ids:
-                    return
-                # Ignore the bot itself
-                if member == adapter_self._client.user:
                     return
 
                 joined = before.channel is None and after.channel is not None
@@ -1838,9 +2051,6 @@ class DiscordAdapter(BasePlatformAdapter):
         Forum channels (type 15) reject direct messages — a thread post is
         created automatically.
         """
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
         try:
             # Determine target channel: thread_id in metadata takes precedence.
             thread_id = None
@@ -1848,6 +2058,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 thread_id = metadata["thread_id"]
             nonconversational = _metadata_marks_nonconversational(metadata)
             suppress_embeds = _metadata_suppresses_embeds(metadata)
+
+            if not self._client:
+                return SendResult(success=False, error="Not connected")
 
             if thread_id:
                 # Fetch the thread directly — threads are addressed by their own ID.
@@ -2294,11 +2507,32 @@ class DiscordAdapter(BasePlatformAdapter):
         When the bot is in a voice channel for this chat's guild, play
         directly in the VC instead of sending as a file attachment.
         """
+        linked_voice_text_channel = False
         for gid, text_ch_id in self._voice_text_channels.items():
-            if str(text_ch_id) == str(chat_id) and self.is_in_voice_channel(gid):
+            if str(text_ch_id) != str(chat_id):
+                continue
+            linked_voice_text_channel = True
+            if self.is_in_voice_channel(gid):
                 logger.info("[%s] Playing TTS in voice channel (guild=%d)", self.name, gid)
                 success = await self.play_in_voice_channel(gid, audio_path)
                 return SendResult(success=success)
+
+        # Auto-managed Discord voice uses the linked text channel as the
+        # transcript/control surface. If the voice client is not actually
+        # connected yet (startup race, reconnect, permission blip), fail closed
+        # instead of dropping a generated voice-message attachment into the
+        # transcript channel.
+        auto_channel_id = self._auto_voice_channel_id()
+        if linked_voice_text_channel or (
+            auto_channel_id is not None and str(auto_channel_id) == str(chat_id)
+        ):
+            logger.warning(
+                "[%s] Suppressing text-channel TTS fallback for voice-linked Discord channel %s; no active voice connection",
+                self.name,
+                chat_id,
+            )
+            return SendResult(success=False, error="No active Discord voice connection for voice-linked text channel")
+
         return await self.send_voice(chat_id=chat_id, audio_path=audio_path, **kwargs)
 
     async def send_voice(
@@ -2489,9 +2723,32 @@ class DiscordAdapter(BasePlatformAdapter):
             if error:
                 logger.error("Voice mixer stream error (guild=%d): %s", guild_id, error)
 
+        audio_source_base = getattr(discord, "AudioSource", None)
+        if isinstance(audio_source_base, type):
+            class _DiscordMixerSource(audio_source_base):
+                def __init__(self, wrapped_mixer):
+                    self._wrapped_mixer = wrapped_mixer
+
+                def read(self) -> bytes:
+                    return self._wrapped_mixer.read()
+
+                def is_opus(self) -> bool:
+                    return False
+
+                def cleanup(self) -> None:
+                    cleanup = getattr(self._wrapped_mixer, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+
+            source = _DiscordMixerSource(mixer)
+        else:
+            # Test/mock fallback only. Real discord.py exposes AudioSource and
+            # rejects sources that are not instances of it.
+            source = mixer
+
         if vc.is_playing():
             vc.stop()
-        vc.play(mixer, after=_after)
+        vc.play(source, after=_after)
         self._voice_mixers[guild_id] = mixer
         logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
 
@@ -2513,11 +2770,7 @@ class DiscordAdapter(BasePlatformAdapter):
             phrase = random.choice(phrases)
 
         # Synthesise the ack via the configured TTS provider, then layer it.
-        import uuid as _uuid
-        audio_path = os.path.join(
-            tempfile.gettempdir(), "hermes_voice",
-            f"ack_{_uuid.uuid4().hex[:12]}.mp3",
-        )
+        audio_path = gateway_tts_temp_path("ack", "mp3")
         os.makedirs(os.path.dirname(audio_path), exist_ok=True)
         try:
             from tools.tts_tool import text_to_speech_tool
@@ -2555,6 +2808,137 @@ class DiscordAdapter(BasePlatformAdapter):
         """True when a continuous mixer is installed for this guild."""
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
+    def _auto_voice_channel_id(self) -> Optional[int]:
+        """Configured Discord voice channel that explicitly enables hands-free mode."""
+        raw = self.config.extra.get("auto_voice_channel_id")
+        if raw in (None, ""):
+            return None
+        try:
+            channel_id = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid discord.auto_voice_channel_id: %r", raw)
+            return None
+        return channel_id if channel_id > 0 else None
+
+    def _auto_voice_user_ids(self) -> set[str]:
+        """Explicit Discord user IDs allowed to trigger auto voice mode."""
+        raw = self.config.extra.get("auto_voice_user_ids")
+        if raw in (None, ""):
+            return set()
+        if isinstance(raw, (list, tuple, set)):
+            items = raw
+        else:
+            items = str(raw).split(",")
+        return {_clean_discord_id(str(item)) for item in items if str(item).strip()}
+
+    def _is_auto_voice_member_allowed(self, member, guild=None) -> bool:
+        explicit_users = self._auto_voice_user_ids()
+        member_id = str(getattr(member, "id", ""))
+        if explicit_users:
+            return _clean_discord_id(member_id) in explicit_users
+        return self._is_allowed_user(member_id, member, guild=guild, is_dm=False)
+
+    def _is_auto_voice_user_id_allowed(self, user_id: str | int) -> bool:
+        """Return True when ``user_id`` is explicitly allowed for auto voice."""
+        explicit_users = self._auto_voice_user_ids()
+        if not explicit_users:
+            return False
+        return _clean_discord_id(str(user_id)) in explicit_users
+
+    def _is_voice_speaker_allowed(self, user_id: str | int, *, guild=None) -> bool:
+        """Authorize captured voice input for the active voice session."""
+        explicit_users = self._auto_voice_user_ids()
+        cleaned = _clean_discord_id(str(user_id))
+        if explicit_users:
+            return cleaned in explicit_users
+        return self._is_allowed_user(cleaned, guild=guild, is_dm=False)
+
+    async def _get_channel_by_id(self, channel_id: int):
+        """Return a Discord channel from cache or API fetch."""
+        if not self._client:
+            return None
+        channel = self._client.get_channel(int(channel_id))
+        if channel is not None:
+            return channel
+        fetch = getattr(self._client, "fetch_channel", None)
+        if fetch is None:
+            return None
+        try:
+            return await fetch(int(channel_id))
+        except Exception as e:
+            logger.warning("Failed to fetch Discord channel %s: %s", channel_id, e)
+            return None
+
+    def _has_allowed_human_in_voice_channel(self, channel) -> bool:
+        """True when at least one authorized non-bot user is present."""
+        guild = getattr(channel, "guild", None)
+        for member in getattr(channel, "members", []) or []:
+            if getattr(member, "bot", False):
+                continue
+            if self._is_auto_voice_member_allowed(member, guild=guild):
+                return True
+        return False
+
+    def _is_auto_voice_guild(self, guild_id: int) -> bool:
+        """Return True when this guild is connected to the configured auto voice channel."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None:
+            return False
+        vc = self._voice_clients.get(guild_id)
+        channel = getattr(vc, "channel", None) if vc else None
+        return getattr(channel, "id", None) == auto_channel_id
+
+    async def _sync_auto_voice_presence(self) -> None:
+        """Join the configured voice channel on startup if an authorized user is already there."""
+        channel_id = self._auto_voice_channel_id()
+        if channel_id is None:
+            return
+        channel = await self._get_channel_by_id(channel_id)
+        if channel is None:
+            logger.warning("Configured Discord auto voice channel %s was not found", channel_id)
+            return
+        if not self._has_allowed_human_in_voice_channel(channel):
+            return
+        runner = getattr(self, "gateway_runner", None)
+        if runner and hasattr(runner, "_handle_discord_auto_voice_join"):
+            member = next(
+                (
+                    m for m in getattr(channel, "members", []) or []
+                    if not getattr(m, "bot", False)
+                    and self._is_auto_voice_member_allowed(m, guild=getattr(channel, "guild", None))
+                ),
+                None,
+            )
+            if member is not None:
+                await runner._handle_discord_auto_voice_join(self, member, channel)
+
+    async def _handle_auto_voice_state_update(self, member, before, after) -> None:
+        """Join/leave auto voice mode based only on configured Discord VC presence."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None or getattr(member, "bot", False):
+            return
+        guild = getattr(member, "guild", None)
+        if not self._is_auto_voice_member_allowed(member, guild=guild):
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        before_id = getattr(before_channel, "id", None)
+        after_id = getattr(after_channel, "id", None)
+        moved_into_auto = after_id == auto_channel_id and before_id != auto_channel_id
+        moved_out_of_auto = before_id == auto_channel_id and after_id != auto_channel_id
+        if not moved_into_auto and not moved_out_of_auto:
+            return
+
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return
+        if moved_into_auto and hasattr(runner, "_handle_discord_auto_voice_join"):
+            await runner._handle_discord_auto_voice_join(self, member, after_channel)
+        elif moved_out_of_auto and hasattr(runner, "_handle_discord_auto_voice_leave"):
+            if before_channel is not None and self._has_allowed_human_in_voice_channel(before_channel):
+                return
+            await runner._handle_discord_auto_voice_leave(self, member, before_channel)
 
     def _configured_stt_aliases(self) -> Dict[str, str]:
         """Return normalized Discord STT alias phrase -> replacement text.
@@ -2604,6 +2988,32 @@ class DiscordAdapter(BasePlatformAdapter):
         logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
         return replacement
 
+    def _schedule_stt_warmup(self) -> None:
+        """Best-effort background warmup for local STT on first VC join."""
+        existing = getattr(self, "_stt_warmup_task", None)
+        if existing and not existing.done():
+            return
+
+        async def _warm() -> None:
+            try:
+                from tools.transcription_tools import warm_local_stt_model
+                result = await asyncio.to_thread(warm_local_stt_model)
+                if result.get("success") and result.get("warmed"):
+                    logger.info(
+                        "Voice STT warmup complete (provider=%s model=%s)",
+                        result.get("provider"), result.get("model"),
+                    )
+                elif result.get("success"):
+                    logger.debug("Voice STT warmup skipped: %s", result)
+                elif result.get("reason") == "stt_disabled":
+                    logger.debug("Voice STT warmup skipped: STT disabled")
+                else:
+                    logger.warning("Voice STT warmup failed: %s", result)
+            except Exception as exc:
+                logger.warning("Voice STT warmup failed: %s", exc)
+
+        self._stt_warmup_task = asyncio.ensure_future(_warm())
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not DISCORD_AVAILABLE:
@@ -2623,33 +3033,41 @@ class DiscordAdapter(BasePlatformAdapter):
 
             vc = await channel.connect()
             self._voice_clients[guild_id] = vc
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             self._reset_voice_timeout(guild_id)
 
             # Start voice receiver (Phase 2: listen to users)
             try:
-                receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+                receiver = VoiceReceiver(
+                    vc,
+                    allowed_user_ids=self._auto_voice_user_ids() or self._allowed_user_ids,
+                )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
                 self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
                     self._voice_listen_loop(guild_id)
                 )
+                self._schedule_stt_warmup()
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
 
-            # Phase 3: install the continuous mixer (ambient bed + ducked
-            # speech).  Best-effort — if it fails we fall back to the legacy
-            # one-shot FFmpegPCMAudio playback path in play_in_voice_channel.
-            if getattr(self, "_voice_fx_cfg", {}).get("enabled"):
-                try:
-                    await self._install_voice_mixer(guild_id, vc)
-                except Exception as e:
-                    logger.warning("Voice mixer failed to start: %s", e)
-
+            # Do not start an outbound stream while idle. TTS uses the one-shot
+            # playback path in play_in_voice_channel, so Discord only shows
+            # Hermes speaking while it has meaningful audio to send.
             return True
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            # Invalidate any in-flight STT before cancelling the listen loop.
+            # leave_voice_channel() can await Discord disconnect while a drained
+            # STT worker finishes in the background; bumping the generation first
+            # prevents that late transcript from entering a closing/new session.
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             # Stop voice receiver first
             receiver = self._voice_receivers.pop(guild_id, None)
             if receiver:
@@ -2673,7 +3091,10 @@ class DiscordAdapter(BasePlatformAdapter):
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
                 task.cancel()
-            self._voice_text_channels.pop(guild_id, None)
+            session_channel_id = self._voice_text_channels.pop(guild_id, None)
+            auto_voice_session_channels = getattr(self, "_auto_voice_session_channels", None)
+            if isinstance(auto_voice_session_channels, set) and session_channel_id is not None:
+                auto_voice_session_channels.discard(str(session_channel_id))
             self._voice_sources.pop(guild_id, None)
 
     # Maximum seconds to wait for voice playback before giving up
@@ -2771,6 +3192,8 @@ class DiscordAdapter(BasePlatformAdapter):
         task = self._voice_timeout_tasks.pop(guild_id, None)
         if task:
             task.cancel()
+        if self._is_auto_voice_guild(guild_id):
+            return
         self._voice_timeout_tasks[guild_id] = asyncio.ensure_future(
             self._voice_timeout_handler(guild_id)
         )
@@ -2920,40 +3343,97 @@ class DiscordAdapter(BasePlatformAdapter):
                 # guild-scoped and not cross-guild.
                 _vc_guild = self._client.get_guild(guild_id) if self._client is not None else None
                 for user_id, pcm_data in completed:
-                    if not self._is_allowed_user(
-                        str(user_id),
-                        guild=_vc_guild,
-                        is_dm=False,
-                    ):
+                    if not self._is_voice_speaker_allowed(user_id, guild=_vc_guild):
                         continue
                     # A user speaking to the bot is activity too — not just the
                     # bot's own playback. Reset the inactivity timer so an active
                     # listener isn't disconnected mid-conversation (this also
                     # covers voice-on text-only sessions that never play audio).
                     self._reset_voice_timeout(guild_id)
-                    await self._process_voice_input(guild_id, user_id, pcm_data)
+                    session_generation = self._voice_session_generations.get(guild_id, 0)
+                    await self._process_voice_input(
+                        guild_id, user_id, pcm_data,
+                        session_generation=session_generation,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error("Voice listen loop error: %s", e, exc_info=True)
 
-    async def _process_voice_input(self, guild_id: int, user_id: int, pcm_data: bytes):
+    async def _process_voice_worker(self, awaitable, phase: str, wav_path: str):
+        """Run voice file work to completion even if leave cancels the listener.
+
+        ``leave_voice_channel`` cancels the listen loop immediately on user
+        disconnect.  If that cancellation lands while ffmpeg or STT is using the
+        temporary WAV, the old flow unlinked the file from ``finally`` while the
+        worker thread still needed it.  Drain the worker first so a disconnect
+        cannot turn a valid utterance into ``FileNotFoundError``.
+        """
+        task = asyncio.create_task(awaitable)
+        logged_cancel = False
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not logged_cancel:
+                    logger.info(
+                        "Voice input %s continuing after listener cancellation (%s)",
+                        phase, os.path.basename(wav_path),
+                    )
+                    logged_cancel = True
+
+    async def _process_voice_input(
+        self,
+        guild_id: int,
+        user_id: int,
+        pcm_data: bytes,
+        *,
+        session_generation: Optional[int] = None,
+    ):
         """Convert PCM -> WAV -> STT -> callback."""
-        from tools.voice_mode import is_whisper_hallucination
+        from tools.voice_mode import is_whisper_hallucination, stt_noise_drop_reason
 
         tmp_f = tempfile.NamedTemporaryFile(suffix=".wav", prefix="vc_listen_", delete=False)
         wav_path = tmp_f.name
         tmp_f.close()
         try:
-            await asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path)
+            await self._process_voice_worker(
+                asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path),
+                "wav conversion",
+                wav_path,
+            )
 
             from tools.transcription_tools import transcribe_audio
-            result = await asyncio.to_thread(transcribe_audio, wav_path)
+            result = await self._process_voice_worker(
+                asyncio.to_thread(transcribe_audio, wav_path),
+                "transcription",
+                wav_path,
+            )
 
             if not result.get("success"):
                 return
             transcript = result.get("transcript", "").strip()
             if not transcript or is_whisper_hallucination(transcript):
+                return
+            noise_reason = stt_noise_drop_reason(transcript)
+            if noise_reason:
+                logger.debug(
+                    "Dropping Discord voice transcript before callback "
+                    "(reason=%s): %r",
+                    noise_reason,
+                    transcript[:100],
+                )
+                return
+
+            if (
+                session_generation is not None
+                and self._voice_session_generations.get(guild_id, 0) != session_generation
+            ):
+                logger.info(
+                    "Dropping stale Discord voice transcript for guild=%s "
+                    "after voice session changed",
+                    guild_id,
+                )
                 return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])

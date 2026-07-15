@@ -224,9 +224,10 @@ class GatewaySlashCommandsMixin:
         except Exception:
             _tip_line = ""
 
+        voice_text = t("gateway.reset.voice_notice")
         if session_info:
-            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
-        return EphemeralReply(f"{header}{_tip_line}")
+            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}", voice_text=voice_text)
+        return EphemeralReply(f"{header}{_tip_line}", voice_text=voice_text)
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show active profile name and home directory."""
