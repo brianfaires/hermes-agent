@@ -43,6 +43,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Dict, Optional, Any, List, Union
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
@@ -54,6 +55,7 @@ from typing import Dict, Optional, Any, List, Union
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
+from gateway.temp_audio import gateway_tts_temp_path
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -1590,6 +1592,7 @@ from gateway.delivery import DeliveryRouter
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from gateway.slash_commands import GatewaySlashCommandsMixin
+from gateway.voice_mixin import GatewayVoiceMixin
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -1806,48 +1809,6 @@ def _format_duration(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
-
-
-async def _probe_audio_duration(path: str) -> Optional[str]:
-    """Best-effort duration probe. Returns formatted MM:SS / HH:MM:SS, or None on failure."""
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext == ".wav":
-        try:
-            def _wav_duration() -> float:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate() or 1
-                    return frames / float(rate)
-            secs = await asyncio.to_thread(_wav_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    if ext in (".ogg", ".opus", ".oga"):
-        try:
-            def _ogg_duration() -> float:
-                from mutagen.oggopus import OggOpus
-                return float(OggOpus(path).info.length)
-            secs = await asyncio.to_thread(_ogg_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        if proc.returncode == 0:
-            return _format_duration(float(stdout.decode().strip()))
-    except Exception:
-        pass
-
-    return None
 
 
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
@@ -2381,7 +2342,7 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
         )
 
 
-class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
+class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin, GatewayVoiceMixin):
     """
     Main gateway controller.
 
@@ -2767,45 +2728,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
 
-    def _voice_key(self, platform: Platform, chat_id: str) -> str:
-        """Return a platform-namespaced key for voice mode state."""
-        return f"{platform.value}:{chat_id}"
-
-    def _load_voice_modes(self) -> Dict[str, str]:
-        try:
-            data = json.loads(self._VOICE_MODE_PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-        if not isinstance(data, dict):
-            return {}
-
-        valid_modes = {"off", "voice_only", "all"}
-        result = {}
-        for chat_id, mode in data.items():
-            if mode not in valid_modes:
-                continue
-            key = str(chat_id)
-            # Skip legacy unprefixed keys (warn and skip)
-            if ":" not in key:
-                logger.warning(
-                    "Skipping legacy unprefixed voice mode key %r during migration. "
-                    "Re-enable voice mode on that chat to rebuild the prefixed key.",
-                    key,
-                )
-                continue
-            result[key] = mode
-        return result
-
-    def _save_voice_modes(self) -> None:
-        try:
-            self._VOICE_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._VOICE_MODE_PATH.write_text(
-                json.dumps(self._voice_mode, indent=2)
-            )
-        except OSError as e:
-            logger.warning("Failed to save voice modes: %s", e)
-
     def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
         disabled_chats = getattr(adapter, "_auto_tts_disabled_chats", None)
@@ -2837,50 +2759,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 disabled_chats.discard(chat_id)
         else:
             enabled_chats.discard(chat_id)
-
-    def _sync_voice_mode_state_to_adapter(self, adapter) -> None:
-        """Restore persisted /voice state into a live platform adapter.
-
-        Populates three fields from config + ``self._voice_mode``:
-          - ``_auto_tts_default``: global default from ``voice.auto_tts``
-          - ``_auto_tts_enabled_chats``: chats with mode ``voice_only``/``all``
-          - ``_auto_tts_disabled_chats``: chats with mode ``off``
-        """
-        platform = getattr(adapter, "platform", None)
-        if not isinstance(platform, Platform):
-            return
-
-        disabled_chats = getattr(adapter, "_auto_tts_disabled_chats", None)
-        enabled_chats = getattr(adapter, "_auto_tts_enabled_chats", None)
-        if not isinstance(disabled_chats, set) and not isinstance(enabled_chats, set):
-            return
-
-        # Push the global voice.auto_tts default (config.yaml) onto the adapter.
-        # Lazy import to avoid adding a module-level dep from gateway → hermes_cli.
-        try:
-            from hermes_cli.config import load_config as _load_full_config
-            _full_cfg = _load_full_config()
-            _auto_tts_default = bool(
-                (_full_cfg.get("voice") or {}).get("auto_tts", False)
-            )
-        except Exception:
-            _auto_tts_default = False
-        if hasattr(adapter, "_auto_tts_default"):
-            adapter._auto_tts_default = _auto_tts_default
-
-        prefix = f"{platform.value}:"
-        if isinstance(disabled_chats, set):
-            disabled_chats.clear()
-            disabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
-                if mode == "off" and key.startswith(prefix)
-            )
-        if isinstance(enabled_chats, set):
-            enabled_chats.clear()
-            enabled_chats.update(
-                key[len(prefix):] for key, mode in self._voice_mode.items()
-                if mode in {"voice_only", "all"} and key.startswith(prefix)
-            )
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
         """Call adapter.disconnect() defensively, swallowing any error.
@@ -5441,6 +5319,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             
             # Set up message + fatal error handlers
+            if hasattr(adapter, "set_runtime_profile_home"):
+                adapter.set_runtime_profile_home(self._gateway_profile_home)
             adapter.set_message_handler(self._handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
@@ -6214,6 +6094,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         del self._failed_platforms[platform]
                         continue
 
+                    if hasattr(adapter, "set_runtime_profile_home"):
+                        adapter.set_runtime_profile_home(self._gateway_profile_home)
                     adapter.set_message_handler(self._handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
@@ -6872,6 +6754,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Stamp every inbound event from this adapter with its profile so
             # the agent turn (and session key) resolve to the right home.
+            if hasattr(adapter, "set_runtime_profile_home"):
+                adapter.set_runtime_profile_home(profile_home)
             adapter.set_message_handler(
                 self._make_profile_message_handler(profile_name)
             )
@@ -7368,15 +7252,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
-        # Intercept messages that are responses to a pending clarify
-        # request that is awaiting free-form text (either an open-ended
-        # clarify with no choices, or one where the user picked the
-        # "Other" button).  The first non-empty user message in the
-        # session resolves the clarify and unblocks the agent thread —
-        # we do NOT route it to the agent as a new turn.
+        # A spoken approval must resolve the tool waiter before ordinary
+        # message/clarify handling. The agent thread is blocked in
+        # tools.approval, so routing this transcript as a normal turn would
+        # leave the command pending until timeout.
+        if self._maybe_resolve_voice_approval_response(event):
+            return ""
+
+        # Intercept messages that are responses to a pending clarify request.
+        # Typed replies require free-form text-capture mode (an open-ended
+        # clarify or an explicit "Other" choice). Spoken replies can answer
+        # any pending clarify because they cannot first activate the visual
+        # "Other" button. In either case, resolve the waiter instead of
+        # routing the answer as a new turn or interrupt.
         try:
             from tools import clarify_gateway as _clarify_mod
-            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _pending_clarify = (
+                _clarify_mod.get_pending_for_voice_capture(_quick_key)
+                if event.message_type == MessageType.VOICE
+                else _clarify_mod.get_pending_for_session(_quick_key)
+            )
         except Exception:
             _pending_clarify = None
         if _pending_clarify is not None:
@@ -9446,6 +9341,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_id=session_entry.session_id,
                 session_key=session_key,
                 run_generation=run_generation,
+                event=event,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
                 persist_user_message=persist_user_message,
@@ -10551,336 +10447,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if hasattr(raw, "guild") and raw.guild:
             return raw.guild.id
         return None
-
-
-    async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
-        """Join the user's current Discord voice channel."""
-        adapter = self.adapters.get(event.source.platform)
-        if not hasattr(adapter, "join_voice_channel"):
-            return "Voice channels are not supported on this platform."
-
-        guild_id = self._get_guild_id(event)
-        if not guild_id:
-            return "This command only works in a Discord server."
-
-        voice_channel = await adapter.get_user_voice_channel(
-            guild_id, event.source.user_id
-        )
-        if not voice_channel:
-            return "You need to be in a voice channel first."
-
-        # Wire callbacks BEFORE join so voice input arriving immediately
-        # after connection is not lost.
-        if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = self._handle_voice_channel_input
-        if hasattr(adapter, "_on_voice_disconnect"):
-            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
-        # Let the adapter's inactivity timer see the live voice-reply mode so it
-        # doesn't disconnect a deliberately text-only (/voice off) session.
-        if hasattr(adapter, "_voice_mode_getter"):
-            adapter._voice_mode_getter = lambda chat_id: self._voice_mode.get(
-                self._voice_key(Platform.DISCORD, str(chat_id)), "off"
-            )
-
-        try:
-            success = await adapter.join_voice_channel(voice_channel)
-        except Exception as e:
-            logger.warning("Failed to join voice channel: %s", e)
-            adapter._voice_input_callback = None
-            err_lower = str(e).lower()
-            if "pynacl" in err_lower or "nacl" in err_lower or "davey" in err_lower:
-                return (
-                    "Voice dependencies are missing (PyNaCl / davey). "
-                    f"Install with: `{sys.executable} -m pip install PyNaCl`"
-                )
-            return f"Failed to join voice channel: {e}"
-
-        if success:
-            adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
-            if hasattr(adapter, "_voice_sources"):
-                adapter._voice_sources[guild_id] = event.source.to_dict()
-            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "all"
-            self._save_voice_modes()
-            self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
-            return (
-                f"Joined voice channel **{voice_channel.name}**.\n"
-                f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
-            )
-        # Join failed — clear callback
-        adapter._voice_input_callback = None
-        return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
-
-    async def _handle_voice_channel_leave(self, event: MessageEvent) -> str:
-        """Leave the Discord voice channel."""
-        adapter = self.adapters.get(event.source.platform)
-        guild_id = self._get_guild_id(event)
-
-        if not guild_id or not hasattr(adapter, "leave_voice_channel"):
-            return "Not in a voice channel."
-
-        if not hasattr(adapter, "is_in_voice_channel") or not adapter.is_in_voice_channel(guild_id):
-            return "Not in a voice channel."
-
-        try:
-            await adapter.leave_voice_channel(guild_id)
-        except Exception as e:
-            logger.warning("Error leaving voice channel: %s", e)
-        # Always clean up state even if leave raised an exception
-        self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "off"
-        self._save_voice_modes()
-        self._set_adapter_auto_tts_disabled(adapter, event.source.chat_id, disabled=True)
-        if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = None
-        return "Left voice channel."
-
-    def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
-        """Called by the adapter when a voice channel times out.
-
-        Cleans up runner-side voice_mode state that the adapter cannot reach.
-        """
-        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
-        self._save_voice_modes()
-        adapter = self.adapters.get(Platform.DISCORD)
-        self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
-
-    def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
-        """Suppress repeated STT outputs for the same recent utterance.
-
-        Voice capture can occasionally emit the same utterance twice a few
-        seconds apart, which creates a second queued agent run and overlapping
-        spoken replies. Dedup exact and near-exact repeats per guild/user over a
-        short window while allowing genuinely new turns through.
-        """
-        from difflib import SequenceMatcher
-
-        normalized = re.sub(r"\s+", " ", transcript).strip().lower()
-        normalized = re.sub(r"[^\w\s]", "", normalized)
-        if not normalized:
-            return False
-
-        now = time.monotonic()
-        window_seconds = 12.0
-        key = (guild_id, user_id)
-        recent_store = getattr(self, "_recent_voice_transcripts", None)
-        if not isinstance(recent_store, dict):
-            recent_store = {}
-            self._recent_voice_transcripts = recent_store
-        recent = [
-            (ts, txt)
-            for ts, txt in recent_store.get(key, [])
-            if now - ts <= window_seconds
-        ]
-
-        for _, prior in recent:
-            if prior == normalized:
-                recent_store[key] = recent
-                return True
-            if len(prior) >= 16 and len(normalized) >= 16:
-                if SequenceMatcher(None, prior, normalized).ratio() >= 0.95:
-                    recent_store[key] = recent
-                    return True
-
-        recent.append((now, normalized))
-        recent_store[key] = recent[-5:]
-        return False
-
-    async def _handle_voice_channel_input(
-        self, guild_id: int, user_id: int, transcript: str
-    ):
-        """Handle transcribed voice from a user in a voice channel.
-
-        Creates a synthetic MessageEvent and processes it through the
-        adapter's full message pipeline (session, typing, agent, TTS reply).
-        """
-        adapter = self.adapters.get(Platform.DISCORD)
-        if not adapter:
-            return
-
-        text_ch_id = adapter._voice_text_channels.get(guild_id)
-        if not text_ch_id:
-            return
-
-        # Build source — reuse the linked text channel's metadata when available
-        # so voice input shares the same session as the bound text conversation.
-        source_data = getattr(adapter, "_voice_sources", {}).get(guild_id)
-        if source_data:
-            source = SessionSource.from_dict(source_data)
-            source.user_id = str(user_id)
-            source.user_name = str(user_id)
-        else:
-            source = SessionSource(
-                platform=Platform.DISCORD,
-                chat_id=str(text_ch_id),
-                user_id=str(user_id),
-                user_name=str(user_id),
-                chat_type="channel",
-            )
-
-        # Check authorization before processing voice input
-        if not self._is_user_authorized(source):
-            logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
-            return
-
-        if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
-            logger.info(
-                "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
-                guild_id,
-                user_id,
-                transcript[:100],
-            )
-            return
-
-        # Show transcript in text channel (after auth, with mention sanitization)
-        try:
-            channel = adapter._client.get_channel(text_ch_id)
-            if channel:
-                safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
-                await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
-        except Exception:
-            pass
-
-        # Build a synthetic MessageEvent and feed through the normal pipeline
-        # Use SimpleNamespace as raw_message so _get_guild_id() can extract
-        # guild_id and _send_voice_reply() plays audio in the voice channel.
-        from types import SimpleNamespace
-        event = MessageEvent(
-            source=source,
-            text=transcript,
-            message_type=MessageType.VOICE,
-            raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
-        )
-
-        await adapter.handle_message(event)
-
-    def _should_send_voice_reply(
-        self,
-        event: MessageEvent,
-        response: str,
-        agent_messages: list,
-        already_sent: bool = False,
-    ) -> bool:
-        """Decide whether the runner should send a TTS voice reply.
-
-        Returns False when:
-        - voice_mode is off for this chat
-        - response is empty or an error
-        - agent already called text_to_speech tool (dedup)
-        - voice input and base adapter auto-TTS already handled it (skip_double)
-          UNLESS streaming already consumed the response (already_sent=True),
-          in which case the base adapter won't have text for auto-TTS so the
-          runner must handle it.
-        """
-        if not response or response.startswith("Error:"):
-            return False
-
-        chat_id = event.source.chat_id
-        voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
-        is_voice_input = (event.message_type == MessageType.VOICE)
-
-        should = (
-            (voice_mode == "all")
-            or (voice_mode == "voice_only" and is_voice_input)
-        )
-        if not should:
-            return False
-
-        # Dedup: agent already called TTS tool
-        has_agent_tts = any(
-            msg.get("role") == "assistant"
-            and any(
-                tc.get("function", {}).get("name") == "text_to_speech"
-                for tc in (msg.get("tool_calls") or [])
-            )
-            for msg in agent_messages
-        )
-        if has_agent_tts:
-            return False
-
-        # Dedup: base adapter auto-TTS already handles voice input
-        # (play_tts plays in VC when connected, so runner can skip).
-        # When streaming already delivered the text (already_sent=True),
-        # the base adapter will receive None and can't run auto-TTS,
-        # so the runner must take over.
-        if is_voice_input and not already_sent:
-            return False
-
-        return True
-
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
-        """Generate TTS audio and send as a voice message before the text reply."""
-        import uuid as _uuid
-        audio_path = None
-        actual_path = None
-        try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
-
-            tts_text = _strip_markdown_for_tts(text[:4000])
-            if not tts_text:
-                return
-
-            # Telegram's adapter only sends native voice bubbles for OGG/Opus.
-            # Other platforms keep the existing MP3 default.
-            audio_ext = "ogg" if event.source.platform == Platform.TELEGRAM else "mp3"
-            audio_path = os.path.join(
-                tempfile.gettempdir(), "hermes_voice",
-                f"tts_reply_{_uuid.uuid4().hex[:12]}.{audio_ext}",
-            )
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
-
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
-            try:
-                result = json.loads(result_json)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
-                return
-
-            # Use the actual file path from result (may differ after opus conversion)
-            actual_path = result.get("file_path", audio_path)
-            if not result.get("success") or not os.path.isfile(actual_path):
-                logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
-
-            adapter = self.adapters.get(event.source.platform)
-
-            # If connected to a voice channel, play there instead of sending a file
-            guild_id = self._get_guild_id(event)
-            if (guild_id
-                    and hasattr(adapter, "play_in_voice_channel")
-                    and hasattr(adapter, "is_in_voice_channel")
-                    and adapter.is_in_voice_channel(guild_id)):
-                await adapter.play_in_voice_channel(guild_id, actual_path)
-            elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-                # Mark the auto voice reply as notify-worthy.  Mirrors the
-                # final-text path in gateway/platforms/base.py which sets
-                # ``notify=True`` so platform adapters that gate push
-                # notifications (Telegram "important" mode) deliver the
-                # final voice reply as a normal notification instead of a
-                # silent message.  Clone first so we don't mutate metadata
-                # shared with concurrent typing-indicator state.
-                if thread_meta is not None:
-                    thread_meta = dict(thread_meta)
-                    thread_meta["notify"] = True
-                else:
-                    thread_meta = {"notify": True}
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": event.source.chat_id,
-                    "audio_path": actual_path,
-                    "reply_to": reply_anchor,
-                    "metadata": thread_meta,
-                }
-                await adapter.send_voice(**send_kwargs)
-        except Exception as e:
-            logger.warning("Auto voice reply failed: %s", e, exc_info=True)
-        finally:
-            for p in {audio_path, actual_path} - {None}:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
 
     async def _deliver_media_from_response(
         self,
@@ -12700,174 +12266,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return prefix
         return user_text
 
-    async def _enrich_message_with_transcription(
-        self,
-        user_text: str,
-        audio_paths: List[str],
-    ) -> tuple[str, List[str]]:
-        """
-        Auto-transcribe user voice/audio messages using the configured STT provider
-        and prepend the transcript to the message text.
-
-        Args:
-            user_text:   The user's original caption / message text.
-            audio_paths: List of local file paths to cached audio files.
-
-        Returns:
-            A tuple of ``(enriched_text, successful_transcripts)``:
-              - ``enriched_text``: the message string with transcription wrappers
-                prepended (same as before).
-              - ``successful_transcripts``: the raw transcript strings for audio
-                clips that were successfully transcribed, in input order. Empty
-                list if every clip failed or STT is disabled. Callers can use
-                this to echo transcripts back to the user before the agent loop.
-        """
-        if not getattr(self.config, "stt_enabled", True):
-            notes = []
-            for path in audio_paths:
-                abs_path = os.path.abspath(path)
-                duration_str = await _probe_audio_duration(abs_path)
-                if duration_str:
-                    notes.append(
-                        f"[The user sent a voice message: {abs_path} (duration: {duration_str})]"
-                    )
-                else:
-                    notes.append(f"[The user sent a voice message: {abs_path}]")
-            if not notes:
-                return user_text, []
-            prefix = "\n\n".join(notes)
-            _placeholder = "(The user sent a message with no text content)"
-            if user_text and user_text.strip() == _placeholder:
-                return prefix, []
-            if user_text:
-                return f"{prefix}\n\n{user_text}", []
-            return prefix, []
-
-        from tools.transcription_tools import transcribe_audio
-
-        enriched_parts = []
-        successful_transcripts: List[str] = []
-        for path in audio_paths:
-            try:
-                logger.debug("Transcribing user voice: %s", path)
-                result = await asyncio.to_thread(transcribe_audio, path)
-                if result["success"]:
-                    transcript = result["transcript"]
-                    successful_transcripts.append(transcript)
-                    enriched_parts.append(
-                        f'[The user sent a voice message~ '
-                        f'Here\'s what they said: "{transcript}"]'
-                    )
-                else:
-                    error = result.get("error", "unknown error")
-                    if (
-                        "No STT provider" in error
-                        or error.startswith("Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set")
-                    ):
-                        _no_stt_note = (
-                            "[The user sent a voice message but I can't listen "
-                            "to it right now — no STT provider is configured. "
-                            "A direct message has already been sent to the user "
-                            "with setup instructions."
-                        )
-                        if self._has_setup_skill():
-                            _no_stt_note += (
-                                " You have a skill called hermes-agent-setup "
-                                "that can help users configure Hermes features "
-                                "including voice, tools, and more."
-                            )
-                        _no_stt_note += "]"
-                        enriched_parts.append(_no_stt_note)
-                    else:
-                        enriched_parts.append(
-                            "[The user sent a voice message but I had trouble "
-                            f"transcribing it~ ({error})]"
-                        )
-            except Exception as e:
-                logger.error("Transcription error: %s", e)
-                enriched_parts.append(
-                    "[The user sent a voice message but something went wrong "
-                    "when I tried to listen to it~ Let them know!]"
-                )
-
-        if enriched_parts:
-            prefix = "\n\n".join(enriched_parts)
-            # Strip the empty-content placeholder from the Discord adapter
-            # when we successfully transcribed the audio — it's redundant.
-            _placeholder = "(The user sent a message with no text content)"
-            if user_text and user_text.strip() == _placeholder:
-                return prefix, successful_transcripts
-            if user_text:
-                return f"{prefix}\n\n{user_text}", successful_transcripts
-            return prefix, successful_transcripts
-        return user_text, successful_transcripts
-
-    async def _dequeue_pending_with_transcription(
-        self,
-        adapter,
-        session_key: str,
-        source,
-    ) -> str | None:
-        """Dequeue a pending queued message, auto-transcribing audio media.
-
-        When a voice/audio message arrives during an active agent run, the
-        adapter stores the event in its pending queue and signals an interrupt
-        (see base.BaseAdapter.handle_message). The adapter path bypasses
-        _handle_message entirely, so the normal STT pipeline at message-receive
-        time never runs.
-
-        This helper fills that gap: when the dequeued event has audio media,
-        we transcribe inline, echo the raw transcript back to the user (same
-        "🎙️" format as the fresh-message path), and return enriched text.
-        Non-audio events fall back to _build_media_placeholder, matching the
-        original _dequeue_pending_text behavior.
-        """
-        event = adapter.get_pending_message(session_key)
-        if not event:
-            return None
-
-        text = event.text or ""
-
-        audio_paths: List[str] = []
-        media_urls = getattr(event, "media_urls", None) or []
-        media_types = getattr(event, "media_types", None) or []
-        for i, path in enumerate(media_urls):
-            mtype = media_types[i] if i < len(media_types) else ""
-            is_audio = (
-                mtype.startswith("audio/")
-                or getattr(event, "message_type", None) in (MessageType.VOICE, MessageType.AUDIO)
-            )
-            if is_audio:
-                audio_paths.append(path)
-
-        if audio_paths:
-            enriched_text, successful_transcripts = await self._enrich_message_with_transcription(
-                text, audio_paths,
-            )
-            # Echo raw transcripts back to the user so voice interrupts
-            # feel identical to fresh voice messages.
-            if successful_transcripts:
-                echo_adapter = self.adapters.get(source.platform)
-                echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
-                if echo_adapter:
-                    for tx in successful_transcripts:
-                        try:
-                            await echo_adapter.send(
-                                source.chat_id,
-                                f'🎙️ "{tx}"',
-                                metadata=echo_meta,
-                            )
-                        except Exception as echo_exc:
-                            logger.debug(
-                                "Transcript echo failed (non-fatal): %s", echo_exc,
-                            )
-            return enriched_text or None
-
-        # Non-audio fallback: preserve original _dequeue_pending_text semantics.
-        if not text and media_urls:
-            text = _build_media_placeholder(event)
-        return text or None
-
     def _build_process_event_source(self, evt: dict):
         """Resolve the canonical source for a synthetic background-process event.
 
@@ -14208,6 +13606,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         session_key: str = None,
         run_generation: Optional[int] = None,
+        event: Optional[MessageEvent] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
@@ -14228,6 +13627,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
+                event=event,
                 _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
                 channel_prompt=channel_prompt, persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
@@ -14274,6 +13674,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         session_key: str = None,
         run_generation: Optional[int] = None,
+        event: Optional[MessageEvent] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
@@ -15564,6 +14965,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _clarify_mod.clear_session(session_key or "")
                     return "[clarify prompt could not be delivered]"
 
+                try:
+                    if event is not None:
+                        self._maybe_send_clarify_voice_prompt(
+                            event=event,
+                            question=question,
+                            choices=list(choices) if choices else None,
+                            loop=_loop_for_step,
+                        )
+                except Exception as exc:
+                    # Best-effort only: the visual clarify prompt is already
+                    # delivered, and a TTS failure must not cancel the waiter.
+                    logger.warning("Clarify voice prompt failed: %s", exc)
+
                 timeout = _clarify_mod.get_clarify_timeout()
                 response = _clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
                 if response is None or response == "":
@@ -15674,6 +15088,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             raise RuntimeError("send_exec_approval: loop unavailable")
                         _approval_result = _approval_fut.result(timeout=15)
                         if _approval_result.success:
+                            try:
+                                if event is not None:
+                                    self._maybe_send_approval_voice_prompt(
+                                        event=event,
+                                        description=desc,
+                                        loop=_loop_for_step,
+                                    )
+                            except Exception as exc:
+                                logger.warning("Approval voice prompt failed: %s", exc)
                             return
                         logger.warning(
                             "Button-based approval failed (send returned error), falling back to text: %s",
@@ -15710,6 +15133,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if _approval_send_fut is not None:
                         _approval_send_fut.result(timeout=15)
+                        try:
+                            if event is not None:
+                                self._maybe_send_approval_voice_prompt(
+                                    event=event,
+                                    description=desc,
+                                    loop=_loop_for_step,
+                                )
+                        except Exception as exc:
+                            logger.warning("Approval voice prompt failed: %s", exc)
                 except Exception as _e:
                     logger.error("Failed to send approval request: %s", _e)
 
@@ -16752,6 +16184,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_id=session_id,
                     session_key=session_key,
                     run_generation=run_generation,
+                    event=pending_event,
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
