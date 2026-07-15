@@ -5717,6 +5717,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
+        # Start background kanban Discord mirror daemon — self-gates on
+        # config (kanban.discord_mirror.enabled) so this is a no-op when
+        # disabled, same pattern as the notifier's internal gating.
+        from gateway.kanban_mirror.daemon import run_mirror_daemon
+        asyncio.create_task(run_mirror_daemon(lambda: self._running))
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
@@ -12565,6 +12571,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         in a ``finally`` block.
         """
         from gateway.session_context import set_session_vars
+
+        kanban_board = ""
+        kanban_task = ""
+        if context.source.platform == Platform.DISCORD and context.source.thread_id:
+            try:
+                from gateway.kanban_mirror.context import resolve_mirrored_kanban_thread
+
+                mirrored = resolve_mirrored_kanban_thread(context.source.thread_id)
+            except Exception:
+                mirrored = None
+            if mirrored is not None and getattr(mirrored, "safe_default_task_id", None):
+                kanban_board = str(getattr(mirrored, "board_slug", "") or "")
+                kanban_task = str(getattr(mirrored, "safe_default_task_id", "") or "")
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -12574,6 +12593,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
+            kanban_board=kanban_board,
+            kanban_task=kanban_task,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
