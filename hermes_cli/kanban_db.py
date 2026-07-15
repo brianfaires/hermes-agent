@@ -100,6 +100,7 @@ _log = logging.getLogger(__name__)
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -890,6 +891,25 @@ class Task:
 
 
 @dataclass
+class OwnerInstruction:
+    """Durable owner request attached to an existing task."""
+
+    id: int
+    task_id: str
+    assignee: str
+    source: str
+    source_key: str
+    actor: str
+    body: str
+    status: str
+    created_at: int
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> "OwnerInstruction":
+        return cls(**{name: row[name] for name in cls.__dataclass_fields__})
+
+
+@dataclass
 class Run:
     """In-memory view of a ``task_runs`` row.
 
@@ -1064,6 +1084,19 @@ CREATE TABLE IF NOT EXISTS task_comments (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_owner_instructions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL,
+    assignee      TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    source_key    TEXT NOT NULL,
+    actor         TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    INTEGER NOT NULL,
+    UNIQUE(source, source_key)
+);
+
 CREATE TABLE IF NOT EXISTS task_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    TEXT NOT NULL,
@@ -1140,6 +1173,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_instructions_task ON task_owner_instructions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_instructions_dispatch ON task_owner_instructions(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
@@ -2566,6 +2601,129 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
         )
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Owner instructions
+# ---------------------------------------------------------------------------
+
+def create_owner_instruction(conn: sqlite3.Connection, *, task_id: str, assignee: str,
+                             source: str, source_key: str, actor: str, body: str) -> OwnerInstruction:
+    """Create or return the authoritative source-deduplicated instruction."""
+    if not all(str(v).strip() for v in (task_id, assignee, source, source_key, actor, body)):
+        raise ValueError("owner instruction fields are required")
+    now = int(time.time())
+    with write_txn(conn):
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        conn.execute(
+            "INSERT OR IGNORE INTO task_owner_instructions "
+            "(task_id,assignee,source,source_key,actor,body,status,created_at) "
+            "VALUES (?,?,?,?,?,?,'pending',?)",
+            (task_id, assignee.strip(), source.strip(), source_key.strip(), actor.strip(), body.strip(), now),
+        )
+        row = conn.execute("SELECT * FROM task_owner_instructions WHERE source=? AND source_key=?",
+                           (source.strip(), source_key.strip())).fetchone()
+        assert row is not None
+        return OwnerInstruction.from_row(row)
+
+
+def route_owner_instruction(conn: sqlite3.Connection, instruction_id: int, *,
+                            explicit_rerun: bool = False, passive: bool = False) -> str:
+    """Route an instruction through the original card's ordinary lifecycle."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT i.task_id,i.status,t.status task_status,t.assignee task_assignee "
+            "FROM task_owner_instructions i "
+            "JOIN tasks t ON t.id=i.task_id WHERE i.id=?", (int(instruction_id),),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown owner instruction {instruction_id}")
+        if row["status"] not in {"pending", "queued"}:
+            return str(row["status"])
+        task_status = str(row["task_status"])
+        was_queued = row["status"] == "queued"
+        if passive:
+            disposition = "routed"
+        elif not str(row["task_assignee"] or "").strip():
+            # Persist the instruction without pretending an ordinary worker can
+            # receive it before the card has an assignee.
+            disposition = "unroutable"
+        elif task_status == "running":
+            disposition = "queued"
+        elif task_status in {"done", "archived"} and not (explicit_rerun or was_queued):
+            disposition = "ignored"
+        else:
+            undone = conn.execute(
+                "SELECT 1 FROM task_links l JOIN tasks p ON p.id=l.parent_id "
+                "WHERE l.child_id=? AND p.status!='done' LIMIT 1", (row["task_id"],),
+            ).fetchone()
+            next_status = "todo" if undone else "ready"
+            if task_status in {"blocked", "scheduled", "review", "done", "archived"} or (
+                task_status == "todo" and not undone
+            ):
+                conn.execute(
+                    "UPDATE tasks SET status=?,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,"
+                    "current_run_id=NULL,completed_at=NULL WHERE id=?",
+                    (next_status, row["task_id"]),
+                )
+            disposition = "routed"
+        conn.execute("UPDATE task_owner_instructions SET status=? WHERE id=?",
+                     (disposition, int(instruction_id)))
+        _append_event(conn, row["task_id"], "owner_instruction_routed", {
+            "instruction_id": int(instruction_id), "status": disposition,
+            "explicit_rerun": bool(explicit_rerun),
+        })
+        return disposition
+
+
+def route_queued_owner_instructions(conn: sqlite3.Connection) -> int:
+    """Route instructions deferred behind an active run, without racing it."""
+    ids = [int(r["id"]) for r in conn.execute(
+        "SELECT i.id FROM task_owner_instructions i JOIN tasks t ON t.id=i.task_id "
+        "WHERE i.status='queued' AND t.status!='running' ORDER BY i.created_at,i.id"
+    ).fetchall()]
+    for instruction_id in ids:
+        route_owner_instruction(conn, instruction_id)
+    return len(ids)
+
+
+def route_pending_owner_instructions(conn: sqlite3.Connection) -> int:
+    """Route pending instructions onto ordinary card dispatch."""
+    rows = conn.execute(
+        "SELECT id,body FROM task_owner_instructions "
+        "WHERE status='pending' ORDER BY created_at,id"
+    ).fetchall()
+    for row in rows:
+        intent = next(
+            (
+                line.partition(":")[2].strip()
+                for line in str(row["body"] or "").splitlines()
+                if line.startswith("Instruction:")
+            ),
+            "",
+        )
+        route_owner_instruction(
+            conn,
+            int(row["id"]),
+            explicit_rerun=intent == "rerun_request",
+            passive=intent == "watch",
+        )
+    return len(rows)
+
+
+def get_owner_instruction(conn: sqlite3.Connection, instruction_id: int) -> Optional[OwnerInstruction]:
+    row = conn.execute("SELECT * FROM task_owner_instructions WHERE id=?", (int(instruction_id),)).fetchone()
+    return OwnerInstruction.from_row(row) if row else None
+
+
+def list_owner_instructions(conn: sqlite3.Connection, task_id: Optional[str] = None) -> list[OwnerInstruction]:
+    if task_id is None:
+        rows = conn.execute("SELECT * FROM task_owner_instructions ORDER BY created_at,id").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM task_owner_instructions WHERE task_id=? ORDER BY created_at,id", (task_id,)).fetchall()
+    return [OwnerInstruction.from_row(row) for row in rows]
+
 
 
 # ---------------------------------------------------------------------------
@@ -4926,6 +5084,7 @@ class DispatchResult:
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
     rate_limited: list[str] = field(default_factory=list)
+
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
@@ -6116,6 +6275,7 @@ def dispatch_once(
     conn: sqlite3.Connection,
     *,
     spawn_fn=None,
+
     ttl_seconds: Optional[int] = None,
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
@@ -6182,6 +6342,14 @@ def dispatch_once(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    route_pending_owner_instructions(conn)
+    route_queued_owner_instructions(conn)
+
+    active_total = int(conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status='running'"
+    ).fetchone()[0])
+    profile_active = {r["assignee"]: int(r["n"]) for r in conn.execute(
+        "SELECT assignee,COUNT(*) n FROM tasks WHERE status='running' GROUP BY assignee")}
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
@@ -6190,13 +6358,9 @@ def dispatch_once(
     # board, since "running" tasks aren't reclaimed by completion alone —
     # they sit in status='running' until the worker calls
     # kanban_complete/kanban_block (or the dispatcher TTL-reclaims them).
-    running_count = 0
+    running_count = active_total
     if max_spawn is not None:
-        running_count = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-            ).fetchone()[0]
-        )
+        running_count = active_total
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
@@ -6208,15 +6372,14 @@ def dispatch_once(
     # resource-constrained hosts) can finish what they have before more tasks
     # pile up and time out.
     if max_in_progress is not None and ready_rows:
-        in_progress = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
-        ).fetchone()[0]
+        in_progress = active_total
         if in_progress >= max_in_progress:
             return result
         # Only spawn enough to reach the cap, respecting max_spawn too.
         remaining = max_in_progress - in_progress
-        if max_spawn is None or max_spawn > remaining:
-            max_spawn = remaining
+        absolute_cap = running_count + remaining
+        if max_spawn is None or max_spawn > absolute_cap:
+            max_spawn = absolute_cap
     spawned = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
@@ -6230,14 +6393,14 @@ def dispatch_once(
         isinstance(max_in_progress_per_profile, int)
         and max_in_progress_per_profile > 0
     ) else None
-    _per_profile_running: dict[str, int] = {}
+    _per_profile_running: dict[str, int] = dict(profile_active)
     if _per_profile_cap is not None:
         for prow in conn.execute(
             "SELECT assignee, COUNT(*) AS n FROM tasks "
             "WHERE status = 'running' AND assignee IS NOT NULL "
             "GROUP BY assignee"
         ):
-            _per_profile_running[prow["assignee"]] = int(prow["n"])
+            _per_profile_running.setdefault(prow["assignee"], int(prow["n"]))
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
@@ -6804,6 +6967,7 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -6818,12 +6982,13 @@ def _default_spawn(
     from. Workers cannot accidentally see other boards.
     """
     import subprocess
-    if not task.assignee:
+    assignee = task.assignee
+    if not assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
     from hermes_cli.profiles import normalize_profile_name
 
-    profile_arg = normalize_profile_name(task.assignee)
+    profile_arg = normalize_profile_name(assignee)
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
@@ -6850,6 +7015,7 @@ def _default_spawn(
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
     if task.current_run_id is not None:
