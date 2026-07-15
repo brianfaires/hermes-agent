@@ -17,6 +17,7 @@ import sys
 import time
 import types
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -33,6 +34,7 @@ async def _fire_post_delivery_cb(cb):
     if _inspect.isawaitable(result):
         await result
 from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.session import SessionSource
 
 
@@ -83,6 +85,13 @@ class CleanupCaptureAdapter(BasePlatformAdapter):
 
     async def stop_typing(self, chat_id) -> None:
         return None
+
+    def pause_typing_for_chat(self, chat_id) -> None:
+        return None
+
+    async def send_clarify(self, **kwargs) -> SendResult:
+        self.sent.append({"clarify": kwargs, "message_id": self._mint_id()})
+        return SendResult(success=True, message_id=self.sent[-1]["message_id"])
 
     async def get_chat_info(self, chat_id: str):
         return {"id": chat_id}
@@ -141,6 +150,16 @@ class FailingAgent:
             "failed": True,
             "error": "simulated provider failure",
         }
+
+
+class ClarifyAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+        self.clarify_callback = None
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        response = self.clarify_callback("Pick one?", ["A", "B"])
+        return {"final_response": response, "messages": [], "api_calls": 1}
 
 
 def _make_runner(adapter):
@@ -231,6 +250,41 @@ async def test_cleanup_off_by_default_leaves_bubbles(monkeypatch, tmp_path):
         for _ in range(10):
             await asyncio.sleep(0.01)
     assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_clarify_voice_prompt_callback_receives_inbound_event(monkeypatch, tmp_path):
+    adapter = CleanupCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, ClarifyAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    from tools import clarify_gateway
+
+    monkeypatch.setattr(clarify_gateway, "wait_for_response", lambda *a, **k: "A")
+    runner._maybe_send_clarify_voice_prompt = MagicMock(return_value=True)
+
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
+    event = MessageEvent(
+        text="hello",
+        source=source,
+        message_type=MessageType.TEXT,
+        message_id="msg-1",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-clarify",
+        session_key="agent:main:telegram:group:-1001",
+        event=event,
+    )
+
+    assert result["final_response"] == "A"
+    runner._maybe_send_clarify_voice_prompt.assert_called_once()
+    assert runner._maybe_send_clarify_voice_prompt.call_args.kwargs["event"] is event
 
 
 @pytest.mark.asyncio

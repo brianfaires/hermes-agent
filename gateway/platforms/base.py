@@ -6,6 +6,7 @@ and implement the required methods.
 """
 
 import asyncio
+import hashlib
 import inspect
 import ipaddress
 import logging
@@ -15,6 +16,7 @@ import re
 import socket as _socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -34,6 +36,32 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
 _POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS = 30.0
+_SAFE_TEMP_SEGMENT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def gateway_tts_temp_path(prefix: str, extension: str) -> str:
+    """Return a unique profile-scoped path for gateway-generated TTS audio."""
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home()
+    if home.parent.name == "profiles" and home.name:
+        raw_profile = home.name
+    else:
+        try:
+            raw_profile = "default" if home.resolve() == (Path.home() / ".hermes").resolve() else ""
+        except OSError:
+            raw_profile = ""
+        if not raw_profile:
+            digest = hashlib.sha256(str(home).encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            raw_profile = f"home-{digest}"
+    profile = _SAFE_TEMP_SEGMENT_RE.sub("_", raw_profile).strip("._-")
+    if not profile:
+        profile = hashlib.sha256(str(home).encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    safe_prefix = _SAFE_TEMP_SEGMENT_RE.sub("_", prefix).strip("._-") or "tts"
+    safe_ext = _SAFE_TEMP_SEGMENT_RE.sub("", extension.lstrip(".")) or "mp3"
+    temp_dir = Path(tempfile.gettempdir()) / "hermes_voice" / profile
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    return str(temp_dir / f"{safe_prefix}_{uuid.uuid4().hex[:12]}.{safe_ext}")
 
 
 def _platform_name(platform) -> str:
@@ -489,6 +517,7 @@ def is_host_excluded_by_no_proxy(hostname: str, no_proxy_value: str | None = Non
 
 
 import dataclasses
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -2089,13 +2118,25 @@ class EphemeralReply(str):
     place.  When ``ttl_seconds`` is ``None``, the pipeline uses the
     configured ``display.ephemeral_system_ttl`` default.  A default of ``0``
     disables auto-deletion globally, preserving prior behavior.
+
+    ``voice_text`` optionally overrides the text used for automatic TTS when
+    the reply is triggered from a voice message.  ``None`` preserves the
+    legacy fallback of speaking the visible reply text.  An empty string
+    intentionally suppresses automatic TTS for this ephemeral reply.
     """
 
     ttl_seconds: Optional[int]
+    voice_text: Optional[str]
 
-    def __new__(cls, text: str, ttl_seconds: Optional[int] = None):
+    def __new__(
+        cls,
+        text: str,
+        ttl_seconds: Optional[int] = None,
+        voice_text: Optional[str] = None,
+    ):
         instance = super().__new__(cls, text)
         instance.ttl_seconds = ttl_seconds
+        instance.voice_text = voice_text
         return instance
 
     @property
@@ -2439,11 +2480,18 @@ class BasePlatformAdapter(ABC):
     # it) means EVERY platform adapter receives the injection, so profile
     # routing is platform-generic instead of Discord-only.
     gateway_runner = None  # type: ignore[assignment]  # set by gateway/run.py
+    # Voice-mode replies: "before_tts" posts the reply text to the chat before
+    # TTS audio is generated/played (voice-channel users read along while the
+    # audio spins up); "after_tts" keeps voice-first behavior and delivers the
+    # text as the audio caption/follow-up. Capability flag — the shared
+    # dispatch path branches on it; no platform checks at call sites.
+    voice_reply_text_order: str = "after_tts"
 
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._runtime_profile_home: Optional[Path] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2905,6 +2953,43 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_runtime_profile_home(self, profile_home: Optional[Path | str]) -> None:
+        """Pin adapter-side gateway work to the profile that owns this adapter.
+
+        The agent turn itself runs under a profile scope in the gateway runner.
+        Adapter-side post-processing runs after the handler returns, so keep the
+        owning profile home here for paths/config used by that post-processing.
+        """
+        self._runtime_profile_home = Path(profile_home).resolve() if profile_home else None
+        home = self._runtime_profile_home
+        self._runtime_profile_name = (
+            home.name if home is not None and home.parent.name == "profiles" else "default"
+        )
+
+    @contextmanager
+    def _runtime_profile_scope(self, event: MessageEvent):
+        """Scope adapter-side post-processing to this adapter/event's profile."""
+        profile_home = getattr(self, "_runtime_profile_home", None)
+        if profile_home is None:
+            try:
+                profile_name = (getattr(getattr(event, "source", None), "profile", None) or "").strip()
+                if profile_name:
+                    from hermes_cli.profiles import get_profile_dir
+                    profile_home = Path(get_profile_dir(profile_name)).resolve()
+            except Exception:
+                profile_home = None
+        if profile_home is None:
+            yield
+            return
+
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        token = set_hermes_home_override(str(profile_home))
+        try:
+            yield
+        finally:
+            reset_hermes_home_override(token)
 
     def set_topic_recovery_fn(
         self,
@@ -4885,12 +4970,17 @@ class BasePlatformAdapter(ABC):
                             include_choice_prompts=True,
                         ) is not None
                     )
+                    _has_voice_clarify = (
+                        event.message_type == MessageType.VOICE
+                        and _clarify_mod.get_pending_for_voice_capture(session_key) is not None
+                    )
                 except Exception:
                     _has_text_clarify = False
+                    _has_voice_clarify = False
 
-                if _has_text_clarify:
+                if _has_text_clarify or _has_voice_clarify:
                     logger.debug(
-                        "[%s] Routing message to clarify text-intercept for %s",
+                        "[%s] Routing message to clarify response-intercept for %s",
                         self.name, session_key,
                     )
                     try:
@@ -5048,6 +5138,7 @@ class BasePlatformAdapter(ABC):
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
             is_ephemeral_response = isinstance(response, EphemeralReply)
+            ephemeral_voice_text = response.voice_text if is_ephemeral_response else None
 
             # Slash-command handlers may return an EphemeralReply sentinel to
             # request that their reply message auto-delete after a TTL (used
@@ -5139,31 +5230,78 @@ class BasePlatformAdapter(ABC):
                 # thread-strict.
                 _final_thread_metadata = _mark_notify_metadata(_thread_metadata)
 
-                # Auto-TTS: if voice message, generate audio FIRST (before sending text)
+                # Auto-TTS: if voice message, generate audio for a spoken reply.
                 # Gated via ``_should_auto_tts_for_chat``: fires when the chat has
                 # an explicit ``/voice on|tts`` opt-in OR when ``voice.auto_tts`` is
                 # True globally and no ``/voice off`` has been issued.
                 _tts_path = None
-                if (self._should_auto_tts_for_chat(event.source.chat_id)
-                        and event.message_type == MessageType.VOICE
-                        and text_content
-                        and not media_files):
+                _should_auto_tts = (
+                    self._should_auto_tts_for_chat(event.source.chat_id)
+                    and event.message_type == MessageType.VOICE
+                    and text_content
+                    and ephemeral_voice_text != ""
+                    and not media_files
+                )
+                _text_sent_before_tts = False
+                if _should_auto_tts and self.voice_reply_text_order == "before_tts":
+                    try:
+                        logger.info(
+                            "[%s] Sending voice response text before TTS playback (%d chars) to %s",
+                            self.name,
+                            len(text_content),
+                            event.source.chat_id,
+                        )
+                        _reply_anchor = _reply_anchor_for_event(event)
+                        result = await self._send_with_retry(
+                            chat_id=event.source.chat_id,
+                            content=text_content,
+                            reply_to=_reply_anchor,
+                            metadata=_final_thread_metadata,
+                        )
+                        _record_delivery(result)
+                        _text_sent_before_tts = bool(getattr(result, "success", False))
+                        if (
+                            _text_sent_before_tts
+                            and _ephemeral_ttl
+                            and _ephemeral_ttl > 0
+                            and getattr(result, "message_id", None)
+                        ):
+                            self._schedule_ephemeral_delete(
+                                chat_id=event.source.chat_id,
+                                message_id=result.message_id,
+                                ttl_seconds=_ephemeral_ttl,
+                            )
+                    except Exception as text_err:
+                        logger.warning(
+                            "[%s] Early voice response text send failed: %s",
+                            self.name,
+                            text_err,
+                        )
+
+                if _should_auto_tts:
                     try:
                         from tools.tts_tool import text_to_speech_tool, check_tts_requirements
-                        if check_tts_requirements():
-                            import json as _json
-                            speech_text = self.prepare_tts_text(text_content)
-                            if not speech_text:
-                                raise ValueError("Empty text after markdown cleanup")
-                            tts_result_str = await asyncio.to_thread(
-                                text_to_speech_tool, text=speech_text
-                            )
-                            tts_data = _json.loads(tts_result_str)
-                            _tts_path = tts_data.get("file_path")
+                        with self._runtime_profile_scope(event):
+                            if check_tts_requirements():
+                                import json as _json
+                                speech_source = ephemeral_voice_text if ephemeral_voice_text is not None else text_content
+                                speech_text = self.prepare_tts_text(speech_source)
+                                if not speech_text:
+                                    raise ValueError("Empty text after markdown cleanup")
+                                audio_ext = "ogg" if self.platform == Platform.TELEGRAM else "mp3"
+                                output_path = gateway_tts_temp_path("tts_reply", audio_ext)
+                                tts_result_str = await asyncio.to_thread(
+                                    text_to_speech_tool,
+                                    text=speech_text,
+                                    output_path=output_path,
+                                )
+                                tts_data = _json.loads(tts_result_str)
+                                _tts_path = tts_data.get("file_path")
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
 
-                # Play TTS audio before text (voice-first experience)
+                # Play TTS audio. "before_tts" platforms sent their text above;
+                # the rest keep the prior voice-first behavior.
                 _tts_caption_delivered = False
                 if _tts_path and Path(_tts_path).exists():
                     try:
@@ -5193,7 +5331,7 @@ class BasePlatformAdapter(ABC):
                 # adapter while its in-flight handler was still producing a
                 # final response; that response is a new message, so resolve
                 # the current transport before sending it.
-                if text_content and not _tts_caption_delivered:
+                if text_content and not _tts_caption_delivered and not _text_sent_before_tts:
                     delivery_adapter = self._final_delivery_adapter(event.source)
                     logger.info(
                         "[%s] Sending response (%d chars) to %s",

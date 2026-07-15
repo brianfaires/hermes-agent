@@ -21,6 +21,7 @@ Covered:
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -297,6 +298,358 @@ async def test_process_message_ephemeral_reply_does_not_auto_upload_bare_paths(t
     adapter._send_with_retry.assert_called_once()
     assert adapter._send_with_retry.call_args.kwargs["content"] == reply_text
     adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_auto_tts_uses_ephemeral_spoken_text(tmp_path):
+    """Voice input may need a short spoken notice without changing text output."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return EphemeralReply(
+            "✨ Session reset! Starting fresh.\n\nSession ID: abc\n✦ Tip: long tip",
+            ttl_seconds=0,
+            voice_text="Fresh session. What's up?",
+        )
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch(
+        "tools.tts_tool.text_to_speech_tool",
+        return_value=json.dumps({"success": True, "file_path": str(tts_path)}),
+    ) as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_called_once()
+    assert mock_tts.call_args.kwargs["text"] == "Fresh session. What's up?"
+    adapter.play_tts.assert_awaited_once()
+    sent_text = adapter._send_with_retry.call_args.kwargs["content"]
+    assert "Session ID: abc" in sent_text
+    assert "long tip" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_process_message_discord_voice_sends_text_before_tts_generation(tmp_path):
+    """Discord voice mode posts visible text before long TTS generation/playback."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    calls = []
+
+    async def _send_text(**kwargs):
+        calls.append(("text", kwargs["content"]))
+        return SendResult(success=True, message_id="sent-1")
+
+    async def _play_tts(**kwargs):
+        calls.append(("tts", kwargs["audio_path"]))
+        return SendResult(success=True)
+
+    adapter._send_with_retry = AsyncMock(side_effect=_send_text)
+    adapter.play_tts = AsyncMock(side_effect=_play_tts)
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return "Long visible answer"
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="voice question", chat_id="42")
+    event.source.platform = Platform.DISCORD
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:discord:channel:42"
+
+    def _fake_tts(**kwargs):
+        calls.append(("generate", kwargs["text"]))
+        return json.dumps({"success": True, "file_path": str(tts_path)})
+
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch("tools.tts_tool.text_to_speech_tool", side_effect=_fake_tts):
+        await adapter._process_message_background(event, session_key)
+
+    assert [kind for kind, _ in calls] == ["text", "generate", "tts"]
+    adapter._send_with_retry.assert_awaited_once()
+    assert adapter._send_with_retry.await_args.kwargs["content"] == "Long visible answer"
+    adapter.play_tts.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_discord_voice_retries_text_after_early_send_failure(tmp_path):
+    """A failed early Discord text send does not suppress the normal final send."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        side_effect=[RuntimeError("temporary discord send failure"), SendResult(success=True, message_id="sent-2")]
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return "Visible answer"
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="voice question", chat_id="42")
+    event.source.platform = Platform.DISCORD
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:discord:channel:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch(
+        "tools.tts_tool.text_to_speech_tool",
+        return_value=json.dumps({"success": True, "file_path": str(tts_path)}),
+    ):
+        await adapter._process_message_background(event, session_key)
+
+    assert adapter._send_with_retry.await_count == 2
+    assert adapter._send_with_retry.await_args.kwargs["content"] == "Visible answer"
+    adapter.play_tts.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_message_discord_voice_schedules_ephemeral_delete_after_early_text(tmp_path):
+    """Early Discord voice text keeps EphemeralReply auto-delete semantics."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-early")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return EphemeralReply("Short-lived visible answer", ttl_seconds=5)
+
+    adapter.set_message_handler(_handler)
+    sleeps: list[float] = []
+
+    async def _fake_sleep(duration):
+        sleeps.append(duration)
+
+    event = _make_event(text="voice question", chat_id="42")
+    event.source.platform = Platform.DISCORD
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:discord:channel:42"
+    with patch("gateway.platforms.base.asyncio.sleep", _fake_sleep), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch(
+        "tools.tts_tool.text_to_speech_tool",
+        return_value=json.dumps({"success": True, "file_path": str(tts_path)}),
+    ):
+        await adapter._process_message_background(event, session_key)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    adapter._send_with_retry.assert_awaited_once()
+    adapter.play_tts.assert_awaited_once()
+    assert 5 in sleeps
+    assert ("42", "sent-early") in adapter.deleted
+
+
+@pytest.mark.asyncio
+async def test_process_message_auto_tts_falls_back_when_ephemeral_voice_text_absent(tmp_path):
+    """Absent voice_text preserves legacy behavior: speak the visible text."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return EphemeralReply("Visible reset notice", ttl_seconds=0)
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch(
+        "tools.tts_tool.text_to_speech_tool",
+        return_value=json.dumps({"success": True, "file_path": str(tts_path)}),
+    ) as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_called_once()
+    assert mock_tts.call_args.kwargs["text"] == "Visible reset notice"
+    adapter.play_tts.assert_awaited_once()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == "Visible reset notice"
+
+
+@pytest.mark.asyncio
+async def test_process_message_auto_tts_falls_back_when_ephemeral_voice_text_none(tmp_path):
+    """Explicit voice_text=None is equivalent to leaving voice_text unset."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+    tts_path = tmp_path / "notice.mp3"
+    tts_path.write_bytes(b"audio")
+
+    async def _handler(evt):
+        return EphemeralReply("Visible reset notice", ttl_seconds=0, voice_text=None)
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=True
+    ), patch(
+        "tools.tts_tool.text_to_speech_tool",
+        return_value=json.dumps({"success": True, "file_path": str(tts_path)}),
+    ) as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_called_once()
+    assert mock_tts.call_args.kwargs["text"] == "Visible reset notice"
+    adapter.play_tts.assert_awaited_once()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == "Visible reset notice"
+
+
+@pytest.mark.asyncio
+async def test_process_message_ephemeral_empty_voice_text_suppresses_auto_tts():
+    """Explicit voice_text="" means speak nothing, not fall back to visible text."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+
+    async def _handler(evt):
+        return EphemeralReply("Visible reset notice", ttl_seconds=0, voice_text="")
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch("tools.tts_tool.text_to_speech_tool") as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_not_called()
+    adapter.play_tts.assert_not_awaited()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == "Visible reset notice"
+
+
+@pytest.mark.asyncio
+async def test_process_message_ephemeral_voice_text_does_not_tts_when_disabled():
+    """voice_text is ignored when TTS requirements are not available."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+
+    async def _handler(evt):
+        return EphemeralReply(
+            "Visible reset notice",
+            ttl_seconds=0,
+            voice_text="Short spoken notice",
+        )
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.VOICE
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch(
+        "tools.tts_tool.check_tts_requirements", return_value=False
+    ), patch("tools.tts_tool.text_to_speech_tool") as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_not_called()
+    adapter.play_tts.assert_not_awaited()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == "Visible reset notice"
+
+
+@pytest.mark.asyncio
+async def test_process_message_ephemeral_voice_text_does_not_tts_for_text_context():
+    """voice_text is only a spoken override; text-channel commands stay text-only."""
+    adapter = _delete_adapter()
+    adapter.platform = Platform.DISCORD
+    adapter.voice_reply_text_order = "before_tts"
+    adapter._auto_tts_enabled_chats.add("42")
+    adapter._send_with_retry = AsyncMock(
+        return_value=SendResult(success=True, message_id="sent-1")
+    )
+    adapter.play_tts = AsyncMock(return_value=SendResult(success=True))
+
+    async def _handler(evt):
+        return EphemeralReply(
+            "Visible reset notice",
+            ttl_seconds=0,
+            voice_text="Short spoken notice",
+        )
+
+    adapter.set_message_handler(_handler)
+
+    event = _make_event(text="/new", chat_id="42")
+    event.message_type = MessageType.TEXT
+    session_key = "agent:main:telegram:private:42"
+    with patch("gateway.platforms.base.asyncio.sleep", AsyncMock()), patch.object(
+        adapter, "_keep_typing", new=AsyncMock()
+    ), patch("tools.tts_tool.text_to_speech_tool") as mock_tts:
+        await adapter._process_message_background(event, session_key)
+
+    mock_tts.assert_not_called()
+    adapter.play_tts.assert_not_awaited()
+    assert adapter._send_with_retry.call_args.kwargs["content"] == "Visible reset notice"
 
 
 @pytest.mark.asyncio

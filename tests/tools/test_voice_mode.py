@@ -876,6 +876,37 @@ class TestWhisperHallucinationFilter:
         assert is_whisper_hallucination("Can you explain this code?") is False
 
 
+class TestSttNoiseFragmentFilter:
+    def test_drops_non_english_and_symbol_noise(self):
+        from tools.voice_mode import stt_noise_drop_reason
+
+        assert stt_noise_drop_reason("ご視聴ありがとうございました") == "mostly_non_english_script"
+        assert stt_noise_drop_reason("字幕由 Amara.org 社群提供") == "mostly_non_english_script"
+        assert stt_noise_drop_reason("... --- !!!") == "symbol_or_punctuation_junk"
+        assert stt_noise_drop_reason("♬ ♪ ♫") == "symbol_or_punctuation_junk"
+        assert stt_noise_drop_reason("xqzrtp") == "low_information_gibberish"
+
+    def test_preserves_intentional_short_english_and_technical_fragments(self):
+        from tools.voice_mode import stt_noise_drop_reason
+
+        for transcript in [
+            "yes",
+            "no",
+            "stop",
+            "hold",
+            "wait",
+            "OK",
+            "approve",
+            "deny",
+            "C++",
+            "GPT-5",
+            "Brian",
+            "1234",
+            "docker エラー 404",
+        ]:
+            assert stt_noise_drop_reason(transcript) is None
+
+
 # ============================================================================
 # play_audio_file
 # ============================================================================
