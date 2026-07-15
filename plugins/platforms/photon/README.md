@@ -160,7 +160,8 @@ All env vars are documented in `plugin.yaml`. The most important:
 
 `spectrum-ts` is pinned to an **exact version** in `sidecar/package.json`
 (no `^` range) and installed with `npm ci`, because the SDK ships breaking
-majors (v2 removed `defineFusorPlatform`; v3 reworked space construction).
+majors (v2 removed `defineFusorPlatform`; v3 reworked space construction; v8
+made `richlink` outbound-only, so inbound rich links arrive as plain `text`).
 A floating range or `npm install spectrum-ts@latest` would let a breaking
 release take down fresh setups silently. Upgrades are deliberate:
 
