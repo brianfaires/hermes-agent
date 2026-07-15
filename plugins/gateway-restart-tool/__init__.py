@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,13 @@ REQUEST_GATEWAY_RESTART_SCHEMA = {
                 "type": "boolean",
                 "description": "If true, validate policy and report what would happen without restarting.",
                 "default": False,
+            },
+            "target_profile": {
+                "type": "string",
+                "description": (
+                    "Profile gateway to restart. Defaults to the invoking profile. "
+                    "A different profile must be listed in allowed_target_profiles."
+                ),
             },
         },
         "required": ["reason", "confirm"],
@@ -101,6 +110,31 @@ def _coerce_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, parsed)
+
+
+def _normalize_profile_name(value: str) -> str:
+    from hermes_cli import profiles as profiles_mod
+
+    normalized = profiles_mod.normalize_profile_name(value)
+    profiles_mod.validate_profile_name(normalized)
+    return normalized
+
+
+def _allowed_target_profiles(cfg: dict[str, Any], source_profile: str) -> set[str]:
+    """Return explicitly configured cross-profile targets plus the source."""
+    configured = cfg.get("allowed_target_profiles", [])
+    if isinstance(configured, str):
+        configured = configured.split(",")
+    if not isinstance(configured, (list, tuple, set, frozenset)):
+        configured = []
+
+    targets = {source_profile}
+    for item in configured:
+        try:
+            targets.add(_normalize_profile_name(str(item).strip()))
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid allowed_target_profiles entry")
+    return targets
 
 
 def _audit_path() -> Path:
@@ -178,9 +212,45 @@ def _schedule_restart(runner: Any, delay_seconds: float) -> bool:
     return True
 
 
+def _spawn_profile_restart(target_profile: str) -> int:
+    """Run the normal per-profile gateway restart command in a detached child."""
+    command = [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "-p",
+        target_profile,
+        "gateway",
+        "restart",
+    ]
+    environment = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
+    # This detached child controls a *different* profile. The CLI's gateway
+    # marker protects against self-restart loops, so it must not leak here.
+    environment.pop("_HERMES_GATEWAY", None)
+    kwargs: dict[str, Any] = {
+        "cwd": str(Path(__file__).resolve().parents[2]),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": environment,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(command, **kwargs).pid
+
+
 def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     cfg = _plugin_config()
-    profile = _active_profile_name()
+    try:
+        profile = _normalize_profile_name(_active_profile_name())
+        target_profile = _normalize_profile_name(
+            str(args.get("target_profile") or profile).strip()
+        )
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "invalid_target_profile"})
+    allowed_targets = _allowed_target_profiles(cfg, profile)
     cooldown_seconds = _coerce_int(
         cfg.get("cooldown_seconds"), _DEFAULT_COOLDOWN_SECONDS, minimum=0
     )
@@ -195,9 +265,23 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     record = {
         "ts": now,
         "profile": profile,
+        "target_profile": target_profile,
         "reason": reason,
         "dry_run": dry_run,
     }
+
+    if target_profile not in allowed_targets:
+        record.update({"decision": "deny", "error": "target_profile_not_allowed"})
+        _append_audit(record)
+        return _json(
+            {
+                "ok": False,
+                "error": "target_profile_not_allowed",
+                "profile": profile,
+                "target_profile": target_profile,
+                "allowed_target_profiles": sorted(allowed_targets),
+            }
+        )
 
     if not reason:
         record.update({"decision": "deny", "error": "missing_reason"})
@@ -234,7 +318,8 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    runner = _resolve_runner()
+    is_local_target = target_profile == profile
+    runner = _resolve_runner() if is_local_target else None
     runner_available = runner is not None
     active_agents = None
     if runner_available:
@@ -244,21 +329,51 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             active_agents = None
 
     detached, via_service = _restart_modes()
+    dispatch = "in_process" if is_local_target else "profile_cli"
     if dry_run:
-        record.update({"decision": "dry_run", "runner_available": runner_available})
+        record.update(
+            {
+                "decision": "dry_run",
+                "runner_available": runner_available,
+                "dispatch": dispatch,
+            }
+        )
         _append_audit(record)
         return _json(
             {
                 "ok": True,
                 "dry_run": True,
                 "profile": profile,
+                "target_profile": target_profile,
+                "dispatch": dispatch,
                 "runner_available": runner_available,
                 "active_agents": active_agents,
                 "would_schedule_after_seconds": delay_seconds,
-                "restart_mode": {
-                    "detached": detached,
-                    "via_service": via_service,
-                },
+                "restart_mode": {"detached": detached, "via_service": via_service},
+                "audit_log": str(_audit_path()),
+            }
+        )
+
+    if not is_local_target:
+        try:
+            child_pid = _spawn_profile_restart(target_profile)
+        except OSError as exc:
+            record.update({"decision": "failed", "error": "profile_restart_spawn_failed"})
+            _append_audit(record)
+            return _json(
+                {"ok": False, "error": "profile_restart_spawn_failed", "detail": str(exc)}
+            )
+        _write_last_restart_time(now)
+        record.update({"decision": "scheduled", "dispatch": dispatch, "child_pid": child_pid})
+        _append_audit(record)
+        return _json(
+            {
+                "ok": True,
+                "status": "restart_scheduled",
+                "profile": profile,
+                "target_profile": target_profile,
+                "dispatch": dispatch,
+                "child_pid": child_pid,
                 "audit_log": str(_audit_path()),
             }
         )
@@ -277,13 +392,7 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     if getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False):
         record.update({"decision": "already_in_progress", "active_agents": active_agents})
         _append_audit(record)
-        return _json(
-            {
-                "ok": True,
-                "status": "already_in_progress",
-                "active_agents": active_agents,
-            }
-        )
+        return _json({"ok": True, "status": "already_in_progress", "active_agents": active_agents})
 
     _write_last_restart_time(now)
     scheduled = _schedule_restart(runner, delay_seconds)
@@ -303,6 +412,9 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
         {
             "ok": True,
             "status": "restart_scheduled",
+            "profile": profile,
+            "target_profile": target_profile,
+            "dispatch": dispatch,
             "scheduled_after_seconds": delay_seconds,
             "active_agents": active_agents,
             "restart_mode": {"detached": detached, "via_service": via_service},
