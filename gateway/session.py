@@ -185,7 +185,7 @@ class SessionContext:
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "source": self.source.to_dict(),
@@ -378,6 +378,20 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+
+        if context.source.thread_id:
+            try:
+                from gateway.kanban_mirror.context import (
+                    render_mirrored_kanban_context,
+                    resolve_mirrored_kanban_thread,
+                )
+
+                mirrored = resolve_mirrored_kanban_thread(context.source.thread_id)
+                if mirrored is not None:
+                    lines.append("")
+                    lines.append(render_mirrored_kanban_context(mirrored))
+            except Exception:
+                logger.debug("failed to render mirrored Kanban thread context", exc_info=True)
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
@@ -1491,7 +1505,7 @@ def build_session_context(
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         ),
     )
-    
+
     if session_entry:
         context.session_key = session_entry.session_key
         context.session_id = session_entry.session_id
