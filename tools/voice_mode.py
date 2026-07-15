@@ -872,6 +872,79 @@ def is_whisper_hallucination(transcript: str) -> bool:
     return False
 
 
+_INTENTIONAL_SHORT_UTTERANCES = {
+    "yes",
+    "yeah",
+    "yep",
+    "no",
+    "nope",
+    "ok",
+    "okay",
+    "stop",
+    "hold",
+    "wait",
+    "pause",
+    "cancel",
+    "approve",
+    "deny",
+}
+
+
+def stt_noise_drop_reason(transcript: str) -> Optional[str]:
+    """Return a debug-only reason when an STT fragment is obvious noise.
+
+    The filter is intentionally conservative: it drops punctuation/symbol-only
+    fragments, non-English-script fragments with little/no ASCII signal, and a
+    narrow class of low-information gibberish while preserving short intentional
+    commands, names, technical strings, and numeric utterances.
+    """
+    text = " ".join(str(transcript or "").strip().split())
+    if not text:
+        return "empty"
+
+    lowered = text.lower().strip(".,!?;:()[]{}\"'")
+    if lowered in _INTENTIONAL_SHORT_UTTERANCES:
+        return None
+
+    chars = [ch for ch in text if not ch.isspace()]
+    if not chars:
+        return "empty"
+
+    letters = [ch for ch in chars if ch.isalpha()]
+    digits = [ch for ch in chars if ch.isdigit()]
+    ascii_alnum = [ch for ch in chars if ch.isascii() and ch.isalnum()]
+    non_ascii_letters = [ch for ch in letters if not ch.isascii()]
+
+    if not letters and not digits:
+        return "symbol_or_punctuation_junk"
+
+    # Preserve numeric-only utterances: "one two three" may transcribe as
+    # digits and can be an intentional command/answer.
+    if digits and not letters:
+        return None
+
+    ascii_signal_ratio = len(ascii_alnum) / max(1, len(chars))
+    if non_ascii_letters and ascii_signal_ratio <= 0.50:
+        return "mostly_non_english_script"
+
+    # Drop only the most obvious ASCII gibberish: a long alphabetic token with
+    # no vowels. Ambiguous short sounds ("hm", "sh") are left alone.
+    word_tokens = re.findall(r"[A-Za-z]+", text)
+    if (
+        len(word_tokens) == 1
+        and len(word_tokens[0]) >= 6
+        and not re.search(r"[aeiouy]", word_tokens[0], flags=re.IGNORECASE)
+    ):
+        return "low_information_gibberish"
+
+    return None
+
+
+def is_stt_noise_fragment(transcript: str) -> bool:
+    """Return True when an STT transcript is obvious background/noise junk."""
+    return stt_noise_drop_reason(transcript) is not None
+
+
 # ============================================================================
 # STT dispatch
 # ============================================================================

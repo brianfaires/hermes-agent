@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 from urllib.parse import urljoin
 
-from hermes_constants import display_hermes_home
+from hermes_constants import display_hermes_home, get_hermes_home
 
 logger = logging.getLogger(__name__)
 def get_env_value(name, default=None):
@@ -345,8 +345,53 @@ def _load_tts_config() -> Dict[str, Any]:
 
 
 def _get_provider(tts_config: Dict[str, Any]) -> str:
-    """Get the configured TTS provider name."""
+    """Return configured provider name (defaults to edge)."""
     return (tts_config.get("provider") or DEFAULT_PROVIDER).lower().strip()
+
+
+def _active_hermes_profile_label() -> str:
+    """Return the active profile name inferred from HERMES_HOME.
+
+    TTS often runs in long-lived gateways where default and named profiles can
+    be active at the same time.  Logging both the display home and this compact
+    profile label makes voice drift diagnosable without logging secrets.
+    """
+    home = get_hermes_home()
+    try:
+        default_home = Path.home() / ".hermes"
+        if home.resolve() == default_home.resolve():
+            return "default"
+        if home.parent.name == "profiles" and home.name:
+            return home.name
+    except OSError:
+        pass
+    return home.name or "unknown"
+
+
+def _tts_log_details(provider: str, tts_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return non-secret TTS selection details suitable for logs."""
+    details: Dict[str, Any] = {
+        "hermes_home": display_hermes_home(),
+        "profile": _active_hermes_profile_label(),
+        "provider": provider,
+    }
+    if provider == "elevenlabs":
+        el_config = tts_config.get("elevenlabs", {}) if isinstance(tts_config, dict) else {}
+        details.update({
+            "voice_id": el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
+            "model_id": el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID),
+            "speed": el_config.get("speed", tts_config.get("speed", 1.0)),
+            "style": el_config.get("style"),
+            "stability": el_config.get("stability"),
+            "similarity_boost": el_config.get("similarity_boost"),
+            "use_speaker_boost": el_config.get("use_speaker_boost"),
+        })
+    return details
+
+
+def _format_tts_log_details(details: Dict[str, Any]) -> str:
+    """Format TTS log details as stable key=value pairs."""
+    return " ".join(f"{key}={value!r}" for key, value in details.items())
 
 
 # ===========================================================================
@@ -2233,7 +2278,7 @@ def text_to_speech_tool(
             )
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(DEFAULT_OUTPUT_DIR)
+        out_dir = Path(_get_default_output_dir())
         out_dir.mkdir(parents=True, exist_ok=True)
         if command_provider_config is not None:
             fmt = _get_command_tts_output_format(command_provider_config)
@@ -2432,7 +2477,12 @@ def text_to_speech_tool(
             voice_compatible = want_opus and file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
-        logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
+        logger.info(
+            "TTS audio generated: path=%s bytes=%s %s",
+            file_str,
+            f"{file_size:,}",
+            _format_tts_log_details(_tts_log_details(provider, tts_config)),
+        )
 
         # Build response with MEDIA tag for platform delivery
         media_tag = f"MEDIA:{file_str}"
