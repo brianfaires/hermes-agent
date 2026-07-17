@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ 壓縮已中止 ({error})。未刪除任何訊息 — 對話保持不變。執行 /compress 重試，執行 /reset 開始新工作階段，或檢查你的 auxiliary.compression 模型設定。"
     aux_failed:            "ℹ️ 設定的壓縮模型 `{model}` 失敗（{error}）。已使用主要模型復原 — 上下文完整 — 但您可能想檢查 config.yaml 中的 `auxiliary.compression.model`。"
     failed:                "壓縮失敗：{error}"
+    not_persisted:         "⚠️ 無法儲存壓縮結果，因此對話維持不變（未遺失任何內容）。請重試；若持續失敗，請檢查工作階段資料庫是否存在且可寫入。"
 
   debug:
     upload_failed:         "✗ 無法上傳除錯報告：{error}"
