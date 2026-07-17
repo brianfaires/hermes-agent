@@ -31,6 +31,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import shlex
 import site
@@ -14219,14 +14220,66 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return raw.guild.id
         return None
 
-    def _discord_voice_join_ack_text(self, source: SessionSource) -> str:
+    @staticmethod
+    def _configured_discord_voice_ack(adapter, key: str) -> Optional[str]:
+        """Choose a configured Discord voice acknowledgement, if any."""
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        if not isinstance(config, dict):
+            return None
+        raw = config.get(key)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        phrases = [str(item).strip() for item in raw if str(item).strip()]
+        return random.choice(phrases) if phrases else None
+
+    @staticmethod
+    def _configured_discord_voice_int(adapter, key: str, default: int) -> int:
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        raw = config.get(key, default) if isinstance(config, dict) else default
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _voice_session_user_turn_count(self, source: SessionSource) -> int:
+        """Return persisted user-turn count for a voice-linked session."""
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return 0
+        try:
+            entry = store.get_or_create_session(source)
+            history = store.load_transcript(entry.session_id) or []
+        except Exception:
+            logger.debug("Could not load voice-session history for join acknowledgement", exc_info=True)
+            return 0
+        return sum(1 for message in history if message.get("role") == "user")
+
+    def _discord_voice_join_ack_text(
+        self,
+        source: SessionSource,
+        *,
+        adapter=None,
+        rejoining_persisted_voice_session: bool = False,
+    ) -> str:
         """Return the spoken Discord VC join acknowledgement for this session."""
         try:
             if self._session_key_for_source(source) in (self._running_agents or {}):
-                return "working, one sec"
+                return self._configured_discord_voice_ack(adapter, "busy_ack_phrases") or "working, one sec"
         except Exception:
             pass
-        return t("gateway.voice.connected_spoken")
+        if rejoining_persisted_voice_session:
+            return self._configured_discord_voice_ack(adapter, "restart_join_ack_phrases") or "Back online."
+        threshold = self._configured_discord_voice_int(
+            adapter, "session_resume_user_turn_threshold", 2
+        )
+        if self._voice_session_user_turn_count(source) > threshold:
+            return (
+                self._configured_discord_voice_ack(adapter, "session_resume_ack_phrases")
+                or "Picking up where we left off."
+            )
+        return self._configured_discord_voice_ack(adapter, "join_ack_phrases") or t("gateway.voice.connected_spoken")
 
     async def _wait_for_discord_voice_ready(
         self, adapter, guild_id: int, *, timeout: float = 3.0,
@@ -14310,6 +14363,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return False
 
         chat_id = str(channel_id)
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(Platform.DISCORD, chat_id)
+        ) in {"voice_only", "all"}
         adapter._voice_text_channels[int(guild_id)] = int(channel_id)
         getattr(adapter, "_auto_voice_session_channels", set()).add(chat_id)
         profile_name = getattr(adapter, "_runtime_profile_name", None)
@@ -14339,7 +14395,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 source=source, text="", message_type=MessageType.TEXT,
                 raw_message=SimpleNamespace(guild_id=int(guild_id), guild=guild),
             )
-            await self._send_voice_reply(event, self._discord_voice_join_ack_text(source))
+            await self._send_voice_reply(
+                event,
+                self._discord_voice_join_ack_text(
+                    source,
+                    adapter=adapter,
+                    rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                ),
+            )
         return True
 
     async def _handle_discord_auto_voice_leave(self, adapter, member, voice_channel) -> bool:
@@ -14377,6 +14440,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not voice_channel:
             return "You need to be in a voice channel first."
 
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(event.source.platform, event.source.chat_id)
+        ) in {"voice_only", "all"}
+
         # Wire callbacks BEFORE join so immediate receive/cleanup work remains
         # bound to this source profile's adapter.
         self._wire_discord_voice_callbacks(adapter)
@@ -14403,7 +14470,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
             try:
                 await self._send_voice_reply(
-                    event, self._discord_voice_join_ack_text(event.source),
+                    event,
+                    self._discord_voice_join_ack_text(
+                        event.source,
+                        adapter=adapter,
+                        rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                    ),
                 )
             except Exception:
                 logger.debug("Discord voice join greeting failed", exc_info=True)

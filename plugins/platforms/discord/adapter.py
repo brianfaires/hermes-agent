@@ -4023,11 +4023,16 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _load_voice_fx_config(self) -> Dict[str, Any]:
-        """Read voice mixer / ambient / ack settings from config.yaml.
+        """Read voice mixer, ambient, and acknowledgement settings from config.yaml.
 
         All settings live under ``discord.voice_fx`` in config.yaml (NOT the
         .env file — these are behavioral, not secrets).  The feature is OFF by
-        default; users opt in with ``discord.voice_fx.enabled: true``.
+        default; users opt in with ``discord.voice_fx.enabled: true``.  The
+        acknowledgement lists are ``cancellation_ack_phrases``,
+        ``model_switch_ack_phrases``, ``join_ack_phrases``, ``busy_ack_phrases``,
+        ``restart_join_ack_phrases``, and ``session_resume_ack_phrases``.
+        ``session_resume_user_turn_threshold`` controls when the session-resume
+        acknowledgement applies.
 
         Returns a dict with safe defaults so callers never KeyError.
         """
@@ -4046,6 +4051,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 "Give me a sec.",
                 "On it.",
             ],
+            "cancellation_ack_phrases": [
+                "Sure thing.",
+                "Ignored.",
+                "Consider it unsaid.",
+            ],
+            "model_switch_ack_phrases": ["Model switched."],
+            "join_ack_phrases": [],
+            "busy_ack_phrases": [],
+            "restart_join_ack_phrases": ["Back online."],
+            "session_resume_ack_phrases": ["Picking up where we left off."],
+            "session_resume_user_turn_threshold": 2,
         }
         try:
             from hermes_cli.config import read_raw_config
@@ -4182,6 +4198,40 @@ class DiscordAdapter(BasePlatformAdapter):
             return True
         except Exception as e:
             logger.debug("play_ack_in_voice failed: %s", e)
+            return False
+        finally:
+            for p in {audio_path, locals().get("actual")}:
+                if p and os.path.isfile(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+    async def play_cancellation_ack_in_voice(self, guild_id: int) -> bool:
+        """Speak a configured acknowledgement after dropping a voice transcript."""
+        if not self.is_in_voice_channel(guild_id):
+            return False
+        import random
+
+        raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
+        phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
+        if not phrases:
+            phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
+        phrase = random.choice(phrases)
+        audio_path = gateway_tts_temp_path("cancellation_ack", "mp3")
+        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+        try:
+            from tools.tts_tool import text_to_speech_tool
+            result_json = await asyncio.to_thread(
+                text_to_speech_tool, text=phrase, output_path=audio_path
+            )
+            result = json.loads(result_json)
+            actual = result.get("file_path", audio_path)
+            if not result.get("success") or not os.path.isfile(actual):
+                return False
+            return await self.play_in_voice_channel(guild_id, actual)
+        except Exception as e:
+            logger.debug("play_cancellation_ack_in_voice failed: %s", e)
             return False
         finally:
             for p in {audio_path, locals().get("actual")}:
@@ -4778,7 +4828,11 @@ class DiscordAdapter(BasePlatformAdapter):
         session_generation: Optional[int] = None,
     ):
         """Convert PCM -> WAV -> STT -> callback."""
-        from tools.voice_mode import is_whisper_hallucination, stt_noise_drop_reason
+        from tools.voice_mode import (
+            is_stt_cancellation,
+            is_whisper_hallucination,
+            stt_noise_drop_reason,
+        )
 
         tmp_f = tempfile.NamedTemporaryFile(suffix=".wav", prefix="vc_listen_", delete=False)
         wav_path = tmp_f.name
@@ -4811,6 +4865,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     noise_reason,
                     transcript[:100],
                 )
+                return
+
+            if is_stt_cancellation(transcript):
+                logger.info("Dropped Discord voice transcript after spoken cancellation")
+                await self.play_cancellation_ack_in_voice(guild_id)
                 return
 
             if (
