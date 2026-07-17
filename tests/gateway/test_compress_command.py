@@ -54,6 +54,12 @@ def _make_runner(history: list[dict[str, str]]):
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
     runner.session_store._save = MagicMock()
+    # The handler passes this to the temp agent so compress_context can
+    # rotate the session. These tests mock _compress_context itself, so the
+    # DB is never touched — but it must be present, and tests that assert
+    # successful compression must also rotate agent_instance.session_id,
+    # since a real rotation is what makes the compressed output persist.
+    runner._session_db = MagicMock()
     return runner
 
 
@@ -104,7 +110,8 @@ async def test_compress_command_explains_when_token_estimate_rises():
     agent_instance._cached_system_prompt = ""
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
-    agent_instance.session_id = "sess-1"
+    # Compression succeeded, so the session rotated onto a child id.
+    agent_instance.session_id = "sess-2"
     agent_instance._compress_context.return_value = (compressed, "")
 
     def _estimate(messages, **_kwargs):
@@ -216,7 +223,8 @@ async def test_compress_command_surfaces_aux_model_failure_even_when_recovered()
     agent_instance.context_compressor._last_aux_model_failure_error = (
         "404 model not found: gemini-3-flash-preview"
     )
-    agent_instance.session_id = "sess-1"
+    # Compression succeeded (via the main-model retry), so the session rotated.
+    agent_instance.session_id = "sess-2"
     agent_instance._compress_context.return_value = (compressed, "")
 
     def _estimate(messages, **_kwargs):

@@ -1397,6 +1397,64 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def discard_failed_compression_child(
+        self,
+        parent_session_id: str,
+        child_session_id: str,
+    ) -> bool:
+        """Atomically recover a manual compression split that never committed.
+
+        A manual gateway ``/compress`` may create a continuation child before
+        its compressed transcript is durably written.  If that write fails,
+        the gateway keeps the user on the original parent.  Remove only an
+        *empty*, direct compression child and reopen the parent in the same
+        SQLite transaction so a later resume/list traversal cannot discover a
+        stranded continuation.  A child with messages or descendants is never
+        removed: it may contain independently durable work and needs explicit
+        recovery rather than data loss.
+
+        Returns ``True`` when the parent was reopened and any safely-empty
+        child was discarded.  Returns ``False`` if the relationship is unsafe
+        or the parent was not ended by compression.
+        """
+        if not parent_session_id or parent_session_id == child_session_id:
+            return False
+
+        def _do(conn):
+            parent = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (parent_session_id,),
+            ).fetchone()
+            if parent is None or parent[0] != "compression":
+                return False
+
+            child = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE id = ?",
+                (child_session_id,),
+            ).fetchone()
+            if child is not None:
+                if child[0] != parent_session_id:
+                    return False
+                has_messages = conn.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                    (child_session_id,),
+                ).fetchone()
+                has_children = conn.execute(
+                    "SELECT 1 FROM sessions WHERE parent_session_id = ? LIMIT 1",
+                    (child_session_id,),
+                ).fetchone()
+                if has_messages is not None or has_children is not None:
+                    return False
+                conn.execute("DELETE FROM sessions WHERE id = ?", (child_session_id,))
+
+            conn.execute(
+                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
+                (parent_session_id,),
+            )
+            return True
+
+        return bool(self._execute_write(_do))
+
     def update_session_cwd(self, session_id: str, cwd: str) -> None:
         """Persist the session working directory when a frontend knows it."""
         if not session_id or not cwd:

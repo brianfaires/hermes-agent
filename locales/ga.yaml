@@ -97,6 +97,7 @@ gateway:
     aborted:               "⚠️ Cuireadh deireadh leis an dlúthú ({error}). Níor baineadh aon teachtaireacht — tá an comhrá gan athrú. Rith /compress chun é a thriail arís, /reset le haghaidh seisiún glan, nó seiceáil do chumraíocht samhla auxiliary.compression."
     aux_failed:            "ℹ️ Theip ar an tsamhail dlúthúcháin chumraithe `{model}` ({error}). Aisghafa ag baint úsáide as do phríomhshamhail — tá an comhthéacs slán — ach b'fhéidir gur mhaith leat `auxiliary.compression.model` i config.yaml a sheiceáil."
     failed:                "Theip ar dhlúthú: {error}"
+    not_persisted:         "⚠️ Níorbh fhéidir an comhbhrú a shábháil, mar sin níl aon athrú ar do chomhrá (níor cailleadh aon rud). Bain triail eile as; má leanann sé ag teip, seiceáil go bhfuil bunachar sonraí an tseisiúin ann agus inscríofa."
 
   debug:
     upload_failed:         "✗ Theip ar uaslódáil tuairisce dífhabhtaithe: {error}"
