@@ -85,8 +85,8 @@ def test_cross_profile_restart_uses_profile_scoped_cli(monkeypatch):
     )
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
     monkeypatch.setattr(module, "_append_audit", audits.append)
-    monkeypatch.setattr(module, "_read_last_restart_time", lambda: 0.0)
-    monkeypatch.setattr(module, "_write_last_restart_time", lambda now: None)
+    monkeypatch.setattr(module, "_read_last_restart_time", lambda target, source: 0.0)
+    monkeypatch.setattr(module, "_write_last_restart_time", lambda target, now: None)
     monkeypatch.setattr(module, "_audit_path", lambda: Path("/tmp/gateway-restart-tool.jsonl"))
     monkeypatch.setattr(module, "_spawn_profile_restart", lambda profile: 4321)
 
@@ -105,6 +105,60 @@ def test_cross_profile_restart_uses_profile_scoped_cli(monkeypatch):
     assert result["dispatch"] == "profile_cli"
     assert result["child_pid"] == 4321
     assert audits[-1]["decision"] == "scheduled"
+
+
+def test_cooldown_is_scoped_to_the_target_profile(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
+
+    module._write_last_restart_time("default", 100.0)
+
+    assert module._read_last_restart_time("default", "ops") == 100.0
+    assert module._read_last_restart_time("ops", "ops") == 0.0
+
+
+def test_legacy_cooldown_remains_conservative_until_scoped_state_exists(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    state_path = tmp_path / "restart-state.json"
+    state_path.write_text('{"last_requested_at": 100.0}', encoding="utf-8")
+    monkeypatch.setattr(module, "_state_path", lambda: state_path)
+
+    assert module._read_last_restart_time("default", "ops") == 100.0
+    assert module._read_last_restart_time("research", "ops") == 100.0
+
+
+def test_restart_batch_validates_and_schedules_each_allowed_target(monkeypatch):
+    module = _load_plugin_module()
+    writes = []
+    spawns = []
+    monkeypatch.setattr(
+        module,
+        "_plugin_config",
+        lambda: {"allowed_target_profiles": ["default", "research"]},
+    )
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_read_last_restart_time", lambda target, source: 0.0)
+    monkeypatch.setattr(module, "_write_last_restart_time", lambda target, now: writes.append(target))
+    monkeypatch.setattr(module, "_spawn_profile_restart", lambda target: spawns.append(target) or 4321)
+
+    result = json.loads(
+        module._handle_request_gateway_restart(
+            {
+                "reason": "reload every authorized gateway",
+                "confirm": "restart gateway",
+                "target_profiles": ["ops", "default", "research"],
+            }
+        )
+    )
+
+    # The source profile is intentionally scheduled last; remote gateways get
+    # their commands before this agent begins draining its own gateway.
+    assert result["ok"] is False  # local runner is unavailable in this unit test
+    assert result["status"] == "restart_batch_scheduled"
+    assert result["target_profiles"] == ["default", "research", "ops"]
+    assert spawns == ["default", "research"]
+    assert writes == ["default", "research"]
 
 
 def test_profile_restart_child_does_not_inherit_gateway_marker(monkeypatch):

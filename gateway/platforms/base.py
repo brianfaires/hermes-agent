@@ -4107,12 +4107,17 @@ class BasePlatformAdapter(ABC):
                     _has_text_clarify = (
                         _clarify_mod.get_pending_for_session(session_key) is not None
                     )
+                    _has_voice_clarify = (
+                        event.message_type == MessageType.VOICE
+                        and _clarify_mod.get_pending_for_voice_capture(session_key) is not None
+                    )
                 except Exception:
                     _has_text_clarify = False
+                    _has_voice_clarify = False
 
-                if _has_text_clarify:
+                if _has_text_clarify or _has_voice_clarify:
                     logger.debug(
-                        "[%s] Routing message to clarify text-intercept for %s",
+                        "[%s] Routing message to clarify response-intercept for %s",
                         self.name, session_key,
                     )
                     try:

@@ -57,6 +57,14 @@ REQUEST_GATEWAY_RESTART_SCHEMA = {
                     "A different profile must be listed in allowed_target_profiles."
                 ),
             },
+            "target_profiles": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Profile gateways to restart as one validated batch. Mutually exclusive with "
+                    "target_profile. Every target must be listed in allowed_target_profiles."
+                ),
+            },
         },
         "required": ["reason", "confirm"],
         "additionalProperties": False,
@@ -155,19 +163,57 @@ def _append_audit(record: dict[str, Any]) -> None:
         logger.debug("gateway restart tool audit write failed: %s", exc)
 
 
-def _read_last_restart_time() -> float:
+def _read_last_restart_times() -> tuple[dict[str, float], float]:
+    """Return target-profile cooldowns plus an unscoped legacy timestamp."""
     try:
         data = json.loads(_state_path().read_text(encoding="utf-8"))
-        return float(data.get("last_requested_at") or 0.0)
+        raw_times = data.get("last_requested_at_by_profile")
+        times = (
+            {str(profile): float(timestamp) for profile, timestamp in raw_times.items()}
+            if isinstance(raw_times, dict)
+            else {}
+        )
+        return times, float(data.get("last_requested_at") or 0.0)
     except Exception:
-        return 0.0
+        return {}, 0.0
 
 
-def _write_last_restart_time(now: float) -> None:
+def _read_last_restart_time(target_profile: str, source_profile: str) -> float:
+    times, legacy = _read_last_restart_times()
+    if target_profile in times:
+        return times[target_profile]
+    # Old state had no target identity, so retain its conservative global gate
+    # until the first scoped write replaces it.  This avoids an immediate
+    # duplicate restart of a formerly remote target during upgrade.
+    return legacy if not times else 0.0
+
+
+def _write_last_restart_time(target_profile: str, now: float) -> None:
     path = _state_path()
+    times, _legacy = _read_last_restart_times()
+    times[target_profile] = now
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"last_requested_at": now}, sort_keys=True), encoding="utf-8")
+    tmp.write_text(
+        json.dumps({"last_requested_at_by_profile": times}, sort_keys=True), encoding="utf-8"
+    )
     tmp.replace(path)
+
+
+def _target_profiles(args: dict[str, Any], source_profile: str) -> list[str]:
+    """Normalize one target or a deduplicated batch of targets."""
+    singular = args.get("target_profile")
+    plural = args.get("target_profiles")
+    if singular is not None and plural is not None:
+        raise ValueError("target_profile and target_profiles are mutually exclusive")
+    raw_targets = [singular or source_profile] if plural is None else plural
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError("target_profiles must be a non-empty array")
+    targets: list[str] = []
+    for raw_target in raw_targets:
+        target = _normalize_profile_name(str(raw_target).strip())
+        if target not in targets:
+            targets.append(target)
+    return targets
 
 
 def _resolve_runner() -> Any | None:
@@ -245,11 +291,11 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     cfg = _plugin_config()
     try:
         profile = _normalize_profile_name(_active_profile_name())
-        target_profile = _normalize_profile_name(
-            str(args.get("target_profile") or profile).strip()
-        )
+        target_profiles = _target_profiles(args, profile)
     except (TypeError, ValueError):
-        return _json({"ok": False, "error": "invalid_target_profile"})
+        error = "invalid_target_profiles" if args.get("target_profiles") is not None else "invalid_target_profile"
+        return _json({"ok": False, "error": error})
+    target_profile = target_profiles[0]
     allowed_targets = _allowed_target_profiles(cfg, profile)
     cooldown_seconds = _coerce_int(
         cfg.get("cooldown_seconds"), _DEFAULT_COOLDOWN_SECONDS, minimum=0
@@ -265,20 +311,32 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     record = {
         "ts": now,
         "profile": profile,
-        "target_profile": target_profile,
+        "target_profiles": target_profiles,
         "reason": reason,
         "dry_run": dry_run,
     }
 
-    if target_profile not in allowed_targets:
+    forbidden_targets = sorted(set(target_profiles) - allowed_targets)
+    if forbidden_targets:
         record.update({"decision": "deny", "error": "target_profile_not_allowed"})
         _append_audit(record)
+        if len(target_profiles) == 1:
+            return _json(
+                {
+                    "ok": False,
+                    "error": "target_profile_not_allowed",
+                    "profile": profile,
+                    "target_profile": target_profile,
+                    "allowed_target_profiles": sorted(allowed_targets),
+                }
+            )
         return _json(
             {
                 "ok": False,
                 "error": "target_profile_not_allowed",
                 "profile": profile,
-                "target_profile": target_profile,
+                "target_profiles": target_profiles,
+                "forbidden_target_profiles": forbidden_targets,
                 "allowed_target_profiles": sorted(allowed_targets),
             }
         )
@@ -299,7 +357,52 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    last = _read_last_restart_time()
+    if len(target_profiles) > 1:
+        cooldowns = {
+            target: max(
+                0,
+                int(cooldown_seconds - (now - _read_last_restart_time(target, profile))),
+            )
+            for target in target_profiles
+        }
+        active_cooldowns = {target: remaining for target, remaining in cooldowns.items() if remaining}
+        if active_cooldowns and not dry_run:
+            record.update(
+                {
+                    "decision": "deny",
+                    "error": "cooldown_active",
+                    "cooldown_active_profiles": active_cooldowns,
+                }
+            )
+            _append_audit(record)
+            return _json(
+                {
+                    "ok": False,
+                    "error": "cooldown_active",
+                    "cooldown_active_profiles": active_cooldowns,
+                }
+            )
+        # Restart remote targets first. Scheduling this gateway drains the
+        # current agent, so it must be the last operation in a batch.
+        ordered_targets = [target for target in target_profiles if target != profile]
+        if profile in target_profiles:
+            ordered_targets.append(profile)
+        results = []
+        for target in ordered_targets:
+            per_target_args = {key: value for key, value in args.items() if key != "target_profiles"}
+            per_target_args["target_profile"] = target
+            results.append(json.loads(_handle_request_gateway_restart(per_target_args)))
+        return _json(
+            {
+                "ok": all(result.get("ok") for result in results),
+                "status": "restart_batch_scheduled",
+                "profile": profile,
+                "target_profiles": ordered_targets,
+                "restarts": results,
+            }
+        )
+
+    last = _read_last_restart_time(target_profile, profile)
     cooldown_remaining = max(0, int(cooldown_seconds - (now - last)))
     if cooldown_remaining and not dry_run:
         record.update(
@@ -363,7 +466,7 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             return _json(
                 {"ok": False, "error": "profile_restart_spawn_failed", "detail": str(exc)}
             )
-        _write_last_restart_time(now)
+        _write_last_restart_time(target_profile, now)
         record.update({"decision": "scheduled", "dispatch": dispatch, "child_pid": child_pid})
         _append_audit(record)
         return _json(
@@ -394,7 +497,7 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
         _append_audit(record)
         return _json({"ok": True, "status": "already_in_progress", "active_agents": active_agents})
 
-    _write_last_restart_time(now)
+    _write_last_restart_time(target_profile, now)
     scheduled = _schedule_restart(runner, delay_seconds)
     record.update(
         {

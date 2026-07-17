@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -193,7 +194,49 @@ class GatewayVoiceMixin:
                 if mode in {"voice_only", "all"} and key.startswith(prefix)
             )
 
-    def _discord_voice_join_ack_text(self, source: SessionSource) -> str:
+    @staticmethod
+    def _configured_discord_voice_ack(adapter, key: str) -> Optional[str]:
+        """Choose a configured Discord voice acknowledgement, if any."""
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        if not isinstance(config, dict):
+            return None
+        raw = config.get(key)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        phrases = [str(item).strip() for item in raw if str(item).strip()]
+        return random.choice(phrases) if phrases else None
+
+    @staticmethod
+    def _configured_discord_voice_int(adapter, key: str, default: int) -> int:
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        raw = config.get(key, default) if isinstance(config, dict) else default
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _voice_session_user_turn_count(self, source: SessionSource) -> int:
+        """Return persisted user-turn count for a voice-linked session."""
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return 0
+        try:
+            entry = store.get_or_create_session(source)
+            history = store.load_transcript(entry.session_id) or []
+        except Exception:
+            logger.debug("Could not load voice-session history for join acknowledgement", exc_info=True)
+            return 0
+        return sum(1 for message in history if message.get("role") == "user")
+
+    def _discord_voice_join_ack_text(
+        self,
+        source: SessionSource,
+        *,
+        adapter=None,
+        rejoining_persisted_voice_session: bool = False,
+    ) -> str:
         """Return the spoken Discord VC join acknowledgement for this session."""
         try:
             session_key = self._session_key_for_source(source)
@@ -201,8 +244,18 @@ class GatewayVoiceMixin:
             session_key = ""
         running_agents = getattr(self, "_running_agents", {}) or {}
         if session_key and session_key in running_agents:
-            return _DISCORD_VOICE_BUSY_ACK
-        return t("gateway.voice.connected_spoken")
+            return self._configured_discord_voice_ack(adapter, "busy_ack_phrases") or _DISCORD_VOICE_BUSY_ACK
+        if rejoining_persisted_voice_session:
+            return self._configured_discord_voice_ack(adapter, "restart_join_ack_phrases") or "Back online."
+        threshold = self._configured_discord_voice_int(
+            adapter, "session_resume_user_turn_threshold", 2
+        )
+        if self._voice_session_user_turn_count(source) > threshold:
+            return (
+                self._configured_discord_voice_ack(adapter, "session_resume_ack_phrases")
+                or "Picking up where we left off."
+            )
+        return self._configured_discord_voice_ack(adapter, "join_ack_phrases") or t("gateway.voice.connected_spoken")
 
     @staticmethod
     def _discord_adapter_connected_to_voice_channel(adapter, guild_id: int, channel_id: int) -> bool:
@@ -253,6 +306,9 @@ class GatewayVoiceMixin:
         # transcripts and text replies land where the conversation happens.
         session_channel_id = int(getattr(voice_channel, "id"))
         chat_id = str(session_channel_id)
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(Platform.DISCORD, chat_id)
+        ) in {"voice_only", "all"}
         adapter._voice_text_channels[int(guild_id)] = session_channel_id
         if hasattr(adapter, "_auto_voice_session_channels"):
             adapter._auto_voice_session_channels.add(chat_id)
@@ -298,7 +354,11 @@ class GatewayVoiceMixin:
             )
             await self._send_voice_reply(
                 auto_voice_event,
-                self._discord_voice_join_ack_text(voice_source),
+                self._discord_voice_join_ack_text(
+                    voice_source,
+                    adapter=adapter,
+                    rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                ),
             )
         except Exception:
             logger.debug("Discord auto-voice greeting failed", exc_info=True)
@@ -366,6 +426,9 @@ class GatewayVoiceMixin:
         )
         if not voice_channel:
             return "You need to be in a voice channel first."
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(event.source.platform, event.source.chat_id)
+        ) in {"voice_only", "all"}
 
         # Wire callbacks BEFORE join so voice input arriving immediately
         # after connection is not lost.
@@ -403,7 +466,11 @@ class GatewayVoiceMixin:
             try:
                 await self._send_voice_reply(
                     event,
-                    self._discord_voice_join_ack_text(event.source),
+                    self._discord_voice_join_ack_text(
+                        event.source,
+                        adapter=adapter,
+                        rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                    ),
                 )
             except Exception:
                 logger.debug("Discord voice join greeting failed", exc_info=True)
@@ -617,6 +684,50 @@ class GatewayVoiceMixin:
             f"Reason: {clean_description}. "
             "Use the approval buttons, or say approve or deny."
         )
+
+    def _maybe_resolve_voice_approval_response(self, event: MessageEvent) -> bool:
+        """Resolve a pending command approval from a standalone spoken response.
+
+        Approval prompts explicitly invite the user to say ``approve`` or
+        ``deny``. Voice transcripts otherwise enter the ordinary message
+        pipeline, where they cannot reach the agent thread blocked in
+        ``tools.approval``. The accepted token may have terminal STT
+        punctuation, but no extra words are accepted: unlike a clarify
+        response, an accidental affirmative must not authorize a destructive
+        command.
+        """
+        if event.message_type != MessageType.VOICE:
+            return False
+
+        response = (event.text or "").strip().casefold().rstrip(".!?")
+        choice = {
+            "approve": "once",
+            "approved": "once",
+            "allow": "once",
+            "deny": "deny",
+        }.get(response)
+        if choice is None:
+            return False
+
+        try:
+            from tools.approval import has_blocking_approval, resolve_gateway_approval
+
+            session_key = self._session_key_for_source(event.source)
+            if not has_blocking_approval(session_key):
+                return False
+            resolved = resolve_gateway_approval(session_key, choice)
+        except Exception:
+            logger.exception("Voice approval response handling failed")
+            return False
+
+        if resolved:
+            logger.info(
+                "Gateway resolved a pending command approval from voice (session=%s, choice=%s)",
+                session_key,
+                choice,
+            )
+            return True
+        return False
 
     def _should_send_interactive_prompt_voice(self, event: MessageEvent) -> bool:
         """Return whether a direct interactive prompt should be spoken."""
@@ -866,6 +977,7 @@ class GatewayVoiceMixin:
             return prefix, []
 
         from tools.transcription_tools import transcribe_audio
+        from tools.voice_mode import clean_voice_transcript
 
         enriched_parts = []
         successful_transcripts: List[str] = []
@@ -874,7 +986,7 @@ class GatewayVoiceMixin:
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
-                    transcript = result["transcript"]
+                    transcript = clean_voice_transcript(result["transcript"])
                     successful_transcripts.append(transcript)
                     enriched_parts.append(
                         f'**[Voice]** [The user sent a voice message~ '

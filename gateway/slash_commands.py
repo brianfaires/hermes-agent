@@ -21,6 +21,7 @@ import hashlib
 import inspect
 import logging
 import os
+import random
 import re
 import shlex
 import sys
@@ -60,6 +61,46 @@ class GatewaySlashCommandsMixin:
         """
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
         return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
+
+    def _model_switch_voice_text(
+        self,
+        event: MessageEvent,
+        *,
+        model_name: str,
+        command_model_name: str = "",
+    ) -> str:
+        """Return a concise spoken acknowledgement for a successful ``/model`` switch.
+
+        ``discord.voice_fx.model_switch_ack_phrases`` accepts either the legacy
+        phrase list or a mapping keyed by provider-free model name.  Mapping
+        entries may include ``default`` and can use ``[name]`` for the name
+        typed in the command.
+        """
+        adapter = self.adapters.get(event.source.platform) if getattr(self, "adapters", None) else None
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        raw_phrases = config.get("model_switch_ack_phrases") if isinstance(config, dict) else None
+
+        def _provider_free_name(value: str) -> str:
+            return str(value or "").strip().rsplit("/", 1)[-1]
+
+        spoken_name = _provider_free_name(command_model_name) or _provider_free_name(model_name)
+        if isinstance(raw_phrases, dict):
+            configured_names = (_provider_free_name(model_name), _provider_free_name(command_model_name))
+            raw_phrases = next(
+                (
+                    raw_phrases[name]
+                    for name in configured_names
+                    if name and name in raw_phrases
+                ),
+                raw_phrases.get("default"),
+            )
+        if isinstance(raw_phrases, str):
+            raw_phrases = [raw_phrases]
+        if isinstance(raw_phrases, (list, tuple, set)):
+            phrases = [str(phrase).strip() for phrase in raw_phrases if str(phrase).strip()]
+            if phrases:
+                return random.choice(phrases).replace("[name]", spoken_name)
+        return "Model switched."
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
@@ -703,6 +744,22 @@ class GatewaySlashCommandsMixin:
 
         return "\n".join(lines)
 
+    async def _stop_voice_playback_for_event(self, event: MessageEvent) -> bool:
+        """Best-effort stop for Discord TTS associated with a ``/stop`` event."""
+        if event.source.platform != Platform.DISCORD:
+            return False
+        adapter = getattr(self, "adapters", {}).get(Platform.DISCORD)
+        if adapter is None or not hasattr(adapter, "stop_voice_playback"):
+            return False
+        guild_id = self._get_guild_id(event)
+        if not guild_id:
+            return False
+        try:
+            return bool(await adapter.stop_voice_playback(guild_id))
+        except Exception as exc:
+            logger.debug("Failed to stop Discord TTS for /stop: %s", exc)
+            return False
+
     async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /stop command - interrupt a running agent.
 
@@ -716,6 +773,7 @@ class GatewaySlashCommandsMixin:
         """
         from gateway.run import _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
         source = event.source
+        await self._stop_voice_playback_for_event(event)
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
@@ -1479,7 +1537,14 @@ class GatewaySlashCommandsMixin:
             else:
                 lines.append(t("gateway.model.session_only_hint"))
 
-            return "\n".join(lines)
+            return EphemeralReply(
+                "\n".join(lines),
+                voice_text=self._model_switch_voice_text(
+                    event,
+                    model_name=result.new_model,
+                    command_model_name=model_input,
+                ),
+            )
 
         # Expensive-model confirmation gate (typed /model <name> path).
         # The pickers (Telegram/Discord inline keyboards, TUI, dashboard)

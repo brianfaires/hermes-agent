@@ -1285,6 +1285,35 @@ class TestDiscordVoiceChannelMethods:
 
         callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello")
 
+    @pytest.mark.asyncio
+    async def test_process_voice_input_drops_cancellation_suffix_before_callback(self):
+        """A spoken cancellation never enters the gateway/model callback."""
+        adapter = self._make_adapter()
+        callback = AsyncMock()
+        adapter._voice_input_callback = callback
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav"), \
+             patch("tools.transcription_tools.transcribe_audio",
+                   return_value={"success": True, "transcript": "Write a poem. Cancel that."}), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            await adapter._process_voice_input(111, 42, b"\x00" * 96000)
+
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_process_voice_input_acknowledges_cancellation(self):
+        """A cancelled voice message gets a spoken acknowledgement, not model dispatch."""
+        adapter = self._make_adapter()
+        adapter.play_cancellation_ack_in_voice = AsyncMock(return_value=True)
+
+        with patch("plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav"), \
+             patch("tools.transcription_tools.transcribe_audio",
+                   return_value={"success": True, "transcript": "Draft that email. Strike that."}), \
+             patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
+            await adapter._process_voice_input(111, 42, b"\x00" * 96000)
+
+        adapter.play_cancellation_ack_in_voice.assert_awaited_once_with(111)
+
     def test_stt_alias_rewrite_from_mapping_config(self):
         """Discord STT aliases are data-driven; no voice commands are hard-coded."""
         adapter = self._make_adapter()
@@ -1297,6 +1326,14 @@ class TestDiscordVoiceChannelMethods:
         assert adapter._rewrite_stt_alias("hard-reset") == "/new"
         assert adapter._rewrite_stt_alias("keep going") == "/queue continue"
         assert adapter._rewrite_stt_alias("please reset session") == "please reset session"
+
+    def test_stt_alias_rewrite_after_voice_filler_cleanup(self):
+        adapter = self._make_adapter()
+        adapter.config.extra["stt_aliases"] = {"/model luna": ["load luna"]}
+
+        from tools.voice_mode import clean_voice_transcript
+
+        assert adapter._rewrite_stt_alias(clean_voice_transcript("Yeah, load ummm luna")) == "/model luna"
 
     def test_stt_alias_rewrite_from_json_string_config(self):
         """Support Hermes config set storing dict-like values as strings."""

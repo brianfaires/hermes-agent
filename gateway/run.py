@@ -7587,15 +7587,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
-        # Intercept messages that are responses to a pending clarify
-        # request that is awaiting free-form text (either an open-ended
-        # clarify with no choices, or one where the user picked the
-        # "Other" button).  The first non-empty user message in the
-        # session resolves the clarify and unblocks the agent thread —
-        # we do NOT route it to the agent as a new turn.
+        # A spoken approval must resolve the tool waiter before ordinary
+        # message/clarify handling. The agent thread is blocked in
+        # tools.approval, so routing this transcript as a normal turn would
+        # leave the command pending until timeout.
+        if self._maybe_resolve_voice_approval_response(event):
+            return ""
+
+        # Intercept messages that are responses to a pending clarify request.
+        # Typed replies require free-form text-capture mode (an open-ended
+        # clarify or an explicit "Other" choice). Spoken replies can answer
+        # any pending clarify because they cannot first activate the visual
+        # "Other" button. In either case, resolve the waiter instead of
+        # routing the answer as a new turn or interrupt.
         try:
             from tools import clarify_gateway as _clarify_mod
-            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _pending_clarify = (
+                _clarify_mod.get_pending_for_voice_capture(_quick_key)
+                if event.message_type == MessageType.VOICE
+                else _clarify_mod.get_pending_for_session(_quick_key)
+            )
         except Exception:
             _pending_clarify = None
         if _pending_clarify is not None:

@@ -174,3 +174,63 @@ def test_approval_voice_prompt_not_scheduled_when_voice_mode_off():
 
     assert scheduled is False
     schedule.assert_not_called()
+
+
+def test_spoken_approval_synonyms_resolve_live_command_once():
+    runner = _runner()
+    event = _event(MessageType.VOICE)
+
+    for transcript in ("Approve.", "approved", "allow"):
+        event.text = transcript
+        with patch("tools.approval.has_blocking_approval", return_value=True), patch(
+            "tools.approval.resolve_gateway_approval", return_value=1
+        ) as resolve:
+            assert runner._maybe_resolve_voice_approval_response(event) is True
+
+        resolve.assert_called_once_with(
+            runner._session_key_for_source(event.source), "once"
+        )
+
+
+def test_spoken_deny_resolves_live_command_approval():
+    runner = _runner()
+    event = _event(MessageType.VOICE)
+    event.text = "deny"
+
+    with patch("tools.approval.has_blocking_approval", return_value=True), patch(
+        "tools.approval.resolve_gateway_approval", return_value=1
+    ) as resolve:
+        assert runner._maybe_resolve_voice_approval_response(event) is True
+
+    resolve.assert_called_once_with(
+        runner._session_key_for_source(event.source), "deny"
+    )
+
+
+def test_spoken_affirmative_or_extra_words_do_not_approve_command():
+    runner = _runner()
+    event = _event(MessageType.VOICE)
+
+    for transcript in ("yes", "approve this", "deny later"):
+        event.text = transcript
+        with patch("tools.approval.has_blocking_approval") as pending, patch(
+            "tools.approval.resolve_gateway_approval"
+        ) as resolve:
+            assert runner._maybe_resolve_voice_approval_response(event) is False
+
+        pending.assert_not_called()
+        resolve.assert_not_called()
+
+
+def test_text_approve_does_not_resolve_command_approval():
+    runner = _runner()
+    event = _event(MessageType.TEXT)
+    event.text = "approve"
+
+    with patch("tools.approval.has_blocking_approval") as pending, patch(
+        "tools.approval.resolve_gateway_approval"
+    ) as resolve:
+        assert runner._maybe_resolve_voice_approval_response(event) is False
+
+    pending.assert_not_called()
+    resolve.assert_not_called()

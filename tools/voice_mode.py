@@ -945,6 +945,44 @@ def is_stt_noise_fragment(transcript: str) -> bool:
     return stt_noise_drop_reason(transcript) is not None
 
 
+_STT_CANCELLATION_SUFFIXES = ("cancel that", "strike that")
+_STT_CANCELLATION_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_VOICE_THINKING_FILLER_RE = re.compile(
+    r"(?<!\w)(?:oh+|uh+|um+)(?![\w\-—])[\s,.;:!?]*",
+    re.IGNORECASE,
+)
+_VOICE_INITIAL_ACK_RE = re.compile(
+    r"^\s*(?:(?:yeah|okay|k)(?!\w)[\s,.;:!?\-—]*)+",
+    re.IGNORECASE,
+)
+
+
+def clean_voice_transcript(transcript: str) -> str:
+    """Remove spoken disfluencies before matching voice-command aliases.
+
+    ``oh``, ``uh``, and ``um`` accept repeated final letters because STT often
+    renders a pause as ``ohhh`` or ``ummm``. Leading acknowledgement words are
+    removed only at the start, so normal speech elsewhere is preserved.
+    """
+    cleaned = _VOICE_THINKING_FILLER_RE.sub("", str(transcript or ""))
+    cleaned = _VOICE_INITIAL_ACK_RE.sub("", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def is_stt_cancellation(transcript: str) -> bool:
+    """Return whether a transcript ends with a spoken cancellation instruction.
+
+    The match is case- and punctuation-insensitive, but requires the phrase to
+    be its own trailing words: ``uncancel that`` is not a cancellation.
+    """
+    normalized = _STT_CANCELLATION_PUNCT_RE.sub(" ", str(transcript or "").casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return any(
+        normalized == suffix or normalized.endswith(f" {suffix}")
+        for suffix in _STT_CANCELLATION_SUFFIXES
+    )
+
+
 # ============================================================================
 # STT dispatch
 # ============================================================================
@@ -968,9 +1006,16 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
     else:
         result = transcribe_audio(wav_path, model=model)
 
-    # Filter out Whisper hallucinations (common on silent/near-silent audio)
+    # Filter out Whisper hallucinations (common on silent audio)
     if result.get("success") and is_whisper_hallucination(result.get("transcript", "")):
         logger.info("Filtered Whisper hallucination: %r", result["transcript"])
+        return {"success": True, "transcript": "", "filtered": True}
+
+    if result.get("success"):
+        result["transcript"] = clean_voice_transcript(result.get("transcript", ""))
+
+    if result.get("success") and is_stt_cancellation(result.get("transcript", "")):
+        logger.info("Dropped voice transcript after spoken cancellation")
         return {"success": True, "transcript": "", "filtered": True}
 
     return result
