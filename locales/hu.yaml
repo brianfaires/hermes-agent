@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ Tömörítés megszakítva ({error}). Egyetlen üzenet sem lett eldobva — a beszélgetés változatlan. Futtass /compress parancsot az újrapróbálkozáshoz, /reset egy új munkamenethez, vagy ellenőrizd az auxiliary.compression modell konfigurációt."
     aux_failed:            "ℹ️ A beállított tömörítőmodell (`{model}`) hibát adott ({error}). A főmodellel helyreállítva — a kontextus érintetlen — de érdemes ellenőrizni az `auxiliary.compression.model` beállítást a config.yaml fájlban."
     failed:                "Tömörítés sikertelen: {error}"
+    not_persisted:         "⚠️ A tömörítést nem sikerült menteni, ezért a beszélgetés változatlan maradt (semmi sem veszett el). Próbálja újra; ha továbbra sem sikerül, ellenőrizze, hogy a munkamenet-adatbázis létezik-e és írható-e."
 
   debug:
     upload_failed:         "✗ Nem sikerült feltölteni a hibakeresési jelentést: {error}"
