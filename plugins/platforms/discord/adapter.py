@@ -3032,7 +3032,10 @@ class DiscordAdapter(BasePlatformAdapter):
         aliases = self._configured_stt_aliases()
         if not aliases:
             return transcript
-        replacement = aliases.get(_normalize_discord_stt_alias_text(transcript))
+        from tools.voice_mode import clean_voice_transcript
+
+        candidate = clean_voice_transcript(transcript)
+        replacement = aliases.get(_normalize_discord_stt_alias_text(candidate))
         if not replacement:
             return transcript
         logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
