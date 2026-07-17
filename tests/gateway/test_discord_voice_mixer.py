@@ -300,6 +300,7 @@ class TestPlayAckInVoice:
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
             "discord:\n  voice_fx:\n    cancellation_ack_phrases: [Got it.]\n"
+            "    model_switch_ack_phrases: [Changed over.]\n"
             "    join_ack_phrases: [Ready when you are.]\n"
             "    busy_ack_phrases: [Still working.]\n"
             "    restart_join_ack_phrases: [Back online.]\n"
@@ -312,6 +313,7 @@ class TestPlayAckInVoice:
         config = DiscordAdapter._load_voice_fx_config(object.__new__(DiscordAdapter))
 
         assert config["cancellation_ack_phrases"] == ["Got it."]
+        assert config["model_switch_ack_phrases"] == ["Changed over."]
         assert config["join_ack_phrases"] == ["Ready when you are."]
         assert config["busy_ack_phrases"] == ["Still working."]
         assert config["restart_join_ack_phrases"] == ["Back online."]
