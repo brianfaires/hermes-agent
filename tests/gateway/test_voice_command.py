@@ -1327,6 +1327,14 @@ class TestDiscordVoiceChannelMethods:
         assert adapter._rewrite_stt_alias("keep going") == "/queue continue"
         assert adapter._rewrite_stt_alias("please reset session") == "please reset session"
 
+    def test_stt_alias_rewrite_after_voice_filler_cleanup(self):
+        adapter = self._make_adapter()
+        adapter.config.extra["stt_aliases"] = {"/model luna": ["load luna"]}
+
+        from tools.voice_mode import clean_voice_transcript
+
+        assert adapter._rewrite_stt_alias(clean_voice_transcript("Yeah, load ummm luna")) == "/model luna"
+
     def test_stt_alias_rewrite_from_json_string_config(self):
         """Support Hermes config set storing dict-like values as strings."""
         adapter = self._make_adapter()

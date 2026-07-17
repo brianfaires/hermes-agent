@@ -757,6 +757,21 @@ class TestSttCancellationSuffix:
         assert is_stt_cancellation("uncancel that") is False
 
 
+class TestCleanVoiceTranscript:
+    def test_strips_thinking_fillers_and_their_punctuation(self):
+        from tools.voice_mode import clean_voice_transcript
+
+        assert clean_voice_transcript("load ummm, luna") == "load luna"
+        assert clean_voice_transcript("Ohhh... load uh, luna") == "load luna"
+
+    def test_strips_leading_acknowledgements_only(self):
+        from tools.voice_mode import clean_voice_transcript
+
+        assert clean_voice_transcript("yeah, okay — k, load luna") == "load luna"
+        assert clean_voice_transcript("load okay luna") == "load okay luna"
+        assert clean_voice_transcript("uh-huh, load luna") == "uh-huh, load luna"
+
+
 class TestTranscribeRecording:
     def test_delegates_to_transcribe_audio(self):
         mock_transcribe = MagicMock(return_value={
@@ -783,6 +798,18 @@ class TestTranscribeRecording:
             result = transcribe_recording("/tmp/test.wav")
 
         assert result == {"success": True, "transcript": "", "filtered": True}
+
+    def test_cleans_spoken_fillers(self):
+        mock_transcribe = MagicMock(return_value={
+            "success": True,
+            "transcript": "Yeah, load ummm luna.",
+        })
+
+        with patch("tools.transcription_tools.transcribe_audio", mock_transcribe):
+            from tools.voice_mode import transcribe_recording
+            result = transcribe_recording("/tmp/test.wav")
+
+        assert result["transcript"] == "load luna."
 
     def test_filters_whisper_hallucination(self):
         mock_transcribe = MagicMock(return_value={
