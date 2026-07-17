@@ -2643,7 +2643,7 @@ class DiscordAdapter(BasePlatformAdapter):
         .env file — these are behavioral, not secrets).  The feature is OFF by
         default; users opt in with ``discord.voice_fx.enabled: true``.  The
         acknowledgement lists are ``cancellation_ack_phrases``,
-        ``join_ack_phrases``, ``busy_ack_phrases``,
+        ``model_switch_ack_phrases``, ``join_ack_phrases``, ``busy_ack_phrases``,
         ``restart_join_ack_phrases``, and ``session_resume_ack_phrases``.
         ``session_resume_user_turn_threshold`` controls when the session-resume
         acknowledgement applies.
@@ -2670,6 +2670,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 "Ignored.",
                 "Consider it unsaid.",
             ],
+            "model_switch_ack_phrases": ["Model switched."],
             "join_ack_phrases": [],
             "busy_ack_phrases": [],
             "restart_join_ack_phrases": ["Back online."],
