@@ -8,6 +8,9 @@ nothing and reply "no active task to stop".  Authorized users should be able to
 stop any run in the same thread.
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from gateway.run import GatewayRunner, _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
@@ -220,3 +223,24 @@ async def test_stop_no_active_agent_survives_status_clear_failure():
     result = await runner._handle_stop_command(event)
 
     assert "no active" in str(getattr(result, "text", result)).lower()
+
+
+@pytest.mark.asyncio
+async def test_stop_also_stops_active_discord_tts_for_the_event_guild():
+    runner = object.__new__(GatewayRunner)
+    session_key = _per_user_key("userA")
+    runner._running_agents = {}
+    runner.session_store = _FakeStore(session_key)
+    adapter = SimpleNamespace(stop_voice_playback=AsyncMock(return_value=True))
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    event = MessageEvent(
+        text="/stop",
+        message_type=MessageType.TEXT,
+        source=_thread_source("userA"),
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+
+    await runner._handle_stop_command(event)
+
+    adapter.stop_voice_playback.assert_awaited_once_with(42)

@@ -1122,6 +1122,22 @@ class GatewaySlashCommandsMixin:
 
         return "\n".join(lines)
 
+    async def _stop_voice_playback_for_event(self, event: MessageEvent) -> bool:
+        """Best-effort stop for Discord TTS associated with a ``/stop`` event."""
+        if event.source.platform != Platform.DISCORD:
+            return False
+        adapter = self._adapter_for_source(event.source)
+        if adapter is None or not hasattr(adapter, "stop_voice_playback"):
+            return False
+        guild_id = self._get_guild_id(event)
+        if not guild_id:
+            return False
+        try:
+            return bool(await adapter.stop_voice_playback(guild_id))
+        except Exception as exc:
+            logger.debug("Failed to stop Discord TTS for /stop: %s", exc)
+            return False
+
     async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /stop command - interrupt a running agent.
 
@@ -1135,6 +1151,7 @@ class GatewaySlashCommandsMixin:
         """
         from gateway.run import _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
         source = event.source
+        await self._stop_voice_playback_for_event(event)
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
