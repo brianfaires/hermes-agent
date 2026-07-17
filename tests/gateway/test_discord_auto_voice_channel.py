@@ -100,6 +100,64 @@ async def test_discord_auto_voice_join_enables_voice_only_and_links_text_channel
 
 
 @pytest.mark.asyncio
+async def test_discord_auto_voice_join_uses_configured_join_ack_phrase():
+    runner, adapter = _runner_adapter()
+    adapter._voice_fx_cfg = {"join_ack_phrases": ["Ready for you."]}
+    guild = _guild()
+    member = _member(guild=guild)
+    channel = _channel(guild=guild, members=[member])
+
+    result = await runner._handle_discord_auto_voice_join(adapter, member, channel)
+
+    assert result is True
+    _, greeting_text = runner._send_voice_reply.await_args.args
+    assert greeting_text == "Ready for you."
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_voice_rejoin_after_gateway_restart_uses_configured_ack():
+    runner, adapter = _runner_adapter()
+    runner._voice_mode["discord:456"] = "voice_only"
+    adapter._voice_fx_cfg = {"restart_join_ack_phrases": ["Back online."]}
+    guild = _guild()
+    member = _member(guild=guild)
+    channel = _channel(guild=guild, members=[member])
+
+    result = await runner._handle_discord_auto_voice_join(adapter, member, channel)
+
+    assert result is True
+    _, greeting_text = runner._send_voice_reply.await_args.args
+    assert greeting_text == "Back online."
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_voice_rejoins_long_session_with_configured_ack():
+    runner, adapter = _runner_adapter()
+    adapter._voice_fx_cfg = {
+        "session_resume_ack_phrases": ["Picking up where we left off."],
+        "session_resume_user_turn_threshold": 2,
+    }
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SimpleNamespace(session_id="session-1")
+    runner.session_store.load_transcript.return_value = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+    ]
+    guild = _guild()
+    member = _member(guild=guild)
+    channel = _channel(guild=guild, members=[member])
+
+    result = await runner._handle_discord_auto_voice_join(adapter, member, channel)
+
+    assert result is True
+    _, greeting_text = runner._send_voice_reply.await_args.args
+    assert greeting_text == "Picking up where we left off."
+
+
+@pytest.mark.asyncio
 async def test_discord_auto_voice_join_skips_greeting_when_already_connected_to_same_channel():
     runner, adapter = _runner_adapter()
     guild = _guild()
@@ -122,6 +180,7 @@ async def test_discord_auto_voice_join_skips_greeting_when_already_connected_to_
 @pytest.mark.asyncio
 async def test_discord_auto_voice_join_uses_busy_ack_when_session_already_running():
     runner, adapter = _runner_adapter()
+    adapter._voice_fx_cfg = {"busy_ack_phrases": ["Still working."]}
     guild = _guild()
     member = _member(guild=guild)
     channel = _channel(guild=guild, members=[member])
@@ -132,7 +191,7 @@ async def test_discord_auto_voice_join_uses_busy_ack_when_session_already_runnin
     assert result is True
     runner._send_voice_reply.assert_awaited_once()
     _, greeting_text = runner._send_voice_reply.await_args.args
-    assert greeting_text == "working, one sec"
+    assert greeting_text == "Still working."
 
 
 @pytest.mark.asyncio
