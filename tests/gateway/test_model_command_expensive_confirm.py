@@ -41,6 +41,14 @@ def _make_event(text):
     )
 
 
+def _make_voice_event(text):
+    return MessageEvent(
+        text=text,
+        message_type=MessageType.VOICE,
+        source=SessionSource(platform=Platform.DISCORD, chat_id="12345", chat_type="group"),
+    )
+
+
 def _fake_switch_result():
     from hermes_cli.model_switch import ModelSwitchResult
 
@@ -184,3 +192,47 @@ async def test_typed_model_cheap_switches_without_prompt(tmp_path, monkeypatch):
     assert "gpt-5.5-pro" in result
     overrides = list(runner._session_model_overrides.values())
     assert len(overrides) == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_model_switch_expands_command_model_name_in_acknowledgement(tmp_path, monkeypatch):
+    """Voice /model uses the typed model name in the selected acknowledgement."""
+    _setup_isolated_home(tmp_path, monkeypatch, warn=False)
+    runner = _make_runner()
+    runner._evict_cached_agent = lambda session_key: None
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            _voice_fx_cfg={"model_switch_ack_phrases": ["Loaded [name]."]}
+        )
+    }
+
+    result = await runner._handle_model_command(
+        _make_voice_event("/model openai/gpt-5.5-pro")
+    )
+
+    assert "gpt-5.5-pro" in result
+    assert result.voice_text == "Loaded gpt-5.5-pro."
+
+
+@pytest.mark.asyncio
+async def test_voice_model_switch_prefers_per_model_acknowledgement(tmp_path, monkeypatch):
+    """A model-name config section overrides generic voice acknowledgement phrases."""
+    _setup_isolated_home(tmp_path, monkeypatch, warn=False)
+    runner = _make_runner()
+    runner._evict_cached_agent = lambda session_key: None
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            _voice_fx_cfg={
+                "model_switch_ack_phrases": {
+                    "default": ["Loaded [name]."],
+                    "gpt-5.5-pro": ["Sol loaded, thanks for the boost."],
+                }
+            }
+        )
+    }
+
+    result = await runner._handle_model_command(
+        _make_voice_event("/model openai/gpt-5.5-pro")
+    )
+
+    assert result.voice_text == "Sol loaded, thanks for the boost."
