@@ -54,6 +54,8 @@ def _make_runner(history: list[dict[str, str]]):
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
     runner.session_store._save = MagicMock()
+    # Passed to the temp agent so compress_context can rotate the session.
+    runner._session_db = MagicMock()
     return runner
 
 
@@ -65,7 +67,8 @@ async def test_compress_focus_topic_passed_to_agent():
     runner = _make_runner(history)
     agent_instance = MagicMock()
     agent_instance.context_compressor.has_content_to_compress.return_value = True
-    agent_instance.session_id = "sess-1"
+    # Compression succeeded, so the session rotated onto a child id.
+    agent_instance.session_id = "sess-2"
     agent_instance._compress_context.return_value = (compressed, "")
 
     def _estimate(messages):

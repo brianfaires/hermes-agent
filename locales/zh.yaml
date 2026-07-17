@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ 压缩已中止 ({error})。未删除任何消息 — 对话保持不变。运行 /compress 重试，运行 /reset 开始新会话，或检查你的 auxiliary.compression 模型配置。"
     aux_failed:            "ℹ️ 配置的压缩模型 `{model}` 失败（{error}）。已使用主模型恢复 — 上下文完好 — 但您可能想检查 config.yaml 中的 `auxiliary.compression.model`。"
     failed:                "压缩失败：{error}"
+    not_persisted:         "⚠️ 无法保存压缩结果，因此对话保持不变（未丢失任何内容）。请重试；若持续失败，请检查会话数据库是否存在且可写。"
 
   debug:
     upload_failed:         "✗ 无法上传调试报告：{error}"
