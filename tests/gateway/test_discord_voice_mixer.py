@@ -292,6 +292,35 @@ class TestPlayInVoiceChannelMixerPath:
         assert vc.play.called
 
 
+class TestStopVoicePlayback:
+    @pytest.mark.asyncio
+    async def test_stops_mixer_speech_without_tearing_down_continuous_stream(self):
+        adapter = _make_adapter()
+        mixer = MagicMock()
+        vc = MagicMock()
+        vc.is_playing.return_value = True
+        adapter._voice_mixers[111] = mixer
+        adapter._voice_clients[111] = vc
+
+        stopped = await adapter.stop_voice_playback(111)
+
+        assert stopped is True
+        mixer.stop_speech.assert_called_once_with()
+        vc.stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stops_legacy_one_shot_playback(self):
+        adapter = _make_adapter()
+        vc = MagicMock()
+        vc.is_playing.return_value = True
+        adapter._voice_clients[111] = vc
+
+        stopped = await adapter.stop_voice_playback(111)
+
+        assert stopped is True
+        vc.stop.assert_called_once_with()
+
+
 class TestPlayAckInVoice:
     def test_loads_cancellation_ack_phrases_from_config_yaml(self, tmp_path, monkeypatch):
         from plugins.platforms.discord.adapter import DiscordAdapter
