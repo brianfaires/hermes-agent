@@ -293,6 +293,21 @@ class TestPlayInVoiceChannelMixerPath:
 
 
 class TestPlayAckInVoice:
+    def test_loads_cancellation_ack_phrases_from_config_yaml(self, tmp_path, monkeypatch):
+        from plugins.platforms.discord.adapter import DiscordAdapter
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "discord:\n  voice_fx:\n    cancellation_ack_phrases: [Got it.]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = DiscordAdapter._load_voice_fx_config(object.__new__(DiscordAdapter))
+
+        assert config["cancellation_ack_phrases"] == ["Got it."]
+
     @pytest.mark.asyncio
     async def test_noop_when_ack_disabled(self):
         adapter = _make_adapter({"ack_enabled": False})
@@ -346,3 +361,26 @@ class TestPlayAckInVoice:
         assert ok is True
         assert os.path.dirname(seen["output_path"]) == str(tmp_path / "tmp" / "hermes_voice" / "ops")
         assert os.path.basename(seen["output_path"]).startswith("ack_")
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ack_uses_configured_phrase_list(self, tmp_path):
+        adapter = _make_adapter({"cancellation_ack_phrases": ["Sure thing.", "Ignored."]})
+        adapter._voice_clients[111] = MagicMock()
+        adapter._voice_clients[111].is_connected.return_value = True
+        adapter.play_in_voice_channel = AsyncMock(return_value=True)
+        ack_file = tmp_path / "cancellation.mp3"
+        ack_file.write_bytes(b"id3")
+        seen = {}
+        import json as _json
+
+        def _tts(**kwargs):
+            seen["text"] = kwargs["text"]
+            return _json.dumps({"success": True, "file_path": str(ack_file)})
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=_tts), \
+                patch("random.choice", return_value="Ignored."):
+            ok = await adapter.play_cancellation_ack_in_voice(111)
+
+        assert ok is True
+        assert seen["text"] == "Ignored."
+        adapter.play_in_voice_channel.assert_awaited_once_with(111, str(ack_file))
