@@ -299,7 +299,12 @@ class TestPlayAckInVoice:
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "discord:\n  voice_fx:\n    cancellation_ack_phrases: [Got it.]\n",
+            "discord:\n  voice_fx:\n    cancellation_ack_phrases: [Got it.]\n"
+            "    join_ack_phrases: [Ready when you are.]\n"
+            "    busy_ack_phrases: [Still working.]\n"
+            "    restart_join_ack_phrases: [Back online.]\n"
+            "    session_resume_ack_phrases: [Picking up.]\n"
+            "    session_resume_user_turn_threshold: 3\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -307,6 +312,11 @@ class TestPlayAckInVoice:
         config = DiscordAdapter._load_voice_fx_config(object.__new__(DiscordAdapter))
 
         assert config["cancellation_ack_phrases"] == ["Got it."]
+        assert config["join_ack_phrases"] == ["Ready when you are."]
+        assert config["busy_ack_phrases"] == ["Still working."]
+        assert config["restart_join_ack_phrases"] == ["Back online."]
+        assert config["session_resume_ack_phrases"] == ["Picking up."]
+        assert config["session_resume_user_turn_threshold"] == 3
 
     @pytest.mark.asyncio
     async def test_noop_when_ack_disabled(self):
