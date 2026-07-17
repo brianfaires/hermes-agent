@@ -3465,6 +3465,7 @@ class DiscordAdapter(BasePlatformAdapter):
     ):
         """Convert PCM -> WAV -> STT -> callback."""
         from tools.voice_mode import (
+            clean_voice_transcript,
             is_stt_cancellation,
             is_whisper_hallucination,
             stt_noise_drop_reason,
@@ -3491,6 +3492,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
             transcript = result.get("transcript", "").strip()
             if not transcript or is_whisper_hallucination(transcript):
+                return
+            transcript = clean_voice_transcript(transcript)
+            if not transcript:
                 return
             noise_reason = stt_noise_drop_reason(transcript)
             if noise_reason:
