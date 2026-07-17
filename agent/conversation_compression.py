@@ -287,6 +287,7 @@ def compress_context(
     task_id: str = "default",
     focus_topic: Optional[str] = None,
     force: bool = False,
+    skip_pre_rotation_flush: bool = False,
 ) -> Tuple[list, str]:
     """Compress conversation context and split the session in SQLite.
 
@@ -303,6 +304,14 @@ def compress_context(
             by the manual ``/compress`` slash command so users can retry
             immediately after an auto-compress abort.  Auto-compress
             callers use the default ``False``.
+        skip_pre_rotation_flush: If True, skip the pre-rotation flush of
+            ``messages`` to the old session.  Set by callers whose input
+            was read back from the session DB and is therefore already
+            canonical there (the gateway's ``/compress``); flushing it
+            again would re-INSERT every message and double the preserved
+            parent transcript.  In-agent callers compress the live
+            mid-turn history — some of which has never been written — and
+            must use the default ``False``.
 
     Returns:
         ``(compressed_messages, new_system_prompt)`` tuple.  When
@@ -506,6 +515,15 @@ def compress_context(
     new_system_prompt = agent._build_system_prompt(system_message)
     agent._cached_system_prompt = new_system_prompt
 
+    # Rotation is only "real" once the child session row exists and carries
+    # its system prompt.  ``agent.session_id`` is reassigned partway through
+    # the block below, BEFORE create_session(), and every failure after that
+    # point is swallowed into a warning — so a changed session_id on its own
+    # proves nothing about what reached the DB.  Callers that treat rotation
+    # as a commit point (the gateway's manual /compress) must read this flag
+    # instead of diffing session_id.
+    agent._last_compression_rotated = False
+
     if agent._session_db:
         try:
             # Propagate title to the new session with auto-numbering
@@ -518,10 +536,17 @@ def compress_context(
             # at a point when _flush_messages_to_session_db() has not yet
             # run.  Without this, messages generated during the current turn
             # are silently lost on session rotation (#47202).
-            try:
-                agent._flush_messages_to_session_db(messages)
-            except Exception:
-                pass  # best-effort — don't block compression on a flush error
+            #
+            # Callers whose `messages` came straight back out of the session
+            # DB opt out: the flush dedups by object identity against
+            # `conversation_history`, which they don't have, so every message
+            # would be re-INSERTed and the preserved parent transcript would
+            # be doubled.
+            if not skip_pre_rotation_flush:
+                try:
+                    agent._flush_messages_to_session_db(messages)
+                except Exception:
+                    pass  # best-effort — don't block compression on a flush error
             agent._session_db.end_session(agent.session_id, "compression")
             old_session_id = agent.session_id
             agent.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -567,6 +592,9 @@ def compress_context(
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0
+            # Everything the child needs to be usable is now durable.  Set
+            # last, so any failure above leaves the flag False.
+            agent._last_compression_rotated = True
         except Exception as e:
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
