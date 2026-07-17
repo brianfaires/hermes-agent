@@ -3150,6 +3150,29 @@ class DiscordAdapter(BasePlatformAdapter):
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
 
+    async def stop_voice_playback(self, guild_id: int) -> bool:
+        """Stop active TTS in one guild while keeping the voice connection alive.
+
+        A continuous mixer owns the Discord voice stream, so only its speech
+        children may be removed. Legacy one-shot playback has no mixer and can
+        stop the VoiceClient directly.
+        """
+        mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
+        if mixer is not None:
+            mixer.stop_speech()
+            return True
+
+        vc = self._voice_clients.get(guild_id)
+        if vc is None:
+            return False
+        try:
+            if vc.is_playing():
+                vc.stop()
+                return True
+        except Exception as exc:
+            logger.debug("Failed to stop Discord voice playback for guild %s: %s", guild_id, exc)
+        return False
+
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
 
