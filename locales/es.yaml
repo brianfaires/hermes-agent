@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ Compresión abortada ({error}). No se eliminó ningún mensaje — la conversación está intacta. Ejecuta /compress para reintentar, /reset para una sesión limpia, o revisa la configuración de tu modelo auxiliary.compression."
     aux_failed:            "ℹ️ El modelo de compresión configurado `{model}` falló ({error}). Recuperado con tu modelo principal — el contexto está intacto — pero quizá quieras revisar `auxiliary.compression.model` en config.yaml."
     failed:                "Compresión fallida: {error}"
+    not_persisted:         "⚠️ No se pudo guardar la compresión, por lo que tu conversación no ha cambiado (no se perdió nada). Inténtalo de nuevo; si sigue fallando, comprueba que la base de datos de sesión exista y permita escritura."
 
   debug:
     upload_failed:         "✗ No se pudo subir el informe de depuración: {error}"

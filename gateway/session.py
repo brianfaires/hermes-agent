@@ -1397,17 +1397,25 @@ class SessionStore:
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
     
-    def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> bool:
         """Replace the entire transcript for a session with new messages.
 
         Used by /retry, /undo, and /compress to persist modified conversation
         history. state.db is the canonical store.
+
+        Returns True only when the replacement was durably written. Callers
+        that treat the rewrite as a commit point (``/compress``, which moves
+        the live session onto the rewritten one) MUST check this: a False
+        return means the stored transcript is not what they just handed us.
         """
-        if self._db:
-            try:
-                self._db.replace_messages(session_id, messages)
-            except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
+        if not self._db:
+            return False
+        try:
+            self._db.replace_messages(session_id, messages)
+            return True
+        except Exception as e:
+            logger.debug("Failed to rewrite transcript in DB: %s", e)
+            return False
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.

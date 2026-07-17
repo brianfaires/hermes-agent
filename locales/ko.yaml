@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ 압축이 중단되었습니다 ({error}). 메시지가 삭제되지 않았으며 대화는 그대로 유지됩니다. 다시 시도하려면 /compress를 실행하거나, 새 세션을 시작하려면 /reset을 사용하거나, auxiliary.compression 모델 설정을 확인하세요."
     aux_failed:            "ℹ️ 구성된 압축 모델 `{model}`이(가) 실패했습니다 ({error}). 메인 모델로 복구되어 컨텍스트는 보존되었지만, config.yaml의 `auxiliary.compression.model` 설정을 확인하는 것이 좋습니다."
     failed:                "압축 실패: {error}"
+    not_persisted:         "⚠️ 압축 내용을 저장할 수 없어 대화는 변경되지 않았습니다(손실된 내용은 없습니다). 다시 시도하고, 계속 실패하면 세션 데이터베이스가 존재하며 쓰기 가능한지 확인하세요."
 
   debug:
     upload_failed:         "✗ 디버그 보고서 업로드 실패: {error}"
