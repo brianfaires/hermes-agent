@@ -2651,6 +2651,12 @@ class GatewaySlashCommandsMixin:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                # Without the DB the rotation block in compress_context() is
+                # skipped wholesale: the compressed messages are computed in
+                # memory and never written anywhere, so the next user message
+                # reloads the full original transcript and the compression is
+                # silently lost.
+                session_db=self._session_db,
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
@@ -2672,7 +2678,15 @@ class GatewaySlashCommandsMixin:
                 loop = asyncio.get_running_loop()
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True)
+                    lambda: tmp_agent._compress_context(
+                        head, "", approx_tokens=approx_tokens,
+                        focus_topic=focus_topic, force=True,
+                        # `head` was read back from the session DB by
+                        # load_transcript() above, so it is already
+                        # persisted; re-flushing it before rotation would
+                        # double the preserved parent transcript.
+                        skip_pre_rotation_flush=True,
+                    )
                 )
 
                 # Re-append the verbatim tail after the compressed head,
@@ -2684,34 +2698,74 @@ class GatewaySlashCommandsMixin:
                 # (preserving its full transcript in SQLite) and creates a new
                 # session_id for the continuation.  Write the compressed messages
                 # into the NEW session so the original history stays searchable.
+                #
+                # A changed session_id is NOT proof the child exists:
+                # _compress_context assigns it before create_session() and
+                # swallows every later failure into a warning, so the id can
+                # point at a session that was never created.  Require the
+                # explicit rotation signal instead.
                 new_session_id = tmp_agent.session_id
-                rotated = new_session_id != session_entry.session_id
-                if rotated:
+                rotated = (
+                    new_session_id != session_entry.session_id
+                    and bool(getattr(tmp_agent, "_last_compression_rotated", False))
+                )
+
+                # The rewrite is the commit point, so it happens BEFORE the
+                # gateway entry moves.  Rewriting an un-rotated session would
+                # DELETE the original messages and leave only the summary —
+                # permanent data loss (#44794, #39704); moving the entry onto
+                # a child whose write failed would strand the user on an empty
+                # session while their history sits on the parent.  Either way
+                # the parent is still intact, so failure keeps us there.
+                persisted = rotated and self.session_store.rewrite_transcript(
+                    new_session_id, compressed
+                )
+                if persisted:
                     session_entry.session_id = new_session_id
                     self.session_store._save()
                     self._sync_telegram_topic_binding(
                         source, session_entry, reason="compress-command",
                     )
-
-                # Only rewrite the transcript when rotation actually produced a
-                # NEW session id. If _compress_context could not rotate (e.g.
-                # _session_db unavailable, or the DB split raised), session_id
-                # is unchanged and rewrite_transcript() would DELETE the
-                # original messages and replace them with only the compressed
-                # summary — permanent data loss (#44794, #39704). In that case
-                # leave the original transcript intact.
-                if rotated:
-                    self.session_store.rewrite_transcript(new_session_id, compressed)
-                else:
-                    logger.warning(
-                        "Manual /compress: session rotation did not occur "
-                        "(session_id unchanged) — preserving original transcript "
-                        "instead of overwriting it (#44794)."
+                    # Reset stored token count — transcript changed, old
+                    # value is stale.  Only valid once the compressed
+                    # transcript is durable; resetting on the preserve path
+                    # would zero the counter for a transcript that is still
+                    # at its original size.
+                    self.session_store.update_session(
+                        session_entry.session_key, last_prompt_tokens=0
                     )
-                # Reset stored token count — transcript changed, old value is stale
-                self.session_store.update_session(
-                    session_entry.session_key, last_prompt_tokens=0
-                )
+                else:
+                    # compress_context() ends the parent BEFORE it rotates, so
+                    # a parent we fall back to is still flagged
+                    # end_reason='compression'. Left that way the lineage walk
+                    # treats the child it never finished writing as the live
+                    # continuation, and a later /resume lands the user on that
+                    # empty session instead of their history. Undo the end so
+                    # the row reads as what it actually is: never compressed,
+                    # still live.
+                    if new_session_id != session_entry.session_id and self._session_db:
+                        try:
+                            recovered = self._session_db.discard_failed_compression_child(
+                                session_entry.session_id, new_session_id
+                            )
+                            if not recovered:
+                                logger.warning(
+                                    "Manual /compress: could not safely discard failed child "
+                                    "%s; preserving it for recovery",
+                                    new_session_id,
+                                )
+                        except Exception as _reopen_err:
+                            logger.warning(
+                                "Manual /compress: could not recover preserved session "
+                                "%s — /resume may redirect to the abandoned child: %s",
+                                session_entry.session_id, _reopen_err,
+                            )
+                    logger.warning(
+                        "Manual /compress: compressed transcript was not persisted "
+                        "(rotated=%s) — staying on session %s and preserving its "
+                        "original transcript (#44794).",
+                        rotated, session_entry.session_id,
+                    )
                 new_tokens = estimate_request_tokens_rough(
                     compressed, system_prompt=_sys_prompt, tools=_tools
                 )
@@ -2740,12 +2794,22 @@ class GatewaySlashCommandsMixin:
                 # from current files (SOUL.md, memory, etc.).
                 self._evict_cached_agent(session_key)
                 self._cleanup_agent_resources(tmp_agent)
-            lines = [f"🗜️ {summary['headline']}"]
-            if focus_topic:
-                lines.append(t("gateway.compress.focus_line", topic=focus_topic))
-            lines.append(summary["token_line"])
-            if summary["note"]:
-                lines.append(summary["note"])
+            # summarize_manual_compression() only compares the in-memory
+            # before/after lists — it is persistence-blind. If compression
+            # produced real output that never reached the DB, its headline
+            # would claim "Compressed: N → M" for a transcript that is still
+            # at its original size. Report the failure instead. A genuine
+            # no-op (nothing to compress, or an aborted summary) is not this
+            # case: nothing needed persisting, so its existing messaging stands.
+            if not persisted and not summary["noop"]:
+                lines = [t("gateway.compress.not_persisted")]
+            else:
+                lines = [f"🗜️ {summary['headline']}"]
+                if focus_topic:
+                    lines.append(t("gateway.compress.focus_line", topic=focus_topic))
+                lines.append(summary["token_line"])
+                if summary["note"]:
+                    lines.append(summary["note"])
             if _summary_aborted:
                 lines.append(
                     t(
