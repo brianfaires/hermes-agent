@@ -2642,7 +2642,11 @@ class DiscordAdapter(BasePlatformAdapter):
         All settings live under ``discord.voice_fx`` in config.yaml (NOT the
         .env file — these are behavioral, not secrets).  The feature is OFF by
         default; users opt in with ``discord.voice_fx.enabled: true``.  The
-        cancellation acknowledgement list is ``cancellation_ack_phrases``.
+        acknowledgement lists are ``cancellation_ack_phrases``,
+        ``join_ack_phrases``, ``busy_ack_phrases``,
+        ``restart_join_ack_phrases``, and ``session_resume_ack_phrases``.
+        ``session_resume_user_turn_threshold`` controls when the session-resume
+        acknowledgement applies.
 
         Returns a dict with safe defaults so callers never KeyError.
         """
@@ -2666,6 +2670,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 "Ignored.",
                 "Consider it unsaid.",
             ],
+            "join_ack_phrases": [],
+            "busy_ack_phrases": [],
+            "restart_join_ack_phrases": ["Back online."],
+            "session_resume_ack_phrases": ["Picking up where we left off."],
+            "session_resume_user_turn_threshold": 2,
         }
         try:
             from hermes_cli.config import read_raw_config
