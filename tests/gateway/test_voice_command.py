@@ -1359,6 +1359,19 @@ class TestDiscordVoiceChannelMethods:
         assert adapter._rewrite_stt_alias("keep going") == "/queue continue"
         assert adapter._rewrite_stt_alias("please reset session") == "please reset session"
 
+    def test_stt_alias_rewrite_after_voice_filler_cleanup(self):
+        adapter = self._make_adapter()
+        adapter._stt_aliases = {"/model luna": ["load luna"]}
+
+        assert adapter._rewrite_stt_alias("Yeah, load ummm luna") == "/model luna"
+
+    def test_stt_alias_miss_preserves_fillers(self):
+        adapter = self._make_adapter()
+        adapter._stt_aliases = {"/model luna": ["load luna"]}
+
+        transcript = "Oh, please load um luna"
+        assert adapter._rewrite_stt_alias(transcript) == transcript
+
     @pytest.mark.asyncio
     async def test_process_voice_input_applies_stt_alias_before_callback(self):
         """Matched voice aliases should enter the normal message pipeline as target text."""

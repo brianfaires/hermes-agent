@@ -977,6 +977,7 @@ class GatewayVoiceMixin:
             return prefix, []
 
         from tools.transcription_tools import transcribe_audio
+        from tools.voice_mode import clean_voice_transcript
 
         enriched_parts = []
         successful_transcripts: List[str] = []
@@ -985,7 +986,7 @@ class GatewayVoiceMixin:
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
-                    transcript = result["transcript"]
+                    transcript = clean_voice_transcript(result["transcript"])
                     successful_transcripts.append(transcript)
                     enriched_parts.append(
                         f'**[Voice]** [The user sent a voice message~ '
