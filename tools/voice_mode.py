@@ -947,6 +947,26 @@ def is_stt_noise_fragment(transcript: str) -> bool:
 
 _STT_CANCELLATION_SUFFIXES = ("cancel that", "strike that")
 _STT_CANCELLATION_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_VOICE_THINKING_FILLER_RE = re.compile(
+    r"(?<!\w)(?:oh+|uh+|um+)(?![\w\-—])[\s,.;:!?]*",
+    re.IGNORECASE,
+)
+_VOICE_INITIAL_ACK_RE = re.compile(
+    r"^\s*(?:(?:yeah|okay|k)(?!\w)[\s,.;:!?\-—]*)+",
+    re.IGNORECASE,
+)
+
+
+def clean_voice_transcript(transcript: str) -> str:
+    """Remove spoken disfluencies before matching voice-command aliases.
+
+    ``oh``, ``uh``, and ``um`` accept repeated final letters because STT often
+    renders a pause as ``ohhh`` or ``ummm``. Leading acknowledgement words are
+    removed only at the start, so normal speech elsewhere is preserved.
+    """
+    cleaned = _VOICE_THINKING_FILLER_RE.sub("", str(transcript or ""))
+    cleaned = _VOICE_INITIAL_ACK_RE.sub("", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def is_stt_cancellation(transcript: str) -> bool:
@@ -990,6 +1010,9 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
     if result.get("success") and is_whisper_hallucination(result.get("transcript", "")):
         logger.info("Filtered Whisper hallucination: %r", result["transcript"])
         return {"success": True, "transcript": "", "filtered": True}
+
+    if result.get("success"):
+        result["transcript"] = clean_voice_transcript(result.get("transcript", ""))
 
     if result.get("success") and is_stt_cancellation(result.get("transcript", "")):
         logger.info("Dropped voice transcript after spoken cancellation")
