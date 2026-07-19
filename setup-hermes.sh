@@ -29,6 +29,15 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# A linked worktree has a .git *file* rather than the primary checkout's
+# .git directory. This setup script installs a global launcher, so running it
+# from a worktree would make experimental code the user's implicit `hermes`.
+if [ -f "$SCRIPT_DIR/.git" ]; then
+    echo -e "${RED}✗${NC} Git worktree detected; refusing to run the global Hermes setup from $SCRIPT_DIR"
+    echo "    Run setup-hermes.sh from the primary checkout instead."
+    exit 2
+fi
+
 # Prevent uv from discovering config files (uv.toml, pyproject.toml) from the
 # wrong user's home directory when running under sudo -u <user>.  See #21269.
 export UV_NO_CONFIG=1
