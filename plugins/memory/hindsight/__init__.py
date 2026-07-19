@@ -1449,38 +1449,6 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="hindsight-prefetch")
         self._prefetch_thread.start()
 
-    def reconstruct_recall(self, query: str) -> list[str]:
-        """Re-run the automatic recall search for a historical-query viewer.
-
-        The caller must label these results as reconstructed: the original
-        automatic-recall response is injected into context but is not persisted
-        as a per-turn audit record.
-        """
-        if self._memory_mode == "tools" or not self._auto_recall:
-            return []
-        if self._recall_max_input_chars and len(query) > self._recall_max_input_chars:
-            query = query[:self._recall_max_input_chars]
-        if self._prefetch_method == "reflect":
-            response = self._run_hindsight_operation(
-                lambda client: client.areflect(
-                    bank_id=self._bank_id, query=query, budget=self._budget
-                )
-            )
-            return [str(response.text)] if response.text else []
-        recall_kwargs: dict = {
-            "bank_id": self._bank_id,
-            "query": query,
-            "budget": self._budget,
-            "max_tokens": self._recall_max_tokens,
-        }
-        if self._recall_tags:
-            recall_kwargs["tags"] = self._recall_tags
-            recall_kwargs["tags_match"] = self._recall_tags_match
-        if self._recall_types:
-            recall_kwargs["types"] = self._recall_types
-        resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-        return [str(result.text) for result in (resp.results or []) if result.text]
-
     def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
         now = datetime.now(timezone.utc).isoformat()
         return [

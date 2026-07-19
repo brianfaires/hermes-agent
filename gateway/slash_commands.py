@@ -3321,67 +3321,6 @@ class GatewaySlashCommandsMixin:
             lines.append("Complete your top-up in the browser — credits will appear in /credits shortly.")
         return "\n".join(lines)
 
-    async def _handle_hindsight_history_command(self, event: MessageEvent) -> str:
-        """Render recorded explicit and reconstructed automatic Hindsight activity."""
-        from gateway.run import _AGENT_PENDING_SENTINEL
-        from plugins.memory.hindsight.history import (
-            build_turns,
-            parse_history_options,
-            render_history,
-        )
-
-        try:
-            options = parse_history_options(event.get_command_args().strip())
-        except ValueError as exc:
-            return str(exc)
-
-        source = event.source
-        session_key = self._session_key_for_source(source)
-        entry = self.session_store.get_or_create_session(source)
-        db = getattr(self, "_session_db", None)
-        if db is None:
-            return "Hindsight history is unavailable: session storage is not configured."
-        messages = (
-            db.get_messages_for_session_key(
-                session_key, include_session_id=entry.session_id
-            )
-            if options.turns is not None
-            else db.get_messages(entry.session_id)
-        )
-        turns = build_turns(messages)
-        if options.turns is not None:
-            turns = turns[-options.turns:]
-
-        agent = self._running_agents.get(session_key)
-        if not agent or agent is _AGENT_PENDING_SENTINEL:
-            cache_lock = getattr(self, "_agent_cache_lock", None)
-            cache = getattr(self, "_agent_cache", None)
-            if cache_lock and cache is not None:
-                with cache_lock:
-                    cached = cache.get(session_key)
-                    if cached:
-                        agent = cached[0]
-        provider = None
-        memory_manager = getattr(agent, "_memory_manager", None)
-        for candidate in getattr(memory_manager, "_providers", []):
-            if getattr(candidate, "name", "") == "hindsight":
-                provider = candidate
-                break
-
-        auto_retain = bool(getattr(provider, "_auto_retain", False))
-        retain_every = int(getattr(provider, "_retain_every_n_turns", 1) or 1)
-        auto_recall = bool(getattr(provider, "_auto_recall", False))
-        recall = getattr(provider, "reconstruct_recall", None)
-        return await asyncio.to_thread(
-            render_history,
-            turns,
-            options,
-            auto_retain=auto_retain,
-            retain_every_n_turns=retain_every,
-            auto_recall=auto_recall,
-            recall=recall,
-        )
-
     async def _handle_usage_command(self, event: MessageEvent) -> str:
         """Handle /usage command -- show token usage for the current session.
 
