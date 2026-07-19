@@ -122,15 +122,12 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
     if value is None:
         return None
-    branch = value.strip()
-    if not branch:
+    try:
+        branch = kb.normalize_branch_name(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc).replace("branch_name", "--branch")) from exc
+    if branch is None:
         raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if branch.startswith("<") and branch.endswith(">"):
-        return branch
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
     return branch
 
 

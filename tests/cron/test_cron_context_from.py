@@ -62,6 +62,23 @@ class TestJobContextFromField:
         with pytest.raises(ValueError, match="Blocked"):
             create_job(prompt=None, prompt_path=str(prompt_file), schedule="every 1h")
 
+    def test_runtime_rescans_mutated_prompt_path_with_skills(self, cron_env):
+        from cron.jobs import create_job
+        from cron.scheduler import CronPromptInjectionBlocked, _build_job_prompt
+
+        prompt_file = cron_env / "mutable.md"
+        prompt_file.write_text("Summarize the report.", encoding="utf-8")
+        job = create_job(
+            prompt=None,
+            prompt_path=str(prompt_file),
+            schedule="every 1h",
+            skills=["missing-test-skill"],
+        )
+        prompt_file.write_text("rm -rf /", encoding="utf-8")
+
+        with pytest.raises(CronPromptInjectionBlocked):
+            _build_job_prompt(job)
+
     def test_prompt_path_must_be_absolute(self, cron_env):
         from cron.jobs import create_job
 

@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ _TOOLSET = "gateway_restart"
 _PLUGIN_KEY = "gateway-restart-tool"
 _DEFAULT_COOLDOWN_SECONDS = 300
 _DEFAULT_SCHEDULE_DELAY_SECONDS = 3.0
+_cooldown_lock = threading.Lock()
 
 REQUEST_GATEWAY_RESTART_SCHEMA = {
     "name": _TOOL_NAME,
@@ -197,6 +199,38 @@ def _write_last_restart_time(target_profile: str, now: float) -> None:
         json.dumps({"last_requested_at_by_profile": times}, sort_keys=True), encoding="utf-8"
     )
     tmp.replace(path)
+
+
+def _reserve_restart(
+    target_profile: str,
+    source_profile: str,
+    now: float,
+    cooldown_seconds: int,
+) -> int:
+    """Atomically check and reserve one target's cooldown in this gateway."""
+    with _cooldown_lock:
+        last = _read_last_restart_time(target_profile, source_profile)
+        remaining = max(0, int(cooldown_seconds - (now - last)))
+        if remaining:
+            return remaining
+        _write_last_restart_time(target_profile, now)
+        return 0
+
+
+def _release_restart_reservation(target_profile: str, reserved_at: float) -> None:
+    """Release this request's reservation without removing a newer one."""
+    with _cooldown_lock:
+        times, _legacy = _read_last_restart_times()
+        if times.get(target_profile) != reserved_at:
+            return
+        del times[target_profile]
+        path = _state_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps({"last_requested_at_by_profile": times}, sort_keys=True),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
 
 
 def _target_profiles(args: dict[str, Any], source_profile: str) -> list[str]:
@@ -401,25 +435,6 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    last = _read_last_restart_time(target_profile, profile)
-    cooldown_remaining = max(0, int(cooldown_seconds - (now - last)))
-    if cooldown_remaining and not dry_run:
-        record.update(
-            {
-                "decision": "deny",
-                "error": "cooldown_active",
-                "cooldown_remaining_seconds": cooldown_remaining,
-            }
-        )
-        _append_audit(record)
-        return _json(
-            {
-                "ok": False,
-                "error": "cooldown_active",
-                "cooldown_remaining_seconds": cooldown_remaining,
-            }
-        )
-
     is_local_target = target_profile == profile
     runner = _resolve_runner() if is_local_target else None
     runner_available = runner is not None
@@ -456,16 +471,52 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
+    if is_local_target and runner is None:
+        record.update({"decision": "deny", "error": "gateway_runner_unavailable"})
+        _append_audit(record)
+        return _json(
+            {
+                "ok": False,
+                "error": "gateway_runner_unavailable",
+                "detail": "This tool must run inside the live gateway process.",
+            }
+        )
+
+    if is_local_target and (
+        getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False)
+    ):
+        record.update({"decision": "already_in_progress", "active_agents": active_agents})
+        _append_audit(record)
+        return _json({"ok": True, "status": "already_in_progress", "active_agents": active_agents})
+
+    cooldown_remaining = _reserve_restart(target_profile, profile, now, cooldown_seconds)
+    if cooldown_remaining:
+        record.update(
+            {
+                "decision": "deny",
+                "error": "cooldown_active",
+                "cooldown_remaining_seconds": cooldown_remaining,
+            }
+        )
+        _append_audit(record)
+        return _json(
+            {
+                "ok": False,
+                "error": "cooldown_active",
+                "cooldown_remaining_seconds": cooldown_remaining,
+            }
+        )
+
     if not is_local_target:
         try:
             child_pid = _spawn_profile_restart(target_profile)
         except OSError as exc:
+            _release_restart_reservation(target_profile, now)
             record.update({"decision": "failed", "error": "profile_restart_spawn_failed"})
             _append_audit(record)
             return _json(
                 {"ok": False, "error": "profile_restart_spawn_failed", "detail": str(exc)}
             )
-        _write_last_restart_time(target_profile, now)
         record.update({"decision": "scheduled", "dispatch": dispatch, "child_pid": child_pid})
         _append_audit(record)
         return _json(
@@ -480,23 +531,6 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if runner is None:
-        record.update({"decision": "deny", "error": "gateway_runner_unavailable"})
-        _append_audit(record)
-        return _json(
-            {
-                "ok": False,
-                "error": "gateway_runner_unavailable",
-                "detail": "This tool must run inside the live gateway process.",
-            }
-        )
-
-    if getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False):
-        record.update({"decision": "already_in_progress", "active_agents": active_agents})
-        _append_audit(record)
-        return _json({"ok": True, "status": "already_in_progress", "active_agents": active_agents})
-
-    _write_last_restart_time(target_profile, now)
     scheduled = _schedule_restart(runner, delay_seconds)
     record.update(
         {

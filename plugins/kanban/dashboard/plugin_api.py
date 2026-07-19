@@ -941,13 +941,15 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     vals.append(payload.body)
                 if payload.branch_name is not None:
                     current = kanban_db.get_task(conn, task_id)
-                    if current and current.workspace_kind == "scratch" and payload.branch_name.strip():
-                        raise HTTPException(
-                            status_code=400,
-                            detail="branch_name is only valid for persistent workspaces",
+                    try:
+                        branch_name = kanban_db.normalize_branch_name(
+                            payload.branch_name,
+                            workspace_kind=(current.workspace_kind if current else None),
                         )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
                     sets.append("branch_name = ?")
-                    vals.append(payload.branch_name.strip() or None)
+                    vals.append(branch_name)
                 vals.append(task_id)
                 conn.execute(
                     f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals,

@@ -3934,25 +3934,43 @@ def _set_nested(config, dotted_key: str, value):
 
 
 def _config_write_lock(config_path: Path):
-    """Return a cross-process lock when the platform provides one."""
+    """Return a cross-process config lock when the platform provides one."""
     try:
         import fcntl
-    except ImportError:  # pragma: no cover - Windows does not provide fcntl.
+    except ImportError:  # pragma: no cover - exercised with a simulated Windows backend.
+        fcntl = None
+    try:
+        import msvcrt
+    except ImportError:  # pragma: no cover - POSIX does not provide msvcrt.
+        msvcrt = None
+    if fcntl is None and msvcrt is None:
         return None
 
     lock_path = config_path.with_name(f".{config_path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(lock_path, "a+", encoding="utf-8")
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-    return lock_file
+    if msvcrt is not None and (
+        not lock_path.exists() or lock_path.stat().st_size == 0
+    ):
+        lock_path.write_text(" ", encoding="utf-8")
+    lock_file = open(lock_path, "r+" if msvcrt is not None else "a+", encoding="utf-8")
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return lock_file, fcntl, None
+    lock_file.seek(0)
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    return lock_file, None, msvcrt
 
 
-def _release_config_write_lock(lock_file) -> None:
-    if lock_file is None:
+def _release_config_write_lock(lock_handle) -> None:
+    if lock_handle is None:
         return
+    lock_file, fcntl, msvcrt = lock_handle
     try:
-        import fcntl
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        else:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
     finally:
         lock_file.close()
 

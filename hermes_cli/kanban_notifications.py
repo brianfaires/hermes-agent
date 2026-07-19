@@ -62,13 +62,24 @@ def notification_policy(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
 
 
 def telegram_home_target(*, user_id: Optional[str] = None, notifier_profile: Optional[str] = None) -> Optional[NotifyTarget]:
+    token = None
+    reset_override = None
     try:
         from gateway.config import Platform, load_gateway_config
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli.profiles import get_profile_dir
+
+        reset_override = reset_hermes_home_override
+        if notifier_profile:
+            token = set_hermes_home_override(get_profile_dir(notifier_profile))
         gw_cfg = load_gateway_config()
         pcfg = gw_cfg.platforms.get(Platform.TELEGRAM)
         home = pcfg.home_channel if pcfg else None
     except Exception:
         home = None
+    finally:
+        if token is not None and reset_override is not None:
+            reset_override(token)
     if not home or not getattr(home, "chat_id", None):
         return None
     return NotifyTarget(

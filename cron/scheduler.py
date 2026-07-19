@@ -1175,12 +1175,14 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
 
     prompt_path = str(job.get("prompt_path") or "").strip()
     inline_prompt = str(job.get("prompt") or "")
+    # Preserve the user-authored source before adding skills or runtime data:
+    # those wrappers use a looser scanner, while this source remains strict.
     if prompt_path:
         file_prompt = read_prompt_file(prompt_path)
-        user_prompt = f"{inline_prompt}\n{file_prompt}" if inline_prompt.strip() else file_prompt
+        raw_user_prompt = f"{inline_prompt}\n{file_prompt}" if inline_prompt.strip() else file_prompt
     else:
-        user_prompt = inline_prompt
-    prompt = user_prompt
+        raw_user_prompt = inline_prompt
+    assembled_prompt = raw_user_prompt
     skills = job.get("skills")
     # True when runtime-collected DATA (script stdout, upstream-job output)
     # has been injected into the prompt. Data content legitimately quotes
@@ -1198,23 +1200,23 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             success, script_output = _run_job_script(script_path)
         if success:
             if script_output:
-                prompt = (
+                assembled_prompt = (
                     "## Script Output\n"
                     "The following data was collected by a pre-run script. "
                     "Use it as context for your analysis.\n\n"
                     f"```\n{script_output}\n```\n\n"
-                    f"{prompt}"
+                    f"{assembled_prompt}"
                 )
                 has_injected_data = True
             else:
                 # Script produced no output — nothing to report, skip AI call.
                 return None
         else:
-            prompt = (
+            assembled_prompt = (
                 "## Script Error\n"
                 "The data-collection script failed. Report this to the user.\n\n"
                 f"```\n{script_output}\n```\n\n"
-                f"{prompt}"
+                f"{assembled_prompt}"
             )
             has_injected_data = True
 
@@ -1252,12 +1254,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 if len(latest_output) > _MAX_CONTEXT_CHARS:
                     latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
                 if latest_output:
-                    prompt = (
+                    assembled_prompt = (
                         f"## Output from job '{source_job_id}'\n"
                         "The following is the most recent output from a preceding "
                         "cron job. Use it as context for your analysis.\n\n"
                         f"```\n{latest_output}\n```\n\n"
-                        f"{prompt}"
+                        f"{assembled_prompt}"
                     )
                     has_injected_data = True
                 else:
@@ -1283,7 +1285,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
-    prompt = cron_hint + prompt
+    assembled_prompt = cron_hint + assembled_prompt
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
@@ -1293,11 +1295,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
         return _scan_assembled_cron_prompt(
-            prompt,
+            assembled_prompt,
             job,
             has_skills=False,
             has_injected_data=has_injected_data,
-            user_prompt=user_prompt,
+            raw_user_prompt=raw_user_prompt,
         )
 
     from tools.skills_tool import skill_view
@@ -1370,9 +1372,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         )
         parts.insert(0, notice)
 
-    if prompt:
-        parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    if assembled_prompt:
+        parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {assembled_prompt}"])
+    return _scan_assembled_cron_prompt(
+        "\n".join(parts), job, has_skills=True, raw_user_prompt=raw_user_prompt
+    )
 
 
 def _scan_assembled_cron_prompt(
@@ -1381,7 +1385,7 @@ def _scan_assembled_cron_prompt(
     *,
     has_skills: bool = False,
     has_injected_data: bool = False,
-    user_prompt: Optional[str] = None,
+    raw_user_prompt: Optional[str] = None,
 ) -> str:
     """Scan the fully-assembled cron prompt for injection patterns. Raises
     ``CronPromptInjectionBlocked`` when a match fires so ``run_job`` can
@@ -1412,8 +1416,8 @@ def _scan_assembled_cron_prompt(
       code, the same trust class — and data feeds (e.g. a triage bot
       ingesting bug reports) legitimately quote dangerous commands.
 
-    When the looser tier is selected because of injected data only,
-    ``user_prompt`` (the raw, pre-assembly prompt) is additionally scanned
+    When the looser tier is selected because of runtime-loaded content,
+    ``raw_user_prompt`` (the raw, pre-assembly prompt) is additionally scanned
     with the STRICT set so the user-authored surface keeps the full
     create/update-time guarantee at runtime (defense-in-depth for legacy
     jobs that predate the create-time scanner).
@@ -1428,10 +1432,10 @@ def _scan_assembled_cron_prompt(
         # prompt is what actually runs.
         cleaned, scan_error = _scan_cron_skill_assembled(assembled)
         assembled = cleaned
-        if not scan_error and not has_skills and user_prompt:
-            # Data-injection path: keep the strict guarantee on the
-            # user-authored prompt itself.
-            scan_error = _scan_cron_prompt(user_prompt)
+        if not scan_error and raw_user_prompt:
+            # A skill must not downgrade mutable prompt_path content to the
+            # looser assembled-content scanner.
+            scan_error = _scan_cron_prompt(raw_user_prompt)
     else:
         scan_error = _scan_cron_prompt(assembled)
     if scan_error:

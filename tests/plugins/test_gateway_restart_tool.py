@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -115,6 +118,80 @@ def test_cooldown_is_scoped_to_the_target_profile(monkeypatch, tmp_path):
 
     assert module._read_last_restart_time("default", "ops") == 100.0
     assert module._read_last_restart_time("ops", "ops") == 0.0
+
+
+def test_concurrent_restart_requests_reserve_cooldown_once(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
+    monkeypatch.setattr(
+        module,
+        "_plugin_config",
+        lambda: {"allowed_target_profiles": ["research"], "cooldown_seconds": 60},
+    )
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    spawns = []
+
+    def fake_spawn(profile):
+        spawns.append(profile)
+        time.sleep(0.05)
+        return 4321
+
+    monkeypatch.setattr(module, "_spawn_profile_restart", fake_spawn)
+    start = threading.Barrier(2)
+    args = {
+        "reason": "reload target configuration",
+        "confirm": "restart gateway",
+        "target_profile": "research",
+    }
+
+    def request_restart():
+        start.wait()
+        return json.loads(module._handle_request_gateway_restart(args))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: request_restart(), range(2)))
+
+    assert sorted(result.get("status") or result.get("error") for result in results) == [
+        "cooldown_active",
+        "restart_scheduled",
+    ]
+    assert spawns == ["research"]
+
+
+def test_failed_remote_spawn_releases_its_cooldown_reservation(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
+    monkeypatch.setattr(
+        module,
+        "_plugin_config",
+        lambda: {"allowed_target_profiles": ["research"], "cooldown_seconds": 60},
+    )
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    attempts = []
+
+    def fake_spawn(profile):
+        attempts.append(profile)
+        if len(attempts) == 1:
+            raise OSError("transient spawn failure")
+        return 4321
+
+    monkeypatch.setattr(module, "_spawn_profile_restart", fake_spawn)
+    args = {
+        "reason": "reload target configuration",
+        "confirm": "restart gateway",
+        "target_profile": "research",
+    }
+
+    first = json.loads(module._handle_request_gateway_restart(args))
+    second = json.loads(module._handle_request_gateway_restart(args))
+
+    assert first["error"] == "profile_restart_spawn_failed"
+    assert second["status"] == "restart_scheduled"
+    assert attempts == ["research", "research"]
 
 
 def test_legacy_cooldown_remains_conservative_until_scoped_state_exists(monkeypatch, tmp_path):

@@ -642,7 +642,7 @@ def resolve_prompt_path(prompt_path: Optional[str]) -> Optional[Path]:
 
 
 def read_prompt_file(prompt_path: Optional[str]) -> str:
-    """Read a cron prompt file, raising a clear error when it is missing."""
+    """Read a cron prompt file, normalizing file errors for callers."""
     resolved = resolve_prompt_path(prompt_path)
     if resolved is None:
         return ""
@@ -650,7 +650,10 @@ def read_prompt_file(prompt_path: Optional[str]) -> str:
         raise ValueError(f"Cron prompt file does not exist: {resolved}")
     if not resolved.is_file():
         raise ValueError(f"Cron prompt path is not a file: {resolved}")
-    return resolved.read_text(encoding="utf-8")
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"Cron prompt file cannot be read: {resolved}: {exc}") from exc
 
 
 def create_job(

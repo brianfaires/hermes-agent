@@ -1,11 +1,14 @@
 """Regression tests for structural ``hermes config patch`` mutations."""
 
 import os
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import yaml
 
+from hermes_cli import config
 from hermes_cli.config import apply_config_patch
 
 
@@ -17,6 +20,24 @@ def hermes_home(tmp_path):
 
 def read_config(home):
     return yaml.safe_load((home / "config.yaml").read_text())
+
+
+def test_config_write_lock_uses_windows_byte_range_lock(hermes_home):
+    calls = []
+
+    def locking(fd, mode, length):
+        calls.append((mode, length, os.lseek(fd, 0, os.SEEK_CUR)))
+
+    fake_msvcrt = SimpleNamespace(LK_LOCK=1, LK_UNLCK=2, locking=locking)
+    config_path = hermes_home / "config.yaml"
+
+    with patch.dict(sys.modules, {"fcntl": None, "msvcrt": fake_msvcrt}):
+        lock = config._config_write_lock(config_path)
+        assert lock is not None
+        config._release_config_write_lock(lock)
+
+    assert calls == [(fake_msvcrt.LK_LOCK, 1, 0), (fake_msvcrt.LK_UNLCK, 1, 0)]
+    assert (hermes_home / ".config.yaml.lock").stat().st_size >= 1
 
 
 def test_patch_add_replace_remove_map_list_and_scalar(hermes_home):

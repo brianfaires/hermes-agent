@@ -133,6 +133,40 @@ def test_branch_display_formats_persistent_git_branches(client):
         assert task["branch_display"] == expected
 
 
+def test_dashboard_create_rejects_invalid_branch_name(client):
+    response = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "bad branch",
+            "workspace_kind": "dir",
+            "branch_name": "bad branch",
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_dashboard_update_rejects_invalid_branch_name(client):
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "valid branch",
+            "workspace_kind": "dir",
+            "branch_name": "work/valid",
+        },
+    ).json()["task"]
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"branch_name": "bad branch"},
+    )
+
+    assert response.status_code == 400
+    assert client.get(
+        f"/api/plugins/kanban/tasks/{task['id']}"
+    ).json()["task"]["branch_name"] == "work/valid"
+
+
 def test_dashboard_branch_field_and_drawer_label_are_bundled():
     repo_root = Path(__file__).resolve().parents[2]
     bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
