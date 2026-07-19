@@ -158,6 +158,138 @@ class TestValidateSignature:
         req = _mock_request(headers={})  # no sig headers at all
         assert adapter._validate_signature(req, b"{}", "my-secret") is False
 
+    def test_validate_google_pubsub_oidc_token_valid(self):
+        """Route-level OIDC auth accepts a Google-signed bearer token."""
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
+                "email_verified": True,
+            },
+        ) as decode:
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+
+            assert adapter._validate_oidc_token(req, route) is True
+
+        jwk_client_cls.assert_called_once_with("https://www.googleapis.com/oauth2/v3/certs")
+        decode.assert_called_once()
+        assert decode.call_args.kwargs["audience"] == "https://agent.example.com/webhooks/pubsub"
+        assert set(decode.call_args.kwargs["issuer"]) == {
+            "accounts.google.com",
+            "https://accounts.google.com",
+        }
+
+    def test_validate_oidc_token_accepts_audience_only_route(self):
+        route = {
+            "auth": "oidc",
+            "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "sub": "service-account-id",
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is True
+
+    def test_validate_google_pubsub_oidc_token_rejects_wrong_email(self):
+        """Expected service-account email narrows which Pub/Sub pusher may call the route."""
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "expected@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "email": "other@example.iam.gserviceaccount.com",
+                "email_verified": True,
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+
+            assert adapter._validate_oidc_token(req, route) is False
+
+    @pytest.mark.parametrize("email_verified", [None, False, "true", 1])
+    def test_validate_oidc_email_requires_boolean_verified_true(self, email_verified):
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "expected@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+        claims = {
+            "iss": "https://accounts.google.com",
+            "aud": "https://agent.example.com/webhooks/pubsub",
+            "email": "expected@example.iam.gserviceaccount.com",
+        }
+        if email_verified is not None:
+            claims["email_verified"] = email_verified
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode", return_value=claims
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is False
+
+    def test_validate_oidc_token_rejects_wrong_subject(self):
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "subject": "expected-service-account-id",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "sub": "other-service-account-id",
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is False
+
+    def test_validate_google_pubsub_oidc_token_requires_bearer_header(self):
+        """OIDC auth fails closed without an Authorization bearer token."""
+        route = {"auth": "oidc", "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"}}
+        adapter = _make_adapter()
+        req = _mock_request(headers={})
+
+        assert adapter._validate_oidc_token(req, route) is False
+
     def test_validate_no_secret_allows_all(self):
         """When the secret is empty/falsy, the validator is never even called
         by the handler (secret check is 'if secret and secret != _INSECURE...').
@@ -516,6 +648,61 @@ class TestHTTPHandling:
         adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_oidc_route_accepts_authenticated_request_without_hmac_secret(self):
+        """OIDC routes use Authorization bearer JWTs instead of route HMAC secrets."""
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+                "prompt": "Pub/Sub payload: {__raw__}",
+            }
+        }
+        adapter = _make_adapter(routes=routes, secret="")
+        adapter.handle_message = AsyncMock()
+        adapter._validate_oidc_token = MagicMock(return_value=True)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/pubsub",
+                json={"message": {"messageId": "m-1", "data": "eyJ4IjoxfQ=="}},
+                headers={"Authorization": "Bearer jwt-token"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+            assert data["route"] == "pubsub"
+
+        adapter._validate_oidc_token.assert_called_once()
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_oidc_route_rejects_invalid_token_before_agent_dispatch(self):
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+                "prompt": "x",
+            }
+        }
+        adapter = _make_adapter(routes=routes, secret="")
+        adapter.handle_message = AsyncMock()
+        adapter._validate_oidc_token = MagicMock(return_value=False)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/pubsub",
+                json={"message": {"messageId": "m-1"}},
+                headers={"Authorization": "Bearer bad-token"},
+            )
+            assert resp.status == 401
+            data = await resp.json()
+            assert data["error"] == "Invalid OIDC token"
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_health_endpoint(self):
         """GET /health returns 200 with status=ok."""
         adapter = _make_adapter()
@@ -549,6 +736,31 @@ class TestHTTPHandling:
             mock_site_inst.start.assert_awaited_once()
 
         await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_connect_starts_server_with_oidc_route_without_hmac_secret(self):
+        """OIDC routes validate startup with audience instead of HMAC secret."""
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+                "prompt": "x",
+            }
+        }
+        adapter = _make_adapter(routes=routes, host="127.0.0.1", port=0, secret="")
+        with patch("gateway.platforms.webhook.web.AppRunner") as MockRunner, \
+             patch("gateway.platforms.webhook.web.TCPSite") as MockSite:
+            mock_runner_inst = AsyncMock()
+            MockRunner.return_value = mock_runner_inst
+            mock_site_inst = AsyncMock()
+            MockSite.return_value = mock_site_inst
+
+            result = await adapter.connect()
+            assert result is True
+            assert adapter.is_connected
+
+        await adapter.disconnect()
+
 
     @pytest.mark.asyncio
     async def test_disconnect_cleans_up(self):
