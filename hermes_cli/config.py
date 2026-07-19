@@ -6752,20 +6752,6 @@ def config_command(args):
             sys.exit(1)
         set_config_value(key, value)
 
-    elif subcmd == "patch":
-        operation = getattr(args, "operation", None)
-        path = getattr(args, "path", None)
-        value_json = getattr(args, "json_value", None)
-        if not operation or not path:
-            print("Usage: hermes config patch <add|replace|remove> <json-pointer-path> [--json <value>]")
-            sys.exit(1)
-        try:
-            apply_config_patch(operation, path, value_json)
-        except (PermissionError, ValueError) as exc:
-            print(f"Cannot patch configuration: {exc}", file=sys.stderr)
-            sys.exit(1)
-        print(f"✓ Patched {path} in {get_config_path()}")
-    
     elif subcmd == "path":
         print(get_config_path())
     
