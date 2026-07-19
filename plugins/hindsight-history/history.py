@@ -69,29 +69,32 @@ def load_messages(options: HistoryOptions, db_path: Path | None = None) -> list[
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             conn.row_factory = sqlite3.Row
+            session = conn.execute(
+                "SELECT s.id FROM sessions AS s "
+                "ORDER BY COALESCE((SELECT MAX(m.timestamp) FROM messages AS m "
+                "WHERE m.session_id = s.id), s.started_at) DESC, s.rowid DESC LIMIT 1"
+            ).fetchone()
+            if not session:
+                return []
+            session_id = session["id"]
             if options.turns is None:
-                session = conn.execute(
-                    "SELECT s.id FROM sessions AS s "
-                    "ORDER BY COALESCE((SELECT MAX(m.timestamp) FROM messages AS m "
-                    "WHERE m.session_id = s.id), s.started_at) DESC, s.rowid DESC LIMIT 1"
-                ).fetchone()
-                if not session:
-                    return []
                 rows = conn.execute(
                     "SELECT * FROM messages WHERE session_id = ? AND active = 1 ORDER BY id",
-                    (session["id"],),
+                    (session_id,),
                 ).fetchall()
             else:
                 users = conn.execute(
-                    "SELECT id FROM messages WHERE role = 'user' AND active = 1 "
-                    "ORDER BY id DESC LIMIT ?", (options.turns,)
+                    "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                    "AND active = 1 ORDER BY id DESC LIMIT ?",
+                    (session_id, options.turns),
                 ).fetchall()
                 if not users:
                     return []
                 first_id = min(row["id"] for row in users)
                 rows = conn.execute(
-                    "SELECT * FROM messages WHERE id >= ? AND active = 1 ORDER BY id",
-                    (first_id,),
+                    "SELECT * FROM messages WHERE session_id = ? AND id >= ? "
+                    "AND active = 1 ORDER BY id",
+                    (session_id, first_id),
                 ).fetchall()
     except (OSError, sqlite3.Error):
         return []

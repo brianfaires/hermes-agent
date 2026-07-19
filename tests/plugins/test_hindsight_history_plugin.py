@@ -88,11 +88,20 @@ def test_load_messages_defaults_to_latest_session_and_turns_span(tmp_path):
         conn.executemany("INSERT INTO sessions VALUES (?, ?)", [("old", 1), ("new", 2)])
         conn.executemany(
             "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?, ?, ?, ?, 1)",
-            [("old", "user", "old turn", 1), ("new", "user", "new turn", 2)],
+            [
+                ("new", "user", "new turn one", 2),
+                ("old", "user", "old interleaved turn", 3),
+                ("new", "assistant", "new response", 4),
+                ("new", "user", "new turn two", 5),
+            ],
         )
 
-    assert [row["content"] for row in history.load_messages(history.parse_options(""), db_path)] == ["new turn"]
-    assert [row["content"] for row in history.load_messages(history.parse_options("--turns 2"), db_path)] == ["old turn", "new turn"]
+    assert [row["content"] for row in history.load_messages(history.parse_options(""), db_path)] == [
+        "new turn one", "new response", "new turn two"
+    ]
+    assert [row["content"] for row in history.load_messages(history.parse_options("--turns 2"), db_path)] == [
+        "new turn one", "new response", "new turn two"
+    ]
 
 
 def test_registers_plugin_command():
