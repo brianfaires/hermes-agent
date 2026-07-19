@@ -38,8 +38,10 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 try:
@@ -548,6 +550,17 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"error": "Rate limit exceeded"}, status=429
             )
 
+        # Script trigger mode: authenticate, rate-limit, dedupe, then run a
+        # local script without parsing or passing through webhook payload text.
+        # The raw body above is used only for HMAC validation.
+        if route_config.get("script"):
+            return await self._handle_script_trigger(
+                route_name=route_name,
+                route_config=route_config,
+                request=request,
+                now=now,
+            )
+
         # Parse payload
         try:
             payload = json.loads(raw_body)
@@ -758,6 +771,221 @@ class WebhookAdapter(BasePlatformAdapter):
             },
             status=202,
         )
+
+    async def _handle_script_trigger(
+        self,
+        *,
+        route_name: str,
+        route_config: dict,
+        request: "web.Request",
+        now: float,
+    ) -> "web.Response":
+        """Run a configured local script without parsing webhook payload text."""
+        delivery_id = request.headers.get(
+            "X-GitHub-Delivery",
+            request.headers.get(
+                "svix-id",
+                request.headers.get("X-Request-ID", str(int(now * 1000))),
+            ),
+        )
+        if not self._record_delivery_id(delivery_id, now):
+            logger.info(
+                "[webhook] Skipping duplicate script delivery %s", delivery_id
+            )
+            return web.json_response(
+                {"status": "duplicate", "delivery_id": delivery_id},
+                status=200,
+            )
+
+        script_name = str(route_config.get("script") or "").strip()
+        try:
+            script_path = self._resolve_script_path(script_name)
+        except ValueError as e:
+            logger.warning(
+                "[webhook] Invalid script route=%s script=%r error=%s",
+                route_name,
+                script_name,
+                e,
+            )
+            return web.json_response(
+                {"status": "error", "error": "Invalid script route", "delivery_id": delivery_id},
+                status=500,
+            )
+
+        timeout = float(route_config.get("script_timeout", 300))
+        logger.info(
+            "[webhook] script-trigger route=%s script=%s delivery=%s",
+            route_name,
+            script_path.name,
+            delivery_id,
+        )
+        delivery = {
+            "deliver": route_config.get("deliver", "log"),
+            "deliver_extra": self._render_delivery_extra(
+                route_config.get("deliver_extra", {}), {}
+            ),
+        }
+        task = asyncio.create_task(
+            self._run_script_trigger(
+                route_name=route_name,
+                script_path=script_path,
+                delivery_id=delivery_id,
+                timeout=timeout,
+                delivery=delivery,
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+        return web.json_response(
+            {"status": "accepted", "route": route_name, "delivery_id": delivery_id},
+            status=202,
+        )
+
+    def _resolve_script_path(self, script_name: str) -> Path:
+        """Resolve a route script under ~/.hermes/scripts only."""
+        if not script_name:
+            raise ValueError("missing script")
+        from hermes_constants import get_hermes_home
+
+        scripts_dir = (get_hermes_home() / "scripts").resolve()
+        script_path = Path(script_name)
+        if script_path.is_absolute():
+            resolved = script_path.resolve()
+        else:
+            resolved = (scripts_dir / script_path).resolve()
+        try:
+            resolved.relative_to(scripts_dir)
+        except ValueError as e:
+            raise ValueError("script must be under ~/.hermes/scripts") from e
+        if not resolved.is_file():
+            raise ValueError("script does not exist")
+        return resolved
+
+    async def _run_script_trigger(
+        self,
+        *,
+        route_name: str,
+        script_path: Path,
+        delivery_id: str,
+        timeout: float,
+        delivery: Optional[dict] = None,
+    ) -> None:
+        """Run a script trigger, optionally delivering non-empty stdout."""
+        if script_path.suffix == ".py":
+            cmd = [sys.executable, str(script_path)]
+        elif script_path.suffix in {".sh", ".bash"}:
+            cmd = ["bash", str(script_path)]
+        else:
+            cmd = [str(script_path)]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error(
+                "[webhook] script timeout route=%s script=%s delivery=%s timeout=%s",
+                route_name,
+                script_path.name,
+                delivery_id,
+                timeout,
+            )
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            except Exception:
+                logger.exception(
+                    "[webhook] failed to kill timed-out script route=%s script=%s delivery=%s",
+                    route_name,
+                    script_path.name,
+                    delivery_id,
+                )
+                return
+            try:
+                await proc.wait()
+            except Exception:
+                logger.exception(
+                    "[webhook] failed to reap timed-out script route=%s script=%s delivery=%s",
+                    route_name,
+                    script_path.name,
+                    delivery_id,
+                )
+            return
+        except Exception:
+            logger.exception(
+                "[webhook] script failed to start route=%s script=%s delivery=%s",
+                route_name,
+                script_path.name,
+                delivery_id,
+            )
+            return
+        if proc.returncode == 0:
+            logger.info(
+                "[webhook] script complete route=%s script=%s delivery=%s stdout_bytes=%d stderr_bytes=%d",
+                route_name,
+                script_path.name,
+                delivery_id,
+                len(stdout or b""),
+                len(stderr or b""),
+            )
+            await self._deliver_script_stdout(
+                stdout or b"",
+                route_name=route_name,
+                delivery_id=delivery_id,
+                delivery=delivery or {},
+            )
+        else:
+            logger.error(
+                "[webhook] script exited nonzero route=%s script=%s delivery=%s returncode=%s stdout_bytes=%d stderr_bytes=%d",
+                route_name,
+                script_path.name,
+                delivery_id,
+                proc.returncode,
+                len(stdout or b""),
+                len(stderr or b""),
+            )
+
+    async def _deliver_script_stdout(
+        self,
+        stdout: bytes,
+        *,
+        route_name: str,
+        delivery_id: str,
+        delivery: dict,
+    ) -> None:
+        """Deliver non-empty script stdout to the configured target."""
+        content = stdout.decode("utf-8", errors="replace").strip()
+        if not content:
+            return
+        if delivery.get("deliver", "log") == "log":
+            logger.info(
+                "[webhook] script stdout suppressed route=%s delivery=%s bytes=%d",
+                route_name,
+                delivery_id,
+                len(stdout),
+            )
+            return
+        try:
+            result = await self._direct_deliver(content, delivery)
+        except Exception:
+            logger.exception(
+                "[webhook] script stdout delivery failed route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return
+        if not result.success:
+            logger.warning(
+                "[webhook] script stdout target rejected route=%s target=%s delivery=%s error=%s",
+                route_name,
+                delivery.get("deliver", "log"),
+                delivery_id,
+                result.error,
+            )
 
     # ------------------------------------------------------------------
     # Signature validation
