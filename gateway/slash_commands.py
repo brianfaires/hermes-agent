@@ -35,6 +35,7 @@ from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
 from gateway.session import SessionSource, build_session_key
+from gateway.voice_acknowledgements import VoiceAcknowledgement
 from hermes_cli.config import cfg_get
 from utils import (
     atomic_json_write,
@@ -70,8 +71,6 @@ class GatewaySlashCommandsMixin:
         command_model_name: str = "",
     ):
         """Resolve a concise spoken acknowledgement for a successful model switch."""
-        from gateway.voice_acknowledgements import VoiceAcknowledgement
-
         adapter = self._adapter_for_source(event.source)
         config = getattr(adapter, "_voice_fx_cfg", None)
         raw_phrases = config.get("model_switch_ack_phrases") if isinstance(config, dict) else None
