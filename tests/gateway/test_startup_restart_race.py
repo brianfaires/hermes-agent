@@ -62,6 +62,9 @@ def make_startup_runner(tmp_path):
         sessions_dir=tmp_path / "sessions",
     )
     runner.adapters = {}
+    runner._profile_adapters = {}
+    runner._gateway_profile_home = tmp_path
+    runner._gateway_profile_name = "default"
     runner._running = False
     runner._shutdown_event = asyncio.Event()
     runner._exit_reason = None

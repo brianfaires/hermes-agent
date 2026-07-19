@@ -54,10 +54,12 @@ class GatewayAuthorizationMixin:
         """Resolve the live adapter whose intake policy should gate authorization.
 
         In multiplex mode, secondary-profile adapters live in
-        ``_profile_adapters[profile]`` while the default/active profile uses
-        ``self.adapters``. ``SessionSource.profile`` selects which map to consult.
-        When a stamped profile has its own adapter registry entry, the default
-        profile's same-platform adapter must not be consulted as a fallback.
+        ``_profile_adapters[profile]`` while only the exact active profile uses
+        ``self.adapters``. The built-in ``default`` profile is therefore
+        secondary when a named profile owns the primary adapter map.
+        ``SessionSource.profile`` selects which map to consult. When a stamped
+        profile has its own adapter registry entry, another profile's
+        same-platform adapter must not be consulted as a fallback.
         """
         if not platform:
             return None
@@ -70,7 +72,7 @@ class GatewayAuthorizationMixin:
                 if active_home is not None and active_home.parent.name == "profiles"
                 else "default"
             )
-        if profile_name and profile_name not in {"default", active_profile}:
+        if profile_name and profile_name != active_profile:
             profile_adapters = getattr(self, "_profile_adapters", None) or {}
             if profile_name in profile_adapters:
                 return profile_adapters[profile_name].get(platform)

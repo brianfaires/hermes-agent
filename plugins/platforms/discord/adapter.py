@@ -25,6 +25,7 @@ import threading
 import time
 import tomllib
 from collections import defaultdict
+from copy import copy
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
@@ -1264,6 +1265,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        self._kanban_backfill_task: Optional[asyncio.Task] = None
+        self._kanban_inbound_task: Optional[asyncio.Task] = None
+        from gateway.kanban_mirror.supervision import LoopSupervisor
+        self._kanban_supervisor = LoopSupervisor()
+        self._kanban_ingestor = None
+        self._kanban_mirror_conn = None
+        self._kanban_backfilled_threads: set[str] = set()
+        self._kanban_thread_backfills: Dict[str, asyncio.Task] = {}
         # WebSocket-level liveness probe. Discord REST and Gateway are distinct
         # transports: a REST 200 cannot prove that this client is still receiving
         # Gateway events. Sample the current Discord WebSocket's ready/open/ACK
@@ -1551,6 +1560,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
 
+                # Discord may emit on_ready more than once on RESUME/reconnect.
+                # Ownership is gateway-wide, so ask the runner to re-check every
+                # multiplex identity rather than claiming it locally.
+                runner = getattr(adapter_self, "gateway_runner", None)
+                revalidate = getattr(runner, "_revalidate_kanban_router_readiness", None)
+                if callable(revalidate):
+                    await revalidate()
+
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
@@ -1560,6 +1577,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     adapter_self._ensure_missed_message_backfill_task()
                 if adapter_self._auto_voice_channel_id() is not None:
                     asyncio.create_task(adapter_self._sync_auto_voice_presence())
+
+            @self._client.event
+            async def on_disconnect():
+                adapter_self._ready_event.clear()
+                await adapter_self._stop_kanban_ingress_runtime()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1732,15 +1754,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 await asyncio.wait_for(self._ready_event.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 pass
+        kanban_observed, _kanban_relevant = await self._observe_kanban_message(message)
         admitted, role_authorized = self._discord_message_admission(
             message, claim=True,
         )
         if not admitted:
             return False
-        if await self._maybe_handle_kanban_inbox(message):
+        if kanban_observed:
             return True
+        kanban_route = await self._maybe_handle_kanban_inbox(message)
+        if kanban_route.consumed:
+            return True
+        if not self._is_kanban_ingress(kanban_route):
+            return False
         return await self._handle_message(
-            message, role_authorized=role_authorized,
+            message, role_authorized=role_authorized, kanban_route=kanban_route,
         )
 
     async def _cancel_bot_task(self) -> None:
@@ -2006,6 +2034,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True
+        self._kanban_router_ingress_identity = None
         # Cancel the liveness probe first so it can't fire a spurious fatal
         # error / reconnect while we're intentionally tearing the adapter down.
         await self._cancel_liveness_task()
@@ -2042,6 +2071,8 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
+        await self._stop_kanban_ingress_runtime()
+
         self._running = False
         self._client = None
         self._ready_event.clear()
@@ -2052,6 +2083,24 @@ class DiscordAdapter(BasePlatformAdapter):
         self._release_platform_lock()
 
         logger.info("[%s] Disconnected", self.name)
+
+    async def _stop_kanban_ingress_runtime(self) -> None:
+        """Revoke and drain this adapter's ingress runtime, restartably."""
+        self._kanban_router_ingress_identity = None
+        await self._kanban_supervisor.stop()
+        self._kanban_inbound_task = None
+        self._kanban_backfill_task = None
+        for task in self._kanban_thread_backfills.values():
+            if not task.done():
+                task.cancel()
+        if self._kanban_thread_backfills:
+            await asyncio.gather(*self._kanban_thread_backfills.values(), return_exceptions=True)
+        self._kanban_thread_backfills.clear()
+        self._kanban_backfilled_threads.clear()
+        if self._kanban_mirror_conn is not None:
+            self._kanban_mirror_conn.close()
+        self._kanban_mirror_conn = None
+        self._kanban_ingestor = None
 
     def _command_sync_state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
@@ -8020,23 +8069,343 @@ class DiscordAdapter(BasePlatformAdapter):
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
 
-    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage) -> bool:
-        """Consume mapped Discord Forum replies into Kanban before chat dispatch."""
+    async def _kanban_runtime(self):
+        """Return the config-gated durable ingestor, initialized lazily."""
+        from gateway.kanban_discord_inbox import load_config
+
+        cfg = load_config()
+        if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
+            return cfg, None
+        # Only the configured ingress identity may own historical persistence.
+        # Re-check the live identity on every reconnect/worker pass: a stale
+        # startup boolean would let a swapped multiplex bot freeze its policy.
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        if not identity:
+            return cfg, None
+        profile, expected_bot_id = identity
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
+        )
+        actual_bot_id = str(
+            getattr(getattr(client, "user", None), "id", "") or ""
+        )
+        if (profile != getattr(self, "_kanban_router_profile", None)
+                or not self._running or self._disconnecting or not ready
+                or not actual_bot_id or actual_bot_id != str(expected_bot_id)):
+            self._kanban_router_ingress_identity = None
+            return cfg, None
+        if self._kanban_ingestor is None:
+            from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
+            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+
+            self._kanban_mirror_conn = connect_mirror(mirror_db_path(cfg.board_slug or "default"))
+            self._kanban_ingestor = DiscordBackfillIngestor(
+                self._kanban_mirror_conn,
+                page_size=int(self.config.extra.get("kanban_backfill_page_size", 100)),
+                max_pages=int(self.config.extra.get("kanban_backfill_max_pages", 10)),
+                max_age_seconds=int(self.config.extra.get("kanban_backfill_max_age_seconds", 7 * 86400)),
+            )
+        return cfg, self._kanban_ingestor
+
+    def start_kanban_ingress_workers(self) -> None:
+        """Idempotently start durable workers for a validated, ready ingress."""
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
+        )
+        actual = str(getattr(getattr(client, "user", None), "id", "") or "")
+        if (not identity or identity[0] != getattr(self, "_kanban_router_profile", None)
+                or actual != str(identity[1]) or not self._running
+                or self._disconnecting or not ready):
+            return
+        self._kanban_inbound_task = self._kanban_supervisor.start(
+            "pending-inbound", self._run_kanban_pending_inbound
+        )
+        self._kanban_backfill_task = self._kanban_supervisor.start(
+            "reconnect-backfill", self._run_kanban_reconnect_backfill
+        )
+
+    def _discord_inbound(self, message: Any, *, relevant: bool):
+        from gateway.kanban_mirror.backfill import DiscordInbound
+
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference is not None else None
+        replied_author = getattr(resolved, "author", None)
+        created_at = getattr(message, "created_at", None)
+        timestamp = int(created_at.timestamp()) if created_at is not None else None
+        user_id = str(getattr(author, "id", "") or "")
+        guild = getattr(message, "guild", None)
+        is_dm = isinstance(channel, discord.DMChannel) or guild is None
+        allowed_users = getattr(self, "_allowed_user_ids", set()) or set()
+        allowed_roles = getattr(self, "_allowed_role_ids", set()) or set()
+        authorized = self._is_allowed_user(user_id, author, guild=guild, is_dm=is_dm)
+        if user_id in allowed_users:
+            authorization_reason = "allowed_user"
+        elif authorized and allowed_roles:
+            authorization_reason = "allowed_role"
+        elif authorized:
+            authorization_reason = "open_policy"
+        else:
+            authorization_reason = "user_and_role_not_allowed"
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        return DiscordInbound(
+            message_id=str(message.id), thread_id=str(channel.id),
+            content=getattr(message, "content", None),
+            author_label=(str(getattr(author, "display_name", "") or "").strip()
+                          or str(getattr(author, "name", "") or "").strip() or "unknown"),
+            created_at=timestamp,
+            replied_to_message_id=(str(getattr(reference, "message_id", "") or "") or None),
+            relevant=relevant,
+            forum_channel_id=str(getattr(channel, "parent_id", "") or "") or None,
+            author_id=str(getattr(author, "id", "") or "") or None,
+            mentioned_user_ids=tuple(str(getattr(u, "id")) for u in (getattr(message, "mentions", None) or ()) if getattr(u, "id", None)),
+            replied_to_author_id=str(getattr(replied_author, "id", "") or "") or None,
+            replied_to_author_is_bot=bool(getattr(replied_author, "bot", False)),
+            authorized=authorized,
+            authorization_reason=authorization_reason,
+            authorization_policy={
+                "ingress_adapter": self.name,
+                "ingress_bot_id": str(getattr(client_user, "id", "") or ""),
+                "guild_id": str(getattr(guild, "id", "") or ""),
+                "is_dm": is_dm,
+                "allowed_user_ids": sorted(str(value) for value in allowed_users),
+                "allowed_role_ids": sorted(str(value) for value in allowed_roles),
+            },
+        )
+
+    async def _run_kanban_pending_inbound(self) -> None:
+        delay = 0.25
+        while self._running and not self._disconnecting:
+            try:
+                cfg, _ = await self._kanban_runtime()
+                if not (cfg.enabled and cfg.conversation_router_enabled):
+                    return
+                handler = getattr(self, "_kanban_pending_handler", self._process_kanban_pending_inbound)
+                if self._kanban_mirror_conn is None:
+                    delay = min(5.0, delay * 2)
+                else:
+                    from gateway.kanban_mirror.inbound import PendingInboundRunner
+                    count = await PendingInboundRunner(self._kanban_mirror_conn, handler).run_once()
+                    delay = 0.05 if count else min(2.0, delay * 1.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[%s] durable Kanban inbound runner failed", self.name)
+                delay = min(5.0, delay * 2)
+            await asyncio.sleep(delay)
+
+    async def _process_kanban_pending_inbound(self, pending):
+        from gateway.kanban_discord_inbox import DiscordReplyContext, handle_reply
+        from gateway.kanban_mirror.inbound import ProcessResult
+        from gateway.platforms.base import MessageEvent, MessageType
+        p = pending.payload
+        if p.get("authorized") is not True:
+            return ProcessResult(
+                "disposition", disposition="unauthorized",
+                detail=str(p.get("authorization_reason") or "authorization denied"),
+            )
+        ctx = DiscordReplyContext(
+            message_id=pending.message_id, author_id=p.get("author_id"),
+            author_label=p.get("author_label") or "unknown",
+            forum_channel_id=p.get("forum_channel_id") or "", thread_id=pending.thread_id,
+            content=p.get("content") or "", reply_to_message_id=p.get("replied_to_message_id"),
+            mentioned_user_ids=tuple(p.get("mentioned_user_ids") or ()),
+            replied_to_author_id=p.get("replied_to_author_id"),
+            replied_to_author_is_bot=bool(p.get("replied_to_author_is_bot")),
+        )
+        result = await asyncio.to_thread(handle_reply, ctx)
+        retry_reasons = {"binding_unavailable", "unmapped_thread", "missing_task", "invalid_profile", "ambiguous_owner", "ambiguous_profile_mentions"}
+        if result.reason in retry_reasons:
+            return ProcessResult("retry", detail=result.reason)
+        if result.reason != "conversation_routed":
+            return ProcessResult("disposition", disposition=result.reason, detail=result.ack)
+        source = self.build_source(
+            pending.thread_id, chat_type="group", user_id=p.get("author_id"),
+            user_name=p.get("author_label"), thread_id=pending.thread_id,
+            parent_chat_id=p.get("forum_channel_id"), message_id=pending.message_id,
+        )
+        source.profile = result.route_profile
+        event = MessageEvent(
+            text=p.get("content") or "", message_type=MessageType.TEXT, source=source,
+            message_id=pending.message_id, reply_to_message_id=p.get("replied_to_message_id"),
+            channel_context=result.card_context, outbound_profile=result.route_profile,
+            outbound_profiles=result.route_profiles, correlation_id=result.correlation_id,
+            route_marker=("discord-kanban-directive" if result.action and
+                          result.action.startswith("directive:") else
+                          "discord-kanban-conversation"),
+        )
+        await self._dispatch_message_event(event)
+        return ProcessResult("routed", correlation_id=result.correlation_id)
+
+    async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
+        """Fakeable discord.py history seam used by durable reconnect recovery."""
+        from gateway.kanban_mirror.backfill import HistoryPage
+
+        # Defense in depth: history must not even be fetched if this adapter is
+        # not the currently validated ingress identity.
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return HistoryPage([], has_more=False)
+
+        channel = self._client.get_channel(int(thread_id)) if self._client else None
+        if channel is None and self._client and hasattr(self._client, "fetch_channel"):
+            channel = await self._client.fetch_channel(int(thread_id))
+        if channel is None:
+            raise LookupError(f"Discord mirror thread unavailable: {thread_id}")
+        kwargs = {"limit": limit, "oldest_first": True}
+        if after is not None:
+            kwargs["after"] = discord.Object(id=int(after))
+        messages = [item async for item in channel.history(**kwargs)]
+        converted = [
+            self._discord_inbound(
+                item,
+                relevant=(
+                    not bool(getattr(getattr(item, "author", None), "bot", False))
+                    and bool(getattr(item, "content", None))
+                    and getattr(item, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+                ),
+            )
+            for item in messages
+        ]
+        return HistoryPage(converted, has_more=len(messages) >= limit)
+
+    async def fetch_after(self, thread_id: str, after: str | None, limit: int):
+        return await self._fetch_kanban_history_page(thread_id, after, limit)
+
+    async def _backfill_kanban_thread(self, thread_id: str) -> None:
+        cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None or thread_id in self._kanban_backfilled_threads:
+            return
+        try:
+            await ingestor.backfill(thread_id, self)
+        except Exception:
+            logger.warning("[%s] Discord mirror backfill failed for thread_id=%s; will retry", self.name, thread_id, exc_info=True)
+            return
+        self._kanban_backfilled_threads.add(thread_id)
+
+    async def _ensure_kanban_thread_backfill(self, thread_id: str) -> None:
+        task = self._kanban_thread_backfills.get(thread_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._backfill_kanban_thread(thread_id))
+            self._kanban_thread_backfills[thread_id] = task
+        await task
+
+    async def _backfill_kanban_mirror_threads(self) -> None:
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return
+        # A reconnect must retry every registered thread from its durable cursor.
+        self._kanban_backfilled_threads.clear()
+        rows = self._kanban_mirror_conn.execute(
+            "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+        ).fetchall()
+        await asyncio.gather(*(self._ensure_kanban_thread_backfill(str(row[0])) for row in rows))
+
+    async def _run_kanban_reconnect_backfill(self) -> None:
+        """Autonomously retry failed reconnect scans from durable cursors."""
+        while self._running and not self._disconnecting:
+            cfg, ingestor = await self._kanban_runtime()
+            if not (cfg.enabled and cfg.conversation_router_enabled) or ingestor is None:
+                return
+            rows = self._kanban_mirror_conn.execute(
+                "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+            ).fetchall()
+            await asyncio.gather(*(
+                self._ensure_kanban_thread_backfill(str(row[0])) for row in rows
+                if str(row[0]) not in self._kanban_backfilled_threads
+            ))
+            await asyncio.sleep(2.0)
+
+    def kanban_supervisor_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Expose content-free adapter worker health to the gateway."""
+        return self._kanban_supervisor.snapshot()
+
+    async def _observe_kanban_message(self, message: Any) -> tuple[bool, bool]:
+        cfg, ingestor = await self._kanban_runtime()
+        channel = getattr(message, "channel", None)
+        parent_id = str(getattr(channel, "parent_id", "") or "")
+        if ingestor is None or parent_id not in cfg.forum_channel_ids:
+            return False, False
+        thread_id = str(getattr(channel, "id", "") or "")
+        if not thread_id:
+            return False, False
+        # Observation happens on every multiplexed bot, but only the designated
+        # ingress identity may persist the authoritative authorization decision.
+        ingress_bot_id = str(getattr(cfg, "conversation_router_ingress_bot_id", "") or "")
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        if ingress_bot_id and current_bot_id != ingress_bot_id:
+            return True, False
+        # Finish older ordered history first. The ingestor's per-thread lock also
+        # serializes a reconnect fetch racing this live gateway event.
+        await self._ensure_kanban_thread_backfill(thread_id)
+        relevant = (
+            not bool(getattr(getattr(message, "author", None), "bot", False))
+            and bool(getattr(message, "content", None))
+            and getattr(message, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+        )
+        await ingestor.ingest_live(self._discord_inbound(message, relevant=relevant))
+        return True, relevant
+
+    def _is_kanban_ingress(self, result: Any) -> bool:
+        """Allow routed conversation dispatch only on the designated bot."""
+        ingress_bot_id = str(getattr(result, "ingress_bot_id", "") or "")
+        if not ingress_bot_id:
+            return True
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        return current_bot_id == ingress_bot_id
+
+    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage):
+        """Inspect mapped Discord Forum replies before chat dispatch."""
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_message
 
             result = await maybe_handle_discord_message(
                 message,
                 mark_nonconversational=self._nonconversational_messages.mark_many,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
             )
         except Exception:
             logger.warning(
-                "[%s] Discord Kanban inbox failed; continuing normal dispatch for message_id=%s",
+                "[%s] Discord Kanban inbox failed for message_id=%s",
                 self.name,
                 getattr(message, "id", "unknown"),
                 exc_info=True,
             )
-            return False
+            from gateway.kanban_discord_inbox import (
+                KanbanReplyInboxResult,
+                load_config as load_kanban_inbox_config,
+            )
+
+            cfg = load_kanban_inbox_config()
+            channel = getattr(message, "channel", None)
+            channel_ids = {
+                str(value)
+                for value in (
+                    getattr(channel, "id", None),
+                    getattr(channel, "parent_id", None),
+                )
+                if value is not None
+            }
+            fail_closed = bool(
+                cfg.enabled
+                and cfg.conversation_router_enabled
+                and cfg.forum_channel_ids
+                and channel_ids.intersection(cfg.forum_channel_ids)
+            )
+            return KanbanReplyInboxResult(
+                consumed=fail_closed,
+                reason="conversation_router_error" if fail_closed else "error",
+                action="conversation" if fail_closed else None,
+                ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+            )
         if result.consumed:
             logger.info(
                 "[%s] Discord on_message consumed by Kanban inbox: message_id=%s task_id=%s action=%s reason=%s",
@@ -8046,8 +8415,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 result.action,
                 result.reason,
             )
-            return True
-        return False
+        return result
 
     async def _handle_raw_reaction_add(self, payload: Any) -> bool:
         """Handle supported Discord reaction-add events before normal dispatch."""
@@ -8066,10 +8434,26 @@ class DiscordAdapter(BasePlatformAdapter):
         if self._client and self._client.user is not None:
             if user_id == str(getattr(self._client.user, "id", "") or ""):
                 return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction
 
-            result = await maybe_handle_discord_reaction(payload)
+            result = await maybe_handle_discord_reaction(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
+            )
         except Exception:
             logger.warning(
                 "[%s] Discord Kanban reaction inbox failed; continuing normal dispatch for message_id=%s",
@@ -8078,6 +8462,27 @@ class DiscordAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
             return False
+        if result.reason == "conversation_routed" and result.route_profile:
+            from gateway.platforms.base import MessageEvent, MessageType
+            source = self.build_source(
+                str(getattr(payload, "channel_id", "")), chat_type="group",
+                user_id=user_id, user_name=getattr(member, "display_name", None),
+                thread_id=str(getattr(payload, "channel_id", "")),
+                parent_chat_id=str(getattr(channel, "parent_id", "") or ""),
+                message_id=result.correlation_id,
+            )
+            source.profile = result.route_profile
+            await self._dispatch_message_event(MessageEvent(
+                text=(f"Discord Kanban reaction directive: {result.action}. "
+                      f"Reacted message: {getattr(payload, 'message_id', '')}."),
+                message_type=MessageType.TEXT, source=source,
+                message_id=result.correlation_id, channel_context=result.card_context,
+                outbound_profile=result.route_profile,
+                outbound_profiles=result.route_profiles,
+                correlation_id=result.correlation_id,
+                route_marker="discord-kanban-directive",
+            ))
+            return True
         if result.consumed:
             logger.info(
                 "[%s] Discord reaction consumed by Kanban inbox: message_id=%s thread=%s task_id=%s action=%s reason=%s",
@@ -8115,9 +8520,25 @@ class DiscordAdapter(BasePlatformAdapter):
         if self._client and self._client.user is not None:
             if user_id == str(getattr(self._client.user, "id", "") or ""):
                 return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
         try:
             from gateway.kanban_discord_inbox import maybe_handle_discord_reaction_remove
-            result = await maybe_handle_discord_reaction_remove(payload)
+            result = await maybe_handle_discord_reaction_remove(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
+            )
         except Exception:
             logger.warning(
                 "[%s] Discord Kanban reaction removal failed for message_id=%s",
@@ -8134,6 +8555,7 @@ class DiscordAdapter(BasePlatformAdapter):
         role_authorized: bool = False,
         *,
         recovered: bool = False,
+        kanban_route: Any | None = None,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -8227,7 +8649,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 and not self._discord_thread_require_mention()
             )
 
-            if require_mention and not is_free_channel and not in_bot_thread:
+            if (
+                require_mention
+                and not is_free_channel
+                and not in_bot_thread
+                and not getattr(kanban_route, "route_profile", None)
+            ):
                 if not self._self_is_explicitly_mentioned(message) and not mention_prefix:
                     return False
         # Auto-thread: when enabled, automatically create a thread for every
@@ -8588,6 +9015,9 @@ class DiscordAdapter(BasePlatformAdapter):
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+        _card_context = getattr(kanban_route, "card_context", None)
+        if _card_context:
+            _channel_context = "\n\n".join(part for part in (_card_context, _channel_context) if part)
 
         reply_to_id = None
         reply_to_text = None
@@ -8610,6 +9040,27 @@ class DiscordAdapter(BasePlatformAdapter):
             auto_skill=_skills,
             channel_prompt=_channel_prompt,
             channel_context=_channel_context,
+            outbound_profile=(
+                getattr(kanban_route, "route_profile", None)
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else None
+            ),
+            outbound_profiles=(
+                getattr(kanban_route, "route_profiles", ())
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else ()
+            ),
+            correlation_id=getattr(kanban_route, "correlation_id", None),
+            route_marker=(
+                ("discord-kanban-directive" if
+                 str(getattr(kanban_route, "action", "")).startswith("directive:") else
+                 "discord-kanban-conversation")
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else None
+            ),
         )
 
         # Track thread participation so the bot won't require @mention for
@@ -8627,8 +9078,47 @@ class DiscordAdapter(BasePlatformAdapter):
         ):
             self._enqueue_text_event(event)
         else:
-            await self.handle_message(event)
+            await self._dispatch_message_event(event)
         return True
+
+    async def _dispatch_message_event(self, event: MessageEvent) -> None:
+        """Dispatch a routed Kanban turn through each exact profile identity."""
+        target_profiles = getattr(event, "outbound_profiles", ()) or (
+            (event.outbound_profile,) if getattr(event, "outbound_profile", None) else ()
+        )
+        if not target_profiles:
+            await self.handle_message(event)
+            return
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_adapter_for_source", None)
+        deliveries = []
+        for target_profile in target_profiles:
+            routed_event = copy(event)
+            routed_event.source = copy(event.source)
+            routed_event.source.profile = target_profile
+            routed_event.outbound_profile = target_profile
+            target = resolver(routed_event.source, require_profile_adapter=True) if resolver else None
+            if target is None:
+                logger.error(
+                    "[Discord] Kanban outbound profile '%s' has no connected adapter; refusing fallback",
+                    target_profile,
+                )
+                continue
+            deliveries.append((target_profile, target.handle_message(routed_event)))
+        if len(deliveries) == 1 and len(target_profiles) == 1:
+            await deliveries[0][1]
+            return
+        if deliveries:
+            results = await asyncio.gather(
+                *(delivery for _profile, delivery in deliveries), return_exceptions=True
+            )
+            for (target_profile, _delivery), result in zip(deliveries, results):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "[Discord] Kanban outbound profile '%s' dispatch failed",
+                        target_profile,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
     # ------------------------------------------------------------------
     # Text message aggregation (handles Discord client-side splits)
@@ -8709,7 +9199,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # into handle_message → the agent's streaming request,
             # aborting the response the user was waiting on.  The new
             # chunk is handled by the fresh flush task regardless.
-            await asyncio.shield(self.handle_message(event))
+            await asyncio.shield(self._dispatch_message_event(event))
         except asyncio.CancelledError:
             # Only reached if cancel landed before the pop — the shielded
             # handle_message is unaffected either way.  Let the task exit

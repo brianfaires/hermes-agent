@@ -1555,3 +1555,87 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
 
     adapter._fetch_channel_context.assert_not_awaited()
 
+
+@pytest.mark.asyncio
+async def test_kanban_owner_route_bypasses_mention_gate_and_sets_profile_context(
+    adapter, monkeypatch
+):
+    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    parent = FakeForumChannel(channel_id=1001)
+    thread = FakeThread(channel_id=2002, parent=parent)
+    message = make_message(channel=thread, content="plain owner conversation", mentions=[])
+    route = KanbanReplyInboxResult(
+        consumed=False,
+        reason="conversation_routed",
+        task_id="t_owner",
+        action="conversation",
+        route_profile="ops",
+        card_context="Kanban card t_owner (board operations, owner profile ops).",
+        ingress_bot_id="999",
+    )
+
+    target_adapter = SimpleNamespace(handle_message=AsyncMock())
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: target_adapter
+    )
+
+    await adapter._handle_message(message, kanban_route=route)
+
+    adapter.handle_message.assert_not_awaited()
+    target_adapter.handle_message.assert_awaited_once()
+    event = target_adapter.handle_message.await_args.args[0]
+    assert event.text == "plain owner conversation"
+    assert event.source.profile == "ops"
+    assert event.outbound_profile == "ops"
+    assert event.channel_context.startswith("Kanban card t_owner")
+
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fails_closed_without_target_adapter(adapter):
+    source = SimpleNamespace(profile="reviewer")
+    event = SimpleNamespace(source=source, outbound_profile="reviewer")
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: None
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_kanban_event_stays_on_ingress_adapter(adapter):
+    event = SimpleNamespace(source=SimpleNamespace(profile="reviewer"), outbound_profile=None)
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fans_out_with_shared_correlation(adapter):
+    targets = {profile: SimpleNamespace(handle_message=AsyncMock()) for profile in ("ops", "reviewer")}
+    event = SimpleNamespace(
+        source=SimpleNamespace(profile="ops"),
+        outbound_profile="ops",
+        outbound_profiles=("ops", "reviewer"),
+        correlation_id="discord:shared",
+    )
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: targets[source.profile]
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    for profile, target in targets.items():
+        target.handle_message.assert_awaited_once()
+        routed = target.handle_message.await_args.args[0]
+        assert routed.source.profile == profile
+        assert routed.outbound_profile == profile
+        assert routed.correlation_id == "discord:shared"
+    assert event.source.profile == "ops"
+

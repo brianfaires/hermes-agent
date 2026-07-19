@@ -1,6 +1,7 @@
 """Phase 3: secondary-profile adapter registry + same-token conflict detection."""
 import logging
 import asyncio
+from types import SimpleNamespace
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -142,13 +143,13 @@ class TestOutboundAdapterResolution:
             ns(platform=Platform.DISCORD, profile="reviewer")
         ) is None
 
-    def test_non_discord_profile_preserves_primary_adapter(self):
+    def test_non_discord_profile_never_falls_back_to_primary_adapter(self):
         runner, ns = self._runner()
         primary = ns(_running=True)
         runner.adapters[Platform.TELEGRAM] = primary
         assert runner._adapter_for_source(
             ns(platform=Platform.TELEGRAM, profile="reviewer")
-        ) is primary
+        ) is None
 
 
 class TestProfileMessageHandler:

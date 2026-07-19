@@ -28,6 +28,14 @@ from hermes_constants import get_hermes_home
 from gateway.kanban_mirror.closed_thread_policy import ClosedThreadPolicy, load_closed_thread_policy
 
 
+def _number(value, default, converter):
+    """Parse an optional numeric setting without breaking gateway startup."""
+    try:
+        return converter(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _default_token_env_path() -> Path:
     # Resolved at load time so a named-profile gateway reads its own .env,
     # not the default profile's.
@@ -48,6 +56,10 @@ class MirrorConfig:
     digest_title: str = "Board"
     done_thread_archive_idle_minutes: float = 60.0
     closed_thread_reply_policy: ClosedThreadPolicy = field(default_factory=ClosedThreadPolicy)
+    binding_transitions_enabled: bool = False
+    terminal_lifecycle_enabled: bool = False
+    reconciliation_enabled: bool = False
+    automatic_successor_enabled: bool = False
 
     def valid(self) -> bool:
         return bool(self.enabled and self.board and self.forum_channel_id)
@@ -64,17 +76,29 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
     cfg = kanban_cfg.get("discord_mirror") if isinstance(kanban_cfg, dict) else {}
     if not isinstance(cfg, dict):
         cfg = {}
-    return MirrorConfig(
+    result = MirrorConfig(
         enabled=bool(cfg.get("enabled", False)),
         board=str(cfg.get("board") or "default").strip(),
         forum_channel_id=str(cfg.get("forum_channel_id") or "").strip(),
         guild_id=str(cfg.get("guild_id") or "").strip(),
         token_env_path=Path(str(cfg.get("token_env_path") or _default_token_env_path())).expanduser(),
-        poll_seconds=float(cfg.get("poll_seconds", 10.0)),
-        prose_interval_seconds=float(cfg.get("prose_interval_seconds", 60.0)),
-        max_post_chars=int(cfg.get("max_post_chars", 3800)),
-        note_char_limit=int(cfg.get("note_char_limit", 900)),
+        poll_seconds=_number(cfg.get("poll_seconds", 10.0), 10.0, float),
+        prose_interval_seconds=_number(cfg.get("prose_interval_seconds", 60.0), 60.0, float),
+        max_post_chars=_number(cfg.get("max_post_chars", 3800), 3800, int),
+        note_char_limit=_number(cfg.get("note_char_limit", 900), 900, int),
         digest_title=str(cfg.get("digest_title") or "Board"),
-        done_thread_archive_idle_minutes=float(cfg.get("done_thread_archive_idle_minutes", 60.0)),
+        done_thread_archive_idle_minutes=_number(
+            cfg.get("done_thread_archive_idle_minutes", 60.0), 60.0, float
+        ),
         closed_thread_reply_policy=load_closed_thread_policy(cfg.get("closed_thread_reply_policy")),
+        binding_transitions_enabled=bool(cfg.get("binding_transitions_enabled", False)),
+        terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
+        reconciliation_enabled=bool(cfg.get("reconciliation_enabled", False)),
+        automatic_successor_enabled=bool(cfg.get("automatic_successor_enabled", False)),
     )
+    if (result.reconciliation_enabled or result.terminal_lifecycle_enabled or result.automatic_successor_enabled) and not result.binding_transitions_enabled:
+        raise ValueError(
+            "kanban.discord_mirror binding_transitions_enabled is required when "
+            "reconciliation_enabled, terminal_lifecycle_enabled, or automatic_successor_enabled is enabled"
+        )
+    return result
