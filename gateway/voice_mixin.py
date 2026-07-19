@@ -25,6 +25,7 @@ from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 from gateway.temp_audio import gateway_tts_temp_path
+from gateway.voice_acknowledgements import VoiceAcknowledgement
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,67 @@ class GatewayVoiceMixin:
             return 0
         return sum(1 for message in history if message.get("role") == "user")
 
+    def _voice_ack_model_for_source(self, source: SessionSource) -> str:
+        """Resolve the active LLM name used for acknowledgement filtering."""
+        try:
+            model, _runtime = self._resolve_session_agent_runtime(source=source)
+            return str(model or "")
+        except Exception:
+            logger.debug("Could not resolve voice acknowledgement model", exc_info=True)
+            return ""
+
+    def _discord_voice_join_ack(
+        self,
+        source: SessionSource,
+        *,
+        adapter=None,
+        rejoining_persisted_voice_session: bool = False,
+    ):
+        """Resolve the catalog or legacy acknowledgement for a Discord VC join."""
+        try:
+            session_key = self._session_key_for_source(source)
+        except Exception:
+            session_key = ""
+        running_agents = getattr(self, "_running_agents", {}) or {}
+        if session_key and session_key in running_agents:
+            event_name = "busy"
+            legacy_key = "busy_ack_phrases"
+            fallback = _DISCORD_VOICE_BUSY_ACK
+        elif rejoining_persisted_voice_session:
+            event_name = "restart_join"
+            legacy_key = "restart_join_ack_phrases"
+            fallback = "Back online."
+        else:
+            threshold = self._configured_discord_voice_int(
+                adapter, "session_resume_user_turn_threshold", 2
+            )
+            if self._voice_session_user_turn_count(source) > threshold:
+                event_name = "session_resume"
+                legacy_key = "session_resume_ack_phrases"
+                fallback = "Picking up where we left off."
+            else:
+                event_name = "join"
+                legacy_key = "join_ack_phrases"
+                fallback = t("gateway.voice.connected_spoken")
+
+        catalog = vars(adapter).get("_voice_ack_catalog") if adapter is not None else None
+        selected = None
+        if catalog:
+            selected = catalog.choose(
+                event_name,
+                model_name=self._voice_ack_model_for_source(source),
+            )
+        if selected is not None:
+            return selected
+
+        return VoiceAcknowledgement(
+            text=self._configured_discord_voice_ack(adapter, legacy_key) or fallback,
+            weight=1,
+            voice_settings={},
+            include_models=("*",),
+            exclude_models=(),
+        )
+
     def _discord_voice_join_ack_text(
         self,
         source: SessionSource,
@@ -237,25 +299,12 @@ class GatewayVoiceMixin:
         adapter=None,
         rejoining_persisted_voice_session: bool = False,
     ) -> str:
-        """Return the spoken Discord VC join acknowledgement for this session."""
-        try:
-            session_key = self._session_key_for_source(source)
-        except Exception:
-            session_key = ""
-        running_agents = getattr(self, "_running_agents", {}) or {}
-        if session_key and session_key in running_agents:
-            return self._configured_discord_voice_ack(adapter, "busy_ack_phrases") or _DISCORD_VOICE_BUSY_ACK
-        if rejoining_persisted_voice_session:
-            return self._configured_discord_voice_ack(adapter, "restart_join_ack_phrases") or "Back online."
-        threshold = self._configured_discord_voice_int(
-            adapter, "session_resume_user_turn_threshold", 2
-        )
-        if self._voice_session_user_turn_count(source) > threshold:
-            return (
-                self._configured_discord_voice_ack(adapter, "session_resume_ack_phrases")
-                or "Picking up where we left off."
-            )
-        return self._configured_discord_voice_ack(adapter, "join_ack_phrases") or t("gateway.voice.connected_spoken")
+        """Return only the spoken text for compatibility with existing callers."""
+        return self._discord_voice_join_ack(
+            source,
+            adapter=adapter,
+            rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+        ).text
 
     @staticmethod
     def _discord_adapter_connected_to_voice_channel(adapter, guild_id: int, channel_id: int) -> bool:
@@ -352,13 +401,20 @@ class GatewayVoiceMixin:
                 message_type=MessageType.TEXT,
                 raw_message=SimpleNamespace(guild_id=int(guild_id), guild=guild),
             )
+            auto_voice_ack = self._discord_voice_join_ack(
+                voice_source,
+                adapter=adapter,
+                rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+            )
+            auto_voice_kwargs = (
+                {"voice_settings": auto_voice_ack.voice_settings}
+                if auto_voice_ack.voice_settings
+                else {}
+            )
             await self._send_voice_reply(
                 auto_voice_event,
-                self._discord_voice_join_ack_text(
-                    voice_source,
-                    adapter=adapter,
-                    rejoining_persisted_voice_session=rejoining_persisted_voice_session,
-                ),
+                auto_voice_ack.text,
+                **auto_voice_kwargs,
             )
         except Exception:
             logger.debug("Discord auto-voice greeting failed", exc_info=True)
@@ -464,13 +520,20 @@ class GatewayVoiceMixin:
             self._save_voice_modes()
             self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
             try:
+                join_ack = self._discord_voice_join_ack(
+                    event.source,
+                    adapter=adapter,
+                    rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                )
+                join_voice_kwargs = (
+                    {"voice_settings": join_ack.voice_settings}
+                    if join_ack.voice_settings
+                    else {}
+                )
                 await self._send_voice_reply(
                     event,
-                    self._discord_voice_join_ack_text(
-                        event.source,
-                        adapter=adapter,
-                        rejoining_persisted_voice_session=rejoining_persisted_voice_session,
-                    ),
+                    join_ack.text,
+                    **join_voice_kwargs,
                 )
             except Exception:
                 logger.debug("Discord voice join greeting failed", exc_info=True)
@@ -853,7 +916,13 @@ class GatewayVoiceMixin:
 
         return True
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
+    async def _send_voice_reply(
+        self,
+        event: MessageEvent,
+        text: str,
+        *,
+        voice_settings: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
         audio_path = None
         actual_path = None
@@ -871,8 +940,12 @@ class GatewayVoiceMixin:
                 audio_path = gateway_tts_temp_path("tts_reply", audio_ext)
                 os.makedirs(os.path.dirname(audio_path), exist_ok=True)
 
+                tts_kwargs = {"text": tts_text, "output_path": audio_path}
+                if voice_settings:
+                    tts_kwargs["voice_settings"] = voice_settings
                 result_json = await asyncio.to_thread(
-                    text_to_speech_tool, text=tts_text, output_path=audio_path
+                    text_to_speech_tool,
+                    **tts_kwargs,
                 )
             try:
                 result = json.loads(result_json)
