@@ -515,6 +515,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
     user_id TEXT,
+    session_key TEXT,
     model TEXT,
     model_config TEXT,
     system_prompt TEXT,
@@ -1343,19 +1344,21 @@ class SessionDB:
         model_config: Dict[str, Any] = None,
         system_prompt: str = None,
         user_id: str = None,
+        session_key: str = None,
         parent_session_id: str = None,
         cwd: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
+                """INSERT OR IGNORE INTO sessions (id, source, user_id, session_key, model, model_config,
                    system_prompt, parent_session_id, cwd, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
                     user_id,
+                    session_key,
                     model,
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
@@ -2770,6 +2773,40 @@ class SessionDB:
                     msg["tool_calls"] = json.loads(msg["tool_calls"])
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
+                    msg["tool_calls"] = []
+            result.append(msg)
+        return result
+
+    def get_messages_for_session_key(
+        self, session_key: str, *, include_session_id: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Load active messages across sessions belonging to one chat session key.
+
+        Used by read-only history views that intentionally span `/new` session
+        boundaries without crossing into another chat, thread, or user scope.
+        """
+        if not session_key and not include_session_id:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT m.* FROM messages AS m
+                JOIN sessions AS s ON s.id = m.session_id
+                WHERE (s.session_key = ? OR s.id = ?) AND m.active = 1
+                ORDER BY m.id
+                """,
+                (session_key, include_session_id),
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            msg = dict(row)
+            if "content" in msg:
+                msg["content"] = self._decode_content(msg["content"])
+            if msg.get("tool_calls"):
+                try:
+                    msg["tool_calls"] = json.loads(msg["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize tool_calls in session-key history")
                     msg["tool_calls"] = []
             result.append(msg)
         return result
