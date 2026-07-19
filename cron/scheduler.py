@@ -228,11 +228,6 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 import cron.hooks as cron_hooks
-from cron import calendar_sync as _cron_calendar_sync
-
-# Opt-in Brian-local COMPLETE-hook consumer: append cron output to its Calendar
-# instance. No-ops unless ~/.hermes/scripts/cron_calendar_recurring_sync.py exists.
-_cron_calendar_sync.register()
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
