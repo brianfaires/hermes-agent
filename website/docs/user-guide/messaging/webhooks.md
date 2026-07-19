@@ -88,6 +88,7 @@ Routes define how different webhook sources are handled. Each route is a named e
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. Payload fields are untrusted — see [Authenticated does not mean trusted](#authenticated-does-not-mean-trusted). |
 | `filters` | No | Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return `{"status":"ignored","reason":"filter"}` with HTTP 200. |
 | `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
+| `script_mode` | No | Set to `trigger` to run the authenticated script without parsing or forwarding the request body. Requires global `script_triggers_enabled: true` and a matching `script_trigger_allowlist` entry; omit this setting for normal payload-transform behavior. |
 | `skills` | No | List of skill names to load for the agent run. |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
@@ -191,6 +192,28 @@ Script outcomes:
 - JSON object stdout replaces the payload used by `prompt` and `deliver_extra`.
 - Non-JSON text stdout is added to the payload as `script_output`.
 - Empty stdout, exact `[SILENT]`, `{"__hermes_ignore__": true}`, timeout, missing script, or nonzero exit code returns HTTP 200 with `{"status":"ignored","reason":"script"}`.
+
+For payload-independent local jobs, set `script_mode: trigger`. Trigger mode is off by default and requires both an explicit global opt-in and allowlist:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      script_triggers_enabled: true
+      script_trigger_allowlist: ["refresh-index.py"]
+      script_timeout_seconds: 30
+      routes:
+        refresh-index:
+          secret: "replace-with-a-strong-secret"
+          script: "refresh-index.py"
+          script_mode: trigger
+          deliver: telegram
+          deliver_extra:
+            chat_id: "12345"
+```
+
+The trigger script must resolve under the active profile's `~/.hermes/scripts/` directory, including after symlink resolution, and its resolved path must match an allowlist entry. It runs without a shell, receives no request body on stdin, and starts only after authentication, body-size enforcement, rate limiting, and delivery-ID deduplication. Non-empty redacted stdout is sent through `deliver`; empty stdout stays silent. Route-level `script_timeout` may shorten but cannot extend the global `script_timeout_seconds` ceiling.
 
 ### Prompt Templates
 
