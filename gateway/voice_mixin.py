@@ -25,6 +25,7 @@ from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 from gateway.temp_audio import gateway_tts_temp_path
+from gateway.voice_acknowledgements import VoiceAcknowledgement
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,6 @@ class GatewayVoiceMixin:
         if selected is not None:
             return selected
 
-        from gateway.voice_acknowledgements import VoiceAcknowledgement
         return VoiceAcknowledgement(
             text=self._configured_discord_voice_ack(adapter, legacy_key) or fallback,
             weight=1,

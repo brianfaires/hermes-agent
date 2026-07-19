@@ -231,6 +231,8 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
+from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from utils import atomic_json_write
@@ -1111,7 +1113,6 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
-        from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
         self._voice_ack_catalog = VoiceAcknowledgementCatalog.load()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
@@ -2848,7 +2849,6 @@ class DiscordAdapter(BasePlatformAdapter):
         if not callable(resolver) or not source_data:
             return ""
         try:
-            from gateway.session import SessionSource
             return str(resolver(SessionSource.from_dict(source_data)) or "")
         except Exception:
             logger.debug("Could not resolve Discord voice acknowledgement model", exc_info=True)
