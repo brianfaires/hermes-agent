@@ -79,7 +79,12 @@ Routes define how different webhook sources are handled. Each route is a named e
 | Property | Required | Description |
 |----------|----------|-------------|
 | `events` | No | List of event types to accept (e.g. `["pull_request"]`). If empty, all events are accepted. Event type is read from `X-GitHub-Event`, `X-GitLab-Event`, or `event_type` in the payload. |
-| `secret` | **Yes** | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
+| `secret` | **Yes** unless `auth: oidc` | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
+| `auth` | No | Authentication mode. Omit for HMAC/GitLab/Svix signatures. Set to `oidc` (or `google_oidc`) to verify an Authorization bearer OIDC token from Google Pub/Sub authenticated push. |
+| `oidc.audience` | Required when `auth: oidc` | Expected JWT audience. For Google Pub/Sub, set this to the push endpoint URL or the audience configured on the push subscription. |
+| `oidc.email` | One of `email` or `subject` | Expected verified service-account email claim. Restricts which Pub/Sub push service account may call the route. |
+| `oidc.subject` | One of `email` or `subject` | Expected JWT `sub` claim. Prefer the immutable service-account subject when available. If both identity fields are configured, both must match. |
+| `oidc.issuer` | No | Accepted issuer(s). Defaults to Google's `accounts.google.com` and `https://accounts.google.com`. |
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. Payload fields are untrusted — see [Authenticated does not mean trusted](#authenticated-does-not-mean-trusted). |
 | `filters` | No | Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return `{"status":"ignored","reason":"filter"}` with HTTP 200. |
 | `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
@@ -255,6 +260,30 @@ gh auth login
 ### 4. Test it
 
 Open a pull request on the repository. The webhook fires, Hermes processes the event, and posts a review comment on the PR.
+
+## Google Pub/Sub authenticated push (OIDC)
+
+Google Pub/Sub push subscriptions can authenticate requests with an OIDC JWT in the Authorization bearer header. Configure the route with `auth: oidc` instead of an HMAC `secret`:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      routes:
+        pubsub-alerts:
+          auth: "oidc"
+          oidc:
+            audience: "https://your-server.example.com/webhooks/pubsub-alerts"
+            email: "pubsub-pusher@your-project.iam.gserviceaccount.com"
+          prompt: |
+            Google Pub/Sub message received:
+            Subscription: {subscription}
+            Payload: {__raw__}
+          deliver: "telegram"
+```
+
+Hermes verifies the token signature against Google's JWKS, checks the audience, and accepts Google's standard issuers. Configure `oidc.email` or `oidc.subject` to authorize the specific caller; audience-only routes are rejected because an audience identifies the endpoint, not the service account allowed to invoke it. If your Pub/Sub subscription uses a custom OIDC audience, put that exact value in `oidc.audience`.
 
 ---
 

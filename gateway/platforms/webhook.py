@@ -8,7 +8,9 @@ source or to another configured platform.
 Configuration lives in config.yaml under platforms.webhook.extra.routes.
 Each route defines:
   - events: which event types to accept (header-based filtering)
-  - secret: HMAC secret for signature validation (REQUIRED)
+  - secret: HMAC secret for signature validation (REQUIRED unless auth=oidc)
+  - auth: optional auth mode; "oidc" verifies Authorization: Bearer JWTs
+    signed by Google OIDC (for Google Pub/Sub authenticated push)
   - prompt: template string formatted with the webhook payload
   - skills: optional list of skills to load for the agent
   - deliver: where to send the response (github_comment, telegram, etc.)
@@ -19,7 +21,8 @@ Each route defines:
     and sub-second delivery matter more than agent reasoning.
 
 Security:
-  - HMAC secret is required per route (validated at startup)
+  - HMAC secret or OIDC audience plus caller identity is required per route
+    (validated at startup)
   - Rate limiting per route (fixed-window, configurable)
   - Idempotency cache prevents duplicate agent runs on webhook retries
   - Body size limits checked before reading payload
@@ -51,6 +54,14 @@ try:
 except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
+
+try:
+    import jwt
+
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
+    jwt = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -101,6 +112,10 @@ DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 _RATE_WINDOW_SECONDS = 60.0
+_OIDC_AUTH_MODES = frozenset({"oidc", "google_oidc"})
+_DEFAULT_GOOGLE_OIDC_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+_DEFAULT_GOOGLE_OIDC_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
+
 # Hostnames/IP literals that only serve connections originating on the same
 # machine. Anything else is treated as a public bind for safety-rail purposes.
 _LOOPBACK_HOSTS = frozenset({
@@ -210,6 +225,10 @@ class WebhookAdapter(BasePlatformAdapter):
         self._route_processor = WebhookRouteProcessor(
             script_timeout_seconds=self._script_timeout_seconds
         )
+        # PyJWKClient caches fetched signing keys internally. Reuse one client
+        # per adapter so authenticated pushes do not fetch Google's JWKS on
+        # every request.
+        self._oidc_jwk_clients: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -221,25 +240,29 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Validate routes at startup — secret is required per route
         for name, route in self._routes.items():
-            secret = route.get("secret", self._global_secret)
-            if not secret:
-                raise ValueError(
-                    f"[webhook] Route '{name}' has no HMAC secret. "
-                    f"Set 'secret' on the route or globally. "
-                    f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
-                )
+            if self._route_uses_oidc_auth(route):
+                self._validate_oidc_route_config(route, name)
+            else:
+                secret = route.get("secret", self._global_secret)
+                if not secret:
+                    raise ValueError(
+                        f"[webhook] Route '{name}' has no HMAC secret. "
+                        f"Set 'secret' on the route or globally. "
+                        f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'. "
+                        f"For Google Pub/Sub push auth, set auth='oidc' and oidc.audience."
+                    )
 
-            # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
-            # non-loopback bind. The escape hatch is for local testing only;
-            # serving an unauthenticated route on a public interface is a
-            # deployment-grade footgun we'd rather crash early than ship.
-            if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-                raise ValueError(
-                    f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
-                    f"but is bound to non-loopback host '{self._host}'. "
-                    f"INSECURE_NO_AUTH is for local testing only. "
-                    f"Refusing to start to prevent accidental exposure."
-                )
+                # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
+                # non-loopback bind. The escape hatch is for local testing only;
+                # serving an unauthenticated route on a public interface is a
+                # deployment-grade footgun we'd rather crash early than ship.
+                if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
+                    raise ValueError(
+                        f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
+                        f"but is bound to non-loopback host '{self._host}'. "
+                        f"INSECURE_NO_AUTH is for local testing only. "
+                        f"Refusing to start to prevent accidental exposure."
+                    )
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -461,6 +484,14 @@ class WebhookAdapter(BasePlatformAdapter):
             for k, v in data.items():
                 if k in self._static_routes:
                     continue
+                if self._route_uses_oidc_auth(v):
+                    try:
+                        self._validate_oidc_route_config(v, k)
+                    except ValueError as e:
+                        logger.warning("[webhook] Dynamic route '%s' skipped: %s", k, e)
+                        continue
+                    new_dynamic[k] = v
+                    continue
                 effective_secret = v.get("secret", self._global_secret)
                 if not effective_secret:
                     logger.warning(
@@ -583,24 +614,35 @@ class WebhookAdapter(BasePlatformAdapter):
         # INSECURE_NO_AUTH mode). Missing/empty secrets must fail closed here,
         # not only during connect(), so direct handler reuse cannot turn a
         # network webhook route into an unauthenticated agent-dispatch surface.
-        secret = route_config.get("secret", self._global_secret)
-        if not secret:
-            logger.error(
-                "[webhook] Route %s has no HMAC secret; refusing request",
-                route_name,
-            )
-            return web.json_response(
-                {"error": "Webhook route is missing an HMAC secret"},
-                status=403,
-            )
-        if secret != _INSECURE_NO_AUTH:
-            if not self._validate_signature(request, raw_body, secret):
+        if self._route_uses_oidc_auth(route_config):
+            if not await asyncio.to_thread(
+                self._validate_oidc_token, request, route_config
+            ):
                 logger.warning(
-                    "[webhook] Invalid signature for route %s", route_name
+                    "[webhook] Invalid OIDC bearer token for route %s", route_name
                 )
                 return web.json_response(
-                    {"error": "Invalid signature"}, status=401
+                    {"error": "Invalid OIDC token"}, status=401
                 )
+        else:
+            secret = route_config.get("secret", self._global_secret)
+            if not secret:
+                logger.error(
+                    "[webhook] Route %s has no HMAC secret; refusing request",
+                    route_name,
+                )
+                return web.json_response(
+                    {"error": "Webhook route is missing an HMAC secret"},
+                    status=403,
+                )
+            if secret != _INSECURE_NO_AUTH:
+                if not self._validate_signature(request, raw_body, secret):
+                    logger.warning(
+                        "[webhook] Invalid signature for route %s", route_name
+                    )
+                    return web.json_response(
+                        {"error": "Invalid signature"}, status=401
+                    )
 
         # ── Rate limiting (after auth) ───────────────────────────
         now = time.time()
@@ -953,6 +995,120 @@ class WebhookAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Signature validation
     # ------------------------------------------------------------------
+
+    def _route_uses_oidc_auth(self, route_config: dict) -> bool:
+        """Return True when route auth is an OIDC bearer JWT instead of HMAC."""
+        return str(route_config.get("auth", "")).strip().lower() in _OIDC_AUTH_MODES
+
+    def _get_oidc_config(self, route_config: dict) -> dict:
+        """Normalize route OIDC config, accepting nested and legacy-flat keys."""
+        nested = route_config.get("oidc")
+        cfg = dict(nested) if isinstance(nested, dict) else {}
+        for flat_key, cfg_key in (
+            ("oidc_audience", "audience"),
+            ("oidc_issuer", "issuer"),
+            ("oidc_email", "email"),
+            ("oidc_subject", "subject"),
+            ("oidc_jwks_url", "jwks_url"),
+        ):
+            if flat_key in route_config and cfg_key not in cfg:
+                cfg[cfg_key] = route_config[flat_key]
+        return cfg
+
+    def _get_oidc_audience(self, route_config: dict, route_name: str = "") -> str:
+        cfg = self._get_oidc_config(route_config)
+        audience = str(cfg.get("audience") or "").strip()
+        if not audience:
+            label = f" '{route_name}'" if route_name else ""
+            raise ValueError(
+                f"OIDC route{label} requires oidc.audience (Google Pub/Sub push audience)"
+            )
+        return audience
+
+    def _validate_oidc_route_config(
+        self, route_config: dict, route_name: str = ""
+    ) -> tuple[str, str, str]:
+        """Require an audience and an expected Google caller identity."""
+        audience = self._get_oidc_audience(route_config, route_name)
+        cfg = self._get_oidc_config(route_config)
+        jwks_url = str(cfg.get("jwks_url") or _DEFAULT_GOOGLE_OIDC_JWKS_URL).strip()
+        if jwks_url != _DEFAULT_GOOGLE_OIDC_JWKS_URL:
+            raise ValueError(
+                "Google Pub/Sub OIDC routes must use the Google JWKS endpoint"
+            )
+        expected_email = str(cfg.get("email") or "").strip()
+        expected_subject = str(cfg.get("subject") or "").strip()
+        if not expected_email and not expected_subject:
+            label = f" '{route_name}'" if route_name else ""
+            raise ValueError(
+                f"OIDC route{label} requires oidc.email or oidc.subject to authorize the caller"
+            )
+        return audience, expected_email, expected_subject
+
+    def _validate_oidc_token(self, request: "web.Request", route_config: dict) -> bool:
+        """Validate an Authorization bearer JWT for Google Pub/Sub push."""
+        if not JWT_AVAILABLE or jwt is None:
+            logger.warning("[webhook] PyJWT unavailable; cannot verify OIDC token")
+            return False
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return False
+        token = auth_header[7:].strip()
+        if not token:
+            return False
+
+        try:
+            cfg = self._get_oidc_config(route_config)
+            audience, expected_email, expected_subject = self._validate_oidc_route_config(
+                route_config
+            )
+            jwks_url = str(cfg.get("jwks_url") or _DEFAULT_GOOGLE_OIDC_JWKS_URL).strip()
+            issuer_value = cfg.get("issuer")
+            if issuer_value:
+                if isinstance(issuer_value, str):
+                    issuer = tuple(i.strip() for i in issuer_value.split(",") if i.strip())
+                elif isinstance(issuer_value, (list, tuple)):
+                    issuer = tuple(str(i).strip() for i in issuer_value if str(i).strip())
+                else:
+                    return False
+            else:
+                issuer = _DEFAULT_GOOGLE_OIDC_ISSUERS
+
+            jwk_client = self._oidc_jwk_clients.get(jwks_url)
+            if jwk_client is None:
+                jwk_client = jwt.PyJWKClient(jwks_url)
+                self._oidc_jwk_clients[jwks_url] = jwk_client
+            signing_key = jwk_client.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
+                audience=audience,
+                issuer=issuer,
+                options={"require": ["exp", "aud", "iss"]},
+                leeway=int(cfg.get("leeway_seconds", 30)),
+            )
+        except Exception as e:
+            logger.warning("[webhook] OIDC token verification failed: %s", e)
+            return False
+
+        if expected_email:
+            token_email = str(claims.get("email") or "").strip()
+            if token_email != expected_email:
+                logger.warning("[webhook] OIDC token email claim did not match expected email")
+                return False
+            if claims.get("email_verified") is not True:
+                logger.warning("[webhook] OIDC token email claim is not verified")
+                return False
+
+        if expected_subject:
+            token_subject = str(claims.get("sub") or "").strip()
+            if token_subject != expected_subject:
+                logger.warning("[webhook] OIDC token subject claim did not match expected subject")
+                return False
+
+        return True
 
     def _validate_signature(
         self, request: "web.Request", body: bytes, secret: str
