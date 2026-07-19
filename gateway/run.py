@@ -2848,6 +2848,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def exit_code(self) -> Optional[int]:
         return self._exit_code
 
+    def _adapter_for_source(self, source: Optional[SessionSource]):
+        """Return the platform adapter bound to an inbound source's profile."""
+        if source is None:
+            return None
+        profile_name = str(getattr(source, "profile", "") or "").strip()
+        if profile_name:
+            profile_adapters = getattr(self, "_profile_adapters", {}).get(profile_name, {})
+            adapter = profile_adapters.get(source.platform)
+            if adapter is not None:
+                return adapter
+        return getattr(self, "adapters", {}).get(source.platform)
+
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:
@@ -13817,7 +13829,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _voice_ack_fired = [False]
         _voice_ack_guild: List[Optional[int]] = [None]
         if source.platform == Platform.DISCORD:
-            _va = self.adapters.get(Platform.DISCORD)
+            _va = self._adapter_for_source(source)
             # source.chat_id is the linked text channel; resolve the guild whose
             # voice connection is bound to it (mirrors DiscordAdapter.play_tts).
             _vtc = getattr(_va, "_voice_text_channels", None)
@@ -13835,12 +13847,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not _run_still_current():
                 return
             _voice_ack_fired[0] = True
-            _adapter = self.adapters.get(Platform.DISCORD)
+            _adapter = self._adapter_for_source(source)
             if _adapter is None or not hasattr(_adapter, "play_ack_in_voice"):
                 return
             try:
                 safe_schedule_threadsafe(
-                    _adapter.play_ack_in_voice(_voice_ack_guild[0]),
+                    _adapter.play_ack_in_voice(
+                        _voice_ack_guild[0],
+                        model_name=self._voice_ack_model_for_source(source),
+                    ),
                     _voice_ack_loop,
                     logger=logger,
                     log_message="voice ack scheduling error",
