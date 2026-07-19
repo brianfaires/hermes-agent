@@ -281,9 +281,6 @@ all = [
   # [all], `uv sync --locked` on Windows tried to build it from sdist
   # and failed on `make`. Lazy-install routes that build to first use,
   # where the user is expected to have a toolchain available.
-  # Unified local environment: agents run repository tests from the shared
-  # .venv, so include the pinned developer tools instead of using a backup.
-  "hermes-agent[dev]",
   "hermes-agent[cron]",
   "hermes-agent[cli]",
   "hermes-agent[pty]",

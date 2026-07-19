@@ -34,6 +34,7 @@ async def test_model_command_persists_to_gateway_profile_home_not_process_home(t
         thread_sessions_per_user=False,
     )
     runner._gateway_profile_home = ops_home.resolve()
+    runner._gateway_profile_name = "ops"
     runner.adapters = {}
     runner.session_store = None
     runner._session_db = None
