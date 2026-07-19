@@ -4099,7 +4099,7 @@ def apply_config_patch(operation: str, path: str, value_json: Optional[str] = No
     """
     if is_managed():
         managed_error("modify configuration")
-        return
+        raise PermissionError("Cannot modify configuration in a managed installation.")
     if operation not in {"add", "replace", "remove"}:
         raise ValueError(f"Unsupported config patch operation {operation!r}.")
     if operation == "remove" and value_json is not None:

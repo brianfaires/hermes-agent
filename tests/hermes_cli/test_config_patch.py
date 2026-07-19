@@ -85,3 +85,13 @@ def test_patch_rejects_managed_leaf_and_ancestor(hermes_home, tmp_path, monkeypa
             apply_config_patch("replace", path, '"user/override"')
 
     managed_scope.invalidate_managed_cache()
+
+
+def test_patch_rejects_fully_managed_installation(hermes_home, monkeypatch):
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: True)
+    monkeypatch.setattr("hermes_cli.config.managed_error", lambda _action: None)
+
+    with pytest.raises(PermissionError, match="managed"):
+        apply_config_patch("add", "/model/default", '"provider/model"')
+
+    assert not (hermes_home / "config.yaml").exists()
