@@ -2123,20 +2123,24 @@ class EphemeralReply(str):
     the reply is triggered from a voice message.  ``None`` preserves the
     legacy fallback of speaking the visible reply text.  An empty string
     intentionally suppresses automatic TTS for this ephemeral reply.
+    ``voice_settings`` carries internal per-utterance TTS overrides.
     """
 
     ttl_seconds: Optional[int]
     voice_text: Optional[str]
+    voice_settings: Optional[Dict[str, Any]]
 
     def __new__(
         cls,
         text: str,
         ttl_seconds: Optional[int] = None,
         voice_text: Optional[str] = None,
+        voice_settings: Optional[Dict[str, Any]] = None,
     ):
         instance = super().__new__(cls, text)
         instance.ttl_seconds = ttl_seconds
         instance.voice_text = voice_text
+        instance.voice_settings = voice_settings
         return instance
 
     @property
@@ -5139,6 +5143,7 @@ class BasePlatformAdapter(ABC):
             response = await self._message_handler(event)
             is_ephemeral_response = isinstance(response, EphemeralReply)
             ephemeral_voice_text = response.voice_text if is_ephemeral_response else None
+            ephemeral_voice_settings = response.voice_settings if is_ephemeral_response else None
 
             # Slash-command handlers may return an EphemeralReply sentinel to
             # request that their reply message auto-delete after a TTL (used
@@ -5280,20 +5285,33 @@ class BasePlatformAdapter(ABC):
 
                 if _should_auto_tts:
                     try:
-                        from tools.tts_tool import text_to_speech_tool, check_tts_requirements
+                        from tools.tts_tool import (
+                            _strip_markdown_for_tts,
+                            check_tts_requirements,
+                            text_to_speech_tool,
+                        )
                         with self._runtime_profile_scope(event):
                             if check_tts_requirements():
                                 import json as _json
                                 speech_source = ephemeral_voice_text if ephemeral_voice_text is not None else text_content
-                                speech_text = self.prepare_tts_text(speech_source)
+                                speech_text = (
+                                    _strip_markdown_for_tts(speech_source[:4000])
+                                    if ephemeral_voice_text is not None
+                                    else self.prepare_tts_text(speech_source)
+                                )
                                 if not speech_text:
                                     raise ValueError("Empty text after markdown cleanup")
                                 audio_ext = "ogg" if self.platform == Platform.TELEGRAM else "mp3"
                                 output_path = gateway_tts_temp_path("tts_reply", audio_ext)
+                                tts_kwargs = {
+                                    "text": speech_text,
+                                    "output_path": output_path,
+                                }
+                                if ephemeral_voice_settings:
+                                    tts_kwargs["voice_settings"] = ephemeral_voice_settings
                                 tts_result_str = await asyncio.to_thread(
                                     text_to_speech_tool,
-                                    text=speech_text,
-                                    output_path=output_path,
+                                    **tts_kwargs,
                                 )
                                 tts_data = _json.loads(tts_result_str)
                                 _tts_path = tts_data.get("file_path")

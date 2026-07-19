@@ -241,6 +241,8 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
+from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker, convert_table_to_bullets
 from utils import atomic_json_write, env_float, env_int
@@ -1232,6 +1234,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._voice_ack_catalog = VoiceAcknowledgementCatalog.load()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -4154,7 +4157,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers[guild_id] = mixer
         logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
 
-    async def play_ack_in_voice(self, guild_id: int, phrase: Optional[str] = None) -> bool:
+    async def play_ack_in_voice(
+        self,
+        guild_id: int,
+        phrase: Optional[str] = None,
+        *,
+        model_name: str = "",
+        voice_settings: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Speak a short acknowledgement over the ambient bed.
 
         Called from the gateway's tool-progress hook on the first tool call of
@@ -4167,9 +4177,17 @@ class DiscordAdapter(BasePlatformAdapter):
         if mixer is None:
             return False
         if phrase is None:
-            import random
-            phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
-            phrase = random.choice(phrases)
+            selected = None
+            catalog = vars(self).get("_voice_ack_catalog")
+            if catalog:
+                selected = catalog.choose("tool_call", model_name=model_name)
+            if selected is not None:
+                phrase = selected.text
+                voice_settings = selected.voice_settings
+            else:
+                import random
+                phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
+                phrase = random.choice(phrases)
 
         # Synthesise the ack via the configured TTS provider, then layer it.
         with self._runtime_profile_scope(None):
@@ -4178,7 +4196,10 @@ class DiscordAdapter(BasePlatformAdapter):
             with self._runtime_profile_scope(None):
                 from tools.tts_tool import text_to_speech_tool
                 result_json = await asyncio.to_thread(
-                    text_to_speech_tool, text=phrase, output_path=audio_path
+                    text_to_speech_tool,
+                    text=phrase,
+                    output_path=audio_path,
+                    voice_settings=voice_settings,
                 )
             result = json.loads(result_json)
             actual = result.get("file_path", audio_path)
@@ -4207,23 +4228,53 @@ class DiscordAdapter(BasePlatformAdapter):
                     except OSError:
                         pass
 
-    async def play_cancellation_ack_in_voice(self, guild_id: int) -> bool:
+    def _voice_ack_model_name(self, guild_id: int) -> str:
+        """Resolve the active LLM for a linked Discord voice session."""
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_voice_ack_model_for_source", None)
+        source_data = getattr(self, "_voice_sources", {}).get(guild_id)
+        if not callable(resolver) or not source_data:
+            return ""
+        try:
+            return str(resolver(SessionSource.from_dict(source_data)) or "")
+        except Exception:
+            logger.debug("Could not resolve Discord voice acknowledgement model", exc_info=True)
+            return ""
+
+    async def play_cancellation_ack_in_voice(
+        self,
+        guild_id: int,
+        *,
+        model_name: str = "",
+    ) -> bool:
         """Speak a configured acknowledgement after dropping a voice transcript."""
         if not self.is_in_voice_channel(guild_id):
             return False
-        import random
+        model_name = model_name or self._voice_ack_model_name(guild_id)
+        selected = None
+        catalog = vars(self).get("_voice_ack_catalog")
+        if catalog:
+            selected = catalog.choose("cancellation", model_name=model_name)
+        voice_settings = selected.voice_settings if selected is not None else None
+        if selected is not None:
+            phrase = selected.text
+        else:
+            import random
 
-        raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
-        phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
-        if not phrases:
-            phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
-        phrase = random.choice(phrases)
+            raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
+            phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
+            if not phrases:
+                phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
+            phrase = random.choice(phrases)
         audio_path = gateway_tts_temp_path("cancellation_ack", "mp3")
         os.makedirs(os.path.dirname(audio_path), exist_ok=True)
         try:
             from tools.tts_tool import text_to_speech_tool
             result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=phrase, output_path=audio_path
+                text_to_speech_tool,
+                text=phrase,
+                output_path=audio_path,
+                voice_settings=voice_settings,
             )
             result = json.loads(result_json)
             actual = result.get("file_path", audio_path)
