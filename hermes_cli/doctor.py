@@ -1358,7 +1358,12 @@ def run_doctor(args):
                         _cmd_link.symlink_to(_venv_bin)
                         check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
                         fixed_count += 1
-                    elif not _is_git_worktree:
+                    elif _is_git_worktree:
+                        issues.append(
+                            f"Broken symlink at {_cmd_link_display}/hermes — "
+                            "run 'hermes doctor --fix' from the primary checkout"
+                        )
+                    else:
                         issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
             elif _cmd_link.exists():
                 # It's a regular file, not a symlink — possibly a wrapper script
@@ -1382,7 +1387,12 @@ def run_doctor(args):
                             "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")"
                         )
                         manual_issues.append(f"Add {_cmd_link_display} to your PATH")
-                elif not _is_git_worktree:
+                elif _is_git_worktree:
+                    issues.append(
+                        f"Missing {_cmd_link_display}/hermes symlink — "
+                        "run 'hermes doctor --fix' from the primary checkout"
+                    )
+                else:
                     issues.append(f"Missing {_cmd_link_display}/hermes symlink — run 'hermes doctor --fix'")
 
     _section("External Tools")
