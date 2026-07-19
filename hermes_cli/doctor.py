@@ -1321,6 +1321,15 @@ def run_doctor(args):
             _cmd_link_dir = Path.home() / ".local" / "bin"
             _cmd_link_display = "~/.local/bin"
         _cmd_link = _cmd_link_dir / "hermes"
+        # Secondary Git worktrees contain a .git file pointing at the common
+        # repository. Their venv is a development environment, not a valid
+        # target for the user's global `hermes` launcher.
+        _is_git_worktree = (PROJECT_ROOT / ".git").is_file()
+        if _is_git_worktree:
+            check_warn(
+                "Git worktree detected",
+                "(global hermes launcher will not be modified from a worktree)",
+            )
 
         if _venv_bin is None:
             check_warn(
@@ -1344,12 +1353,12 @@ def run_doctor(args):
                         f"{_cmd_link_display}/hermes points to wrong target",
                         f"(→ {_target}, expected → {_expected})"
                     )
-                    if should_fix:
+                    if should_fix and not _is_git_worktree:
                         _cmd_link.unlink()
                         _cmd_link.symlink_to(_venv_bin)
                         check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
                         fixed_count += 1
-                    else:
+                    elif not _is_git_worktree:
                         issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
             elif _cmd_link.exists():
                 # It's a regular file, not a symlink — possibly a wrapper script
@@ -1359,7 +1368,7 @@ def run_doctor(args):
                     f"{_cmd_link_display}/hermes not found",
                     "(hermes command may not work outside the venv)"
                 )
-                if should_fix:
+                if should_fix and not _is_git_worktree:
                     _cmd_link_dir.mkdir(parents=True, exist_ok=True)
                     _cmd_link.symlink_to(_venv_bin)
                     check_ok(f"Created symlink: {_cmd_link_display}/hermes → {_venv_bin}")
@@ -1373,7 +1382,7 @@ def run_doctor(args):
                             "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")"
                         )
                         manual_issues.append(f"Add {_cmd_link_display} to your PATH")
-                else:
+                elif not _is_git_worktree:
                     issues.append(f"Missing {_cmd_link_display}/hermes symlink — run 'hermes doctor --fix'")
 
     _section("External Tools")

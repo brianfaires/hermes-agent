@@ -154,6 +154,26 @@ class TestDoctorCommandInstallation:
         assert cmd_link.resolve() == hermes_bin.resolve()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Symlink check is Unix-only")
+    def test_fix_refuses_to_repoint_global_launcher_from_git_worktree(self, monkeypatch, tmp_path):
+        home, project, hermes_bin = _setup_doctor_env(monkeypatch, tmp_path)
+        (project / ".git").write_text("gitdir: /tmp/fake-worktree\n", encoding="utf-8")
+
+        cmd_link_dir = tmp_path / ".local" / "bin"
+        cmd_link_dir.mkdir(parents=True)
+        cmd_link = cmd_link_dir / "hermes"
+        existing_target = tmp_path / "canonical-hermes"
+        existing_target.write_text("#!/usr/bin/env python\n")
+        cmd_link.symlink_to(existing_target)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out = _run_doctor(fix=True)
+
+        assert "Git worktree" in out
+        assert cmd_link.resolve() == existing_target
+        assert cmd_link.resolve() != hermes_bin.resolve()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlink check is Unix-only")
     def test_missing_venv_entry_point_shows_warn(self, monkeypatch, tmp_path):
         home = tmp_path / ".hermes"
         home.mkdir(parents=True, exist_ok=True)
