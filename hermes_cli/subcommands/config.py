@@ -53,6 +53,19 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     )
     config_unset.add_argument("key", nargs="?", help="Configuration key to remove")
 
+    # config patch
+    config_patch = config_subparsers.add_parser(
+        "patch",
+        help="Structurally modify config with JSON Pointer paths",
+    )
+    config_patch.add_argument("operation", choices=("add", "replace", "remove"))
+    config_patch.add_argument("path", help="JSON Pointer path (e.g., /model/aliases/fast)")
+    config_patch.add_argument(
+        "--json",
+        dest="json_value",
+        help="JSON value required by add and replace",
+    )
+
     # config path
     config_subparsers.add_parser("path", help="Print config file path")
 
