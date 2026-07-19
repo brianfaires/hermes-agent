@@ -8324,12 +8324,18 @@ async def _standalone_send(
                                 thread_id,
                                 info_resp.status,
                             )
+                            return {
+                                "error": "Discord outbound policy could not verify the thread parent"
+                            }
             except Exception:
                 logger.warning(
                     "Discord standalone outbound policy probe failed for thread %s",
                     thread_id,
                     exc_info=True,
                 )
+                return {
+                    "error": "Discord outbound policy could not verify the thread parent"
+                }
 
         allowed_to_send, deny_reason = _discord_outbound_scope_allowed(
             channel_ids,

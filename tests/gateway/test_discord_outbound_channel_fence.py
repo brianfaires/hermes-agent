@@ -7,6 +7,7 @@ from plugins.platforms.discord.adapter import (
     DiscordAdapter,
     _discord_outbound_scope_allowed,
     _discord_policy_sets,
+    _standalone_send,
 )
 
 
@@ -139,3 +140,57 @@ async def test_multi_image_send_obeys_outbound_channel_fence():
     )
 
     channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standalone_thread_send_fails_closed_when_parent_probe_fails(monkeypatch):
+    import aiohttp
+
+    posts = []
+
+    class Response:
+        def __init__(self, status, payload=None):
+            self.status = status
+            self.payload = payload or {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def json(self):
+            return self.payload
+
+        async def text(self):
+            return "failure"
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def get(self, *_args, **_kwargs):
+            return Response(503)
+
+        def post(self, *_args, **_kwargs):
+            posts.append(True)
+            return Response(200, {"id": "message-1"})
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: Session())
+    pconfig = SimpleNamespace(
+        token="test-token",
+        extra={"allowed_channels": "parent-1"},
+    )
+
+    result = await _standalone_send(
+        pconfig,
+        "parent-1",
+        "hello",
+        thread_id="thread-1",
+    )
+
+    assert result == {"error": "Discord outbound policy could not verify the thread parent"}
+    assert posts == []
