@@ -1314,10 +1314,42 @@ class TestDiscordVoiceChannelMethods:
 
         adapter.play_cancellation_ack_in_voice.assert_awaited_once_with(111)
 
-    def test_stt_alias_rewrite_from_mapping_config(self):
+    def test_profile_stt_aliases_load_from_toml(self, tmp_path, monkeypatch):
+        """Discord STT aliases live in a readable profile-local TOML file."""
+        voice_dir = tmp_path / "voice"
+        voice_dir.mkdir()
+        (voice_dir / "commands.toml").write_text(
+            '[stt_aliases]\n'
+            '"/new" = [\n'
+            '  "reset session",\n'
+            '  "new session",\n'
+            ']\n'
+            '"/queue continue" = ["keep going"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from plugins.platforms.discord.adapter import _load_profile_stt_aliases
+
+        assert _load_profile_stt_aliases() == {
+            "/new": ["reset session", "new session"],
+            "/queue continue": ["keep going"],
+        }
+
+    def test_profile_stt_aliases_ignore_malformed_toml(self, tmp_path, monkeypatch):
+        voice_dir = tmp_path / "voice"
+        voice_dir.mkdir()
+        (voice_dir / "commands.toml").write_bytes(b"\xff")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        from plugins.platforms.discord.adapter import _load_profile_stt_aliases
+
+        assert _load_profile_stt_aliases() == {}
+
+    def test_stt_alias_rewrite_from_profile_commands(self):
         """Discord STT aliases are data-driven; no voice commands are hard-coded."""
         adapter = self._make_adapter()
-        adapter.config.extra["stt_aliases"] = {
+        adapter._stt_aliases = {
             "/new": ["reset session", "hard reset"],
             "/queue continue": "keep going",
         }
@@ -1329,24 +1361,17 @@ class TestDiscordVoiceChannelMethods:
 
     def test_stt_alias_rewrite_after_voice_filler_cleanup(self):
         adapter = self._make_adapter()
-        adapter.config.extra["stt_aliases"] = {"/model luna": ["load luna"]}
+        adapter._stt_aliases = {"/model luna": ["load luna"]}
 
         from tools.voice_mode import clean_voice_transcript
 
         assert adapter._rewrite_stt_alias(clean_voice_transcript("Yeah, load ummm luna")) == "/model luna"
 
-    def test_stt_alias_rewrite_from_json_string_config(self):
-        """Support Hermes config set storing dict-like values as strings."""
-        adapter = self._make_adapter()
-        adapter.config.extra["stt_aliases"] = '{"/new": ["new session"]}'
-
-        assert adapter._rewrite_stt_alias("New session.") == "/new"
-
     @pytest.mark.asyncio
     async def test_process_voice_input_applies_stt_alias_before_callback(self):
         """Matched voice aliases should enter the normal message pipeline as target text."""
         adapter = self._make_adapter()
-        adapter.config.extra["stt_aliases"] = {"/new": ["new session"]}
+        adapter._stt_aliases = {"/new": ["new session"]}
         callback = AsyncMock()
         adapter._voice_input_callback = callback
 
