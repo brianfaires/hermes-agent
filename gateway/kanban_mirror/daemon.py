@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -42,7 +44,9 @@ from gateway.kanban_mirror.state import (
     BoardSnapshot,
     Initiative,
     MemberState,
+    active_thread_binding,
     add_member,
+    backfill_legacy_bindings,
     clear_archived,
     connect_mirror,
     create_initiative,
@@ -54,15 +58,212 @@ from gateway.kanban_mirror.state import (
     mark_brief_stale,
     mirror_db_path,
     record_note,
+    resumable_binding_transitions,
     set_archived,
     set_member_seen,
     set_prose,
     set_thread,
 )
 from gateway.kanban_mirror import writer
+from gateway.kanban_mirror.transitions import TransitionReceipt, request_binding_transition, run_binding_transition
+from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
+from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
+from gateway.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
+                                                   reconcile_mirror_state)
 from gateway.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_hash(payload: dict) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _is_quarantined(conn: sqlite3.Connection, thread_id: str | None) -> bool:
+    return bool(thread_id and conn.execute(
+        "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL", (thread_id,)
+    ).fetchone())
+
+
+async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
+                                 conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                 log: list[str]) -> None:
+    """Read live Discord state independently per mapped thread and reconcile it."""
+    rows = conn.execute("SELECT thread_id,starter_message_id FROM mirror_initiatives "
+                        "WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
+    try:
+        forum = await asyncio.to_thread(client.get_channel, cfg.forum_channel_id)
+        tag_names = {str(t.get("id")): str(t.get("name")) for t in forum.get("available_tags", [])}
+    except Exception as exc:
+        logger.warning("kanban mirror: reconciliation forum snapshot unavailable: %s", exc)
+        log.append("reconciliation: PARTIAL forum")
+        tag_names = {}
+        forum_complete = False
+    else:
+        forum_complete = True
+    observed: dict[str, ObservedThread] = {}
+    for row in rows:
+        thread_id, starter_id = str(row["thread_id"]), str(row["starter_message_id"] or "")
+        if not forum_complete:
+            log.append(f"reconciliation: PARTIAL thread={thread_id}")
+            continue
+        try:
+            channel = await asyncio.to_thread(client.get_channel, thread_id)
+            starter = await asyncio.to_thread(client.get_message, thread_id, starter_id)
+            tags = tuple(tag_names[x] for x in channel.get("applied_tags", []) if x in tag_names)
+            payload = {"title": str(channel.get("name") or ""),
+                       "body": str(starter.get("content") or ""), "tags": list(tags)}
+            existing: set[str] = set()
+            message_ids = [str(r[0]) for r in conn.execute(
+                "SELECT transition_message_id FROM mirror_binding_transitions "
+                "WHERE thread_id=? AND transition_message_id IS NOT NULL", (thread_id,))]
+            for message_id in message_ids:
+                try:
+                    await asyncio.to_thread(client.get_message, thread_id, message_id)
+                    existing.add(message_id)
+                except DiscordAPIError as exc:
+                    if exc.status != 404:
+                        raise
+            metadata = channel.get("thread_metadata") or {}
+            observed[thread_id] = ObservedThread(
+                thread_id, starter_id, _canonical_hash(payload), frozenset(existing), payload["title"], tags,
+                bool(metadata.get("archived", channel.get("archived", False))),
+            )
+        except Exception as exc:
+            logger.warning("kanban mirror: reconciliation observation failed for %s: %s", thread_id, exc)
+            log.append(f"reconciliation: PARTIAL thread={thread_id}")
+    state = load_mirror_state(conn)
+    expected: dict[str, ExpectedThread] = {}
+    for initiative in state.values():
+        if initiative.kind != "post" or not initiative.thread_id:
+            continue
+        member_cards = [snapshot.cards[task_id] for task_id in initiative.members if task_id in snapshot.cards]
+        if len(member_cards) != len(initiative.members):
+            continue
+        terminal = bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        expected[initiative.thread_id] = ExpectedThread(
+            post_title(initiative, snapshot), tuple(_tags_for(initiative, snapshot)), terminal,
+        )
+    observed_digest = None; digest_complete = True
+    digest = get_digest(conn)
+    if digest is not None and digest.thread_id and digest.starter_message_id:
+        try:
+            digest_channel = await asyncio.to_thread(client.get_channel, digest.thread_id)
+            digest_message = await asyncio.to_thread(client.get_message, digest.thread_id, digest.starter_message_id)
+            observed_digest = ObservedDigest(str(digest.thread_id), str(digest_message.get("content") or ""),
+                bool(digest_channel.get("pinned") or (int(digest_channel.get("flags") or 0) & 2)))
+        except Exception as exc:
+            logger.warning("kanban mirror: reconciliation digest snapshot unavailable: %s", exc)
+            log.append("reconciliation: PARTIAL digest"); digest_complete = False
+    findings = await asyncio.to_thread(reconcile_mirror_state, conn, observed_threads=observed,
+                                       cards=((cfg.board, task_id) for task_id in snapshot.cards),
+                                       expected_threads=expected, observed_digest=observed_digest,
+                                       digest_observation_complete=digest_complete)
+    quarantine_codes = {"binding.open_count", "binding.card_missing", "binding.mapping_missing",
+                        "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+                        "starter.changed_without_transition_confirmation", "transition.confirmation_missing",
+                        "thread.premature_archive", "digest.thread_mismatch",
+                        "successor.selection_ambiguous"}
+    grouped: dict[str, list] = {}
+    for finding in findings:
+        if finding.code in quarantine_codes:
+            grouped.setdefault(finding.thread_id, []).append(finding)
+    for thread_id, conflicts in grouped.items():
+        row = conn.execute("SELECT quarantined_at FROM mirror_thread_quarantine "
+                           "WHERE thread_id=? AND resolved_at IS NULL", (thread_id,)).fetchone()
+        if row is None:
+            continue
+        quarantined_at = int(row[0])
+        if conn.execute("SELECT 1 FROM mirror_repair_notices WHERE thread_id=? AND quarantined_at=?",
+                        (thread_id, quarantined_at)).fetchone():
+            continue
+        identity = hashlib.sha256("|".join(sorted(f.finding_key for f in conflicts)).encode()).hexdigest()
+        nonce = hashlib.sha256(f"mirror-repair:{thread_id}:{quarantined_at}".encode()).hexdigest()[:25]
+        details = "; ".join(f"{f.code}: {json.dumps(f.evidence, sort_keys=True)}" for f in conflicts)
+        content = ("[Mirror repair notice — non-conversational]\nConflict: " + details +
+                   "\nSafe action: repair Discord/Kanban state without remapping, archiving, or deleting this thread; "
+                   "run a complete scan, then call resolve_thread_quarantine().")
+        try:
+            response = await asyncio.to_thread(client.send_message, thread_id, content=content, nonce=nonce)
+            conn.execute("INSERT OR IGNORE INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
+                         (thread_id, quarantined_at, identity, nonce, str(response.get("id") or ""), int(time.time())))
+            conn.commit()
+            log.append(f"reconciliation: QUARANTINED thread={thread_id}")
+        except Exception as exc:
+            logger.warning("kanban mirror: repair notice failed for %s: %s", thread_id, exc)
+            log.append(f"reconciliation: NOTICE_FAILED thread={thread_id}")
+
+
+class DiscordTransitionPublisher:
+    """Concrete publisher using Discord's durable nonce de-duplication."""
+
+    def __init__(self, client: DiscordClient, cfg: MirrorConfig, conn: sqlite3.Connection | None = None):
+        self.client, self.cfg, self.conn = client, cfg, conn
+
+    def _starter_message_id(self, thread_id: str) -> str:
+        if self.conn is None:
+            return thread_id
+        rows = self.conn.execute(
+            "SELECT starter_message_id FROM mirror_initiatives WHERE thread_id=?", (thread_id,)
+        ).fetchall()
+        if len(rows) != 1 or not str(rows[0][0] or "").strip():
+            raise ValueError("thread does not have one starter message mapping")
+        return str(rows[0][0])
+
+    def publish_transition(self, thread_id: str, payload: dict, *, operation_key: str) -> TransitionReceipt:
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("transition payload requires non-empty content")
+        nonce = hashlib.sha256(operation_key.encode()).hexdigest()[:25]
+        response = self.client.send_message(thread_id, content=content, nonce=nonce)
+        return TransitionReceipt(str(response.get("id") or ""), thread_id, operation_key, _canonical_hash(payload))
+
+    def update_starter(self, thread_id: str, payload: dict) -> None:
+        title, body, tags = payload.get("title"), payload.get("body"), payload.get("tags")
+        if not isinstance(title, str) or not isinstance(body, str) or not isinstance(tags, list):
+            raise ValueError("starter payload requires title, body, and tags")
+        forum = self.client.get_channel(self.cfg.forum_channel_id)
+        lookup, _ = ensure_forum_tags(self.client, forum, [str(tag) for tag in tags])
+        tag_ids = [lookup[str(tag).strip().lower()] for tag in tags if str(tag).strip().lower() in lookup]
+        starter_id = self._starter_message_id(thread_id)
+        self.client.update_message(thread_id, starter_id, content=body)
+        self.client.update_thread(thread_id, name=title, tag_ids=tag_ids)
+
+    def read_starter(self, thread_id: str) -> dict:
+        thread = self.client.get_channel(thread_id)
+        message = self.client.get_message(thread_id, self._starter_message_id(thread_id))
+        forum = self.client.get_channel(self.cfg.forum_channel_id)
+        names = {str(tag.get("id")): str(tag.get("name")) for tag in forum.get("available_tags", [])}
+        return {"title": str(thread.get("name") or ""), "body": str(message.get("content") or ""),
+                "tags": [names[tag] for tag in thread.get("applied_tags", []) if tag in names]}
+
+
+def _starter_identity_authorized(conn: sqlite3.Connection, thread_id: str, represented_task_id: str | None) -> bool:
+    """Fail closed unless a planner edit still represents the confirmed epoch."""
+    binding = active_thread_binding(conn, thread_id)
+    return binding is not None and represented_task_id == binding.task_id
+
+
+async def _recover_binding_transitions(cfg: MirrorConfig, client: DiscordClient | None,
+                                       conn: sqlite3.Connection, log: list[str]) -> None:
+    if not cfg.binding_transitions_enabled:
+        return
+    await asyncio.to_thread(backfill_legacy_bindings, conn, cfg.board)
+    if client is None:
+        return
+    publisher = DiscordTransitionPublisher(client, cfg, conn)
+    for transition in await asyncio.to_thread(resumable_binding_transitions, conn):
+        if cfg.reconciliation_enabled and _is_quarantined(conn, transition.thread_id):
+            log.append(f"binding_transition: BLOCKED quarantined thread={transition.thread_id}")
+            continue
+        await asyncio.to_thread(
+            run_binding_transition, conn, publisher, transition_key=transition.transition_key,
+            thread_id=transition.thread_id, old_card_metadata=transition.old_card_metadata,
+            new_card_metadata=transition.new_card_metadata, transition_payload=transition.transition_payload,
+            starter_payload=transition.starter_payload,
+        )
+        log.append(f"binding_transition: resumed {transition.transition_key}")
 
 # Prose-pass rate limiting + per-initiative backoff on write_prose failures.
 _LAST_PROSE_PASS: float = 0.0
@@ -474,6 +675,15 @@ async def _do_edit_post(cfg: MirrorConfig, client: DiscordClient | None, conn: s
     log.append(f"edit_post: {initiative_id} {title!r} tags={tags}")
     if dry_run or client is None or initiative is None or not initiative.thread_id:
         return
+    if cfg.binding_transitions_enabled:
+        represented = pointed_card_id(initiative, snapshot)
+        authorized = await asyncio.to_thread(
+            _starter_identity_authorized, conn, initiative.thread_id, represented
+        )
+        if not authorized:
+            log.append(f"edit_post: BLOCKED identity replacement for {initiative_id}")
+            logger.error("kanban mirror: blocked direct starter identity replacement for %s", initiative_id)
+            return
     try:
         await _publish_edit(client, cfg, initiative, title, body, tags)
     except Exception as exc:
@@ -855,6 +1065,8 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
     _LAST_PROSE_PASS = now_mono
 
     for initiative in state.values():
+        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
+            continue
         if initiative.kind != "post" or initiative.archived_at is not None:
             continue
         if not initiative.brief_stale or not initiative.thread_id:
@@ -895,6 +1107,14 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
         log.append(f"edit_post(prose): {initiative.id} {title!r}")
         if client is None:
             continue
+        if cfg.binding_transitions_enabled:
+            represented = pointed_card_id(refreshed, snapshot)
+            authorized = await asyncio.to_thread(
+                _starter_identity_authorized, conn, refreshed.thread_id, represented
+            )
+            if not authorized:
+                log.append(f"edit_post(prose): BLOCKED identity replacement for {initiative.id}")
+                continue
         try:
             await _publish_edit(client, cfg, refreshed, title, body, tags)
         except Exception as exc:
@@ -973,6 +1193,176 @@ def _append_closed_thread_policy_counts(log: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _terminal_chain(snapshot: BoardSnapshot, task_id: str) -> list[dict]:
+    """Return descendants first and authoritative bound card last."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    def visit(current: str) -> None:
+        if current in seen:
+            return
+        seen.add(current)
+        for child in sorted(snapshot.children.get(current, [])):
+            visit(child)
+        ordered.append(current)
+    visit(task_id)
+    return [{"task_id": cid, "title": snapshot.cards[cid].title,
+             "status": snapshot.cards[cid].status} for cid in ordered if cid in snapshot.cards]
+
+
+def _record_successor_finding(conn: sqlite3.Connection, thread: str, binding: str,
+                              task: str, evidence: dict) -> None:
+    code = "successor.selection_ambiguous"; stamp = int(time.time())
+    identity = json.dumps([code, thread, binding, task], separators=(",", ":"))
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    payload = json.dumps({"thread_id": thread, **evidence}, sort_keys=True, separators=(",", ":"))
+    evidence_hash = hashlib.sha256(payload.encode()).hexdigest()
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES (?,'error',?,?,?,?,?,?,?,?) ON CONFLICT(finding_key) DO UPDATE SET
+        evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,last_seen_at=excluded.last_seen_at,resolved_at=NULL""",
+        (key, code, thread, binding, task, payload, evidence_hash, stamp, stamp))
+    conn.execute("""INSERT INTO mirror_thread_quarantine(thread_id,needs_repair,quarantined_at,updated_at)
+        VALUES (?,1,?,?) ON CONFLICT(thread_id) DO UPDATE SET needs_repair=1,updated_at=excluded.updated_at,
+        quarantined_at=CASE WHEN resolved_at IS NOT NULL THEN excluded.quarantined_at ELSE quarantined_at END,
+        resolved_at=NULL""", (thread, stamp, stamp))
+    conn.commit()
+
+
+def _card_metadata(board: str, card: Any) -> dict:
+    return {"board_slug": board, "task_id": card.id, "title": str(card.title or card.id),
+            "status": str(card.status or ""), "owner": str(card.assignee or ""),
+            "body": str(card.body or ""), "priority": str(card.priority or "")}
+
+
+def _reachable_cycle(snapshot: BoardSnapshot, root: str) -> bool:
+    visiting: set[str] = set(); visited: set[str] = set()
+    def visit(node: str) -> bool:
+        if node in visiting: return True
+        if node in visited: return False
+        visiting.add(node)
+        if any(visit(child) for child in snapshot.children.get(node, ())): return True
+        visiting.remove(node); visited.add(node); return False
+    return visit(root)
+
+
+async def _initiate_automatic_successors(cfg: MirrorConfig, client: DiscordClient,
+                                         conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                         state: dict[str, Initiative], log: list[str]) -> None:
+    if not cfg.automatic_successor_enabled:
+        return
+    publisher = DiscordTransitionPublisher(client, cfg, conn)
+    mapped = {str(r[0]): (str(r[1]), str(r[2] or "")) for r in conn.execute(
+        "SELECT m.task_id,m.initiative_id,i.thread_id FROM mirror_members m JOIN mirror_initiatives i ON i.id=m.initiative_id")}
+    for initiative in state.values():
+        if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
+            continue
+        binding = active_thread_binding(conn, initiative.thread_id)
+        current = snapshot.cards.get(binding.task_id) if binding else None
+        if binding is None or current is None or not is_terminal(str(current.status or "")):
+            continue
+        children = sorted(set(snapshot.children.get(current.id, ())))
+        descendants = [x["task_id"] for x in _terminal_chain(snapshot, current.id)[:-1]
+                       if not is_terminal(str(x["status"] or ""))]
+        eligible: list[str] = []; rejected: dict[str, list[str]] = {}
+        cycle = _reachable_cycle(snapshot, current.id)
+        for child_id in children:
+            child = snapshot.cards.get(child_id); why: list[str] = []
+            if child is None: why.append("card_missing")
+            else:
+                if is_terminal(str(child.status or "")): why.append("terminal")
+                parents = sorted(set(snapshot.parents.get(child_id, ())))
+                if current.id not in parents: why.append("edge_inconsistent")
+                if any(p not in snapshot.cards or not is_terminal(str(snapshot.cards[p].status or "")) for p in parents):
+                    why.append("parents_not_terminal")
+                if not str(child.assignee or "").strip(): why.append("owner_missing")
+                membership = mapped.get(child_id)
+                if membership: why.append("already_mapped" if membership[1] == initiative.thread_id else "cross_thread_mapping")
+                if len(initiative.members) != 1 or current.id not in initiative.members: why.append("ambiguous_membership")
+            if child is not None and not why: eligible.append(child_id)
+            rejected[child_id] = why
+        if cycle or (descendants and len(eligible) != 1):
+            _record_successor_finding(conn, initiative.thread_id, binding.binding_key, current.id,
+                {"direct_children": children, "eligible": eligible, "rejections": rejected,
+                 "nonterminal_descendants": sorted(descendants), "cycle": cycle})
+            log.append(f"automatic_successor: BLOCKED thread={initiative.thread_id}")
+            continue
+        if len(eligible) != 1:
+            continue
+        # A clean scan resolves the machine finding, but quarantine remains
+        # latched until explicit operator acknowledgement.  Never mutate the
+        # starter/binding in the scan which establishes cleanliness.
+        stamp = int(time.time())
+        conn.execute("""UPDATE mirror_reconciliation_findings SET resolved_at=?,last_seen_at=?
+            WHERE thread_id=? AND code='successor.selection_ambiguous' AND resolved_at IS NULL""",
+            (stamp, stamp, initiative.thread_id))
+        conn.commit()
+        if _is_quarantined(conn, initiative.thread_id):
+            log.append(f"automatic_successor: BLOCKED quarantined thread={initiative.thread_id}")
+            continue
+        successor = snapshot.cards[eligible[0]]
+        advanced = Initiative(initiative.id, str(successor.title or successor.id), initiative.kind,
+            initiative.thread_id, initiative.starter_message_id, None, None, {}, initiative.published_hash,
+            True, None, None, initiative.created_at, int(time.time()),
+            {successor.id: MemberState(successor.id, None, None)})
+        starter = {"title": post_title(advanced, snapshot),
+                   "body": render_post(advanced, snapshot, cfg.max_post_chars, int(time.time())),
+                   "tags": list(_tags_for(advanced, snapshot))}
+        key = f"auto:{binding.binding_key}:{successor.id}"
+        note = {"content": f"Work advanced from **{current.title or current.id}** (`{current.id}`) to **{successor.title or successor.id}** (`{successor.id}`)."}
+        await asyncio.to_thread(request_binding_transition, conn, publisher, transition_key=key,
+            thread_id=initiative.thread_id, old_card_metadata=_card_metadata(cfg.board, current),
+            successor_card_metadata=_card_metadata(cfg.board, successor), transition_payload=note,
+            frozen_starter_payload=starter)
+        log.append(f"automatic_successor: {current.id} -> {successor.id}")
+
+
+async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
+                                      conn: sqlite3.Connection, snapshot: BoardSnapshot,
+                                      state: dict[str, Initiative], log: list[str]) -> None:
+    publisher = DiscordLifecyclePublisher(client, cfg, conn)
+    for initiative in state.values():
+        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
+            continue
+        if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
+            continue
+        binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
+        if binding is None:
+            continue
+        chain = _terminal_chain(snapshot, binding.task_id)
+        # An absent card is ambiguity, not completion.
+        if not chain or chain[-1]["task_id"] != binding.task_id:
+            continue
+        # Dependency descendants are continuations, not containment.
+        if any(not is_terminal(str(item["status"] or "")) for item in chain[:-1]):
+            continue
+        try:
+            activity = await _latest_thread_activity_ts(client, initiative.thread_id)
+            if activity is None:
+                log.append(f"terminal_lifecycle: SKIPPED {initiative.id} (latest activity unknown)")
+                continue
+            outcomes = [{"task_id": cid, "outcome": str(snapshot.cards[cid].result or "completed")}
+                        for cid in [x["task_id"] for x in chain] if cid in snapshot.cards]
+            starts = [str(snapshot.cards[x["task_id"]].created_at) for x in chain if snapshot.cards[x["task_id"]].created_at]
+            ends = [str(snapshot.cards[x["task_id"]].completed_at) for x in chain if snapshot.cards[x["task_id"]].completed_at]
+            life = await asyncio.to_thread(
+                run_terminal_lifecycle, conn, publisher,
+                lifecycle_key=f"terminal:{binding.binding_key}", thread_id=initiative.thread_id,
+                card_chain=chain, outcomes=outcomes,
+                owners=sorted({str(snapshot.cards[x["task_id"]].assignee) for x in chain if snapshot.cards[x["task_id"]].assignee}),
+                date_range={"start": min(starts) if starts else None, "end": max(ends) if ends else None},
+                thread_link=f"https://discord.com/channels/{cfg.guild_id}/{initiative.thread_id}",
+                idle_seconds=max(0, int(cfg.done_thread_archive_idle_minutes * 60)),
+                observed_activity_at=int(activity), clock=lambda: int(time.time()),
+            )
+            if life is not None:
+                log.append(f"terminal_lifecycle: {initiative.id} state={life.state}")
+                if life.state == "archived":
+                    await asyncio.to_thread(set_archived, conn, initiative.id, int(time.time()))
+        except Exception:
+            logger.exception("kanban mirror: terminal lifecycle failed closed for %s", initiative.id)
+            log.append(f"terminal_lifecycle: FAILED {initiative.id}")
+
+
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
                dry_run: bool = False, allow_llm: bool = True) -> list[str]:
     log: list[str] = []
@@ -981,16 +1371,41 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
     except sqlite3.OperationalError as exc:
         logger.warning("kanban mirror: board snapshot unavailable (locked/busy?): %s", exc)
         return log
+    if cfg.reconciliation_enabled and not dry_run and client is not None:
+        try:
+            await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)
+        except Exception:
+            logger.exception("kanban mirror: live reconciliation failed closed")
+            log.append("reconciliation: FAILED")
+    if not dry_run:
+        try:
+            await _recover_binding_transitions(cfg, client, mirror_conn, log)
+        except Exception:
+            logger.exception("kanban mirror: binding transition recovery failed closed")
+            log.append("binding_transition: recovery failed")
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
+    if not dry_run and client is not None and cfg.automatic_successor_enabled:
+        try:
+            await _initiate_automatic_successors(cfg, client, mirror_conn, snapshot, state, log)
+        except Exception:
+            logger.exception("kanban mirror: automatic successor initiation failed closed")
+            log.append("automatic_successor: FAILED")
+        state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     digest = await asyncio.to_thread(get_digest, mirror_conn)
     note_keys = await asyncio.to_thread(load_note_keys, mirror_conn)
-    if not dry_run and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log):
+    if (not dry_run and not cfg.reconciliation_enabled
+            and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log)):
         state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     now = int(time.time())
     ops = plan(snapshot, state, digest, note_keys, cfg, now)
 
     for op in ops:
+        initiative = state.get(str(op.data.get("initiative_id") or ""))
+        if (cfg.reconciliation_enabled and initiative is not None
+                and _is_quarantined(mirror_conn, initiative.thread_id)):
+            log.append(f"{op.kind}: BLOCKED quarantined thread={initiative.thread_id}")
+            continue
         try:
             if op.kind == "curate":
                 await _do_curate(cfg, client, mirror_conn, snapshot, state, op, dry_run, allow_llm, log)
@@ -1001,7 +1416,10 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             elif op.kind == "post_note":
                 await _do_post_note(cfg, client, mirror_conn, snapshot, state, op, dry_run, allow_llm, log)
             elif op.kind == "archive_thread":
-                await _do_archive_thread(cfg, client, mirror_conn, snapshot, state, op, dry_run, log)
+                if cfg.terminal_lifecycle_enabled:
+                    log.append(f"archive_thread: DEFERRED {op.data['initiative_id']} (terminal lifecycle)")
+                else:
+                    await _do_archive_thread(cfg, client, mirror_conn, snapshot, state, op, dry_run, log)
             elif op.kind == "ensure_digest":
                 await _do_ensure_digest(cfg, client, mirror_conn, op, dry_run, log)
             elif op.kind == "mark_stale":
@@ -1018,6 +1436,12 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
 
     if allow_llm and not dry_run:
         await _prose_pass(cfg, client, mirror_conn, snapshot, state, log)
+
+    if cfg.terminal_lifecycle_enabled and not dry_run and client is not None:
+        # Run after ordinary operations so transition, note, outbox, and starter
+        # work gets first chance to drain; lifecycle itself rechecks durable guards.
+        state = await asyncio.to_thread(load_mirror_state, mirror_conn)
+        await _resume_terminal_lifecycles(cfg, client, mirror_conn, snapshot, state, log)
 
     _append_closed_thread_policy_counts(log)
     return log
@@ -1235,7 +1659,14 @@ async def run_mirror_daemon(is_running: Callable[[], bool]) -> None:
         return
     client = DiscordClient(token)
     conn = connect_mirror(mirror_db_path(cfg.board))
-    await reconcile(cfg, client, conn)
+    if cfg.reconciliation_enabled:
+        try:
+            snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
+            await _observe_and_reconcile(cfg, client, conn, snapshot, [])
+        except Exception:
+            logger.exception("kanban mirror: startup live reconciliation failed closed")
+    else:
+        await reconcile(cfg, client, conn)
     while is_running():
         try:
             await tick(cfg, client, conn)
