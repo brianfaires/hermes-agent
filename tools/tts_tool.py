@@ -2200,6 +2200,8 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 def text_to_speech_tool(
     text: str,
     output_path: Optional[str] = None,
+    *,
+    voice_settings: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Convert text to speech audio.
@@ -2214,6 +2216,8 @@ def text_to_speech_tool(
     Args:
         text: The text to convert to speech.
         output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
+        voice_settings: Internal per-utterance style/stability/speed overrides.
+            This is intentionally not exposed in the model-facing tool schema.
 
     Returns:
         str: JSON result with success, file_path, and optionally MEDIA tag.
@@ -2221,8 +2225,15 @@ def text_to_speech_tool(
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
-    tts_config = _load_tts_config()
+    tts_config = dict(_load_tts_config())
     provider = _get_provider(tts_config)
+    if isinstance(voice_settings, dict):
+        provider_config = dict(tts_config.get(provider) or {})
+        for key in ("style", "stability", "speed"):
+            value = voice_settings.get(key)
+            if value is not None:
+                provider_config[key] = value
+        tts_config[provider] = provider_config
 
     # User-declared command provider (type: command under tts.providers.<name>)
     # resolves BEFORE the built-in dispatch. Built-in names short-circuit here
