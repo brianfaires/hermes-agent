@@ -62,21 +62,17 @@ class GatewaySlashCommandsMixin:
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
         return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
 
-    def _model_switch_voice_text(
+    def _model_switch_voice_ack(
         self,
         event: MessageEvent,
         *,
         model_name: str,
         command_model_name: str = "",
-    ) -> str:
-        """Return a concise spoken acknowledgement for a successful ``/model`` switch.
+    ):
+        """Resolve a concise spoken acknowledgement for a successful model switch."""
+        from gateway.voice_acknowledgements import VoiceAcknowledgement
 
-        ``discord.voice_fx.model_switch_ack_phrases`` accepts either the legacy
-        phrase list or a mapping keyed by provider-free model name.  Mapping
-        entries may include ``default`` and can use ``[name]`` for the name
-        typed in the command.
-        """
-        adapter = self.adapters.get(event.source.platform) if getattr(self, "adapters", None) else None
+        adapter = self._adapter_for_source(event.source)
         config = getattr(adapter, "_voice_fx_cfg", None)
         raw_phrases = config.get("model_switch_ack_phrases") if isinstance(config, dict) else None
 
@@ -84,6 +80,17 @@ class GatewaySlashCommandsMixin:
             return str(value or "").strip().rsplit("/", 1)[-1]
 
         spoken_name = _provider_free_name(command_model_name) or _provider_free_name(model_name)
+        catalog = vars(adapter).get("_voice_ack_catalog") if adapter is not None else None
+        selected = catalog.choose("model_switch", model_name=model_name) if catalog else None
+        if selected is not None:
+            return VoiceAcknowledgement(
+                text=selected.text.replace("[name]", spoken_name),
+                weight=selected.weight,
+                voice_settings=selected.voice_settings,
+                include_models=selected.include_models,
+                exclude_models=selected.exclude_models,
+            )
+
         if isinstance(raw_phrases, dict):
             configured_names = (_provider_free_name(model_name), _provider_free_name(command_model_name))
             raw_phrases = next(
@@ -99,8 +106,23 @@ class GatewaySlashCommandsMixin:
         if isinstance(raw_phrases, (list, tuple, set)):
             phrases = [str(phrase).strip() for phrase in raw_phrases if str(phrase).strip()]
             if phrases:
-                return random.choice(phrases).replace("[name]", spoken_name)
-        return "Model switched."
+                text = random.choice(phrases).replace("[name]", spoken_name)
+                return VoiceAcknowledgement(text, 1, {}, ("*",), ())
+        return VoiceAcknowledgement("Model switched.", 1, {}, ("*",), ())
+
+    def _model_switch_voice_text(
+        self,
+        event: MessageEvent,
+        *,
+        model_name: str,
+        command_model_name: str = "",
+    ) -> str:
+        """Return only model-switch acknowledgement text for compatibility."""
+        return self._model_switch_voice_ack(
+            event,
+            model_name=model_name,
+            command_model_name=command_model_name,
+        ).text
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
@@ -1537,13 +1559,15 @@ class GatewaySlashCommandsMixin:
             else:
                 lines.append(t("gateway.model.session_only_hint"))
 
+            model_switch_ack = self._model_switch_voice_ack(
+                event,
+                model_name=result.new_model,
+                command_model_name=model_input,
+            )
             return EphemeralReply(
                 "\n".join(lines),
-                voice_text=self._model_switch_voice_text(
-                    event,
-                    model_name=result.new_model,
-                    command_model_name=model_input,
-                ),
+                voice_text=model_switch_ack.text,
+                voice_settings=model_switch_ack.voice_settings,
             )
 
         # Expensive-model confirmation gate (typed /model <name> path).
