@@ -680,16 +680,24 @@ Hermes Agent supports Discord voice messages:
 - **Discord voice channels**: Hermes can also join a voice channel, listen to users speaking, and talk back in the channel.
 - **STT aliases**: Discord voice-channel transcripts can be exact-matched and rewritten before dispatch, so spoken phrases like "new session" can trigger `/new` without hard-coding voice commands.
 
-Configure aliases in `config.yaml` under `discord.stt_aliases`:
+Configure aliases in the profile-local `voice/commands.toml` file (for the
+default profile, `~/.hermes/voice/commands.toml`):
 
-```yaml
-discord:
-  stt_aliases:
-    /new: [reset session, new session, start over]
-    /queue continue: keep going
+```toml
+[stt_aliases]
+"/new" = [
+  "reset session",
+  "new session",
+  "start over",
+]
+"/queue continue" = [
+  "keep going",
+]
 ```
 
-Each key is the replacement text; its value is one spoken phrase or a list of phrases.
+Each key is the replacement text; its value is one spoken phrase or a list of
+phrases. The catalog is loaded when the Discord adapter starts, so restart the
+gateway after editing it.
 
 Aliases are exact after light normalization: case, punctuation, and repeated spaces are ignored. Partial phrases are not matched; `please reset session` remains normal speech.
 
