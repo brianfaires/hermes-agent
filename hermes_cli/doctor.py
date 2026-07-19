@@ -1325,6 +1325,7 @@ def run_doctor(args):
         # repository. Their venv is a development environment, not a valid
         # target for the user's global `hermes` launcher.
         _is_git_worktree = (PROJECT_ROOT / ".git").is_file()
+        _repair_location = " from the primary checkout" if _is_git_worktree else ""
         if _is_git_worktree:
             check_warn(
                 "Git worktree detected",
@@ -1358,13 +1359,11 @@ def run_doctor(args):
                         _cmd_link.symlink_to(_venv_bin)
                         check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
                         fixed_count += 1
-                    elif _is_git_worktree:
+                    else:
                         issues.append(
                             f"Broken symlink at {_cmd_link_display}/hermes — "
-                            "run 'hermes doctor --fix' from the primary checkout"
+                            f"run 'hermes doctor --fix'{_repair_location}"
                         )
-                    else:
-                        issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
             elif _cmd_link.exists():
                 # It's a regular file, not a symlink — possibly a wrapper script
                 check_ok(f"{_cmd_link_display}/hermes exists (non-symlink)")
@@ -1387,13 +1386,11 @@ def run_doctor(args):
                             "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")"
                         )
                         manual_issues.append(f"Add {_cmd_link_display} to your PATH")
-                elif _is_git_worktree:
+                else:
                     issues.append(
                         f"Missing {_cmd_link_display}/hermes symlink — "
-                        "run 'hermes doctor --fix' from the primary checkout"
+                        f"run 'hermes doctor --fix'{_repair_location}"
                     )
-                else:
-                    issues.append(f"Missing {_cmd_link_display}/hermes symlink — run 'hermes doctor --fix'")
 
     _section("External Tools")
     # Git
