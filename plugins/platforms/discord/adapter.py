@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -98,6 +99,23 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
 _DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
 _DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
 _DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _load_profile_stt_aliases() -> Dict[str, Any]:
+    """Load Discord STT aliases from the profile-local voice command catalog."""
+    path = get_hermes_home() / "voice" / "commands.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            aliases = tomllib.load(handle).get("stt_aliases")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not load Discord STT aliases from %s: %s", path, exc)
+        return {}
+    if not isinstance(aliases, dict):
+        logger.warning("Discord STT aliases in %s must be a TOML table", path)
+        return {}
+    return aliases
 
 
 def _discord_config_id_set(raw: Any) -> set[str]:
@@ -243,6 +261,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource
 from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
+from hermes_constants import get_hermes_home
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker, convert_table_to_bullets
 from utils import atomic_json_write, env_float, env_int
@@ -1235,6 +1254,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
         self._voice_ack_catalog = VoiceAcknowledgementCatalog.load()
+        self._stt_aliases = _load_profile_stt_aliases()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -4431,23 +4451,14 @@ class DiscordAdapter(BasePlatformAdapter):
     def _configured_stt_aliases(self) -> Dict[str, str]:
         """Return normalized Discord STT alias phrase -> replacement text.
 
-        Config lives under ``discord.stt_aliases`` and is intentionally
-        data-only, keyed by the replacement text with one or more spoken
-        phrases per entry:
+        Aliases live in ``voice/commands.toml``, keyed by replacement text
+        with one or more spoken phrases per entry:
 
-            discord:
-              stt_aliases:
-                /new: [reset session, new session, start over]
-                /queue continue: keep going
+            [stt_aliases]
+            "/new" = ["reset session", "new session", "start over"]
+            "/queue continue" = ["keep going"]
         """
-        raw = getattr(getattr(self, "config", None), "extra", {}).get("stt_aliases")
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                raw = parsed
+        raw = getattr(self, "_stt_aliases", {})
         if not isinstance(raw, dict):
             return {}
         aliases: Dict[str, str] = {}

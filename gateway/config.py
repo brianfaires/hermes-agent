@@ -1489,7 +1489,6 @@ def load_gateway_config() -> GatewayConfig:
                     for key in (
                         "auto_voice_channel_id",
                         "auto_voice_user_ids",
-                        "stt_aliases",
                     ):
                         if key in platform_cfg:
                             bridged[key] = platform_cfg[key]
