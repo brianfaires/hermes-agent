@@ -1,0 +1,7 @@
+name: hindsight-history
+kind: standalone
+version: "1.0.0"
+description: "Browse reconstructed Hindsight retain and recall activity. Enable with `hermes plugins enable hindsight-history`."
+author: brian
+pip_dependencies:
+  - "hindsight-client>=0.6.1"
