@@ -799,17 +799,17 @@ class TestTranscribeRecording:
 
         assert result == {"success": True, "transcript": "", "filtered": True}
 
-    def test_cleans_spoken_fillers(self):
+    def test_preserves_spoken_fillers(self):
         mock_transcribe = MagicMock(return_value={
             "success": True,
-            "transcript": "Yeah, load ummm luna.",
+            "transcript": "Yeah, quote the word ummm exactly.",
         })
 
         with patch("tools.transcription_tools.transcribe_audio", mock_transcribe):
             from tools.voice_mode import transcribe_recording
             result = transcribe_recording("/tmp/test.wav")
 
-        assert result["transcript"] == "load luna."
+        assert result["transcript"] == "Yeah, quote the word ummm exactly."
 
     def test_filters_whisper_hallucination(self):
         mock_transcribe = MagicMock(return_value={

@@ -1011,9 +1011,6 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
         logger.info("Filtered Whisper hallucination: %r", result["transcript"])
         return {"success": True, "transcript": "", "filtered": True}
 
-    if result.get("success"):
-        result["transcript"] = clean_voice_transcript(result.get("transcript", ""))
-
     if result.get("success") and is_stt_cancellation(result.get("transcript", "")):
         logger.info("Dropped voice transcript after spoken cancellation")
         return {"success": True, "transcript": "", "filtered": True}

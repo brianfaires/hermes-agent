@@ -3164,7 +3164,10 @@ class DiscordAdapter(BasePlatformAdapter):
         aliases = self._configured_stt_aliases()
         if not aliases:
             return transcript
-        replacement = aliases.get(_normalize_discord_stt_alias_text(transcript))
+        from tools.voice_mode import clean_voice_transcript
+
+        candidate = clean_voice_transcript(transcript)
+        replacement = aliases.get(_normalize_discord_stt_alias_text(candidate))
         if not replacement:
             return transcript
         logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
@@ -3597,7 +3600,6 @@ class DiscordAdapter(BasePlatformAdapter):
     ):
         """Convert PCM -> WAV -> STT -> callback."""
         from tools.voice_mode import (
-            clean_voice_transcript,
             is_stt_cancellation,
             is_whisper_hallucination,
             stt_noise_drop_reason,
@@ -3624,9 +3626,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 return
             transcript = result.get("transcript", "").strip()
             if not transcript or is_whisper_hallucination(transcript):
-                return
-            transcript = clean_voice_transcript(transcript)
-            if not transcript:
                 return
             noise_reason = stt_noise_drop_reason(transcript)
             if noise_reason:

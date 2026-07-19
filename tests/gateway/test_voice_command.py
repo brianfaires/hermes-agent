@@ -1363,9 +1363,14 @@ class TestDiscordVoiceChannelMethods:
         adapter = self._make_adapter()
         adapter._stt_aliases = {"/model luna": ["load luna"]}
 
-        from tools.voice_mode import clean_voice_transcript
+        assert adapter._rewrite_stt_alias("Yeah, load ummm luna") == "/model luna"
 
-        assert adapter._rewrite_stt_alias(clean_voice_transcript("Yeah, load ummm luna")) == "/model luna"
+    def test_stt_alias_miss_preserves_fillers(self):
+        adapter = self._make_adapter()
+        adapter._stt_aliases = {"/model luna": ["load luna"]}
+
+        transcript = "Oh, please load um luna"
+        assert adapter._rewrite_stt_alias(transcript) == transcript
 
     @pytest.mark.asyncio
     async def test_process_voice_input_applies_stt_alias_before_callback(self):

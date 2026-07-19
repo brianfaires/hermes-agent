@@ -769,7 +769,7 @@ class GatewaySlashCommandsMixin:
         """Best-effort stop for Discord TTS associated with a ``/stop`` event."""
         if event.source.platform != Platform.DISCORD:
             return False
-        adapter = getattr(self, "adapters", {}).get(Platform.DISCORD)
+        adapter = self._adapter_for_source(event.source)
         if adapter is None or not hasattr(adapter, "stop_voice_playback"):
             return False
         guild_id = self._get_guild_id(event)
