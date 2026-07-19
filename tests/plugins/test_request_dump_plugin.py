@@ -109,6 +109,14 @@ def test_no_data_response_has_no_success_caveat(tmp_path, monkeypatch):
     assert not (tmp_path / "dump-system-prompt").exists()
 
 
+def test_dump_root_is_profile_local(tmp_path, monkeypatch):
+    plugin = load_plugin()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    assert plugin._hermes_home() == tmp_path.resolve()
+    assert plugin._dump_root() == (tmp_path / "dump-system-prompt").resolve()
+
+
 def test_newest_nonempty_full_prompt_tools_headers_permissions_and_collision(tmp_path, monkeypatch):
     plugin = load_plugin()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hermes_constants import get_hermes_home
+
 _LOCK = threading.Lock()
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 _METADATA_COLUMNS = (
@@ -20,7 +22,7 @@ _WRAP_WIDTH = 100
 
 
 def _hermes_home() -> Path:
-    return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().resolve()
+    return get_hermes_home().resolve()
 
 
 def _profile() -> str:
@@ -114,7 +116,7 @@ def _wrap_text(text: str, width: int = _WRAP_WIDTH) -> str:
 
 
 def _dump_root() -> Path:
-    return Path("/home/brian/.hermes/dump-system-prompt").resolve()
+    return (_hermes_home() / "dump-system-prompt").resolve()
 
 
 def _readable_json(value: Any, indent: int = 0) -> str:
