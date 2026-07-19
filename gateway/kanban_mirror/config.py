@@ -48,6 +48,10 @@ class MirrorConfig:
     digest_title: str = "Board"
     done_thread_archive_idle_minutes: float = 60.0
     closed_thread_reply_policy: ClosedThreadPolicy = field(default_factory=ClosedThreadPolicy)
+    binding_transitions_enabled: bool = False
+    terminal_lifecycle_enabled: bool = False
+    reconciliation_enabled: bool = False
+    automatic_successor_enabled: bool = False
 
     def valid(self) -> bool:
         return bool(self.enabled and self.board and self.forum_channel_id)
@@ -64,7 +68,7 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
     cfg = kanban_cfg.get("discord_mirror") if isinstance(kanban_cfg, dict) else {}
     if not isinstance(cfg, dict):
         cfg = {}
-    return MirrorConfig(
+    result = MirrorConfig(
         enabled=bool(cfg.get("enabled", False)),
         board=str(cfg.get("board") or "default").strip(),
         forum_channel_id=str(cfg.get("forum_channel_id") or "").strip(),
@@ -77,4 +81,14 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
         digest_title=str(cfg.get("digest_title") or "Board"),
         done_thread_archive_idle_minutes=float(cfg.get("done_thread_archive_idle_minutes", 60.0)),
         closed_thread_reply_policy=load_closed_thread_policy(cfg.get("closed_thread_reply_policy")),
+        binding_transitions_enabled=bool(cfg.get("binding_transitions_enabled", False)),
+        terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
+        reconciliation_enabled=bool(cfg.get("reconciliation_enabled", False)),
+        automatic_successor_enabled=bool(cfg.get("automatic_successor_enabled", False)),
     )
+    if (result.reconciliation_enabled or result.terminal_lifecycle_enabled or result.automatic_successor_enabled) and not result.binding_transitions_enabled:
+        raise ValueError(
+            "kanban.discord_mirror binding_transitions_enabled is required when "
+            "reconciliation_enabled, terminal_lifecycle_enabled, or automatic_successor_enabled is enabled"
+        )
+    return result

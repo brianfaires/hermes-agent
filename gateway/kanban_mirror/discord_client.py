@@ -290,8 +290,10 @@ class DiscordClient:
         resp = self.request("POST", "/users/@me/channels", {"recipient_id": str(user_id)}, expected={200})
         return resp.data or {}
 
-    def send_message(self, channel_id: str, *, content: str) -> dict[str, Any]:
+    def send_message(self, channel_id: str, *, content: str, nonce: str | None = None) -> dict[str, Any]:
         payload = {"content": content, "allowed_mentions": {"parse": []}}
+        if nonce is not None:
+            payload.update({"nonce": nonce, "enforce_nonce": True})
         resp = self.request("POST", f"/channels/{channel_id}/messages", payload, expected={200, 201})
         return resp.data or {}
 
