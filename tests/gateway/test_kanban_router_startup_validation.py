@@ -145,3 +145,19 @@ def test_daemon_advanced_gates_require_binding_backfill_and_legacy_remains_off()
         load_mirror_config(raw)
     raw["kanban"]["discord_mirror"]["binding_transitions_enabled"] = True
     assert load_mirror_config(raw).reconciliation_enabled
+
+
+def test_disabled_mirror_ignores_malformed_optional_numbers():
+    config = load_mirror_config({
+        "kanban": {
+            "discord_mirror": {
+                "enabled": False,
+                "poll_seconds": "not-a-number",
+                "max_post_chars": None,
+            }
+        }
+    })
+
+    assert config.enabled is False
+    assert config.poll_seconds == 10.0
+    assert config.max_post_chars == 3800

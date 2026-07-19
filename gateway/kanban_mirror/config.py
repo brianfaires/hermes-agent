@@ -28,6 +28,14 @@ from hermes_constants import get_hermes_home
 from gateway.kanban_mirror.closed_thread_policy import ClosedThreadPolicy, load_closed_thread_policy
 
 
+def _number(value, default, converter):
+    """Parse an optional numeric setting without breaking gateway startup."""
+    try:
+        return converter(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _default_token_env_path() -> Path:
     # Resolved at load time so a named-profile gateway reads its own .env,
     # not the default profile's.
@@ -74,12 +82,14 @@ def load_mirror_config(raw_config: dict | None = None) -> MirrorConfig:
         forum_channel_id=str(cfg.get("forum_channel_id") or "").strip(),
         guild_id=str(cfg.get("guild_id") or "").strip(),
         token_env_path=Path(str(cfg.get("token_env_path") or _default_token_env_path())).expanduser(),
-        poll_seconds=float(cfg.get("poll_seconds", 10.0)),
-        prose_interval_seconds=float(cfg.get("prose_interval_seconds", 60.0)),
-        max_post_chars=int(cfg.get("max_post_chars", 3800)),
-        note_char_limit=int(cfg.get("note_char_limit", 900)),
+        poll_seconds=_number(cfg.get("poll_seconds", 10.0), 10.0, float),
+        prose_interval_seconds=_number(cfg.get("prose_interval_seconds", 60.0), 60.0, float),
+        max_post_chars=_number(cfg.get("max_post_chars", 3800), 3800, int),
+        note_char_limit=_number(cfg.get("note_char_limit", 900), 900, int),
         digest_title=str(cfg.get("digest_title") or "Board"),
-        done_thread_archive_idle_minutes=float(cfg.get("done_thread_archive_idle_minutes", 60.0)),
+        done_thread_archive_idle_minutes=_number(
+            cfg.get("done_thread_archive_idle_minutes", 60.0), 60.0, float
+        ),
         closed_thread_reply_policy=load_closed_thread_policy(cfg.get("closed_thread_reply_policy")),
         binding_transitions_enabled=bool(cfg.get("binding_transitions_enabled", False)),
         terminal_lifecycle_enabled=bool(cfg.get("terminal_lifecycle_enabled", False)),
