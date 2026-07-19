@@ -576,6 +576,7 @@ def write_runtime_status(
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    kanban_mirror: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
@@ -601,6 +602,12 @@ def write_runtime_status(
         # for a single-profile gateway. Lets `hermes status` show per-profile
         # coverage without a second probe.
         payload["served_profiles"] = list(served_profiles or [])
+    if kanban_mirror is not _UNSET:
+        # Content-free metrics are omitted entirely while the feature is off.
+        if kanban_mirror:
+            payload["kanban_mirror"] = dict(kanban_mirror)
+        else:
+            payload.pop("kanban_mirror", None)
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})

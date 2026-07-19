@@ -1474,6 +1474,14 @@ class MessageEvent:
     # from ``text`` so the sender-prefix logic in run.py can operate on the
     # trigger message alone, then prepend this context afterward.
     channel_context: Optional[str] = None
+
+    # Runtime-only outbound identity hint. Discord's Kanban conversation
+    # router uses this to select the target profile's connected adapter.
+    outbound_profile: Optional[str] = None
+    outbound_profiles: tuple[str, ...] = ()
+    correlation_id: Optional[str] = None
+    # Dedicated runtime discriminator; never inferred from prompt/context text.
+    route_marker: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
