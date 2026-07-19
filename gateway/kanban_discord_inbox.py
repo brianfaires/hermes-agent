@@ -7,15 +7,24 @@ normal chat dispatcher out of those messages.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import sqlite3
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from hermes_cli import kanban_db as kb
 
+from gateway.kanban_mirror.conversation_log import (
+    freeze_log_delivery,
+    mark_log_delivery,
+    parse_log_command,
+    record_conversation_event,
+    resolve_log_targets,
+)
 from gateway.kanban_mirror.state import (
     connect_mirror,
     ensure_receipts,
@@ -31,6 +40,7 @@ from gateway.kanban_mirror.state import (
 
 logger = logging.getLogger(__name__)
 
+_UNRESOLVED_CHANNEL = object()
 _SUPPORTED_ACTIONS = {"comment", "block", "unblock"}
 _COMMAND_USAGE = "Usage: comment <text>, block <reason>, or unblock"
 
@@ -44,6 +54,11 @@ class KanbanReplyInboxConfig:
     ack: bool = True
     board_slug: str | None = None
     allow_thread_level_messages: bool = False
+    # Independent of legacy reply ingestion and deliberately off by default.
+    conversation_log_enabled: bool = False
+    conversation_router_enabled: bool = False
+    conversation_router_ingress_bot_id: str | None = None
+    profile_bot_user_ids: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,21 @@ class DiscordReplyContext:
     content: str
     reply_to_message_id: str | None = None
     reply_to_text: str | None = None
+    mentioned_user_ids: tuple[str, ...] = ()
+    replied_to_author_id: str | None = None
+    replied_to_author_is_bot: bool = False
+    discord_created_at: int | None = None
+    message_link: str | None = None
+    attachments: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
+class ProfileRoute:
+    profile: str | None
+    basis: Literal["explicit_mention", "reply_to_profile_bot", "card_owner", "none"]
+    mentioned_profiles: tuple[str, ...] = ()
+    profiles: tuple[str, ...] = ()
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +107,7 @@ class DiscordReactionContext:
     message_id: str
     author_id: str | None
     author_label: str
+    forum_channel_id: str
     thread_id: str
     emoji: str
     intent: str
@@ -94,6 +125,11 @@ class KanbanReplyInboxResult:
     owner_instruction_id: int | None = None
     owner_instruction_status: str | None = None
     ack: str | None = None
+    route_profile: str | None = None
+    route_profiles: tuple[str, ...] = ()
+    correlation_id: str | None = None
+    card_context: str | None = None
+    ingress_bot_id: str | None = None
 
 
 _REACTION_INTENTS: dict[str, ParsedKanbanReaction] = {
@@ -120,6 +156,29 @@ _TEXT_ACTION_ALIASES: dict[str, str] = {
     "review": "🧐",
     "expand": "🤔",
 }
+
+
+_DIRECTIVE_EMOJIS: dict[str, str] = {
+    "approve": "✅",
+    "pause": "⏸",
+    "close": "🗑",
+    "watch": "👀",
+    "rerun": "🔁",
+    "reject": "🚫",
+    "context": "❔",
+    "review": "🧐",
+    "expand": "🤔",
+}
+
+
+def directive_for_text(text: str) -> ParsedKanbanReaction | None:
+    """Resolve a canonical ``!directive`` token; unknown commands are conversation."""
+    body = (text or "").strip()
+    if not body.startswith("!"):
+        return None
+    token = body.split(None, 1)[0][1:].casefold()
+    emoji = _DIRECTIVE_EMOJIS.get(token)
+    return _REACTION_INTENTS.get(emoji) if emoji is not None else None
 
 
 def text_action_for_command(text: str) -> ParsedKanbanReaction | None:
@@ -159,13 +218,21 @@ def _reaction_author_label(payload: Any) -> str:
     return user_id or "unknown Discord user"
 
 
-def context_from_discord_reaction(payload: Any) -> DiscordReactionContext | None:
+def context_from_discord_reaction(
+    payload: Any, *, resolved_channel: Any = _UNRESOLVED_CHANNEL
+) -> DiscordReactionContext | None:
     thread_id = str(getattr(payload, "channel_id", "") or "").strip()
     message_id = str(getattr(payload, "message_id", "") or "").strip()
     emoji_raw = str(getattr(getattr(payload, "emoji", None), "name", "") or "").strip()
     reaction = reaction_intent_for_emoji(emoji_raw)
     if not thread_id or not message_id or reaction is None:
         return None
+    channel = (
+        getattr(payload, "channel", None)
+        if resolved_channel is _UNRESOLVED_CHANNEL
+        else resolved_channel
+    )
+    forum_channel_id = str(getattr(channel, "parent_id", "") or "").strip()
     author_id = str(getattr(payload, "user_id", "") or "").strip() or None
     reaction_key = f"reaction:{thread_id}:{message_id}:{author_id or 'unknown'}:{_normalize_emoji(emoji_raw)}"
     return DiscordReactionContext(
@@ -173,6 +240,7 @@ def context_from_discord_reaction(payload: Any) -> DiscordReactionContext | None
         message_id=message_id,
         author_id=author_id,
         author_label=_reaction_author_label(payload),
+        forum_channel_id=forum_channel_id,
         thread_id=thread_id,
         emoji=reaction.emoji,
         intent=reaction.intent,
@@ -194,6 +262,24 @@ def _as_id_set(value: Any) -> frozenset[str]:
     if isinstance(value, (list, tuple, set)):
         return frozenset(str(v).strip() for v in value if str(v).strip())
     return frozenset(part.strip() for part in str(value).split(",") if part.strip())
+
+
+def _as_profile_bot_pairs(value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ValueError("profile_bot_user_ids must be a mapping")
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    pairs: list[tuple[str, str]] = []
+    for raw_bot_id, raw_profile in value.items():
+        bot_id = str(raw_bot_id or "").strip()
+        profile = normalize_profile_name(str(raw_profile or ""))
+        if not bot_id.isdigit():
+            raise ValueError("profile bot user IDs must be numeric")
+        validate_profile_name(profile)
+        pairs.append((bot_id, profile))
+    return tuple(sorted(pairs))
 
 
 def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxConfig:
@@ -219,7 +305,58 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
         ack=_as_bool(inbox_cfg.get("ack"), True),
         board_slug=(str(inbox_cfg.get("board_slug")).strip() or None) if inbox_cfg.get("board_slug") is not None else None,
         allow_thread_level_messages=_as_bool(inbox_cfg.get("allow_thread_level_messages"), False),
+        conversation_log_enabled=_as_bool(inbox_cfg.get("conversation_log_enabled"), False),
+        conversation_router_enabled=_as_bool(inbox_cfg.get("conversation_router_enabled"), False),
+        conversation_router_ingress_bot_id=(
+            str(inbox_cfg.get("conversation_router_ingress_bot_id") or "").strip() or None
+        ),
+        profile_bot_user_ids=_as_profile_bot_pairs(inbox_cfg.get("profile_bot_user_ids")),
     )
+
+
+def validate_router_config(cfg: KanbanReplyInboxConfig, *, multiplex_profiles: bool,
+                           profile_exists_fn=None, mirror_config=None) -> str | None:
+    """Return the ingress profile or raise an actionable, secret-free error."""
+    if not (cfg.enabled and cfg.conversation_router_enabled):
+        return None
+    errors: list[str] = []
+    if not multiplex_profiles:
+        errors.append("gateway.multiplex_profiles must be enabled")
+    if not cfg.conversation_router_ingress_bot_id:
+        errors.append("conversation_router_ingress_bot_id is required")
+    elif not cfg.conversation_router_ingress_bot_id.isdigit():
+        errors.append("conversation_router_ingress_bot_id must be numeric")
+    if not cfg.board_slug:
+        errors.append("board_slug is required")
+    if not cfg.forum_channel_ids:
+        errors.append("forum_channel_ids must contain at least one Forum")
+    pairs = tuple(cfg.profile_bot_user_ids)
+    bot_ids = [bot_id for bot_id, _ in pairs]
+    profiles = [profile for _, profile in pairs]
+    if not pairs:
+        errors.append("profile_bot_user_ids must map every router bot to a profile")
+    if len(bot_ids) != len(set(bot_ids)):
+        errors.append("profile_bot_user_ids contains duplicate bot IDs")
+    if len(profiles) != len(set(profiles)):
+        errors.append("profile_bot_user_ids contains duplicate profiles")
+    if profile_exists_fn is None:
+        from hermes_cli.profiles import profile_exists as profile_exists_fn
+    missing = sorted({profile for profile in profiles if not profile_exists_fn(profile)})
+    if missing:
+        errors.append("mapped profiles do not exist: " + ", ".join(missing))
+    ingress_matches = [profile for bot_id, profile in pairs
+                       if bot_id == cfg.conversation_router_ingress_bot_id]
+    if cfg.conversation_router_ingress_bot_id and not ingress_matches:
+        errors.append("ingress bot ID must be present in profile_bot_user_ids")
+    if mirror_config is not None and getattr(mirror_config, "enabled", False):
+        if str(getattr(mirror_config, "board", "")) != cfg.board_slug:
+            errors.append("router board_slug must match kanban.discord_mirror.board")
+        forum = str(getattr(mirror_config, "forum_channel_id", ""))
+        if forum not in cfg.forum_channel_ids:
+            errors.append("router Forums must include kanban.discord_mirror.forum_channel_id")
+    if errors:
+        raise ValueError("Discord conversation router configuration invalid: " + "; ".join(errors))
+    return ingress_matches[0]
 
 
 def parse_instruction(text: str, *, config: KanbanReplyInboxConfig | None = None) -> ParsedKanbanInstruction:
@@ -415,7 +552,7 @@ def handle_reaction(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
 
     board_slug = cfg.board_slug or "default"
-    resolved = resolve_thread_task(mirror_db_path(board_slug), forum_channel_id="", thread_id=ctx.thread_id)
+    resolved = resolve_thread_task(mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id)
     if resolved is None:
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
 
@@ -434,19 +571,64 @@ def handle_reaction(
         task = kb.get_task(conn, task_id)
         if task is None:
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+        target_assignee = task.assignee or "unassigned"
+        if cfg.conversation_router_enabled:
+            directive = ParsedKanbanReaction(ctx.emoji, ctx.intent, ctx.meaning)
+            turn_ctx = DiscordReplyContext(
+                message_id=ctx.reaction_key, author_id=ctx.author_id,
+                author_label=ctx.author_label, forum_channel_id=ctx.forum_channel_id,
+                thread_id=ctx.thread_id,
+                content=f"{ctx.emoji} {ctx.intent} (reaction to Discord message {ctx.message_id})",
+                reply_to_message_id=ctx.message_id,
+            )
+            event = record_conversation_event(
+                mirror_conn, discord_message_id=ctx.reaction_key,
+                thread_id=ctx.thread_id, binding_key=None,
+                legacy_binding_key=task_id, event_class="directive.user",
+                author_label=ctx.author_label, author_id=ctx.author_id,
+                content=turn_ctx.content, replied_to_message_id=ctx.message_id,
+            )
+            route = resolve_profile_route(turn_ctx, owner=str(target_assignee), config=cfg)
+            result = _routed_turn_result(
+                ctx=turn_ctx, task_id=task_id, board_slug=resolved_board_slug,
+                event_id=event.id, route=route,
+                ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                directive=directive,
+            )
+            return KanbanReplyInboxResult(
+                **{**result.__dict__, "action": f"reaction:{ctx.intent}"}
+            )
+        if cfg.conversation_router_enabled:
+            try:
+                from hermes_cli.profiles import normalize_profile_name, profile_exists
+                target_assignee = normalize_profile_name(target_assignee)
+                if not profile_exists(target_assignee):
+                    raise ValueError("profile does not exist")
+            except Exception:
+                mirror_conn.rollback()
+                return KanbanReplyInboxResult(
+                    consumed=True,
+                    reason="invalid_profile",
+                    task_id=task_id,
+                    action=f"reaction:{ctx.intent}",
+                    ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                )
         generation = reaction_generation(mirror_conn, ctx.reaction_key)
         source_key = (
             ctx.reaction_key
             if generation == 0
             else f"{ctx.reaction_key}:generation:{generation}"
         )
+        reaction_source = (
+            "discord_router_reaction" if cfg.conversation_router_enabled else "discord_reaction"
+        )
         unresolved = conn.execute(
             """SELECT id,source_key FROM task_owner_instructions
-               WHERE task_id=? AND source='discord_reaction'
+               WHERE task_id=? AND source=?
                  AND status IN ('pending','queued','unroutable')
                  AND (source_key=? OR source_key LIKE ?)
                ORDER BY id DESC LIMIT 1""",
-            (task_id, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
+            (task_id, reaction_source, ctx.reaction_key, f"{ctx.reaction_key}:generation:%"),
         ).fetchone()
         if unresolved is not None:
             source_key = str(unresolved["source_key"])
@@ -455,8 +637,8 @@ def handle_reaction(
             instruction = kb.create_owner_instruction(
                 conn,
                 task_id=task_id,
-                assignee=task.assignee or "unassigned",
-                source="discord_reaction",
+                assignee=target_assignee,
+                source=reaction_source,
                 source_key=source_key,
                 actor=_reaction_author(ctx),
                 body=_reaction_followup_body(ctx, task_id),
@@ -469,11 +651,13 @@ def handle_reaction(
             comment_body = (_reaction_comment_body(ctx, replied_to_comment_id, source_key)
                             + f"\nOwner instruction: #{instruction.id} ({instruction.status})")
             comment_id = kb.add_comment(conn, task_id, author=_reaction_author(ctx), body=comment_body)
-        routed_status = kb.route_owner_instruction(
-            conn, instruction.id,
-            explicit_rerun=ctx.intent == "rerun_request",
-            passive=ctx.intent == "watch",
-        )
+        routed_status = instruction.status
+        if not cfg.conversation_router_enabled:
+            routed_status = kb.route_owner_instruction(
+                conn, instruction.id,
+                explicit_rerun=ctx.intent == "rerun_request",
+                passive=ctx.intent == "watch",
+            )
         instruction = kb.get_owner_instruction(conn, instruction.id)
         assert instruction is not None
         mark_reaction_active(mirror_conn, ctx.reaction_key)
@@ -481,7 +665,7 @@ def handle_reaction(
             mirror_conn,
             discord_message_id=ctx.reaction_key,
             board_slug=resolved_board_slug,
-            forum_channel_id="",
+            forum_channel_id=ctx.forum_channel_id,
             thread_id=ctx.thread_id,
             task_id=task_id,
             author_id=ctx.author_id,
@@ -518,8 +702,10 @@ def _handle_text_action(
     board_slug: str,
     ctx: DiscordReplyContext,
     action: ParsedKanbanReaction,
+    target_profile: str | None = None,
+    action_prefix: str = "text",
 ) -> KanbanReplyInboxResult:
-    source_key = f"text:{ctx.thread_id}:{ctx.message_id}"
+    source_key = f"{action_prefix}:{ctx.thread_id}:{ctx.message_id}"
     ensure_receipts(mirror_conn)
     mirror_conn.execute("BEGIN IMMEDIATE")
     if receipt_exists(mirror_conn, ctx.message_id):
@@ -546,8 +732,8 @@ def _handle_text_action(
     instruction = kb.create_owner_instruction(
         conn,
         task_id=task_id,
-        assignee=task.assignee or "unassigned",
-        source="discord_text_command",
+        assignee=target_profile or task.assignee or "unassigned",
+        source="discord_directive" if action_prefix == "directive" else "discord_text_command",
         source_key=source_key,
         actor=_reply_author(ctx),
         body=body,
@@ -573,11 +759,13 @@ def _handle_text_action(
             "Lifecycle routing: original card (or passive watch)",
         ]),
     )
-    routed_status = kb.route_owner_instruction(
-        conn, instruction.id,
-        explicit_rerun=action.intent == "rerun_request",
-        passive=action.intent == "watch",
-    )
+    routed_status = instruction.status
+    if action_prefix != "directive":
+        routed_status = kb.route_owner_instruction(
+            conn, instruction.id,
+            explicit_rerun=action.intent == "rerun_request",
+            passive=action.intent == "watch",
+        )
     instruction = kb.get_owner_instruction(conn, instruction.id)
     assert instruction is not None
     record_receipt(
@@ -588,20 +776,216 @@ def _handle_text_action(
         thread_id=ctx.thread_id,
         task_id=task_id,
         author_id=ctx.author_id,
-        action=f"text:{action.intent}",
+        action=f"{action_prefix}:{action.intent}",
         replied_to_message_id=ctx.reply_to_message_id,
         replied_to_kanban_comment_id=_find_replied_to_comment_id(ctx.reply_to_message_id, mirror_conn=mirror_conn),
         kanban_comment_id=comment_id,
     )
+    if action_prefix == "directive":
+        record_conversation_event(
+            mirror_conn, discord_message_id=f"{ctx.message_id}:disposition",
+            thread_id=ctx.thread_id, binding_key=None, legacy_binding_key=task_id,
+            event_class="directive.agent_disposition",
+            author_label=target_profile or "agent",
+            content=f"{action.intent}: owner instruction #{instruction.id} ({instruction.status})",
+            replied_to_message_id=ctx.message_id,
+            reply_context=(ctx.content or "").strip(),
+        )
     return KanbanReplyInboxResult(
         consumed=True,
         reason="handled",
         task_id=task_id,
-        action=f"text:{action.intent}",
+        action=f"{action_prefix}:{action.intent}",
         kanban_comment_id=comment_id,
         owner_instruction_id=instruction.id,
         owner_instruction_status=instruction.status,
         ack=f"Recorded owner instruction #{instruction.id} ({routed_status}) on Kanban card {task_id}.",
+    )
+
+
+def _handle_log_command(
+    conn: sqlite3.Connection,
+    mirror_conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    ctx: DiscordReplyContext,
+) -> KanbanReplyInboxResult:
+    """Freeze and deliver one explicit conversation export exactly once."""
+    command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
+    if command is None:  # guarded by caller
+        raise ValueError("not a log command")
+    targets = resolve_log_targets(
+        mirror_conn, command=command, thread_id=ctx.thread_id,
+        legacy_task_id=task_id,
+    )
+    deliveries = []
+    for target in targets:
+        operation_id = "discord-log:" + hashlib.sha256(
+            f"{ctx.message_id}\0{target.task_id}\0{target.binding_key or ''}".encode("utf-8")
+        ).hexdigest()
+        delivery = freeze_log_delivery(
+            mirror_conn, operation_id=operation_id,
+            trigger_discord_message_id=ctx.message_id, thread_id=ctx.thread_id,
+            task_id=target.task_id, command=command,
+            binding_key=target.binding_key,
+            scope_all_to_binding=(command.mode == "all" and target.binding_key is not None),
+        )
+        if delivery is not None:
+            deliveries.append((target, delivery, operation_id))
+    if not deliveries:
+        return KanbanReplyInboxResult(
+            consumed=True, reason="nothing_to_log", task_id=task_id, action="log",
+            ack=f"No unsent conversation found for Kanban card {task_id}.",
+        )
+    if all(delivery.status == "delivered" for _target, delivery, _op in deliveries):
+        return KanbanReplyInboxResult(
+            consumed=True, reason="duplicate", task_id=task_id, action="log",
+            kanban_comment_id=deliveries[-1][1].kanban_comment_id,
+        )
+
+    # Each epoch has its own frozen payload and destination. Mark it delivered
+    # only after Kanban confirms the idempotently marked comment.
+    comment_id = None
+    for target, delivery, operation_id in deliveries:
+        if delivery.status == "delivered":
+            comment_id = delivery.kanban_comment_id
+            continue
+        chunks = mirror_conn.execute(
+            """SELECT * FROM mirror_conversation_delivery_chunks
+               WHERE operation_id=? ORDER BY chunk_index""", (operation_id,),
+        ).fetchall()
+        try:
+            for chunk in chunks:
+                if chunk["status"] == "delivered":
+                    comment_id = int(chunk["kanban_comment_id"])
+                    continue
+                marker = (
+                    f"[discord-log-operation:{operation_id}:"
+                    f"{chunk['chunk_index'] + 1}/{chunk['chunk_count']}]"
+                )
+                comment_id, _created = kb.add_comment_once(
+                    conn, target.task_id, author=_reply_author(ctx),
+                    body=f"{chunk['payload']}\n\n{marker}", idempotency_marker=marker,
+                )
+                mirror_conn.execute(
+                    """UPDATE mirror_conversation_delivery_chunks
+                       SET status='delivered',attempt_count=attempt_count+1,
+                           kanban_comment_id=?,delivered_at=?,last_error=NULL
+                       WHERE operation_id=? AND chunk_index=?""",
+                    (comment_id, int(time.time()), operation_id, chunk["chunk_index"]),
+                )
+                mirror_conn.commit()
+        except Exception as exc:
+            mirror_conn.execute(
+                """UPDATE mirror_conversation_delivery_chunks
+                   SET status='failed',attempt_count=attempt_count+1,last_error=?,next_attempt_at=?
+                   WHERE operation_id=? AND status!='delivered'""",
+                (str(exc), int(time.time()) + 2, operation_id),
+            )
+            mirror_conn.commit()
+            mark_log_delivery(
+                mirror_conn, operation_id=operation_id, status="failed", error=str(exc)
+            )
+            raise
+        # Parent delivery (and therefore its source events) becomes delivered
+        # only after every frozen chunk has a confirmed comment id.
+        mark_log_delivery(
+            mirror_conn, operation_id=operation_id, status="delivered",
+            kanban_comment_id=comment_id,
+        )
+    assert comment_id is not None
+    return KanbanReplyInboxResult(
+        consumed=True, reason="handled", task_id=task_id, action="log",
+        kanban_comment_id=comment_id,
+        ack=f"Logged Discord conversation on Kanban as {len(deliveries)} binding-scoped comment(s).",
+    )
+
+
+def resolve_profile_route(
+    ctx: DiscordReplyContext,
+    *,
+    owner: str | None,
+    config: KanbanReplyInboxConfig,
+) -> ProfileRoute:
+    """Resolve explicit mentions, a replied bot, or the card owner to profiles."""
+    from hermes_cli.profiles import normalize_profile_name, profile_exists
+
+    bot_profiles = dict(config.profile_bot_user_ids)
+    mentioned = tuple(
+        dict.fromkeys(
+            bot_profiles[user_id]
+            for user_id in ctx.mentioned_user_ids
+            if user_id in bot_profiles
+        )
+    )
+    if mentioned:
+        candidates, basis = mentioned, "explicit_mention"
+    elif (
+        ctx.replied_to_author_is_bot
+        and ctx.replied_to_author_id
+        and ctx.replied_to_author_id in bot_profiles
+    ):
+        candidates, basis = (bot_profiles[ctx.replied_to_author_id],), "reply_to_profile_bot"
+    else:
+        candidates = (normalize_profile_name(owner),) if owner else ()
+        basis = "card_owner"
+    profiles = tuple(normalize_profile_name(candidate) for candidate in candidates)
+    if not profiles or any(not profile_exists(candidate) for candidate in profiles):
+        return ProfileRoute(profile=None, basis="none", mentioned_profiles=mentioned, error="invalid_profile")
+    return ProfileRoute(
+        profile=profiles[0],
+        basis=basis,
+        mentioned_profiles=mentioned,
+        profiles=profiles,
+    )
+
+
+def _event_bound_task_id(
+    mirror_conn: sqlite3.Connection, *, thread_id: str, binding_key: str | None,
+    legacy_task_id: str,
+) -> str | None:
+    """Resolve the card captured with an event, retaining epoch-less mirrors."""
+    if binding_key is not None:
+        row = mirror_conn.execute(
+            "SELECT task_id FROM mirror_binding_epochs WHERE thread_id=? AND binding_key=?",
+            (str(thread_id), str(binding_key)),
+        ).fetchone()
+        if row is not None:
+            return str(row["task_id"])
+    epoch_count = mirror_conn.execute(
+        "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?", (str(thread_id),)
+    ).fetchone()[0]
+    return str(legacy_task_id) if not epoch_count else None
+
+
+def _routed_turn_result(*, ctx: DiscordReplyContext, task_id: str, board_slug: str,
+                        event_id: int, route: ProfileRoute,
+                        ingress_bot_id: str | None,
+                        directive: ParsedKanbanReaction | None = None) -> KanbanReplyInboxResult:
+    """Describe an agent turn without mutating the Kanban card."""
+    action = f"directive:{directive.intent}" if directive else "conversation"
+    if route.profile is None or not ingress_bot_id:
+        return KanbanReplyInboxResult(
+            consumed=True, reason=route.error or "ambiguous_owner", task_id=task_id,
+            action=action, owner_instruction_id=event_id, ingress_bot_id=ingress_bot_id,
+        )
+    correlation = "discord:" + hashlib.sha256(
+        f"{ctx.thread_id}\0{ctx.message_id}".encode("utf-8")
+    ).hexdigest()
+    extra = ""
+    if directive:
+        owner_only = directive.intent in {"approve", "pause", "close_request", "rerun_request", "reject"}
+        extra = (f" This is a Discord Kanban directive ({directive.intent}: {directive.meaning})."
+                 " You may accept, refuse, or ask for clarification."
+                 + (" Card mutation is owner-authorized only; advisory targets must not mutate it."
+                    if owner_only else ""))
+    return KanbanReplyInboxResult(
+        consumed=False, reason="conversation_routed", task_id=task_id, action=action,
+        owner_instruction_id=event_id, route_profile=route.profile,
+        route_profiles=route.profiles, correlation_id=correlation,
+        card_context=(f"Kanban card {task_id} (board {board_slug}, target profiles "
+                      f"{', '.join(route.profiles)}, route basis {route.basis}).{extra}"),
+        ingress_bot_id=ingress_bot_id,
     )
 
 
@@ -615,15 +999,56 @@ def handle_reply(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
     if not cfg.forum_channel_ids or ctx.forum_channel_id not in cfg.forum_channel_ids:
         return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
-    if not ctx.reply_to_message_id and not cfg.allow_thread_level_messages:
+    log_command = parse_log_command(ctx.content, replied_to_message_id=ctx.reply_to_message_id)
+    log_enabled = cfg.conversation_log_enabled and log_command is not None
+    if (
+        not ctx.reply_to_message_id
+        and not cfg.allow_thread_level_messages
+        and not log_enabled
+        and not cfg.conversation_router_enabled
+    ):
         return KanbanReplyInboxResult(consumed=False, reason="not_a_reply")
 
     board_slug = cfg.board_slug or "default"
+    mirror_path = mirror_db_path(board_slug)
     resolved = resolve_thread_task(
-        mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
+        mirror_path, forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
     )
 
     if resolved is None:
+        # A known epoch-backed thread can be intentionally unresolved when it
+        # has zero/ambiguous active epochs or is quarantined. Preserve routed
+        # human input with a NULL binding, but do not route it to any card.
+        if cfg.conversation_router_enabled and mirror_path.exists():
+            mirror_conn = connect_mirror(mirror_path)
+            try:
+                epoch_count = mirror_conn.execute(
+                    "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?",
+                    (ctx.thread_id,),
+                ).fetchone()[0]
+                directive = directive_for_text(ctx.content)
+                words = (ctx.content or "").strip().split(None, 1)
+                first_word = words[0].rstrip(":").lower() if words else ""
+                explicit = log_command is not None or first_word in _SUPPORTED_ACTIONS
+                if epoch_count and (directive is not None or not explicit):
+                    event = record_conversation_event(
+                        mirror_conn, discord_message_id=ctx.message_id,
+                        thread_id=ctx.thread_id, binding_key=None,
+                        event_class=("directive.user" if directive else "conversation.human"),
+                        author_label=ctx.author_label, content=ctx.content,
+                        replied_to_message_id=ctx.reply_to_message_id,
+                        author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                        discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                        attachments=ctx.attachments,
+                    )
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable",
+                        action=(f"directive:{directive.intent}" if directive else "conversation"),
+                        owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+            finally:
+                mirror_conn.close()
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
 
     task_id, resolved_board_slug = resolved
@@ -632,7 +1057,104 @@ def handle_reply(
     try:
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
-            text_action = text_action_for_command(ctx.content)
+            directive = directive_for_text(ctx.content) if cfg.conversation_router_enabled else None
+            text_action = (
+                directive
+                if directive is not None
+                else (None if cfg.conversation_router_enabled else text_action_for_command(ctx.content))
+            )
+            words = (ctx.content or "").strip().split(None, 1)
+            first_word = words[0].rstrip(":").lower() if words else ""
+            explicit = log_command is not None or text_action is not None or first_word in _SUPPORTED_ACTIONS
+            if cfg.conversation_router_enabled and directive is not None:
+                event = record_conversation_event(
+                    mirror_conn, discord_message_id=ctx.message_id,
+                    thread_id=ctx.thread_id, binding_key=None,
+                    legacy_binding_key=str(task_id),
+                    event_class="directive.user", author_label=ctx.author_label,
+                    content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                    author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                    discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                    attachments=ctx.attachments,
+                )
+                event_task_id = _event_bound_task_id(
+                    mirror_conn, thread_id=ctx.thread_id,
+                    binding_key=event.binding_key, legacy_task_id=str(task_id),
+                )
+                if event_task_id is None:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable",
+                        action=f"directive:{directive.intent}", owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+                task_id = event_task_id
+                task = kb.get_task(conn, str(task_id))
+                owner = str(getattr(task, "assignee", "") or "") if task else ""
+                route = resolve_profile_route(ctx, owner=owner, config=cfg)
+                return _routed_turn_result(
+                    ctx=ctx, task_id=str(task_id), board_slug=resolved_board_slug,
+                    event_id=event.id, route=route,
+                    ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    directive=directive,
+                )
+            if cfg.conversation_router_enabled and not explicit:
+                event = record_conversation_event(
+                    mirror_conn, discord_message_id=ctx.message_id,
+                    thread_id=ctx.thread_id, binding_key=None,
+                    legacy_binding_key=str(task_id),
+                    event_class="conversation.human", author_label=ctx.author_label,
+                    content=ctx.content, replied_to_message_id=ctx.reply_to_message_id,
+                    author_id=ctx.author_id, discord_created_at=ctx.discord_created_at,
+                    discord_message_link=ctx.message_link, reply_context=ctx.reply_to_text,
+                    attachments=ctx.attachments,
+                )
+                event_task_id = _event_bound_task_id(
+                    mirror_conn, thread_id=ctx.thread_id,
+                    binding_key=event.binding_key, legacy_task_id=str(task_id),
+                )
+                if event_task_id is None:
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason="binding_unavailable", action="conversation",
+                        owner_instruction_id=event.id,
+                        ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+                    )
+                task_id = event_task_id
+                task = kb.get_task(conn, str(task_id))
+                owner = str(getattr(task, "assignee", "") or "").strip()
+                route = resolve_profile_route(ctx, owner=owner, config=cfg)
+                ingress_bot_id = cfg.conversation_router_ingress_bot_id
+                if route.profile is None or not ingress_bot_id:
+                    reason = route.error or "ambiguous_owner"
+                    return KanbanReplyInboxResult(
+                        consumed=True, reason=reason, task_id=str(task_id),
+                        action="conversation", owner_instruction_id=event.id,
+                        ingress_bot_id=ingress_bot_id,
+                        ack=(
+                            "Rejected: mention exactly one configured profile bot."
+                            if reason == "ambiguous_profile_mentions" else None
+                        ),
+                    )
+                return KanbanReplyInboxResult(
+                    consumed=False, reason="conversation_routed", task_id=str(task_id),
+                    action="conversation", owner_instruction_id=event.id,
+                    route_profile=route.profile,
+                    route_profiles=route.profiles,
+                    correlation_id="discord:" + hashlib.sha256(
+                        f"{ctx.thread_id}\0{ctx.message_id}".encode("utf-8")
+                    ).hexdigest(),
+                    card_context=(
+                        f"Kanban card {task_id} (board {resolved_board_slug}, "
+                        f"target profile {route.profile}, route basis {route.basis})."
+                    ),
+                    ingress_bot_id=ingress_bot_id,
+                )
+            if log_enabled:
+                return _handle_log_command(
+                    conn,
+                    mirror_conn,
+                    task_id=str(task_id),
+                    ctx=ctx,
+                )
             if text_action is not None:
                 return _handle_text_action(
                     conn,
@@ -666,11 +1188,23 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
     reference = getattr(message, "reference", None)
     reply_to_message_id = None
     reply_to_text = None
+    replied_to_author_id = None
+    replied_to_author_is_bot = False
     if reference is not None:
         raw_mid = getattr(reference, "message_id", None)
         reply_to_message_id = str(raw_mid) if raw_mid is not None else None
-        resolved = getattr(reference, "resolved", None)
+        resolved = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
         reply_to_text = getattr(resolved, "content", None) if resolved is not None else None
+        replied_author = getattr(resolved, "author", None)
+        replied_to_author_id = str(getattr(replied_author, "id", "") or "") or None
+        replied_to_author_is_bot = bool(getattr(replied_author, "bot", False))
+    mentioned_user_ids = tuple(
+        dict.fromkeys(
+            str(getattr(mentioned, "id", "") or "")
+            for mentioned in (getattr(message, "mentions", None) or ())
+            if str(getattr(mentioned, "id", "") or "")
+        )
+    )
     author = getattr(message, "author", None)
     author_id = str(getattr(author, "id", "") or "") or None
     author_label = (
@@ -683,6 +1217,18 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
     content = str(getattr(message, "content", "") or "")
     if not message_id:
         return None
+    created = getattr(message, "created_at", None)
+    created_at = int(created.timestamp()) if created is not None else None
+    attachments = tuple(
+        {
+            "id": str(getattr(item, "id", "") or ""),
+            "filename": str(getattr(item, "filename", "") or ""),
+            "url": str(getattr(item, "url", "") or ""),
+            "content_type": getattr(item, "content_type", None),
+            "size": getattr(item, "size", None),
+        }
+        for item in (getattr(message, "attachments", None) or ())
+    )
     return DiscordReplyContext(
         message_id=message_id,
         author_id=author_id,
@@ -692,6 +1238,12 @@ def context_from_discord_message(message: Any) -> DiscordReplyContext | None:
         content=content,
         reply_to_message_id=reply_to_message_id,
         reply_to_text=reply_to_text,
+        mentioned_user_ids=mentioned_user_ids,
+        replied_to_author_id=replied_to_author_id,
+        replied_to_author_is_bot=replied_to_author_is_bot,
+        discord_created_at=created_at,
+        message_link=str(getattr(message, "jump_url", "") or "") or None,
+        attachments=attachments,
     )
 
 
@@ -700,11 +1252,38 @@ async def maybe_handle_discord_message(
     *,
     config: KanbanReplyInboxConfig | None = None,
     mark_nonconversational=None,
+    current_bot_id: str | None = None,
 ) -> KanbanReplyInboxResult:
     ctx = context_from_discord_message(message)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="not_thread_message")
     cfg = config or load_config()
+    in_mirrored_forum = (
+        cfg.enabled
+        and cfg.conversation_router_enabled
+        and bool(ctx.forum_channel_id)
+        and ctx.forum_channel_id in cfg.forum_channel_ids
+    )
+    # Profile bots publish durable outbox events. Treat their mirrored copies as
+    # already recorded output rather than creating a second ledger event/turn.
+    if in_mirrored_forum and ctx.author_id in dict(cfg.profile_bot_user_ids):
+        return KanbanReplyInboxResult(
+            consumed=True, reason="profile_bot_output", action="conversation",
+            ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+        )
+    if (
+        in_mirrored_forum
+        and (
+            not cfg.conversation_router_ingress_bot_id
+            or str(current_bot_id or "") != cfg.conversation_router_ingress_bot_id
+        )
+    ):
+        return KanbanReplyInboxResult(
+            consumed=True,
+            reason="not_ingress_bot",
+            action="conversation",
+            ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+        )
     try:
         result = handle_reply(ctx, config=cfg)
     except ValueError as exc:
@@ -731,7 +1310,7 @@ def handle_reaction_remove(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
     board_slug = cfg.board_slug or "default"
     resolved = resolve_thread_task(
-        mirror_db_path(board_slug), forum_channel_id="", thread_id=ctx.thread_id
+        mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id
     )
     if resolved is None:
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
@@ -750,26 +1329,64 @@ def handle_reaction_remove(
     )
 
 
+def _reaction_ingress_rejection(
+    cfg: KanbanReplyInboxConfig,
+    ctx: DiscordReactionContext,
+    current_bot_id: str | None,
+) -> KanbanReplyInboxResult | None:
+    if (
+        not cfg.enabled
+        or not cfg.conversation_router_enabled
+        or not ctx.forum_channel_id
+        or ctx.forum_channel_id not in cfg.forum_channel_ids
+    ):
+        return None
+    ingress_bot_id = cfg.conversation_router_ingress_bot_id
+    if ingress_bot_id and str(current_bot_id or "") == ingress_bot_id:
+        return None
+    return KanbanReplyInboxResult(
+        consumed=True,
+        reason="not_ingress_bot",
+        action="reaction",
+        ingress_bot_id=ingress_bot_id,
+    )
+
+
 async def maybe_handle_discord_reaction_remove(
     payload: Any,
     *,
     config: KanbanReplyInboxConfig | None = None,
+    current_bot_id: str | None = None,
+    resolved_channel: Any = _UNRESOLVED_CHANNEL,
 ) -> KanbanReplyInboxResult:
-    ctx = context_from_discord_reaction(payload)
+    ctx = context_from_discord_reaction(payload, resolved_channel=resolved_channel)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
-    return await asyncio.to_thread(handle_reaction_remove, ctx, config=config or load_config())
+    cfg = config or load_config()
+    if ctx.forum_channel_id not in cfg.forum_channel_ids:
+        return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
+    rejected = _reaction_ingress_rejection(cfg, ctx, current_bot_id)
+    if rejected is not None:
+        return rejected
+    return await asyncio.to_thread(handle_reaction_remove, ctx, config=cfg)
 
 
 async def maybe_handle_discord_reaction(
     payload: Any,
     *,
     config: KanbanReplyInboxConfig | None = None,
+    current_bot_id: str | None = None,
+    resolved_channel: Any = _UNRESOLVED_CHANNEL,
 ) -> KanbanReplyInboxResult:
-    ctx = context_from_discord_reaction(payload)
+    ctx = context_from_discord_reaction(payload, resolved_channel=resolved_channel)
     if ctx is None:
         return KanbanReplyInboxResult(consumed=False, reason="unsupported_reaction")
     cfg = config or load_config()
+    if ctx.forum_channel_id not in cfg.forum_channel_ids:
+        return KanbanReplyInboxResult(consumed=False, reason="forum_not_configured")
+    rejected = _reaction_ingress_rejection(cfg, ctx, current_bot_id)
+    if rejected is not None:
+        return rejected
     try:
         return await asyncio.to_thread(handle_reaction, ctx, config=cfg)
     except ValueError as exc:

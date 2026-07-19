@@ -207,6 +207,78 @@ CREATE TABLE IF NOT EXISTS mirror_notes (
   message_id TEXT,
   posted_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mirror_binding_epochs (
+  binding_key TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  board_slug TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  transition_message_id TEXT,
+  starter_revision_hash TEXT,
+  state TEXT NOT NULL DEFAULT 'open',
+  UNIQUE(thread_id, sequence),
+  CHECK ((state = 'open' AND ended_at IS NULL) OR
+         (state != 'open' AND ended_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_epochs_one_open_thread
+ON mirror_binding_epochs(thread_id) WHERE state = 'open';
+CREATE INDEX IF NOT EXISTS idx_mirror_binding_epochs_task
+ON mirror_binding_epochs(board_slug, task_id);
+CREATE TABLE IF NOT EXISTS mirror_binding_transitions (
+  transition_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+  old_binding_key TEXT NOT NULL, new_binding_key TEXT NOT NULL UNIQUE,
+  old_card_metadata TEXT NOT NULL, new_card_metadata TEXT NOT NULL,
+  transition_payload TEXT NOT NULL, starter_payload TEXT NOT NULL,
+  frozen_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared','message_confirmed','starter_verified')),
+  transition_message_id TEXT UNIQUE, prepared_at INTEGER NOT NULL,
+  confirmed_at INTEGER, starter_verified_at INTEGER,
+  FOREIGN KEY(old_binding_key) REFERENCES mirror_binding_epochs(binding_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_binding_transitions_pending_thread
+ON mirror_binding_transitions(thread_id) WHERE state = 'prepared';
+CREATE TABLE IF NOT EXISTS mirror_reconciliation_findings (
+  finding_key TEXT PRIMARY KEY,
+  severity TEXT NOT NULL,
+  code TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  binding_key TEXT,
+  task_id TEXT,
+  evidence TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  UNIQUE(code, thread_id, binding_key, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_reconciliation_findings_open
+ON mirror_reconciliation_findings(resolved_at, severity, thread_id);
+CREATE TABLE IF NOT EXISTS mirror_thread_quarantine (
+  thread_id TEXT PRIMARY KEY,
+  needs_repair INTEGER NOT NULL DEFAULT 1,
+  quarantined_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS mirror_repair_notices (
+  thread_id TEXT NOT NULL, quarantined_at INTEGER NOT NULL,
+  finding_identity TEXT NOT NULL, nonce TEXT NOT NULL UNIQUE,
+  message_id TEXT NOT NULL, published_at INTEGER NOT NULL,
+  PRIMARY KEY(thread_id, quarantined_at)
+);
+CREATE TABLE IF NOT EXISTS mirror_terminal_lifecycles (
+  lifecycle_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, binding_key TEXT NOT NULL,
+  frozen_payload TEXT NOT NULL, frozen_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared','summary_confirmed','digest_confirmed','tag_confirmed','archived','cancelled')),
+  summary_message_id TEXT, summary_confirmed_at INTEGER,
+  digest_entry_id TEXT, digest_confirmed_at INTEGER, tag_confirmed_at INTEGER,
+  latest_activity_at INTEGER NOT NULL, archive_due_at INTEGER, archived_at INTEGER,
+  last_error TEXT, prepared_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_terminal_lifecycles_current
+ON mirror_terminal_lifecycles(thread_id) WHERE state NOT IN ('archived','cancelled');
 """
 
 RECEIPTS_SCHEMA_SQL = """
@@ -223,6 +295,98 @@ CREATE TABLE IF NOT EXISTS mirror_reaction_states (
   active INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mirror_conversation_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_message_id TEXT NOT NULL UNIQUE,
+  thread_id TEXT NOT NULL,
+  binding_key TEXT,
+  event_class TEXT NOT NULL,
+  author_label TEXT NOT NULL,
+  content TEXT NOT NULL,
+  replied_to_message_id TEXT,
+  discord_created_at INTEGER,
+  author_id TEXT,
+  discord_message_link TEXT,
+  reply_context TEXT,
+  binding_task_id TEXT,
+  binding_interval TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  recorded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_conversation_events_thread_binding
+ON mirror_conversation_events(thread_id, binding_key, id);
+CREATE TABLE IF NOT EXISTS mirror_discord_thread_cursors (
+  thread_id TEXT PRIMARY KEY,
+  last_message_id TEXT,
+  last_message_created_at INTEGER,
+  observed_at INTEGER NOT NULL,
+  backlog_limited INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mirror_discord_inbound_state (
+  discord_message_id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  conversation_event_id INTEGER NOT NULL,
+  classification TEXT NOT NULL,
+  processing_status TEXT NOT NULL DEFAULT 'pending',
+  observed_via TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  processed_at INTEGER,
+  payload TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  lease_expires_at INTEGER,
+  last_error TEXT,
+  correlation_id TEXT,
+  FOREIGN KEY(conversation_event_id) REFERENCES mirror_conversation_events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_discord_inbound_pending
+ON mirror_discord_inbound_state(thread_id, processing_status, observed_at);
+CREATE TABLE IF NOT EXISTS mirror_discord_inbound_dispositions (
+  discord_message_id TEXT PRIMARY KEY,
+  correlation_id TEXT,
+  disposition TEXT NOT NULL,
+  detail TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mirror_conversation_deliveries (
+  operation_id TEXT PRIMARY KEY,
+  trigger_discord_message_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  kanban_comment_id INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  delivered_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS mirror_conversation_delivery_chunks (
+  operation_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  chunk_count INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  lease_owner TEXT,
+  lease_expires_at INTEGER,
+  last_error TEXT,
+  kanban_comment_id INTEGER,
+  delivered_at INTEGER,
+  PRIMARY KEY (operation_id, chunk_index)
+);
+CREATE TABLE IF NOT EXISTS mirror_conversation_delivery_items (
+  operation_id TEXT NOT NULL,
+  event_id INTEGER NOT NULL,
+  PRIMARY KEY (operation_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_conversation_delivery_items_event
+ON mirror_conversation_delivery_items(event_id);
 """
 
 SCHEMA_SQL += RECEIPTS_SCHEMA_SQL
@@ -254,6 +418,38 @@ class Initiative:
     members: dict[str, MemberState] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class BindingEpoch:
+    binding_key: str
+    thread_id: str
+    board_slug: str
+    task_id: str
+    sequence: int
+    started_at: int
+    ended_at: int | None
+    transition_message_id: str | None
+    starter_revision_hash: str | None
+    state: str
+
+
+@dataclass(frozen=True)
+class BindingTransition:
+    transition_key: str
+    thread_id: str
+    old_binding_key: str
+    new_binding_key: str
+    old_card_metadata: dict
+    new_card_metadata: dict
+    transition_payload: dict
+    starter_payload: dict
+    frozen_hash: str
+    state: str
+    transition_message_id: str | None
+    prepared_at: int
+    confirmed_at: int | None
+    starter_verified_at: int | None
+
+
 def mirror_db_path(board: str) -> Path:
     from hermes_cli.kanban_db import board_dir
 
@@ -269,8 +465,9 @@ def connect_mirror(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(SCHEMA_SQL)
-    conn.commit()
+    from .schema import initialize_mirror_schema
+
+    initialize_mirror_schema(conn)
     return conn
 
 
@@ -487,6 +684,207 @@ def note_exists(conn: sqlite3.Connection, note_key: str) -> bool:
     return row is not None
 
 
+def _binding_from_row(row: sqlite3.Row) -> BindingEpoch:
+    return BindingEpoch(
+        binding_key=str(row["binding_key"]), thread_id=str(row["thread_id"]),
+        board_slug=str(row["board_slug"]), task_id=str(row["task_id"]),
+        sequence=int(row["sequence"]), started_at=int(row["started_at"]),
+        ended_at=row["ended_at"], transition_message_id=row["transition_message_id"],
+        starter_revision_hash=row["starter_revision_hash"], state=str(row["state"]),
+    )
+
+
+def active_thread_binding(conn: sqlite3.Connection, thread_id: str) -> BindingEpoch | None:
+    """Return the sole open epoch, failing closed if state is ambiguous."""
+    if is_thread_quarantined(conn, thread_id):
+        return None
+    rows = conn.execute(
+        "SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open' ORDER BY sequence",
+        (str(thread_id),),
+    ).fetchall()
+    return _binding_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def is_thread_quarantined(conn: sqlite3.Connection, thread_id: str) -> bool:
+    """Whether card-dependent routing/export must fail closed for a thread."""
+    row = conn.execute(
+        "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL",
+        (str(thread_id),),
+    ).fetchone()
+    return row is not None
+
+
+def _canonical(value: dict) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("transition values must be objects")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _transition_from_row(row: sqlite3.Row) -> BindingTransition:
+    return BindingTransition(
+        transition_key=str(row["transition_key"]), thread_id=str(row["thread_id"]),
+        old_binding_key=str(row["old_binding_key"]), new_binding_key=str(row["new_binding_key"]),
+        old_card_metadata=json.loads(row["old_card_metadata"]), new_card_metadata=json.loads(row["new_card_metadata"]),
+        transition_payload=json.loads(row["transition_payload"]), starter_payload=json.loads(row["starter_payload"]),
+        frozen_hash=str(row["frozen_hash"]), state=str(row["state"]),
+        transition_message_id=row["transition_message_id"], prepared_at=int(row["prepared_at"]),
+        confirmed_at=row["confirmed_at"], starter_verified_at=row["starter_verified_at"])
+
+
+def get_binding_transition(conn: sqlite3.Connection, transition_key: str) -> BindingTransition | None:
+    row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (transition_key,)).fetchone()
+    return _transition_from_row(row) if row is not None else None
+
+
+def pending_binding_transition(conn: sqlite3.Connection, thread_id: str) -> BindingTransition | None:
+    rows = conn.execute("SELECT * FROM mirror_binding_transitions WHERE thread_id=? AND state='prepared'", (str(thread_id),)).fetchall()
+    return _transition_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def resumable_binding_transitions(conn: sqlite3.Connection) -> list[BindingTransition]:
+    """Return transitions whose Discord/starter side effects still need recovery."""
+    rows = conn.execute(
+        "SELECT * FROM mirror_binding_transitions WHERE state!='starter_verified' ORDER BY prepared_at,transition_key"
+    ).fetchall()
+    return [_transition_from_row(row) for row in rows]
+
+
+def prepare_binding_transition(conn: sqlite3.Connection, *, transition_key: str, thread_id: str,
+                               old_card_metadata: dict, new_card_metadata: dict,
+                               transition_payload: dict, starter_payload: dict) -> BindingTransition:
+    """Freeze a recoverable transition while the old epoch remains authoritative."""
+    key, thread = str(transition_key).strip(), str(thread_id).strip()
+    if not key or not thread:
+        raise ValueError("transition_key and thread_id are required")
+    values = tuple(_canonical(v) for v in (old_card_metadata, new_card_metadata, transition_payload, starter_payload))
+    frozen_hash = hashlib.sha256("\0".join(values).encode()).hexdigest()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (key,)).fetchone()
+        if row is not None:
+            result = _transition_from_row(row)
+            if result.thread_id != thread or result.frozen_hash != frozen_hash:
+                raise ValueError("transition retry does not match frozen state")
+            conn.commit(); return result
+        rows = conn.execute("SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open'", (thread,)).fetchall()
+        if len(rows) != 1:
+            raise ValueError("thread does not have exactly one authoritative binding")
+        old = _binding_from_row(rows[0])
+        if (str(old_card_metadata.get("board_slug", "")), str(old_card_metadata.get("task_id", ""))) != (old.board_slug, old.task_id):
+            raise ValueError("old card metadata does not match authoritative binding")
+        new_board, new_task = str(new_card_metadata.get("board_slug", "")), str(new_card_metadata.get("task_id", ""))
+        if not new_board or not new_task or (new_board, new_task) == (old.board_slug, old.task_id):
+            raise ValueError("new card metadata is missing or unchanged")
+        new_key = f"binding:{thread}:{old.sequence + 1}"
+        conn.execute("""INSERT INTO mirror_binding_transitions
+            (transition_key,thread_id,old_binding_key,new_binding_key,old_card_metadata,new_card_metadata,
+             transition_payload,starter_payload,frozen_hash,state,prepared_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'prepared',?)""", (key, thread, old.binding_key, new_key, *values, frozen_hash, _now()))
+        result = get_binding_transition(conn, key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
+
+
+def confirm_binding_transition(conn: sqlite3.Connection, transition_key: str, transition_message_id: str) -> BindingTransition:
+    """Atomically close old/open successor only after a Discord message confirmation."""
+    message_id = str(transition_message_id).strip()
+    if not message_id:
+        raise ValueError("transition_message_id is required")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT * FROM mirror_binding_transitions WHERE transition_key=?", (transition_key,)).fetchone()
+        if row is None:
+            raise ValueError("unknown transition")
+        transition = _transition_from_row(row)
+        if transition.state != "prepared":
+            if transition.transition_message_id != message_id:
+                raise ValueError("transition was confirmed with a different message")
+            conn.commit(); return transition
+        rows = conn.execute("SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open'", (transition.thread_id,)).fetchall()
+        if len(rows) != 1 or rows[0]["binding_key"] != transition.old_binding_key:
+            raise ValueError("authoritative binding changed or is ambiguous")
+        old, now = _binding_from_row(rows[0]), _now(); new = transition.new_card_metadata
+        mappings = conn.execute(
+            "SELECT i.id FROM mirror_initiatives i JOIN mirror_members m ON m.initiative_id=i.id "
+            "WHERE i.thread_id=? AND m.task_id=?", (transition.thread_id, old.task_id),
+        ).fetchall()
+        if len(mappings) != 1:
+            raise ValueError("authoritative initiative membership is ambiguous")
+        if conn.execute("SELECT 1 FROM mirror_members WHERE task_id=?", (str(new["task_id"]),)).fetchone():
+            raise ValueError("successor is already mapped to an initiative")
+        conn.execute("UPDATE mirror_binding_epochs SET state='closed',ended_at=?,transition_message_id=? WHERE binding_key=?", (now, message_id, old.binding_key))
+        conn.execute("""INSERT INTO mirror_binding_epochs
+            (binding_key,thread_id,board_slug,task_id,sequence,started_at,state) VALUES (?,?,?,?,?,?,'open')""",
+            (transition.new_binding_key, transition.thread_id, str(new["board_slug"]), str(new["task_id"]), old.sequence + 1, now))
+        conn.execute("UPDATE mirror_binding_transitions SET state='message_confirmed',transition_message_id=?,confirmed_at=? WHERE transition_key=? AND state='prepared'", (message_id, now, transition_key))
+        conn.execute("UPDATE mirror_members SET task_id=?,last_status=NULL,last_sig=NULL WHERE initiative_id=? AND task_id=?",
+                     (str(new["task_id"]), mappings[0]["id"], old.task_id))
+        result = get_binding_transition(conn, transition_key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
+
+
+def authorize_starter_update(conn: sqlite3.Connection, transition_key: str) -> tuple[dict, str]:
+    transition = get_binding_transition(conn, transition_key)
+    if transition is None or transition.state not in {"message_confirmed", "starter_verified"}:
+        raise ValueError("starter update is not authorized")
+    active = active_thread_binding(conn, transition.thread_id)
+    if active is None or active.binding_key != transition.new_binding_key:
+        raise ValueError("successor binding is not authoritative")
+    return transition.starter_payload, hashlib.sha256(_canonical(transition.starter_payload).encode()).hexdigest()
+
+
+def verify_starter_revision(conn: sqlite3.Connection, transition_key: str, revision_hash: str) -> BindingTransition:
+    """Capture a verified live revision hash; retries are idempotent."""
+    _, expected = authorize_starter_update(conn, transition_key)
+    if not revision_hash or revision_hash != expected:
+        raise ValueError("starter revision does not match frozen payload")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        transition = get_binding_transition(conn, transition_key)
+        row = conn.execute("SELECT starter_revision_hash FROM mirror_binding_epochs WHERE binding_key=? AND state='open'", (transition.new_binding_key,)).fetchone()
+        if row is None or (row[0] is not None and row[0] != revision_hash):
+            raise ValueError("starter revision state is ambiguous")
+        now = _now()
+        conn.execute("UPDATE mirror_binding_epochs SET starter_revision_hash=? WHERE binding_key=?", (revision_hash, transition.new_binding_key))
+        conn.execute("UPDATE mirror_binding_transitions SET state='starter_verified',starter_verified_at=COALESCE(starter_verified_at,?) WHERE transition_key=?", (now, transition_key))
+        result = get_binding_transition(conn, transition_key)
+        conn.commit(); return result
+    except Exception:
+        conn.rollback(); raise
+
+
+def backfill_legacy_bindings(conn: sqlite3.Connection, board_slug: str) -> int:
+    """Idempotently turn unambiguous one-card thread mappings into epoch one."""
+    board = str(board_slug or "").strip()
+    if not board:
+        raise ValueError("board_slug is required")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        before = conn.total_changes
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO mirror_binding_epochs
+              (binding_key,thread_id,board_slug,task_id,sequence,started_at,state)
+            SELECT 'binding:' || i.thread_id || ':1', i.thread_id, ?, MIN(m.task_id),
+                   1, i.created_at, 'open'
+            FROM mirror_initiatives i JOIN mirror_members m ON m.initiative_id=i.id
+            WHERE i.kind='post' AND i.thread_id IS NOT NULL AND i.thread_id!=''
+              AND NOT EXISTS (SELECT 1 FROM mirror_binding_epochs b WHERE b.thread_id=i.thread_id)
+            GROUP BY i.id, i.thread_id, i.created_at HAVING COUNT(m.task_id)=1
+            """,
+            (board,),
+        )
+        inserted = conn.total_changes - before
+        conn.commit()
+        return inserted
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def resolve_thread_task(
     mirror_path: Path, forum_channel_id: str, thread_id: str
 ) -> tuple[str, str] | None:
@@ -509,28 +907,49 @@ def resolve_thread_task(
     conn.row_factory = sqlite3.Row
     try:
         try:
-            row = conn.execute(
-                "SELECT id FROM mirror_initiatives WHERE thread_id = ?", (thread_id,)
+            has_epochs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_binding_epochs'"
             ).fetchone()
+            if has_epochs:
+                quarantined = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_thread_quarantine'"
+                ).fetchone()
+                if quarantined and conn.execute(
+                    "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL",
+                    (thread_id,),
+                ).fetchone():
+                    return None
+                epoch_rows = conn.execute(
+                    "SELECT task_id,board_slug,state FROM mirror_binding_epochs WHERE thread_id=?",
+                    (thread_id,),
+                ).fetchall()
+                if epoch_rows:
+                    open_rows = [row for row in epoch_rows if row["state"] == "open"]
+                    if len(open_rows) != 1:
+                        return None
+                    return (open_rows[0]["task_id"], open_rows[0]["board_slug"])
+            initiatives = conn.execute(
+                "SELECT id FROM mirror_initiatives WHERE thread_id = ?", (thread_id,)
+            ).fetchall()
         except sqlite3.OperationalError:
             # Empty/uninitialized mirror.db (no such table) — treat as no match.
             return None
-        if row is None:
+        if len(initiatives) != 1:
             return None
-        initiative_id = row["id"]
-        member = conn.execute(
+        initiative_id = initiatives[0]["id"]
+        members = conn.execute(
             """
             SELECT task_id FROM mirror_members
             WHERE initiative_id = ?
             ORDER BY rowid ASC
-            LIMIT 1
+            LIMIT 2
             """,
             (initiative_id,),
-        ).fetchone()
-        if member is None:
+        ).fetchall()
+        if len(members) != 1:
             return None
         board_slug = mirror_path.parent.name
-        return (member["task_id"], board_slug)
+        return (members[0]["task_id"], board_slug)
     finally:
         conn.close()
 
@@ -539,8 +958,10 @@ def resolve_thread_task(
 
 
 def ensure_receipts(conn: sqlite3.Connection) -> None:
-    conn.executescript(RECEIPTS_SCHEMA_SQL)
-    conn.commit()
+    """Compatibility entry point; the unified boundary owns receipt DDL."""
+    from .schema import initialize_mirror_schema
+
+    initialize_mirror_schema(conn)
 
 
 def receipt_exists(conn: sqlite3.Connection, discord_message_id: str) -> bool:
