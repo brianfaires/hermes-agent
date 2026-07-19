@@ -73,7 +73,9 @@ def _run(args: list) -> Optional[dict]:
         return None
     cmd = [sys.executable, str(script), "calendar", *[str(a) for a in args]]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL
+        )
     except Exception as e:
         logger.error("cron_calendar_sync: calendar command failed to run: %s", e)
         return None

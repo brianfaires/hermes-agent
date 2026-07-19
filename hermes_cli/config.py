@@ -3933,6 +3933,201 @@ def _set_nested(config, dotted_key: str, value):
         current[last] = value
 
 
+def _config_write_lock(config_path: Path):
+    """Return a cross-process lock when the platform provides one."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows does not provide fcntl.
+        return None
+
+    lock_path = config_path.with_name(f".{config_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "a+", encoding="utf-8")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    return lock_file
+
+
+def _release_config_write_lock(lock_file) -> None:
+    if lock_file is None:
+        return
+    try:
+        import fcntl
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+
+
+def _decode_json_pointer(path: str) -> list[str]:
+    """Decode an RFC 6901 JSON Pointer into config path segments."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("Config patch path must be a JSON Pointer starting with '/'.")
+
+    parts: list[str] = []
+    for part in path[1:].split("/"):
+        decoded = []
+        index = 0
+        while index < len(part):
+            char = part[index]
+            if char != "~":
+                decoded.append(char)
+                index += 1
+                continue
+            if index + 1 >= len(part) or part[index + 1] not in {"0", "1"}:
+                raise ValueError(f"Invalid JSON Pointer escape in {path!r}.")
+            decoded.append("~" if part[index + 1] == "0" else "/")
+            index += 2
+        parts.append("".join(decoded))
+    return parts
+
+
+def _parse_json_patch_value(value_json: Optional[str]) -> Any:
+    if value_json is None:
+        raise ValueError("Config patch add and replace operations require --json.")
+
+    def _reject_non_json_constant(constant: str) -> None:
+        raise ValueError(f"{constant} is not valid JSON")
+
+    try:
+        return json.loads(value_json, parse_constant=_reject_non_json_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Config patch value must be valid JSON: {exc}.") from exc
+
+
+def _list_index(segment: str, length: int, *, allow_append: bool = False) -> int:
+    """Return a validated JSON Patch list index."""
+    if segment == "-" and allow_append:
+        return length
+    if not segment or not segment.isdigit() or (len(segment) > 1 and segment.startswith("0")):
+        raise ValueError(f"Invalid list index {segment!r}.")
+    index = int(segment)
+    if index < 0 or index > length or (index == length and not allow_append):
+        raise ValueError(f"List index {segment!r} is out of range.")
+    return index
+
+
+def _resolve_json_pointer_parent(config: dict, parts: list[str]) -> tuple[Any, str]:
+    if not parts:
+        raise ValueError("Config patch cannot replace or remove the configuration root.")
+
+    current: Any = config
+    for part in parts[:-1]:
+        if isinstance(current, dict):
+            if part not in current:
+                raise ValueError(f"Config patch path does not exist at {part!r}.")
+            current = current[part]
+        elif isinstance(current, list):
+            current = current[_list_index(part, len(current))]
+        else:
+            raise ValueError(f"Config patch path traverses scalar value at {part!r}.")
+    return current, parts[-1]
+
+
+def _patch_path_overlaps_managed(parts: list[str]) -> bool:
+    """Block structural edits that can override a managed config leaf."""
+    from hermes_cli import managed_scope
+
+    current: Any = managed_scope.load_managed_config()
+    if not current:
+        return False
+    for part in parts:
+        # Scalars, lists, and empty maps are managed leaves: any descendant
+        # mutation would override some or all of their managed value.
+        if not isinstance(current, dict) or not current:
+            return True
+        if part not in current:
+            return False
+        current = current[part]
+    # Exact managed leaf or an ancestor containing managed descendants.
+    return True
+
+
+def _apply_json_patch_operation(config: dict, operation: str, parts: list[str], value: Any = None) -> None:
+    parent, last = _resolve_json_pointer_parent(config, parts)
+
+    if isinstance(parent, dict):
+        if operation == "add":
+            parent[last] = value
+            return
+        if last not in parent:
+            raise ValueError(f"Config patch path does not exist at {last!r}.")
+        if operation == "replace":
+            parent[last] = value
+        elif operation == "remove":
+            del parent[last]
+        else:
+            raise ValueError(f"Unsupported config patch operation {operation!r}.")
+        return
+
+    if isinstance(parent, list):
+        if operation == "add":
+            parent.insert(_list_index(last, len(parent), allow_append=True), value)
+            return
+        index = _list_index(last, len(parent))
+        if operation == "replace":
+            parent[index] = value
+        elif operation == "remove":
+            del parent[index]
+        else:
+            raise ValueError(f"Unsupported config patch operation {operation!r}.")
+        return
+
+    raise ValueError("Config patch parent must be a map or list.")
+
+
+def _read_user_config_for_patch(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Cannot patch invalid YAML configuration: {exc}.") from exc
+    if not isinstance(config, dict):
+        raise ValueError("Hermes configuration root must be a map.")
+    return config
+
+
+def apply_config_patch(operation: str, path: str, value_json: Optional[str] = None) -> None:
+    """Apply one structural JSON-Pointer mutation to raw ``config.yaml``.
+
+    ``add`` creates/replaces map members and inserts/appends list members;
+    ``replace`` changes an existing map member or list item; ``remove`` deletes
+    an existing map member or list item. Values are JSON so every supported
+    config scalar, map, or list is representable without heuristic coercion.
+    """
+    if is_managed():
+        managed_error("modify configuration")
+        return
+    if operation not in {"add", "replace", "remove"}:
+        raise ValueError(f"Unsupported config patch operation {operation!r}.")
+    if operation == "remove" and value_json is not None:
+        raise ValueError("Config patch remove does not accept --json.")
+
+    parts = _decode_json_pointer(path)
+    if _patch_path_overlaps_managed(parts):
+        from hermes_cli import managed_scope
+        managed_dir = managed_scope.get_managed_dir()
+        src = (managed_dir / "config.yaml") if managed_dir else "the managed scope"
+        raise PermissionError(
+            f"Cannot modify {path!r}: it overlaps configuration managed by your administrator ({src})."
+        )
+    value = _parse_json_patch_value(value_json) if operation != "remove" else None
+
+    config_path = get_config_path()
+    lock_file = _config_write_lock(config_path)
+    try:
+        user_config = _read_user_config_for_patch(config_path)
+        _apply_json_patch_operation(user_config, operation, parts, value)
+        ensure_hermes_home()
+        from utils import atomic_yaml_write
+        atomic_yaml_write(config_path, user_config, sort_keys=False)
+    finally:
+        _release_config_write_lock(lock_file)
+
+
+
 def get_missing_config_fields() -> List[Dict[str, Any]]:
     """
     Check which config fields are missing or outdated (recursive).
@@ -6656,35 +6851,39 @@ def set_config_value(key: str, value: str):
     # Read the raw user config (not merged with defaults) to avoid
     # dumping all default values back to the file
     config_path = get_config_path()
-    user_config = {}
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
-        except Exception:
-            user_config = {}
-    
-    # Handle nested keys (e.g., "tts.provider") including numeric list
-    # indices (e.g., "custom_providers.0.api_key").  Delegates to
-    # _set_nested which preserves list-typed nodes; before #17876 the
-    # inline navigation here silently overwrote lists with dicts.
+    lock_file = _config_write_lock(config_path)
+    try:
+        user_config = {}
+        if config_path.exists():
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    user_config = yaml.safe_load(f) or {}
+            except Exception:
+                user_config = {}
 
-    # Convert value to appropriate type
-    if value.lower() in {'true', 'yes', 'on'}:
-        value = True
-    elif value.lower() in {'false', 'no', 'off'}:
-        value = False
-    elif value.isdigit():
-        value = int(value)
-    elif value.replace('.', '', 1).isdigit():
-        value = float(value)
+        # Handle nested keys (e.g., "tts.provider") including numeric list
+        # indices (e.g., "custom_providers.0.api_key").  Delegates to
+        # _set_nested which preserves list-typed nodes; before #17876 the
+        # inline navigation here silently overwrote lists with dicts.
 
-    _set_nested(user_config, key, value)
-    
-    # Write only user config back (not the full merged defaults)
-    ensure_hermes_home()
-    from utils import atomic_yaml_write
-    atomic_yaml_write(config_path, user_config, sort_keys=False)
+        # Convert value to appropriate type
+        if value.lower() in {'true', 'yes', 'on'}:
+            value = True
+        elif value.lower() in {'false', 'no', 'off'}:
+            value = False
+        elif value.isdigit():
+            value = int(value)
+        elif value.replace('.', '', 1).isdigit():
+            value = float(value)
+
+        _set_nested(user_config, key, value)
+
+        # Write only user config back (not the full merged defaults)
+        ensure_hermes_home()
+        from utils import atomic_yaml_write
+        atomic_yaml_write(config_path, user_config, sort_keys=False)
+    finally:
+        _release_config_write_lock(lock_file)
     
     # Keep .env in sync for keys that terminal_tool reads directly from env vars.
     # config.yaml is authoritative, but terminal_tool only reads TERMINAL_ENV etc.
@@ -6721,7 +6920,21 @@ def config_command(args):
             print("  hermes config set OPENROUTER_API_KEY sk-or-...")
             sys.exit(1)
         set_config_value(key, value)
-    
+
+    elif subcmd == "patch":
+        operation = getattr(args, "operation", None)
+        path = getattr(args, "path", None)
+        value_json = getattr(args, "json_value", None)
+        if not operation or not path:
+            print("Usage: hermes config patch <add|replace|remove> <json-pointer-path> [--json <value>]")
+            sys.exit(1)
+        try:
+            apply_config_patch(operation, path, value_json)
+        except (PermissionError, ValueError) as exc:
+            print(f"Cannot patch configuration: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(f"✓ Patched {path} in {get_config_path()}")
+
     elif subcmd == "path":
         print(get_config_path())
     

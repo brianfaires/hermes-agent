@@ -20,8 +20,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from copy import copy
+import tomllib
 from collections import defaultdict
+from copy import copy
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
@@ -89,6 +90,23 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
 _DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
 _DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
 _DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _load_profile_stt_aliases() -> Dict[str, Any]:
+    """Load Discord STT aliases from the profile-local voice command catalog."""
+    path = get_hermes_home() / "voice" / "commands.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            aliases = tomllib.load(handle).get("stt_aliases")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not load Discord STT aliases from %s: %s", path, exc)
+        return {}
+    if not isinstance(aliases, dict):
+        logger.warning("Discord STT aliases in %s must be a TOML table", path)
+        return {}
+    return aliases
 
 
 def _discord_config_id_set(raw: Any) -> set[str]:
@@ -232,6 +250,9 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
+from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
+from hermes_constants import get_hermes_home
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from utils import atomic_json_write
@@ -1112,6 +1133,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._voice_ack_catalog = VoiceAcknowledgementCatalog.load()
+        self._stt_aliases = _load_profile_stt_aliases()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -2838,7 +2861,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers[guild_id] = mixer
         logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
 
-    async def play_ack_in_voice(self, guild_id: int, phrase: Optional[str] = None) -> bool:
+    async def play_ack_in_voice(
+        self,
+        guild_id: int,
+        phrase: Optional[str] = None,
+        *,
+        model_name: str = "",
+        voice_settings: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Speak a short acknowledgement over the ambient bed.
 
         Called from the gateway's tool-progress hook on the first tool call of
@@ -2851,9 +2881,17 @@ class DiscordAdapter(BasePlatformAdapter):
         if mixer is None:
             return False
         if phrase is None:
-            import random
-            phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
-            phrase = random.choice(phrases)
+            selected = None
+            catalog = vars(self).get("_voice_ack_catalog")
+            if catalog:
+                selected = catalog.choose("tool_call", model_name=model_name)
+            if selected is not None:
+                phrase = selected.text
+                voice_settings = selected.voice_settings
+            else:
+                import random
+                phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
+                phrase = random.choice(phrases)
 
         # Synthesise the ack via the configured TTS provider, then layer it.
         audio_path = gateway_tts_temp_path("ack", "mp3")
@@ -2861,7 +2899,10 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from tools.tts_tool import text_to_speech_tool
             result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=phrase, output_path=audio_path
+                text_to_speech_tool,
+                text=phrase,
+                output_path=audio_path,
+                voice_settings=voice_settings,
             )
             result = json.loads(result_json)
             actual = result.get("file_path", audio_path)
@@ -2890,23 +2931,53 @@ class DiscordAdapter(BasePlatformAdapter):
                     except OSError:
                         pass
 
-    async def play_cancellation_ack_in_voice(self, guild_id: int) -> bool:
+    def _voice_ack_model_name(self, guild_id: int) -> str:
+        """Resolve the active LLM for a linked Discord voice session."""
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_voice_ack_model_for_source", None)
+        source_data = getattr(self, "_voice_sources", {}).get(guild_id)
+        if not callable(resolver) or not source_data:
+            return ""
+        try:
+            return str(resolver(SessionSource.from_dict(source_data)) or "")
+        except Exception:
+            logger.debug("Could not resolve Discord voice acknowledgement model", exc_info=True)
+            return ""
+
+    async def play_cancellation_ack_in_voice(
+        self,
+        guild_id: int,
+        *,
+        model_name: str = "",
+    ) -> bool:
         """Speak a configured acknowledgement after dropping a voice transcript."""
         if not self.is_in_voice_channel(guild_id):
             return False
-        import random
+        model_name = model_name or self._voice_ack_model_name(guild_id)
+        selected = None
+        catalog = vars(self).get("_voice_ack_catalog")
+        if catalog:
+            selected = catalog.choose("cancellation", model_name=model_name)
+        voice_settings = selected.voice_settings if selected is not None else None
+        if selected is not None:
+            phrase = selected.text
+        else:
+            import random
 
-        raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
-        phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
-        if not phrases:
-            phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
-        phrase = random.choice(phrases)
+            raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
+            phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
+            if not phrases:
+                phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
+            phrase = random.choice(phrases)
         audio_path = gateway_tts_temp_path("cancellation_ack", "mp3")
         os.makedirs(os.path.dirname(audio_path), exist_ok=True)
         try:
             from tools.tts_tool import text_to_speech_tool
             result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=phrase, output_path=audio_path
+                text_to_speech_tool,
+                text=phrase,
+                output_path=audio_path,
+                voice_settings=voice_settings,
             )
             result = json.loads(result_json)
             actual = result.get("file_path", audio_path)
@@ -3063,23 +3134,14 @@ class DiscordAdapter(BasePlatformAdapter):
     def _configured_stt_aliases(self) -> Dict[str, str]:
         """Return normalized Discord STT alias phrase -> replacement text.
 
-        Config lives under ``discord.stt_aliases`` and is intentionally
-        data-only, keyed by the replacement text with one or more spoken
-        phrases per entry:
+        Aliases live in ``voice/commands.toml``, keyed by replacement text
+        with one or more spoken phrases per entry:
 
-            discord:
-              stt_aliases:
-                /new: [reset session, new session, start over]
-                /queue continue: keep going
+            [stt_aliases]
+            "/new" = ["reset session", "new session", "start over"]
+            "/queue continue" = ["keep going"]
         """
-        raw = getattr(getattr(self, "config", None), "extra", {}).get("stt_aliases")
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                raw = parsed
+        raw = getattr(self, "_stt_aliases", {})
         if not isinstance(raw, dict):
             return {}
         aliases: Dict[str, str] = {}
@@ -3580,7 +3642,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.info("Dropped Discord voice transcript after spoken cancellation")
                 await self.play_cancellation_ack_in_voice(guild_id)
                 return
-
 
             if (
                 session_generation is not None

@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ 圧縮が中止されました ({error})。メッセージは削除されていません — 会話はそのままです。再試行するには /compress、新しいセッションを開始するには /reset を実行するか、auxiliary.compression モデル設定を確認してください。"
     aux_failed:            "ℹ️ 構成された圧縮モデル `{model}` が失敗しました ({error})。メインモデルで復旧しました — コンテキストは無傷です — config.yaml の `auxiliary.compression.model` を確認するとよいでしょう。"
     failed:                "圧縮に失敗しました: {error}"
+    not_persisted:         "⚠️ 圧縮結果を保存できなかったため、会話は変更されていません（データは失われていません）。もう一度試し、失敗が続く場合はセッションデータベースが存在し書き込み可能か確認してください。"
 
   debug:
     upload_failed:         "✗ デバッグレポートのアップロードに失敗しました: {error}"

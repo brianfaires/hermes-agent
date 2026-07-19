@@ -93,6 +93,7 @@ gateway:
     aborted:               "⚠️ Komprimierung abgebrochen ({error}). Keine Nachrichten wurden entfernt — die Konversation ist unverändert. Führe /compress aus, um es erneut zu versuchen, /reset für eine neue Sitzung, oder prüfe deine auxiliary.compression-Modellkonfiguration."
     aux_failed:            "ℹ️ Das konfigurierte Komprimierungsmodell `{model}` ist fehlgeschlagen ({error}). Wiederherstellung mit Ihrem Hauptmodell — Kontext ist intakt — Sie sollten jedoch `auxiliary.compression.model` in config.yaml überprüfen."
     failed:                "Komprimierung fehlgeschlagen: {error}"
+    not_persisted:         "⚠️ Die Komprimierung konnte nicht gespeichert werden; deine Konversation ist unverändert (nichts ging verloren). Versuche es erneut. Wenn es weiter fehlschlägt, prüfe, ob die Sitzungsdatenbank vorhanden und beschreibbar ist."
 
   debug:
     upload_failed:         "✗ Debug-Bericht konnte nicht hochgeladen werden: {error}"

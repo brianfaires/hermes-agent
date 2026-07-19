@@ -275,7 +275,6 @@ def _spawn_profile_restart(target_profile: str) -> int:
     environment.pop("_HERMES_GATEWAY", None)
     kwargs: dict[str, Any] = {
         "cwd": str(Path(__file__).resolve().parents[2]),
-        "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "env": environment,
@@ -284,7 +283,7 @@ def _spawn_profile_restart(target_profile: str) -> int:
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(command, **kwargs).pid
+    return subprocess.Popen(command, stdin=subprocess.DEVNULL, **kwargs).pid
 
 
 def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
