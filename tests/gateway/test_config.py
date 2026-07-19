@@ -392,7 +392,7 @@ class TestLoadGatewayConfig:
         assert discord_config.extra["auto_voice_channel_id"] == "456"
         assert discord_config.extra["auto_voice_user_ids"] == ["123"]
 
-    def test_bridges_discord_stt_aliases_from_top_level_discord(self, tmp_path, monkeypatch):
+    def test_does_not_bridge_discord_stt_aliases_from_top_level_config(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -407,10 +407,7 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        discord_config = config.platforms[Platform.DISCORD]
-        assert discord_config.extra["stt_aliases"] == {
-            "/new": ["reset session", "new session"],
-        }
+        assert Platform.DISCORD not in config.platforms
 
     def test_bridges_thread_sessions_per_user_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
