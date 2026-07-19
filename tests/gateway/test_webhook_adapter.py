@@ -21,6 +21,7 @@ import hmac
 import json
 import time
 from collections import deque
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -73,6 +74,19 @@ def _create_app(adapter: WebhookAdapter) -> web.Application:
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
     return app
+
+
+def _wire_mock_target(adapter: WebhookAdapter, platform_name: str = "telegram"):
+    """Attach a gateway_runner with a mocked target adapter."""
+    mock_target = AsyncMock()
+    mock_target.send = AsyncMock(return_value=SendResult(success=True))
+
+    mock_runner = MagicMock()
+    mock_runner.adapters = {Platform(platform_name): mock_target}
+    mock_runner.config.get_home_channel.return_value = None
+
+    adapter.gateway_runner = mock_runner
+    return mock_target
 
 
 def _mock_request(headers=None, body=b"", content_length=None, match_info=None):
@@ -701,6 +715,127 @@ class TestHTTPHandling:
             assert data["error"] == "Invalid OIDC token"
 
         adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_script_route_does_not_parse_payload_or_call_agent(self):
+        """Script routes use body bytes for auth only; invalid JSON still triggers the script."""
+        routes = {"script": {"secret": _INSECURE_NO_AUTH, "script": "noop.py"}}
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/script",
+                data=b"not-json and not read by the route",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+            assert data["route"] == "script"
+
+        await asyncio.sleep(0)
+        adapter.handle_message.assert_not_called()
+        adapter._resolve_script_path.assert_called_once_with("noop.py")
+        adapter._run_script_trigger.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_script_timeout_kills_and_reaps_child_process(self):
+        """Timed-out script triggers must not leave orphaned child processes."""
+        adapter = _make_adapter()
+        script = Path("/tmp/noop.py")
+
+        class SlowProc:
+            returncode = None
+
+            def __init__(self):
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                await asyncio.sleep(10)
+                return b"", b""
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                self.waited = True
+                return self.returncode
+
+        proc = SlowProc()
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=script,
+                delivery_id="delivery-1",
+                timeout=0.01,
+            )
+
+        assert proc.killed is True
+        assert proc.waited is True
+
+    @pytest.mark.asyncio
+    async def test_script_stdout_delivers_to_configured_target(self):
+        """Non-empty script stdout is delivered when the script route has a real deliver target."""
+        adapter = _make_adapter()
+        mock_target = _wire_mock_target(adapter)
+
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"Gmail: 1 important email.\n", b""
+
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=Proc()),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=Path("/tmp/noop.py"),
+                delivery_id="delivery-stdout",
+                timeout=1,
+                delivery={"deliver": "telegram", "deliver_extra": {"chat_id": "12345"}},
+            )
+
+        mock_target.send.assert_awaited_once()
+        chat_id_arg, content_arg = mock_target.send.await_args.args[0:2]
+        assert chat_id_arg == "12345"
+        assert content_arg == "Gmail: 1 important email."
+
+    @pytest.mark.asyncio
+    async def test_script_empty_stdout_does_not_deliver(self):
+        """Silent script success stays silent even with a delivery target configured."""
+        adapter = _make_adapter()
+        mock_target = _wire_mock_target(adapter)
+
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"\n  \n", b""
+
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=Proc()),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=Path("/tmp/noop.py"),
+                delivery_id="delivery-silent",
+                timeout=1,
+                delivery={"deliver": "telegram", "deliver_extra": {"chat_id": "12345"}},
+            )
+
+        mock_target.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_health_endpoint(self):
