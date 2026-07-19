@@ -29,6 +29,15 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# A linked worktree has a .git *file* rather than the primary checkout's
+# .git directory. Worktree-local setup is valid, but it must not replace the
+# user's global `hermes` launcher or alter shell PATH configuration.
+IS_GIT_WORKTREE=false
+if [ -f "$SCRIPT_DIR/.git" ]; then
+    IS_GIT_WORKTREE=true
+    echo -e "${YELLOW}⚠${NC} Git worktree detected; setup will remain local to $SCRIPT_DIR"
+fi
+
 # Prevent uv from discovering config files (uv.toml, pyproject.toml) from the
 # wrong user's home directory when running under sudo -u <user>.  See #21269.
 export UV_NO_CONFIG=1
@@ -345,7 +354,11 @@ fi
 # PATH setup — symlink hermes into a user-facing bin dir
 # ============================================================================
 
-echo -e "${CYAN}→${NC} Setting up hermes command..."
+if [ "$IS_GIT_WORKTREE" = true ]; then
+    SHELL_CONFIG=""
+    echo -e "${YELLOW}⚠${NC} Skipping global hermes launcher and shell PATH changes for Git worktree"
+else
+    echo -e "${CYAN}→${NC} Setting up hermes command..."
 
 HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
 COMMAND_LINK_DIR="$(get_command_link_dir)"
@@ -394,6 +407,7 @@ else
         fi
     fi
 fi
+fi
 
 # ============================================================================
 # Seed bundled skills into ~/.hermes/skills/
@@ -423,7 +437,14 @@ echo -e "${GREEN}✓ Setup complete!${NC}"
 echo ""
 echo "Next steps:"
 echo ""
-if is_termux; then
+if [ "$IS_GIT_WORKTREE" = true ]; then
+    echo "  1. Run the worktree-local setup wizard:"
+    echo "     $SCRIPT_DIR/venv/bin/hermes setup"
+    echo ""
+    echo "  2. Start the worktree-local CLI:"
+    echo "     $SCRIPT_DIR/venv/bin/hermes"
+    echo ""
+elif is_termux; then
     echo "  1. Run the setup wizard to configure API keys:"
     echo "     hermes setup"
     echo ""
