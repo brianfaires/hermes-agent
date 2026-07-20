@@ -666,9 +666,12 @@ def _attach_output(job: dict, output_file: str, duration_seconds: Optional[float
                 parsed = _parse_dt(start.get("dateTime") or start.get("date"))
                 if parsed is None:
                     return float("inf")
-                if parsed.tzinfo is None and run_at.tzinfo is not None:
-                    parsed = parsed.replace(tzinfo=run_at.tzinfo)
-                return abs((parsed - run_at).total_seconds())
+                comparison_run_at = run_at
+                if parsed.tzinfo is None and comparison_run_at.tzinfo is not None:
+                    parsed = parsed.replace(tzinfo=comparison_run_at.tzinfo)
+                elif parsed.tzinfo is not None and comparison_run_at.tzinfo is None:
+                    comparison_run_at = comparison_run_at.replace(tzinfo=parsed.tzinfo)
+                return abs((parsed - comparison_run_at).total_seconds())
 
             instance = min(instances, key=distance)
         elif _is_high_frequency_schedule(job):

@@ -278,6 +278,29 @@ def test_long_run_uses_start_time_when_querying_instances(env, tmp_path):
     assert datetime.fromisoformat(time_min).hour <= 9
 
 
+def test_instance_matching_handles_aware_calendar_time_with_naive_run_time(
+    env, tmp_path, monkeypatch
+):
+    active_job = job(schedule={"kind": "cron", "expr": "0 9 * * *"})
+    cs.on_create(active_job)
+    event_id = cs._load_state()["job1"]["events"][0]["event_id"]
+    env.instances[event_id] = [
+        {
+            "id": "aware-instance",
+            "description": "",
+            "start": {"dateTime": "2026-07-19T09:00:00-07:00"},
+        }
+    ]
+    env.events["aware-instance"] = deepcopy(env.instances[event_id][0])
+    monkeypatch.setattr(cs.hermes_time, "get_timezone", lambda: None)
+    output = tmp_path / "2026-07-19_09-00-00.md"
+    output.write_text("## Response\ndone")
+
+    cs.on_complete(active_job, success=True, duration_seconds=10, output_file=str(output))
+
+    assert "done" in env.events["aware-instance"]["description"]
+
+
 def test_high_frequency_output_is_recorded_as_skipped_not_uploaded(env, tmp_path):
     cs.on_create(job())
     event_id = cs._load_state()["job1"]["events"][0]["event_id"]

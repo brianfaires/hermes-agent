@@ -151,6 +151,33 @@ def test_on_create_no_next_run_skips(env):
     assert cs._load_state() == {}
 
 
+def test_reconciliation_retains_failed_duplicate_archive_for_retry(env, monkeypatch):
+    cs.on_create(_job())
+    duplicate = deepcopy(env.events["ev1"])
+    duplicate["id"] = "ev2"
+    env.events["ev2"] = duplicate
+
+    archive_attempts = []
+
+    def fail_archive(calendar, event_id, reason):
+        archive_attempts.append(event_id)
+        return False
+
+    monkeypatch.setattr(cs, "_archive_event", fail_archive)
+    cs.on_update(_job())
+
+    assert archive_attempts == ["ev2"]
+    assert [event["event_id"] for event in cs._load_state()["job1"]["events"]] == [
+        "ev1",
+        "ev2",
+    ]
+
+    monkeypatch.setattr(cs, "_archive_event", lambda *args: True)
+    cs.on_update(_job())
+
+    assert [event["event_id"] for event in cs._load_state()["job1"]["events"]] == ["ev1"]
+
+
 def test_on_complete_first_run_sets_baseline_silently(env):
     cs.on_create(_job())
     notes = []

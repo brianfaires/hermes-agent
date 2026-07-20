@@ -12,7 +12,7 @@ import sys
 import types
 from pathlib import Path
 
-_PLUGIN_DIR = Path(__file__).resolve().parent
+_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "cron-calendar-sync"
 _PKG = "hermes_plugins.cron_calendar_sync"
 
 
