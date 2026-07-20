@@ -1,18 +1,8 @@
-"""Thin adapter over the google-workspace skill's calendar CLI.
-
-cron_calendar_sync uses this to create/update/delete Google Calendar events for
-cron jobs. All calls route through the installed google-workspace skill
-(``google_api.py``) so the skill's fail-closed write policy and OAuth handling
-stay the single source of truth — this module adds no Google API code of its
-own.
-
-Every method is best-effort: failures are logged and surfaced as ``None`` /
-``False`` rather than raised, so a calendar problem never breaks cron job
-mutations or scheduler runs.
-"""
+"""Fail-soft adapter to the active profile's google-workspace Calendar API."""
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +11,14 @@ from typing import Optional
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
+
+
+class CalendarOperationError(RuntimeError):
+    """A Calendar read failed for a reason other than confirmed absence."""
+
+
+class CalendarNotFoundError(CalendarOperationError):
+    """Google confirmed that the requested Calendar resource is gone."""
 
 
 def _script_path() -> Path:
@@ -38,91 +36,82 @@ def _token_path() -> Path:
     return get_hermes_home() / "google-workspace" / "google_token.json"
 
 
+def _worker_path() -> Path:
+    return Path(__file__).with_name("calendar_worker.py")
+
+
 def available() -> bool:
-    """True when the skill script and an OAuth token are both present."""
-    return _script_path().exists() and _token_path().exists()
+    """True when this profile has the skill, OAuth token, and worker."""
+    return _script_path().exists() and _token_path().exists() and _worker_path().exists()
 
 
-def _parse_json_stdout(stdout: str) -> Optional[dict]:
-    """Extract the first JSON object from CLI stdout (ignoring stray noise)."""
-    if not stdout:
-        return None
-    start = stdout.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(stdout)):
-        ch = stdout[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(stdout[start:i + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
-
-
-def _run(args: list) -> Optional[dict]:
-    """Invoke ``google_api.py calendar <args>`` and return parsed JSON output."""
-    script = _script_path()
-    if not script.exists():
-        logger.warning("cron_calendar_sync: google-workspace script missing at %s", script)
-        return None
-    cmd = [sys.executable, str(script), "calendar", *[str(a) for a in args]]
+def _run_request(operation: str, calendar: str, **payload) -> Optional[object]:
+    request = {"operation": operation, "calendar": calendar, **payload}
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(get_hermes_home())
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL
+            [sys.executable, str(_worker_path())],
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
         )
-    except Exception as e:
-        logger.error("cron_calendar_sync: calendar command failed to run: %s", e)
+    except Exception as exc:
+        logger.error("cron_calendar_sync: calendar %s failed to run: %s", operation, exc)
+        raise CalendarOperationError(str(exc)) from exc
+    try:
+        response = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        response = None
+    if result.returncode != 0 or not isinstance(response, dict) or not response.get("ok"):
+        detail = response.get("error") if isinstance(response, dict) else None
+        status = response.get("status") if isinstance(response, dict) else None
+        detail = detail or (result.stderr or result.stdout or "unknown error").strip()
+        logger.warning("cron_calendar_sync: calendar %s failed: %s", operation, detail)
+        if status in {404, 410}:
+            raise CalendarNotFoundError(detail)
+        raise CalendarOperationError(detail)
+    return response.get("result")
+
+
+def create_event_body(calendar: str, body: dict) -> Optional[str]:
+    try:
+        result = _run_request("create", calendar, body=body)
+    except CalendarOperationError:
         return None
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        logger.warning("cron_calendar_sync: calendar %s failed: %s", args[0] if args else "?", err)
+    return result.get("id") if isinstance(result, dict) else None
+
+
+def patch_event_body(calendar: str, event_id: str, body: dict) -> bool:
+    try:
+        return _run_request("patch", calendar, event_id=str(event_id), body=body) is not None
+    except CalendarOperationError:
+        return False
+
+
+def get_event(calendar: str, event_id: str) -> Optional[dict]:
+    try:
+        result = _run_request("get", calendar, event_id=str(event_id))
+    except CalendarNotFoundError:
         return None
-    return _parse_json_stdout(result.stdout)
+    return result if isinstance(result, dict) else None
 
 
-def create_event(calendar: str, summary: str, start: str, end: str,
-                 *, recurrence: Optional[str] = None, timezone: Optional[str] = None,
-                 description: Optional[str] = None) -> Optional[str]:
-    """Create an event; return its event id or None on failure."""
-    args = ["create", "--calendar", calendar, "--summary", summary,
-            "--start", start, "--end", end]
-    if recurrence:
-        args += ["--recurrence", recurrence]
-    if timezone:
-        args += ["--timezone", timezone]
-    if description:
-        args += ["--description", description]
-    result = _run(args)
-    return result.get("id") if result else None
+def list_events(calendar: str) -> list[dict]:
+    result = _run_request("list", calendar)
+    return result.get("items", []) if isinstance(result, dict) else []
 
 
-def update_event(calendar: str, event_id: str, *, summary: Optional[str] = None,
-                 start: Optional[str] = None, end: Optional[str] = None,
-                 recurrence: Optional[str] = None, timezone: Optional[str] = None,
-                 description: Optional[str] = None) -> bool:
-    """Patch an existing event. Return True on success."""
-    args = ["update", str(event_id), "--calendar", calendar]
-    if summary:
-        args += ["--summary", summary]
-    if start:
-        args += ["--start", start]
-    if end:
-        args += ["--end", end]
-    if recurrence:
-        args += ["--recurrence", recurrence]
-    if timezone:
-        args += ["--timezone", timezone]
-    if description:
-        args += ["--description", description]
-    return _run(args) is not None
-
-
-def delete_event(calendar: str, event_id: str) -> bool:
-    """Delete an event. Return True on success."""
-    return _run(["delete", str(event_id), "--calendar", calendar]) is not None
+def list_instances(
+    calendar: str, event_id: str, time_min: str, time_max: str
+) -> list[dict]:
+    result = _run_request(
+        "instances",
+        calendar,
+        event_id=str(event_id),
+        time_min=time_min,
+        time_max=time_max,
+    )
+    return result.get("items", []) if isinstance(result, dict) else []
