@@ -6492,7 +6492,11 @@ class GatewayRunner(
                 _phase_elapsed(),
             )
 
-            await self._stop_discord_kanban_mirror_runtime()
+            _stop_mirror_runtime = getattr(
+                self, "_stop_discord_kanban_mirror_runtime", None
+            )
+            if _stop_mirror_runtime is not None:
+                await _stop_mirror_runtime()
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
                     continue
