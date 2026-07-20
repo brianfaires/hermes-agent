@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from gateway.kanban_mirror.conversation_log import record_conversation_event
-from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue
-from gateway.kanban_mirror.reconciliation import (
+from plugins.platforms.discord.kanban_mirror.conversation_log import record_conversation_event
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue
+from plugins.platforms.discord.kanban_mirror.reconciliation import (
     ExpectedThread, ObservedDigest, ObservedThread, list_reconciliation_findings,
     reconcile_mirror_state, reconciliation_report, resolve_thread_quarantine,
 )
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, prepare_binding_transition,
     resolve_thread_task, set_thread,

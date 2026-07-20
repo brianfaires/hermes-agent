@@ -126,7 +126,7 @@ def record_conversation_event(
     # Capture the epoch active at creation. Zero/ambiguous bindings remain NULL:
     # the event is preserved while current-card operations fail closed.
     if binding_key is None:
-        from gateway.kanban_mirror.state import active_thread_binding
+        from plugins.platforms.discord.kanban_mirror.state import active_thread_binding
 
         binding = active_thread_binding(conn, thread_id)
         if binding is not None:
@@ -266,7 +266,7 @@ def resolve_log_targets(
         "SELECT COUNT(*) FROM mirror_binding_epochs WHERE thread_id=?", (thread_id,)
     ).fetchone()[0]
     if epoch_count:
-        from gateway.kanban_mirror.state import active_thread_binding
+        from plugins.platforms.discord.kanban_mirror.state import active_thread_binding
 
         active = active_thread_binding(conn, thread_id)
         if active is None:

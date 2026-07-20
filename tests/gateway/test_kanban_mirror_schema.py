@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gateway.kanban_mirror.schema import (
+from plugins.platforms.discord.kanban_mirror.schema import (
     MIRROR_SCHEMA_VERSION,
     MirrorSchemaError,
     initialize_mirror_schema,

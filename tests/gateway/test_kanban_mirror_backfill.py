@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from gateway.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound, HistoryPage
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound, HistoryPage
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
 
 class FakeHistory:

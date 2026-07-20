@@ -18,14 +18,14 @@ from typing import Any, Literal
 
 from hermes_cli import kanban_db as kb
 
-from gateway.kanban_mirror.conversation_log import (
+from plugins.platforms.discord.kanban_mirror.conversation_log import (
     freeze_log_delivery,
     mark_log_delivery,
     parse_log_command,
     record_conversation_event,
     resolve_log_targets,
 )
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     connect_mirror,
     ensure_receipts,
     find_receipt_comment_id,

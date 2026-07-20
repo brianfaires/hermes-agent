@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.kanban_discord_inbox import KanbanReplyInboxConfig, validate_router_config
-from gateway.kanban_mirror.config import load_mirror_config
+from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxConfig, validate_router_config
+from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
 from gateway.platforms.base import Platform
 from gateway.run import GatewayRunner, MultiplexConfigError
 
@@ -39,8 +39,8 @@ def test_router_config_enforces_ingress_and_mirror_ownership():
 
 
 def test_live_readiness_accepts_secondary_ingress_and_rejects_swapped_ids(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", cfg)
-    monkeypatch.setattr("gateway.kanban_mirror.config.load_mirror_config",
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.config.load_mirror_config",
                         lambda: SimpleNamespace(enabled=False))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
     def adapter(user):
@@ -66,8 +66,8 @@ def test_live_readiness_accepts_secondary_ingress_and_rejects_swapped_ids(monkey
 
 
 def test_validation_invokes_ingress_workers_and_clears_stopped_adapter(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", cfg)
-    monkeypatch.setattr("gateway.kanban_mirror.config.load_mirror_config",
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.config.load_mirror_config",
                         lambda: SimpleNamespace(enabled=False))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
 
@@ -99,8 +99,8 @@ def test_validation_invokes_ingress_workers_and_clears_stopped_adapter(monkeypat
 
 @pytest.mark.asyncio
 async def test_reconnect_revalidation_is_serialized_and_fail_closed(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", cfg)
-    monkeypatch.setattr("gateway.kanban_mirror.config.load_mirror_config",
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.config.load_mirror_config",
                         lambda: SimpleNamespace(enabled=False))
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
 

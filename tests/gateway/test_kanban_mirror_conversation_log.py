@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from gateway.kanban_mirror.conversation_log import (
+from plugins.platforms.discord.kanban_mirror.conversation_log import (
     freeze_log_delivery,
     mark_log_delivery,
     parse_log_command,
@@ -15,7 +15,7 @@ from gateway.kanban_mirror.conversation_log import (
     recover_log_deliveries,
     split_log_comment,
 )
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
 
 @pytest.fixture

@@ -1,11 +1,11 @@
-"""CLI: python -m gateway.kanban_mirror --dry-run | --once | --rebuild [--adopt-legacy] [--live]"""
+"""CLI: python -m plugins.platforms.discord.kanban_mirror --dry-run | --once | --rebuild [--adopt-legacy] [--live]"""
 import argparse
 import asyncio
 
-from gateway.kanban_mirror.config import load_mirror_config
-from gateway.kanban_mirror.daemon import rebuild, tick
-from gateway.kanban_mirror.discord_client import DiscordClient, load_discord_token
-from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
+from plugins.platforms.discord.kanban_mirror.daemon import rebuild, tick
+from plugins.platforms.discord.kanban_mirror.discord_client import DiscordClient, load_discord_token
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror, mirror_db_path
 
 
 def main() -> None:

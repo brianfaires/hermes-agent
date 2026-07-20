@@ -7,8 +7,8 @@ import pytest
 
 from gateway.platforms.base import Platform
 from gateway.run import GatewayRunner
-from gateway.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue, get
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, deliver, enqueue, get
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ async def test_live_claim_prevents_concurrent_duplicate_send(conn):
 @pytest.mark.asyncio
 async def test_executable_mirrored_response_uses_profile_outbox_and_agent_ledger(tmp_path, monkeypatch):
     db_path = tmp_path / "live-mirror.db"
-    from gateway.kanban_mirror import context as context_mod, state as state_mod
+    from plugins.platforms.discord.kanban_mirror import context as context_mod, state as state_mod
     monkeypatch.setattr(context_mod, "resolve_mirrored_kanban_thread", lambda _: SimpleNamespace(board_slug="fixture", initiative_kind="single"))
     monkeypatch.setattr(state_mod, "mirror_db_path", lambda _: db_path)
     monkeypatch.setattr(state_mod, "active_thread_binding", lambda *_: SimpleNamespace(binding_key="binding-at-creation"))

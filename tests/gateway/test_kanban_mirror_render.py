@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from gateway.kanban_mirror.render import (
+from plugins.platforms.discord.kanban_mirror.render import (
     render_post, render_digest, post_title, stage_tag, needs_brian_tag, redact,
     STATUS_EMOJI, review_artifact_paths,
 )
-from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
+from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
 
 
 def mk_card(id, title, status, priority=0, body="", assignee=None,

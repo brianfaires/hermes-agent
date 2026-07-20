@@ -12,23 +12,23 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from gateway.kanban_discord_inbox import (
+from plugins.platforms.discord.kanban_mirror.inbox import (
     DiscordReplyContext,
     handle_reply,
     load_config,
     validate_router_config,
 )
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.daemon import (
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.daemon import (
     _initiate_automatic_successors,
     _recover_binding_transitions,
     _resume_terminal_lifecycles,
 )
-from gateway.kanban_mirror.lifecycle import get_terminal_lifecycle
-from gateway.kanban_mirror.reconciliation import reconcile_mirror_state, resolve_thread_quarantine
-from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
-from gateway.kanban_mirror.recovery import run_outbound_recovery
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.lifecycle import get_terminal_lifecycle
+from plugins.platforms.discord.kanban_mirror.reconciliation import reconcile_mirror_state, resolve_thread_quarantine
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
+from plugins.platforms.discord.kanban_mirror.recovery import run_outbound_recovery
+from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding,
     add_member,
     backfill_legacy_bindings,
@@ -180,7 +180,7 @@ def test_disabled_default_and_unrelated_text_voice_are_not_claimed():
     assert handle_reply(unrelated, config=cfg).reason == "disabled"
     # Voice/non-thread events cannot even become a router context; this is the
     # adapter contract that leaves the existing voice pipeline untouched.
-    from gateway.kanban_discord_inbox import context_from_discord_message
+    from plugins.platforms.discord.kanban_mirror.inbox import context_from_discord_message
     assert context_from_discord_message(SimpleNamespace(id="voice", channel=SimpleNamespace(id="voice"))) is None
 
 
@@ -344,7 +344,7 @@ async def test_terminal_lifecycle_idle_archive_is_exactly_once_across_restarts(
     )
     discord = LifecycleDiscordTransport()
     now = {"value": 100}
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: now["value"])
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time", lambda: now["value"])
 
     first = connect_mirror(mirror_path)
     await _resume_terminal_lifecycles(cfg, discord, first, snapshot, load_mirror_state(first), [])
