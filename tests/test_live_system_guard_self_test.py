@@ -201,6 +201,24 @@ def test_subprocess_killall_hermes_blocked():
         subprocess.run(["killall", "hermes"])
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["/definitely/missing/sudo", "-n", "pkill", "-f", "hermes"],
+        ["/definitely/missing/env", "FOO=x", "pkill", "-f", "hermes"],
+        ["/definitely/missing/setsid", "-f", "pkill", "-f", "hermes"],
+        ["/definitely/missing/bash", "-lc", "pkill -f hermes"],
+        ["/definitely/missing/bash", "-lc", "echo ready; pkill -f hermes"],
+        ["/definitely/missing/bash", "-lc", "echo ready && pkill -f hermes"],
+        ["/definitely/missing/bash", "-lc", "echo ready | pkill -f hermes"],
+        ["/definitely/missing/bash", "-lc", "exec pkill -f hermes"],
+    ],
+)
+def test_wrapped_process_killers_are_blocked(command):
+    with pytest.raises(RuntimeError, match="live-system guard"):
+        subprocess.run(command)
+
+
 # ──────────────────── pass-through cases (must NOT raise) ──────
 
 
