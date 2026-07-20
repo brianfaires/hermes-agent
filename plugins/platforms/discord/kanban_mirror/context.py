@@ -154,7 +154,7 @@ def resolve_mirrored_kanban_thread(thread_id: str | None) -> MirroredKanbanThrea
 def _resolve_mirrored_kanban_thread_uncached(thread_id: str) -> MirroredKanbanThreadContext | None:
     try:
         from hermes_cli import kanban_db as kb
-        from gateway.kanban_mirror.state import mirror_db_path
+        from plugins.platforms.discord.kanban_mirror.state import mirror_db_path
 
         boards = [str(row.get("slug") or row.get("name") or "") for row in kb.list_boards(include_archived=False)]
     except Exception:

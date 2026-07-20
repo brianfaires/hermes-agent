@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding, add_member, authorize_starter_update,
     backfill_legacy_bindings, confirm_binding_transition, connect_mirror,
     create_initiative, get_binding_transition, pending_binding_transition,

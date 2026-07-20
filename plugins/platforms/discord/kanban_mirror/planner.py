@@ -15,8 +15,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, replace
 
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.render import (
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.render import (
     needs_brian_tag,
     post_title,
     primary_assignee,
@@ -24,7 +24,7 @@ from gateway.kanban_mirror.render import (
     render_post,
     stage_tag,
 )
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot,
     Card,
     Initiative,

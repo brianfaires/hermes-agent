@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 import pytest
-from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
-from gateway.kanban_mirror.recovery import delivery_health, run_outbound_recovery
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
+from plugins.platforms.discord.kanban_mirror.recovery import delivery_health, run_outbound_recovery
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
 @pytest.fixture
 def conn(tmp_path):

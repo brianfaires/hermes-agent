@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound, HistoryPage
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound, HistoryPage
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 from plugins.platforms.discord import adapter as discord_adapter
 
 
@@ -162,7 +162,7 @@ async def test_mirrored_ingress_freezes_exact_user_role_authorization(
 
 @pytest.mark.asyncio
 async def test_restart_replay_keeps_frozen_unauthorized_disposition(runtime, monkeypatch):
-    from gateway.kanban_mirror.inbound import PendingInboundRunner
+    from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner
 
     adapter, conn, _ingestor = runtime
     _bind(conn, "10")
@@ -192,14 +192,14 @@ async def test_restart_replay_keeps_frozen_unauthorized_disposition(runtime, mon
 
 @pytest.mark.asyncio
 async def test_only_validated_ingress_backfills_and_freezes_its_policy(tmp_path, monkeypatch):
-    from gateway.kanban_mirror.inbound import PendingInboundRunner
+    from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner
 
     conn = connect_mirror(tmp_path / "mirror.db")
     _bind(conn, "10")
     ingestor = DiscordBackfillIngestor(conn, clock=lambda: 1_000)
     cfg = SimpleNamespace(enabled=True, conversation_router_enabled=True,
                           forum_channel_ids=frozenset({"99"}))
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", lambda: cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", lambda: cfg)
 
     def make(bot_id, allowed):
         item = discord_adapter.DiscordAdapter(PlatformConfig(enabled=True, token="fixture"))

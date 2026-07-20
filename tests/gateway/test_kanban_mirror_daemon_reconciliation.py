@@ -1,9 +1,9 @@
 import asyncio
 
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.daemon import _observe_and_reconcile
-from gateway.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.daemon import _observe_and_reconcile
+from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
+from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot, Card, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, set_thread,
 )

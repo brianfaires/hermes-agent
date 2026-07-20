@@ -18,8 +18,8 @@ import json
 import re
 from dataclasses import dataclass
 
-from gateway.kanban_mirror.render import redact
-from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative
+from plugins.platforms.discord.kanban_mirror.render import redact
+from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative
 
 # ---------------------------------------------------------------------------
 # Errors / results

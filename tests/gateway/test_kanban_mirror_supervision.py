@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 
-from gateway.kanban_mirror.schema import initialize_mirror_schema
-from gateway.kanban_mirror.state import connect_mirror
-from gateway.kanban_mirror.supervision import LoopSupervisor, health_snapshot
+from plugins.platforms.discord.kanban_mirror.schema import initialize_mirror_schema
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.supervision import LoopSupervisor, health_snapshot
 
 
 @pytest.mark.asyncio

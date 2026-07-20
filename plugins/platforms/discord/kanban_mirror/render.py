@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative, is_terminal
+from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, is_terminal
 
 # ---------------------------------------------------------------------------
 # Lifted from v1: discord_forum_mirror.py
