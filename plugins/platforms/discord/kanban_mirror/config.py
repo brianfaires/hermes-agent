@@ -25,7 +25,7 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
-from gateway.kanban_mirror.closed_thread_policy import ClosedThreadPolicy, load_closed_thread_policy
+from plugins.platforms.discord.kanban_mirror.closed_thread_policy import ClosedThreadPolicy, load_closed_thread_policy
 
 
 def _number(value, default, converter):

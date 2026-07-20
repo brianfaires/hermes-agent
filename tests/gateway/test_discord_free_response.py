@@ -1203,7 +1203,7 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
 async def test_kanban_owner_route_bypasses_mention_gate_and_sets_profile_context(
     adapter, monkeypatch
 ):
-    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+    from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxResult
 
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")

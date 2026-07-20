@@ -1,8 +1,8 @@
 import asyncio
-from gateway.kanban_mirror.config import MirrorConfig, load_mirror_config
-from gateway.kanban_mirror.daemon import _resume_terminal_lifecycles
-from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
-from gateway.kanban_mirror.state import (BoardSnapshot, Card, add_member, backfill_legacy_bindings,
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig, load_mirror_config
+from plugins.platforms.discord.kanban_mirror.daemon import _resume_terminal_lifecycles
+from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
+from plugins.platforms.discord.kanban_mirror.state import (BoardSnapshot, Card, add_member, backfill_legacy_bindings,
     connect_mirror, create_initiative, load_mirror_state, set_thread)
 
 
@@ -62,13 +62,13 @@ def test_concrete_publisher_nonce_digest_pin_tag_and_archive(tmp_path):
 def test_daemon_resume_orders_stages_and_reopen_cancels(tmp_path, monkeypatch):
     conn=seeded(tmp_path/"m.db"); client=Discord()
     cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time",lambda:100)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:100)
     state=load_mirror_state(conn); log=[]
     asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snapshot(),state,log))
     assert client.events==["summary","digest","tag"]
     # Restart resumes from durable tag boundary; later Discord activity resets idle.
     client.messages[("thread","last")]["timestamp"]="1970-01-01T00:02:50Z"
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time",lambda:200)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:200)
     asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snapshot(),state,log))
     assert "archive" not in client.events
     asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snapshot("running"),state,log))

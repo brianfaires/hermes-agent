@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding,
     add_member,
     backfill_legacy_bindings,
@@ -12,7 +12,7 @@ from gateway.kanban_mirror.state import (
     get_binding_transition,
     set_thread,
 )
-from gateway.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
+from plugins.platforms.discord.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
 
 
 def canonical_hash(payload):

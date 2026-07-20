@@ -1,9 +1,9 @@
 from __future__ import annotations
 import pytest
-from gateway.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound
-from gateway.kanban_mirror.inbound import PendingInboundRunner, ProcessResult
-from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue
-from gateway.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound
+from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner, ProcessResult
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
 
 def bind(conn, thread):

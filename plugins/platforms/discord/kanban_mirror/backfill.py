@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol, Sequence
 
-from gateway.kanban_mirror.state import active_thread_binding, is_thread_quarantined
+from plugins.platforms.discord.kanban_mirror.state import active_thread_binding, is_thread_quarantined
 
 
 @dataclass(frozen=True)

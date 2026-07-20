@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
-from gateway.kanban_mirror.state import connect_mirror
-from gateway.kanban_mirror.supervision import LoopSupervisor
+from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue, get
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror
+from plugins.platforms.discord.kanban_mirror.supervision import LoopSupervisor
 from gateway.platforms.base import Platform
 from gateway.run import GatewayRunner
 
@@ -32,8 +32,8 @@ async def test_live_router_recovery_exact_profile_duplicate_start_and_health(tmp
     ingress = SimpleNamespace(_running=True, is_connected=True)
     cfg = SimpleNamespace(enabled=True, conversation_router_enabled=True, board_slug="board")
     statuses = []
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", lambda: cfg)
-    monkeypatch.setattr("gateway.kanban_mirror.state.mirror_db_path", lambda slug: path)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", lambda: cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.state.mirror_db_path", lambda slug: path)
     monkeypatch.setattr("gateway.status.write_runtime_status", lambda **kw: statuses.append(kw))
 
     runner = SimpleNamespace(
@@ -76,7 +76,7 @@ async def test_live_router_recovery_exact_profile_duplicate_start_and_health(tmp
 async def test_router_runtime_disabled_clears_stale_health(monkeypatch):
     cfg = SimpleNamespace(enabled=True, conversation_router_enabled=False, board_slug="board")
     statuses = []
-    monkeypatch.setattr("gateway.kanban_discord_inbox.load_config", lambda: cfg)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.load_config", lambda: cfg)
     monkeypatch.setattr("gateway.status.write_runtime_status", lambda **kw: statuses.append(kw))
     runner = SimpleNamespace(
         _gateway_profile_name="default", adapters={}, _profile_adapters={},
