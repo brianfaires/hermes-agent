@@ -1,7 +1,7 @@
 import hashlib,json
 import pytest
-from gateway.kanban_mirror.state import connect_mirror,create_initiative,add_member,set_thread,backfill_legacy_bindings
-from gateway.kanban_mirror.lifecycle import PublishReceipt,get_terminal_lifecycle,run_terminal_lifecycle
+from plugins.platforms.discord.kanban_mirror.state import connect_mirror,create_initiative,add_member,set_thread,backfill_legacy_bindings
+from plugins.platforms.discord.kanban_mirror.lifecycle import PublishReceipt,get_terminal_lifecycle,run_terminal_lifecycle
 
 def h(p): return hashlib.sha256(json.dumps(p,ensure_ascii=False,separators=(",",":"),sort_keys=True).encode()).hexdigest()
 class Clock:

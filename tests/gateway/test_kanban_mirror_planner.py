@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from gateway.kanban_mirror.planner import plan, Op, current_publish_hash
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState, material_sig
+from plugins.platforms.discord.kanban_mirror.planner import plan, Op, current_publish_hash
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState, material_sig
 
 CFG = MirrorConfig(enabled=True, board="b", forum_channel_id="f")
 

@@ -21,17 +21,17 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from gateway.kanban_mirror.closed_thread_policy import classify_thread_state, resolve_closed_thread_action
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.discord_client import (
+from plugins.platforms.discord.kanban_mirror.closed_thread_policy import classify_thread_state, resolve_closed_thread_action
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.discord_client import (
     DiscordAPIError,
     DiscordClient,
     ensure_forum_tags,
     load_discord_token,
     split_discord_message,
 )
-from gateway.kanban_mirror.planner import Op, _digest_hash, _tags_for, current_publish_hash, plan
-from gateway.kanban_mirror.render import (
+from plugins.platforms.discord.kanban_mirror.planner import Op, _digest_hash, _tags_for, current_publish_hash, plan
+from plugins.platforms.discord.kanban_mirror.render import (
     post_title,
     pointed_card_id,
     redact,
@@ -40,7 +40,7 @@ from gateway.kanban_mirror.render import (
     review_artifact_paths,
     work_item_ids,
 )
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot,
     Initiative,
     MemberState,
@@ -64,13 +64,13 @@ from gateway.kanban_mirror.state import (
     set_prose,
     set_thread,
 )
-from gateway.kanban_mirror import writer
-from gateway.kanban_mirror.transitions import TransitionReceipt, request_binding_transition, run_binding_transition
-from gateway.kanban_mirror.lifecycle import run_terminal_lifecycle
-from gateway.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
-from gateway.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
+from plugins.platforms.discord.kanban_mirror import writer
+from plugins.platforms.discord.kanban_mirror.transitions import TransitionReceipt, request_binding_transition, run_binding_transition
+from plugins.platforms.discord.kanban_mirror.lifecycle import run_terminal_lifecycle
+from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
+from plugins.platforms.discord.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
                                                    reconcile_mirror_state)
-from gateway.kanban_mirror.writer import WriterError
+from plugins.platforms.discord.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
 
@@ -1647,7 +1647,7 @@ async def rebuild(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: 
 
 
 async def run_mirror_daemon(is_running: Callable[[], bool]) -> None:
-    from gateway.kanban_mirror.config import load_mirror_config
+    from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
 
     cfg = load_mirror_config()
     if not cfg.valid():

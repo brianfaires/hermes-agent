@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.kanban_discord_inbox import (
+from plugins.platforms.discord.kanban_mirror.inbox import (
     DiscordReplyContext,
     KanbanReplyInboxConfig,
     context_from_discord_message,
@@ -24,8 +24,8 @@ from gateway.kanban_discord_inbox import (
     maybe_handle_discord_reaction,
     maybe_handle_discord_reaction_remove,
 )
-from gateway.kanban_mirror.conversation_log import record_conversation_event
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.conversation_log import record_conversation_event
+from plugins.platforms.discord.kanban_mirror.state import (
     add_member,
     connect_mirror,
     create_initiative,
@@ -605,13 +605,13 @@ def test_mirror_resolved_reply_creates_comment_and_mirror_receipt(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_adapter_consumes_mapped_reaction_without_normal_dispatch(monkeypatch):
-    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+    from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxResult
     from plugins.platforms.discord.adapter import DiscordAdapter
 
     async def fake_handle(payload, **_kwargs):
         return KanbanReplyInboxResult(consumed=True, reason="handled", task_id="t_123", action="reaction:approve")
 
-    monkeypatch.setattr("gateway.kanban_discord_inbox.maybe_handle_discord_reaction", fake_handle)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.maybe_handle_discord_reaction", fake_handle)
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
     adapter._client = SimpleNamespace(user=SimpleNamespace(id="999"))
 
@@ -633,7 +633,7 @@ async def test_adapter_rejects_unauthorized_reaction_before_kanban_routing(monke
         called = True
         return SimpleNamespace(consumed=False)
 
-    monkeypatch.setattr("gateway.kanban_discord_inbox.maybe_handle_discord_reaction", track_call)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.maybe_handle_discord_reaction", track_call)
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
     adapter._client = SimpleNamespace(user=SimpleNamespace(id="999"))
     adapter._allowed_user_ids = {"42"}
@@ -659,7 +659,7 @@ async def test_adapter_rejects_bot_reaction_by_default(monkeypatch):
         return SimpleNamespace(consumed=False)
 
     monkeypatch.delenv("DISCORD_ALLOW_BOTS", raising=False)
-    monkeypatch.setattr("gateway.kanban_discord_inbox.maybe_handle_discord_reaction", track_call)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.maybe_handle_discord_reaction", track_call)
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
     adapter._client = SimpleNamespace(user=SimpleNamespace(id="999"))
 
@@ -795,7 +795,7 @@ def test_log_all_exports_unsent_events_across_bindings(kanban_db, inbox_config):
 def test_log_recovers_cross_database_crash_without_duplicate_comment(
     kanban_db, inbox_config, monkeypatch
 ):
-    import gateway.kanban_discord_inbox as inbox
+    import plugins.platforms.discord.kanban_mirror.inbox as inbox
 
     db_path, tid = kanban_db
     _record_log_event(message_id="source", task_id=tid, content="durable source")
@@ -1095,7 +1095,7 @@ def test_conversation_router_canonicalizes_owner_profile(
 
 
 def test_adapter_allows_only_designated_kanban_ingress_bot():
-    from gateway.kanban_discord_inbox import KanbanReplyInboxResult
+    from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxResult
     from plugins.platforms.discord.adapter import DiscordAdapter
 
     route = KanbanReplyInboxResult(
@@ -1112,7 +1112,7 @@ def test_adapter_allows_only_designated_kanban_ingress_bot():
 
 @pytest.mark.asyncio
 async def test_adapter_fails_closed_for_router_error_in_configured_forum(monkeypatch):
-    import gateway.kanban_discord_inbox as inbox
+    import plugins.platforms.discord.kanban_mirror.inbox as inbox
     from plugins.platforms.discord.adapter import DiscordAdapter
 
     async def fail(*_args, **_kwargs):
@@ -1142,7 +1142,7 @@ async def test_adapter_fails_closed_for_router_error_in_configured_forum(monkeyp
 
 @pytest.mark.asyncio
 async def test_adapter_error_falls_through_when_inbox_disabled(monkeypatch):
-    import gateway.kanban_discord_inbox as inbox
+    import plugins.platforms.discord.kanban_mirror.inbox as inbox
     from plugins.platforms.discord.adapter import DiscordAdapter
 
     async def fail(*_args, **_kwargs):

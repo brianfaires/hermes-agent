@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from gateway.kanban_mirror.conversation_log import record_conversation_event
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.conversation_log import record_conversation_event
+from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding,
     add_member,
     backfill_legacy_bindings,

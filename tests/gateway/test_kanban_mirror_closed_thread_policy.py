@@ -5,12 +5,12 @@ import sqlite3
 from dataclasses import replace
 from typing import cast
 
-from gateway.kanban_mirror.closed_thread_policy import classify_thread_state
-from gateway.kanban_mirror.config import MirrorConfig, load_mirror_config
-from gateway.kanban_mirror.daemon import _audit_active_threads, _do_archive_thread, _do_edit_post, _do_post_note, _publish_edit, _send_with_closed_thread_policy
-from gateway.kanban_mirror.discord_client import DiscordClient
-from gateway.kanban_mirror.planner import Op, current_publish_hash
-from gateway.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
+from plugins.platforms.discord.kanban_mirror.closed_thread_policy import classify_thread_state
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig, load_mirror_config
+from plugins.platforms.discord.kanban_mirror.daemon import _audit_active_threads, _do_archive_thread, _do_edit_post, _do_post_note, _publish_edit, _send_with_closed_thread_policy
+from plugins.platforms.discord.kanban_mirror.discord_client import DiscordClient
+from plugins.platforms.discord.kanban_mirror.planner import Op, current_publish_hash
+from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
 
 
 def mk_initiative(thread_id="th1"):
@@ -46,7 +46,7 @@ class FakeClient:
 
     def get_channel(self, channel_id):
         if channel_id == "missing":
-            from gateway.kanban_mirror.discord_client import DiscordAPIError
+            from plugins.platforms.discord.kanban_mirror.discord_client import DiscordAPIError
             raise DiscordAPIError("GET", f"/channels/{channel_id}", 404, "not found")
         if self.state == "active":
             return {
@@ -108,7 +108,7 @@ class FailingRedirectClient(FakeClient):
 
 class MissingMessageClient(FakeClient):
     def update_message(self, channel_id, message_id, *, content):
-        from gateway.kanban_mirror.discord_client import DiscordAPIError
+        from plugins.platforms.discord.kanban_mirror.discord_client import DiscordAPIError
 
         raise DiscordAPIError("PATCH", f"/channels/{channel_id}/messages/{message_id}", 404, '{"message":"Unknown Message"}')
 
@@ -486,7 +486,7 @@ def _published_done_initiative():
 
 
 def test_done_thread_archive_waits_until_idle_delay(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: 2000.0)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time", lambda: 2000.0)
     conn = _archive_test_conn()
     client = FakeClient("active", last_message_ts="1970-01-01T00:32:50+00:00")
     log = []
@@ -508,7 +508,7 @@ def test_done_thread_archive_waits_until_idle_delay(monkeypatch):
 
 
 def test_done_thread_archive_runs_after_idle_delay(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: 2000.0)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time", lambda: 2000.0)
     conn = _archive_test_conn()
     client = FakeClient("active", last_message_ts="1970-01-01T00:30:00+00:00")
     log = []
@@ -531,7 +531,7 @@ def test_done_thread_archive_runs_after_idle_delay(monkeypatch):
 
 def test_new_message_resets_done_thread_archive_idle_timer(monkeypatch):
     now = {"value": 2000.0}
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: now["value"])
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time", lambda: now["value"])
     conn = _archive_test_conn()
     client = FakeClient("active", last_message_ts="1970-01-01T00:32:50+00:00")
     log = []
@@ -563,7 +563,7 @@ def test_new_message_resets_done_thread_archive_idle_timer(monkeypatch):
 
 
 def test_done_thread_archive_skips_until_done_tag_publish_is_current(monkeypatch):
-    monkeypatch.setattr("gateway.kanban_mirror.daemon.time.time", lambda: 2000.0)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time", lambda: 2000.0)
     conn = _archive_test_conn()
     client = FakeClient("active", last_message_ts="1970-01-01T00:30:00+00:00")
     log = []

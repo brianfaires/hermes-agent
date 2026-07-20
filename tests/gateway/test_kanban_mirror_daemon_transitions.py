@@ -1,11 +1,11 @@
 import asyncio
 
-from gateway.kanban_mirror.config import MirrorConfig
-from gateway.kanban_mirror.daemon import (
+from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
+from plugins.platforms.discord.kanban_mirror.daemon import (
     DiscordTransitionPublisher, _initiate_automatic_successors, _recover_binding_transitions,
     _starter_identity_authorized,
 )
-from gateway.kanban_mirror.state import (
+from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, get_binding_transition, load_mirror_state, prepare_binding_transition, set_thread,
 )

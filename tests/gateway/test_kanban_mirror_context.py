@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from gateway.config import GatewayConfig, Platform
-from gateway.kanban_mirror.context import resolve_mirrored_kanban_thread
-from gateway.kanban_mirror.state import add_member, connect_mirror, create_initiative, mirror_db_path, set_thread
+from plugins.platforms.discord.kanban_mirror.context import resolve_mirrored_kanban_thread
+from plugins.platforms.discord.kanban_mirror.state import add_member, connect_mirror, create_initiative, mirror_db_path, set_thread
 from gateway.session import SessionSource, build_session_context, build_session_context_prompt
 from gateway.session_context import clear_session_vars, set_session_vars
 from hermes_cli import kanban_db as kb

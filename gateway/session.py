@@ -381,7 +381,7 @@ def build_session_context_prompt(
 
         if context.source.thread_id:
             try:
-                from gateway.kanban_mirror.context import (
+                from plugins.platforms.discord.kanban_mirror.context import (
                     render_mirrored_kanban_context,
                     resolve_mirrored_kanban_thread,
                 )

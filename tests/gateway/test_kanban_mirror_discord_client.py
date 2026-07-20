@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.kanban_mirror.discord_client import DiscordAPIError, DiscordClient
+from plugins.platforms.discord.kanban_mirror.discord_client import DiscordAPIError, DiscordClient
 
 
 class _DummyResponse:

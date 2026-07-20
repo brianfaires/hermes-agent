@@ -1146,7 +1146,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._post_connect_task: Optional[asyncio.Task] = None
         self._kanban_backfill_task: Optional[asyncio.Task] = None
         self._kanban_inbound_task: Optional[asyncio.Task] = None
-        from gateway.kanban_mirror.supervision import LoopSupervisor
+        from plugins.platforms.discord.kanban_mirror.supervision import LoopSupervisor
         self._kanban_supervisor = LoopSupervisor()
         self._kanban_ingestor = None
         self._kanban_mirror_conn = None
@@ -6161,7 +6161,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def _kanban_runtime(self):
         """Return the config-gated durable ingestor, initialized lazily."""
-        from gateway.kanban_discord_inbox import load_config
+        from plugins.platforms.discord.kanban_mirror.inbox import load_config
 
         cfg = load_config()
         if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
@@ -6187,8 +6187,8 @@ class DiscordAdapter(BasePlatformAdapter):
             self._kanban_router_ingress_identity = None
             return cfg, None
         if self._kanban_ingestor is None:
-            from gateway.kanban_mirror.backfill import DiscordBackfillIngestor
-            from gateway.kanban_mirror.state import connect_mirror, mirror_db_path
+            from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor
+            from plugins.platforms.discord.kanban_mirror.state import connect_mirror, mirror_db_path
 
             self._kanban_mirror_conn = connect_mirror(mirror_db_path(cfg.board_slug or "default"))
             self._kanban_ingestor = DiscordBackfillIngestor(
@@ -6220,7 +6220,7 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
     def _discord_inbound(self, message: Any, *, relevant: bool):
-        from gateway.kanban_mirror.backfill import DiscordInbound
+        from plugins.platforms.discord.kanban_mirror.backfill import DiscordInbound
 
         channel = getattr(message, "channel", None)
         author = getattr(message, "author", None)
@@ -6280,7 +6280,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if self._kanban_mirror_conn is None:
                     delay = min(5.0, delay * 2)
                 else:
-                    from gateway.kanban_mirror.inbound import PendingInboundRunner
+                    from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner
                     count = await PendingInboundRunner(self._kanban_mirror_conn, handler).run_once()
                     delay = 0.05 if count else min(2.0, delay * 1.5)
             except asyncio.CancelledError:
@@ -6291,8 +6291,8 @@ class DiscordAdapter(BasePlatformAdapter):
             await asyncio.sleep(delay)
 
     async def _process_kanban_pending_inbound(self, pending):
-        from gateway.kanban_discord_inbox import DiscordReplyContext, handle_reply
-        from gateway.kanban_mirror.inbound import ProcessResult
+        from plugins.platforms.discord.kanban_mirror.inbox import DiscordReplyContext, handle_reply
+        from plugins.platforms.discord.kanban_mirror.inbound import ProcessResult
         from gateway.platforms.base import MessageEvent, MessageType
         p = pending.payload
         if p.get("authorized") is not True:
@@ -6335,7 +6335,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
         """Fakeable discord.py history seam used by durable reconnect recovery."""
-        from gateway.kanban_mirror.backfill import HistoryPage
+        from plugins.platforms.discord.kanban_mirror.backfill import HistoryPage
 
         # Defense in depth: history must not even be fetched if this adapter is
         # not the currently validated ingress identity.
@@ -6455,7 +6455,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _maybe_handle_kanban_inbox(self, message: DiscordMessage):
         """Inspect mapped Discord Forum replies before chat dispatch."""
         try:
-            from gateway.kanban_discord_inbox import maybe_handle_discord_message
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_message
 
             result = await maybe_handle_discord_message(
                 message,
@@ -6469,7 +6469,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 getattr(message, "id", "unknown"),
                 exc_info=True,
             )
-            from gateway.kanban_discord_inbox import (
+            from plugins.platforms.discord.kanban_mirror.inbox import (
                 KanbanReplyInboxResult,
                 load_config as load_kanban_inbox_config,
             )
@@ -6537,7 +6537,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         self.name, channel_id, exc_info=True,
                     )
         try:
-            from gateway.kanban_discord_inbox import maybe_handle_discord_reaction
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_reaction
 
             result = await maybe_handle_discord_reaction(
                 payload,
@@ -6623,7 +6623,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         self.name, channel_id, exc_info=True,
                     )
         try:
-            from gateway.kanban_discord_inbox import maybe_handle_discord_reaction_remove
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_reaction_remove
             result = await maybe_handle_discord_reaction_remove(
                 payload,
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
