@@ -1,6 +1,6 @@
 name: cron-calendar-sync
 version: 1.0.0
-description: "Mirror cron jobs onto a Google Calendar ('Hermes crons') via the cron lifecycle hooks (CREATE/UPDATE/REMOVE/COMPLETE). Event length is learned empirically from successful runs. Best-effort; self-disables when the google-workspace skill/token are absent."
+description: "Profile-local cron-to-Calendar reconciliation via CREATE/UPDATE/REMOVE/COMPLETE hooks. Preserves user-edited titles, keeps one all-day series for high-frequency jobs, archives ended series, recovers managed events, attaches sanitized run output, and learns event duration. Best-effort; requires each profile's own google-workspace skill/token."
 author: "brian"
 # Note: cron lifecycle hooks (cron.hooks) are not standard agent hooks, so they
 # are registered programmatically in register(ctx) rather than declared here.
