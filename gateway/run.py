@@ -6664,14 +6664,14 @@ class GatewayRunner(
         require_profile_adapter: bool = False,
     ) -> Optional[BasePlatformAdapter]:
         """Resolve the connected adapter that owns a routed profile identity."""
-        primary = self.adapters.get(source.platform)
+        primary = getattr(self, "adapters", {}).get(source.platform)
         if source.platform != Platform.DISCORD or not source.profile:
             return primary
         profile = str(source.profile).strip()
-        if profile == self._gateway_profile_name:
+        if profile == getattr(self, "_gateway_profile_name", None):
             candidate = primary
         else:
-            candidate = self._profile_adapters.get(profile, {}).get(source.platform)
+            candidate = getattr(self, "_profile_adapters", {}).get(profile, {}).get(source.platform)
         if candidate is None or not getattr(candidate, "_running", False):
             # A Discord source carrying an explicit profile must never fall back
             # to another bot identity, regardless of which turn path is sending.
