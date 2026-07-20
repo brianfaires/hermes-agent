@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import run_tests_parallel
+
 
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
@@ -61,6 +63,59 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def test_each_pytest_subprocess_gets_an_isolated_basetemp(tmp_path, monkeypatch):
+    """Concurrent pytest files must not prune each other's live tmp_path tree."""
+    commands = []
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "1 passed in 0.01s\n", None
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return FakeProcess()
+
+    monkeypatch.setattr(run_tests_parallel.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(run_tests_parallel, "_kill_tree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run_tests_parallel.os, "getpgid", lambda pid: pid)
+
+    for name in ("test_one.py", "test_two.py"):
+        run_tests_parallel._run_one_file(tmp_path / name, [], tmp_path, 10)
+
+    basetemps = []
+    for command in commands:
+        index = command.index("--basetemp")
+        basetemps.append(Path(command[index + 1]))
+
+    assert basetemps[0] != basetemps[1]
+    assert all(not path.exists() for path in basetemps)
+
+
+def test_isolated_basetemp_is_cleaned_when_pytest_fails_to_launch(tmp_path, monkeypatch):
+    created = []
+
+    def fake_mkdtemp(prefix):
+        path = tmp_path / f"{prefix}launch-failure"
+        path.mkdir()
+        created.append(path)
+        return str(path)
+
+    def fail_popen(command, **kwargs):
+        raise OSError("pytest unavailable")
+
+    monkeypatch.setattr(run_tests_parallel.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(run_tests_parallel.subprocess, "Popen", fail_popen)
+
+    with pytest.raises(OSError, match="pytest unavailable"):
+        run_tests_parallel._run_one_file(tmp_path / "test_one.py", [], tmp_path, 10)
+
+    assert created
+    assert all(not path.exists() for path in created)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only probe")
