@@ -607,6 +607,15 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response(
                 {"error": "Unknown or unconfigured profile"}, status=404
             )
+        active_profile = getattr(self.gateway_runner, "_gateway_profile_name", None)
+        if not isinstance(active_profile, str) or not active_profile.strip():
+            active_profile = "default"
+        profile_scope = (
+            profile.strip()
+            if isinstance(profile, str) and profile.strip()
+            else active_profile.strip()
+        )
+        route_scope = f"{profile_scope}:{route_name}"
 
         if not route_config:
             return web.json_response(
@@ -685,7 +694,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # ── Rate limiting (after auth) ───────────────────────────
         now = time.time()
-        if not self._record_rate_limit_hit(route_name, now):
+        if not self._record_rate_limit_hit(route_scope, now):
             return web.json_response(
                 {"error": "Rate limit exceeded"}, status=429
             )
@@ -703,6 +712,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 request=request,
                 raw_body=raw_body,
                 now=now,
+                delivery_scope=route_scope,
             )
 
         # Parse payload
@@ -827,7 +837,8 @@ class WebhookAdapter(BasePlatformAdapter):
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
         now = time.time()
-        if not self._record_delivery_id(delivery_id, now):
+        delivery_key = f"{route_scope}:{delivery_id}"
+        if not self._record_delivery_id(delivery_key, now):
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
@@ -896,7 +907,8 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
-        session_chat_id = f"webhook:{route_name}:{delivery_id}"
+        profile_segment = f"{profile_scope}:" if profile is not None else ""
+        session_chat_id = f"webhook:{profile_segment}{route_name}:{delivery_id}"
 
         # Store delivery info for send().  Read by every send() invocation
         # for this chat_id (interim status messages and the final response),
@@ -1054,6 +1066,7 @@ class WebhookAdapter(BasePlatformAdapter):
         request: "web.Request",
         raw_body: bytes,
         now: float,
+        delivery_scope: Optional[str] = None,
     ) -> "web.Response":
         """Run a configured local script without parsing webhook payload text."""
         delivery_id = next(
@@ -1069,7 +1082,8 @@ class WebhookAdapter(BasePlatformAdapter):
             # has already passed authentication and size checks; hash it rather
             # than exposing payload content to the script path or response.
             delivery_id = f"body-{hashlib.sha256(raw_body).hexdigest()[:32]}"
-        delivery_key = f"script:{route_name}:{delivery_id}"
+        route_scope = delivery_scope or route_name
+        delivery_key = f"script:{route_scope}:{delivery_id}"
         if self._delivery_id_is_seen(delivery_key, now):
             logger.info(
                 "[webhook] Skipping duplicate script delivery %s", delivery_id
@@ -1079,7 +1093,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 status=200,
             )
 
-        active_task = self._script_route_tasks.get(route_name)
+        active_task = self._script_route_tasks.get(route_scope)
         if active_task is not None and not active_task.done():
             logger.info(
                 "[webhook] Backpressuring script trigger while route is active route=%s delivery=%s",
@@ -1093,7 +1107,7 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         cooldown = max(0.0, float(route_config.get("script_cooldown_seconds", 10)))
-        completed_at = self._script_route_completed_at.get(route_name)
+        completed_at = self._script_route_completed_at.get(route_scope)
         if completed_at is not None and now - completed_at < cooldown:
             retry_after = max(1, int(cooldown - (now - completed_at) + 0.999))
             logger.info(
@@ -1153,13 +1167,14 @@ class WebhookAdapter(BasePlatformAdapter):
         task = asyncio.create_task(
             self._run_guarded_script_trigger(
                 route_name=route_name,
+                route_scope=route_scope,
                 script_path=script_path,
                 delivery_id=delivery_id,
                 timeout=timeout,
                 delivery=delivery,
             )
         )
-        self._script_route_tasks[route_name] = task
+        self._script_route_tasks[route_scope] = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
@@ -1172,12 +1187,13 @@ class WebhookAdapter(BasePlatformAdapter):
         self,
         *,
         route_name: str,
+        route_scope: str,
         script_path: Path,
         delivery_id: str,
         timeout: float,
         delivery: Optional[dict] = None,
     ) -> None:
-        """Run one script for a route and record when its cooldown begins."""
+        """Run one script for a profile-scoped route and start its cooldown."""
         try:
             await self._run_script_trigger(
                 route_name=route_name,
@@ -1187,10 +1203,10 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery=delivery,
             )
         finally:
-            self._script_route_completed_at[route_name] = time.time()
+            self._script_route_completed_at[route_scope] = time.time()
             current_task = asyncio.current_task()
-            if self._script_route_tasks.get(route_name) is current_task:
-                self._script_route_tasks.pop(route_name, None)
+            if self._script_route_tasks.get(route_scope) is current_task:
+                self._script_route_tasks.pop(route_scope, None)
 
     def _resolve_script_path(self, script_name: str) -> Path:
         """Resolve an explicitly enabled and allowlisted trigger script."""

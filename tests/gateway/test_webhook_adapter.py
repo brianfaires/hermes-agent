@@ -79,6 +79,15 @@ def _create_app(adapter: WebhookAdapter) -> web.Application:
     return app
 
 
+def _create_multiplex_app(adapter: WebhookAdapter) -> web.Application:
+    """Build the webhook routes registered by connect() for multiplex tests."""
+    app = _create_app(adapter)
+    app.router.add_post(
+        "/p/{profile}/webhooks/{route_name}", adapter._handle_webhook
+    )
+    return app
+
+
 def _wire_mock_target(adapter: WebhookAdapter, platform_name: str = "telegram"):
     """Attach a gateway_runner with a mocked target adapter."""
     mock_target = AsyncMock()
@@ -765,6 +774,127 @@ class TestEventFilter:
             assert resp.status == 202
 
     @pytest.mark.asyncio
+    async def test_multiplex_profiles_have_independent_rate_and_delivery_ids(
+        self, monkeypatch
+    ):
+        routes = {
+            "shared": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "profile-scoped event",
+            }
+        }
+        adapter = _make_adapter(routes=routes, rate_limit=1)
+        adapter.handle_message = AsyncMock()
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.config.multiplex_profiles = True
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda multiplex: [("default", None), ("coder", None)],
+        )
+
+        app = _create_multiplex_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            responses = [
+                await cli.post(
+                    f"/p/{profile}/webhooks/shared",
+                    json={"value": profile},
+                    headers={"X-Request-ID": "provider-delivery-1"},
+                )
+                for profile in ("default", "coder")
+            ]
+
+        assert [response.status for response in responses] == [202, 202]
+        await asyncio.sleep(0)
+        assert adapter.handle_message.await_count == 2
+        assert {
+            call.args[0].source.profile
+            for call in adapter.handle_message.await_args_list
+        } == {"default", "coder"}
+
+    @pytest.mark.asyncio
+    async def test_multiplex_script_delivery_and_single_flight_are_profile_scoped(
+        self, monkeypatch
+    ):
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.config.multiplex_profiles = True
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        release = asyncio.Event()
+
+        async def block_script(**_kwargs):
+            await release.wait()
+
+        adapter._run_script_trigger = AsyncMock(side_effect=block_script)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda multiplex: [("default", None), ("coder", None)],
+        )
+
+        app = _create_multiplex_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            try:
+                responses = [
+                    await cli.post(
+                        f"/p/{profile}/webhooks/script",
+                        data=b"same authenticated body",
+                        headers={"X-Request-ID": "provider-delivery-1"},
+                    )
+                    for profile in ("default", "coder")
+                ]
+
+                assert [response.status for response in responses] == [202, 202]
+            finally:
+                release.set()
+                await asyncio.sleep(0)
+
+        assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_multiplex_script_cooldowns_are_profile_scoped(self, monkeypatch):
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 10,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.config.multiplex_profiles = True
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda multiplex: [("default", None), ("coder", None)],
+        )
+
+        app = _create_multiplex_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/p/default/webhooks/script",
+                data=b"first",
+                headers={"X-Request-ID": "default-delivery"},
+            )
+            await asyncio.sleep(0)
+            second = await cli.post(
+                "/p/coder/webhooks/script",
+                data=b"second",
+                headers={"X-Request-ID": "coder-delivery"},
+            )
+
+        assert [first.status, second.status] == [202, 202]
+        assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_event_filter_rejects_non_matching(self):
         """Non-matching event type returns 200 with status=ignored."""
         routes = {
@@ -1401,7 +1531,10 @@ class TestHTTPHandling:
                 asyncio.gather(*(event.wait() for event in started.values())),
                 timeout=1,
             )
-            assert set(adapter._script_route_tasks) == {"first", "second"}
+            assert set(adapter._script_route_tasks) == {
+                "default:first",
+                "default:second",
+            }
 
             release.set()
             await asyncio.gather(*tuple(adapter._script_route_tasks.values()))
@@ -1524,7 +1657,7 @@ class TestHTTPHandling:
             assert (await cooling_down.json())["status"] == "cooldown"
             adapter._run_script_trigger.assert_awaited_once()
 
-            adapter._script_route_completed_at["script"] = time.time() - 11
+            adapter._script_route_completed_at["default:script"] = time.time() - 11
             retried = await cli.post(
                 "/webhooks/script",
                 data=b"retry",
@@ -1792,7 +1925,7 @@ class TestIdempotency:
             assert resp1.status == 202
 
             # Backdate the cache entry so it appears expired
-            adapter._seen_deliveries["delivery-456"] = time.time() - 3700
+            adapter._seen_deliveries["default:idem:delivery-456"] = time.time() - 3700
 
             resp2 = await cli.post("/webhooks/idem", json={"x": 1}, headers=headers)
             assert resp2.status == 202  # re-accepted
@@ -1867,7 +2000,7 @@ class TestRateLimiting:
             assert resp.status == 202
 
             # Backdate all rate-limit timestamps to > 60 seconds ago
-            adapter._rate_counts["limited"] = deque([time.time() - 120])
+            adapter._rate_counts["default:limited"] = deque([time.time() - 120])
 
             resp = await cli.post(
                 "/webhooks/limited",
