@@ -44,7 +44,7 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
         "tools.transcription_tools.transcribe_audio",
         side_effect=AssertionError("transcribe_audio should not be called when STT is disabled"),
     ), patch(
-        "gateway.voice_mixin._probe_audio_duration",
+        "gateway.run._probe_audio_duration",
         new=AsyncMock(return_value="0:12"),
     ):
         result, transcripts = await runner._enrich_message_with_transcription(
@@ -67,7 +67,7 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
     runner.config = GatewayConfig(stt_enabled=False)
 
     with patch(
-        "gateway.voice_mixin._probe_audio_duration",
+        "gateway.run._probe_audio_duration",
         new=AsyncMock(return_value=None),
     ):
         result, transcripts = await runner._enrich_message_with_transcription(

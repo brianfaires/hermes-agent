@@ -335,7 +335,10 @@ async def test_voice_channel_input_drops_noise_before_transcript_or_agent(caplog
     runner._is_user_authorized = MagicMock(return_value=True)
     runner._recent_voice_transcripts = {}
 
-    caplog.set_level(logging.DEBUG, logger="gateway.run")
+    caplog.set_level(
+        logging.DEBUG,
+        logger="plugins.platforms.discord.voice_runtime",
+    )
 
     await runner._handle_voice_channel_input(
         guild_id=42,

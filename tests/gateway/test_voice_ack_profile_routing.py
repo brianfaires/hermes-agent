@@ -10,6 +10,13 @@ from gateway.voice_acknowledgements import (
     VoiceAcknowledgement,
     VoiceAcknowledgementCatalog,
 )
+from plugins.platforms.discord.voice_runtime import DiscordVoiceRuntimeMixin
+
+
+def test_discord_runtime_owns_sidecar_and_turn_ack_orchestration():
+    assert "_voice_channel_sidecar_note" in DiscordVoiceRuntimeMixin.__dict__
+    assert "_discord_voice_ack_callback_for_turn" in DiscordVoiceRuntimeMixin.__dict__
+    assert "_voice_channel_sidecar_note" not in GatewayRunner.__dict__
 
 
 def test_adapter_for_source_prefers_secondary_profile_adapter():
