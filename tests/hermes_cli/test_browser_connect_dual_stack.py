@@ -10,6 +10,7 @@ whole connect past the desktop GUI's RPC timeout
 
 from __future__ import annotations
 
+import errno
 import socket
 import threading
 
@@ -120,3 +121,25 @@ class TestFindFreeDebugPort:
             pytest.skip("successor port unavailable to bind in this environment")
         finally:
             blocker.close()
+
+    def test_ipv4_only_host_skips_occupied_successor(self, monkeypatch):
+        """An unavailable IPv6 family must not force the occupied fallback."""
+        preferred = _free_port()
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", preferred + 1))
+        blocker.listen(1)
+        real_socket = socket.socket
+
+        def ipv4_only_socket(family, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError(errno.EAFNOSUPPORT, "IPv6 unavailable")
+            return real_socket(family, *args, **kwargs)
+
+        try:
+            monkeypatch.setattr(socket, "socket", ipv4_only_socket)
+            port = find_free_debug_port(preferred)
+        finally:
+            blocker.close()
+
+        assert port != preferred + 1
+        assert port > preferred

@@ -228,9 +228,18 @@ def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: in
     """
     import socket
 
+    bind_targets = []
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind((host, 0))
+        except OSError:
+            continue
+        bind_targets.append((family, host))
+
     for port in range(preferred + 1, preferred + 1 + attempts):
         bindable = True
-        for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        for family, host in bind_targets:
             try:
                 with socket.socket(family, socket.SOCK_STREAM) as sock:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
