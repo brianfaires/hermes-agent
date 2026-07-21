@@ -351,15 +351,30 @@ class _DiscordNonConversationalMessageTracker:
 
     _MAX_TRACKED = 2000
 
-    def __init__(self, max_tracked: int = _MAX_TRACKED):
+    def __init__(
+        self,
+        max_tracked: int = _MAX_TRACKED,
+        profile_home: Optional[_Path] = None,
+    ):
         self._max_tracked = max_tracked
+        self._profile_home = (
+            _Path(profile_home).resolve() if profile_home is not None else None
+        )
         self._ids: dict[str, None] = dict.fromkeys(self._load())
+
+    def set_profile_home(self, profile_home: Optional[_Path]) -> None:
+        """Pin persistence to the adapter's owning profile and reload its IDs."""
+        resolved = _Path(profile_home).resolve() if profile_home is not None else None
+        if resolved == self._profile_home:
+            return
+        self._profile_home = resolved
+        self._ids = dict.fromkeys(self._load())
 
     def _state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
 
         return (
-            get_hermes_home()
+            (self._profile_home or get_hermes_home())
             / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
             / _DISCORD_NONCONVERSATIONAL_STATE_FILENAME
         )
@@ -1284,6 +1299,16 @@ class DiscordAdapter(BasePlatformAdapter):
         self._last_overflow_preview: Dict[tuple, str] = {}
         self._warned_fail_closed_default = False
 
+    def set_runtime_profile_home(self, profile_home: Optional[_Path | str]) -> None:
+        """Pin every durable Discord state store to this adapter's profile."""
+        super().set_runtime_profile_home(profile_home)
+        home = self._runtime_profile_home
+        self._nonconversational_messages.set_profile_home(home)
+        if home is not None:
+            from plugins.platforms.discord.recovery import DiscordRecoveryStore
+
+            self._discord_recovery_store = DiscordRecoveryStore(home)
+
     def _config_value(
         self, key: str, default: Any, *, env_key: Optional[str] = None
     ) -> Any:
@@ -2008,7 +2033,8 @@ class DiscordAdapter(BasePlatformAdapter):
     def _command_sync_state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
 
-        directory = get_hermes_home() / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+        home = getattr(self, "_runtime_profile_home", None) or get_hermes_home()
+        directory = home / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except Exception:

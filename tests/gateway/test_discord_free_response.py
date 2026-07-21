@@ -1,6 +1,7 @@
 """Tests for Discord free-response defaults and mention gating."""
 
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import sys
@@ -125,6 +126,26 @@ def adapter(monkeypatch):
     adapter._text_batch_delay_seconds = 0  # disable batching for tests
     adapter.handle_message = AsyncMock()
     return adapter
+
+
+def test_persistent_runtime_state_uses_pinned_profile_home(adapter, tmp_path, monkeypatch):
+    default_home = tmp_path / "default"
+    profile_home = tmp_path / "profiles" / "ops"
+    default_home.mkdir(parents=True)
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+    adapter.set_runtime_profile_home(profile_home)
+    assert adapter._discord_recovery_store._hermes_home == profile_home.resolve()
+    adapter._nonconversational_messages.mark_many(["status-message-1"])
+    adapter._write_command_sync_state({"app": {"fingerprint": "abc"}})
+
+    nonconversational = profile_home / "gateway" / "discord_nonconversational_messages.json"
+    command_sync = profile_home / "gateway" / "discord_command_sync_state.json"
+    assert json.loads(nonconversational.read_text()) == ["status-message-1"]
+    assert json.loads(command_sync.read_text()) == {"app": {"fingerprint": "abc"}}
+    assert not (default_home / "gateway" / nonconversational.name).exists()
+    assert not (default_home / "gateway" / command_sync.name).exists()
 
 
 def make_message(*, channel, content: str, mentions=None, msg_type=None):
