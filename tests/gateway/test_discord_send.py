@@ -8,6 +8,12 @@ import pytest
 from gateway.config import PlatformConfig
 
 
+@pytest.fixture(autouse=True)
+def _clear_discord_channel_policy_env(monkeypatch):
+    monkeypatch.delenv("DISCORD_ALLOWED_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_IGNORED_CHANNELS", raising=False)
+
+
 def _ensure_discord_mock():
     if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
         return
@@ -158,6 +164,59 @@ async def test_send_does_not_retry_on_unrelated_errors():
     # Only the first attempt happens — no reference-retry replay.
     assert channel.send.await_count == 1
     assert send_calls[0]["reference"] is reference_obj
+
+
+@pytest.mark.asyncio
+async def test_send_suppresses_embeds_when_metadata_requests_it():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    sent_msg = SimpleNamespace(id=1234)
+    send_calls = []
+
+    async def fake_send(**kwargs):
+        send_calls.append(kwargs)
+        return sent_msg
+
+    channel = SimpleNamespace(send=AsyncMock(side_effect=fake_send))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.send(
+        "555",
+        '🔍 web_search: "https://example.com/some/page"',
+        metadata={"non_conversational": True, "suppress_embeds": True},
+    )
+
+    assert result.success is True
+    assert send_calls[0]["suppress_embeds"] is True
+    assert "https://example.com/some/page" in send_calls[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_edit_suppresses_embeds_when_metadata_requests_it():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    msg = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=msg))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.edit_message(
+        "555",
+        "999",
+        '🔍 web_search: "https://example.com/some/page"',
+        metadata={"suppress_embeds": True},
+    )
+
+    assert result.success is True
+    msg.edit.assert_awaited_once()
+    edit_kwargs = msg.edit.await_args.kwargs
+    assert edit_kwargs["suppress"] is True
+    assert "https://example.com/some/page" in edit_kwargs["content"]
 
 
 # ---------------------------------------------------------------------------

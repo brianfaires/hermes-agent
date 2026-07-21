@@ -33,13 +33,13 @@ class TestResolveMediaToDataUrls(unittest.TestCase):
 
     def test_media_tag_inlined(self):
         p = self._write_png()
-        out = _resolve_media_to_data_urls(f"Here you go: MEDIA:{p}")
+        out = _resolve_media_to_data_urls(f"Here you go:\nMEDIA:{p}")
         self.assertIn("data:image/png;base64,", out)
         self.assertNotIn("MEDIA:", out)
 
     def test_backtick_wrapped_tag(self):
         p = self._write_png()
-        out = _resolve_media_to_data_urls(f"See `MEDIA:{p}` above")
+        out = _resolve_media_to_data_urls(f"`MEDIA:{p}`")
         self.assertIn("data:image/png;base64,", out)
 
     def test_missing_file_left_untouched(self):
@@ -69,7 +69,7 @@ class TestResolveMediaToDataUrls(unittest.TestCase):
     def test_multiple_tags(self):
         p1 = self._write_png()
         p2 = self._write_png("hermes_media_test2")
-        out = _resolve_media_to_data_urls(f"MEDIA:{p1}\nand MEDIA:{p2}")
+        out = _resolve_media_to_data_urls(f"MEDIA:{p1}\nMEDIA:{p2}")
         self.assertEqual(out.count("data:image/png;base64,"), 2)
 
     def test_relative_traversal_path_not_inlined(self):

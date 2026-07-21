@@ -35,6 +35,7 @@ hermes config edit         # Open config.yaml in your editor
 hermes config get KEY      # Print a resolved value
 hermes config set KEY VAL  # Set a specific value
 hermes config unset KEY    # Remove a user-set value
+hermes config patch ...    # Add, replace, or remove structured values
 hermes config check        # Check for missing options (after updates)
 hermes config migrate      # Interactively add missing options
 
@@ -44,8 +45,14 @@ hermes config set model anthropic/claude-opus-4
 hermes config set terminal.backend docker
 hermes config unset terminal.backend
 hermes config set OPENROUTER_API_KEY sk-or-...  # Saves to .env
+
+# Structural config edits use JSON Pointer paths and JSON values:
+hermes config patch add /model/aliases/fast --json '"openai/gpt-5"'
+hermes config patch add /fallback_providers/- --json '{"provider":"openai","model":"gpt-5"}'
+hermes config patch remove /model/aliases/fast
 ```
 
+`config patch` changes `config.yaml` only. It supports `add`, `replace`, and `remove` for maps, lists, and scalar values. JSON Pointer uses `/` between path segments; escape a literal `/` as `~1` and `~` as `~0`. List `/-` appends an item.
 :::tip
 The `hermes config set` command automatically routes values to the right file — API keys are saved to `.env`, everything else to `config.yaml`.
 :::

@@ -140,6 +140,46 @@ class TestDynamicRouteSecretValidation:
         adapter._reload_dynamic_routes()
         assert "test" in adapter._routes
 
+    def test_oidc_audience_only_route_is_skipped(self, tmp_path):
+        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
+            json.dumps({
+                "pubsub": {
+                    "auth": "oidc",
+                    "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+                    "prompt": "p",
+                }
+            })
+        )
+        adapter = _make_adapter(extra={"secret": ""})
+        adapter._reload_dynamic_routes()
+        assert "pubsub" not in adapter._routes
+
+    def test_oidc_route_with_subject_loads(self, tmp_path):
+        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
+            json.dumps({
+                "pubsub": {
+                    "auth": "oidc",
+                    "oidc": {
+                        "audience": "https://agent.example.com/webhooks/pubsub",
+                        "subject": "service-account-id",
+                    },
+                    "prompt": "p",
+                }
+            })
+        )
+        adapter = _make_adapter(extra={"secret": ""})
+        adapter._reload_dynamic_routes()
+        assert "pubsub" in adapter._routes
+
+    def test_oidc_route_without_audience_is_rejected(self, tmp_path):
+        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
+            json.dumps({"pubsub": {"auth": "oidc", "oidc": {}, "prompt": "p"}})
+        )
+        adapter = _make_adapter(extra={"secret": ""})
+        adapter._reload_dynamic_routes()
+        assert "pubsub" not in adapter._routes
+        assert "pubsub" not in adapter._dynamic_routes
+
     def test_insecure_no_auth_rejected_on_non_loopback_bind(self, tmp_path):
         # Dynamic INSECURE_NO_AUTH routes are only valid on loopback hosts.
         (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(

@@ -20,8 +20,10 @@ import hashlib
 import hmac
 import json
 import socket
+import threading
 import time
 from collections import deque
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -75,6 +77,28 @@ def _create_app(adapter: WebhookAdapter) -> web.Application:
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
     return app
+
+
+def _create_multiplex_app(adapter: WebhookAdapter) -> web.Application:
+    """Build the webhook routes registered by connect() for multiplex tests."""
+    app = _create_app(adapter)
+    app.router.add_post(
+        "/p/{profile}/webhooks/{route_name}", adapter._handle_webhook
+    )
+    return app
+
+
+def _wire_mock_target(adapter: WebhookAdapter, platform_name: str = "telegram"):
+    """Attach a gateway_runner with a mocked target adapter."""
+    mock_target = AsyncMock()
+    mock_target.send = AsyncMock(return_value=SendResult(success=True))
+
+    mock_runner = MagicMock()
+    mock_runner.adapters = {Platform(platform_name): mock_target}
+    mock_runner.config.get_home_channel.return_value = None
+
+    adapter.gateway_runner = mock_runner
+    return mock_target
 
 
 def _mock_request(headers=None, body=b"", content_length=None, match_info=None):
@@ -211,6 +235,166 @@ class TestValidateSignature:
         secret = "gl-tökén-välue"
         req = _mock_request(headers={"X-Gitlab-Token": secret})
         assert adapter._validate_signature(req, b"{}", secret) is True
+
+    def test_validate_google_pubsub_oidc_token_valid(self):
+        """Route-level OIDC auth accepts a Google-signed bearer token."""
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
+                "email_verified": True,
+            },
+        ) as decode:
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+
+            assert adapter._validate_oidc_token(req, route) is True
+
+        jwk_client_cls.assert_called_once_with("https://www.googleapis.com/oauth2/v3/certs")
+        decode.assert_called_once()
+        assert decode.call_args.kwargs["audience"] == "https://agent.example.com/webhooks/pubsub"
+        assert set(decode.call_args.kwargs["issuer"]) == {
+            "accounts.google.com",
+            "https://accounts.google.com",
+        }
+
+    def test_validate_oidc_route_rejects_audience_only_identity(self):
+        route = {
+            "auth": "oidc",
+            "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
+        }
+        adapter = _make_adapter()
+
+        with pytest.raises(ValueError, match="oidc.email or oidc.subject"):
+            adapter._validate_oidc_route_config(route, "pubsub")
+
+    def test_validate_oidc_token_reuses_google_jwks_client(self):
+        route = {
+            "auth": "oidc",
+            "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "sub": "service-account-id",
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is True
+            assert adapter._validate_oidc_token(req, route) is True
+
+        jwk_client_cls.assert_called_once_with(
+            "https://www.googleapis.com/oauth2/v3/certs"
+        )
+
+    def test_oidc_route_rejects_custom_jwks_endpoint(self):
+        adapter = _make_adapter()
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "jwks_url": "https://internal.example.test/keys",
+            },
+        }
+
+        with pytest.raises(ValueError, match="Google JWKS"):
+            adapter._validate_oidc_route_config(route, "pubsub")
+
+    def test_validate_google_pubsub_oidc_token_rejects_wrong_email(self):
+        """Expected service-account email narrows which Pub/Sub pusher may call the route."""
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "expected@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "email": "other@example.iam.gserviceaccount.com",
+                "email_verified": True,
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+
+            assert adapter._validate_oidc_token(req, route) is False
+
+    @pytest.mark.parametrize("email_verified", [None, False, "true", 1])
+    def test_validate_oidc_email_requires_boolean_verified_true(self, email_verified):
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "email": "expected@example.iam.gserviceaccount.com",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+        claims = {
+            "iss": "https://accounts.google.com",
+            "aud": "https://agent.example.com/webhooks/pubsub",
+            "email": "expected@example.iam.gserviceaccount.com",
+        }
+        if email_verified is not None:
+            claims["email_verified"] = email_verified
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode", return_value=claims
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is False
+
+    def test_validate_oidc_token_rejects_wrong_subject(self):
+        route = {
+            "auth": "oidc",
+            "oidc": {
+                "audience": "https://agent.example.com/webhooks/pubsub",
+                "subject": "expected-service-account-id",
+            },
+        }
+        adapter = _make_adapter()
+        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
+
+        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
+            "gateway.platforms.webhook.jwt.decode",
+            return_value={
+                "iss": "https://accounts.google.com",
+                "aud": "https://agent.example.com/webhooks/pubsub",
+                "sub": "other-service-account-id",
+            },
+        ):
+            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
+            assert adapter._validate_oidc_token(req, route) is False
+
+    def test_validate_google_pubsub_oidc_token_requires_bearer_header(self):
+        """OIDC auth fails closed without an Authorization bearer token."""
+        route = {"auth": "oidc", "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"}}
+        adapter = _make_adapter()
+        req = _mock_request(headers={})
+
+        assert adapter._validate_oidc_token(req, route) is False
 
     def test_validate_no_secret_allows_all(self):
         """When the secret is empty/falsy, the validator is never even called
@@ -588,6 +772,81 @@ class TestEventFilter:
                 headers={"X-GitHub-Event": "pull_request"},
             )
             assert resp.status == 202
+
+    @pytest.mark.asyncio
+    async def test_multiplex_profiles_have_independent_rate_and_delivery_ids(
+        self, monkeypatch
+    ):
+        routes = {
+            "shared": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "profile-scoped event",
+            }
+        }
+        adapter = _make_adapter(routes=routes, rate_limit=1)
+        adapter.handle_message = AsyncMock()
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.config.multiplex_profiles = True
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda multiplex: [("default", None), ("coder", None)],
+        )
+
+        app = _create_multiplex_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            responses = [
+                await cli.post(
+                    f"/p/{profile}/webhooks/shared",
+                    json={"value": profile},
+                    headers={"X-Request-ID": "provider-delivery-1"},
+                )
+                for profile in ("default", "coder")
+            ]
+
+        assert [response.status for response in responses] == [202, 202]
+        await asyncio.sleep(0)
+        assert adapter.handle_message.await_count == 2
+        assert {
+            call.args[0].source.profile
+            for call in adapter.handle_message.await_args_list
+        } == {"default", "coder"}
+
+    @pytest.mark.asyncio
+    async def test_multiplex_script_delivery_ids_are_profile_scoped(
+        self, monkeypatch
+    ):
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner.config.multiplex_profiles = True
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda multiplex: [("default", None), ("coder", None)],
+        )
+
+        app = _create_multiplex_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            responses = [
+                await cli.post(
+                    f"/p/{profile}/webhooks/script",
+                    data=b"same authenticated body",
+                    headers={"X-Request-ID": "provider-delivery-1"},
+                )
+                for profile in ("default", "coder")
+            ]
+
+        assert [response.status for response in responses] == [202, 202]
+        await asyncio.sleep(0)
+        assert adapter._run_script_trigger.await_count == 2
 
     @pytest.mark.asyncio
     async def test_event_filter_rejects_non_matching(self):
@@ -982,6 +1241,526 @@ class TestHTTPHandling:
         adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_oidc_route_accepts_authenticated_request_without_hmac_secret(self):
+        """OIDC routes use Authorization bearer JWTs instead of route HMAC secrets."""
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
+                "prompt": "Pub/Sub payload: {__raw__}",
+            }
+        }
+        adapter = _make_adapter(routes=routes, secret="")
+        adapter.handle_message = AsyncMock()
+        adapter._validate_oidc_token = MagicMock(return_value=True)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/pubsub",
+                json={"message": {"messageId": "m-1", "data": "eyJ4IjoxfQ=="}},
+                headers={"Authorization": "Bearer jwt-token"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+            assert data["route"] == "pubsub"
+
+        adapter._validate_oidc_token.assert_called_once()
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_oidc_verification_runs_off_event_loop_thread(self):
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
+                "prompt": "Pub/Sub payload: {__raw__}",
+            }
+        }
+        adapter = _make_adapter(routes=routes, secret="")
+        adapter.handle_message = AsyncMock()
+        loop_thread = threading.get_ident()
+        validation_threads = []
+
+        def validate(request, route_config):
+            validation_threads.append(threading.get_ident())
+            return True
+
+        adapter._validate_oidc_token = validate
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/pubsub",
+                json={"message": {"messageId": "m-1"}},
+                headers={"Authorization": "Bearer jwt-token"},
+            )
+            assert resp.status == 202
+
+        assert validation_threads
+        assert validation_threads[0] != loop_thread
+
+    @pytest.mark.asyncio
+    async def test_oidc_route_rejects_invalid_token_before_agent_dispatch(self):
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
+                "prompt": "x",
+            }
+        }
+        adapter = _make_adapter(routes=routes, secret="")
+        adapter.handle_message = AsyncMock()
+        adapter._validate_oidc_token = MagicMock(return_value=False)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/pubsub",
+                json={"message": {"messageId": "m-1"}},
+                headers={"Authorization": "Bearer bad-token"},
+            )
+            assert resp.status == 401
+            data = await resp.json()
+            assert data["error"] == "Invalid OIDC token"
+
+        adapter.handle_message.assert_not_called()
+
+    def test_script_trigger_requires_global_opt_in_and_allowlist(
+        self, tmp_path, monkeypatch
+    ):
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        script = scripts_dir / "noop.py"
+        script.write_text("print('ok')\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        disabled = _make_adapter()
+        with pytest.raises(ValueError, match="disabled"):
+            disabled._resolve_script_path("noop.py")
+
+        config = _make_config()
+        config.extra.update(
+            {
+                "script_triggers_enabled": True,
+                "script_trigger_allowlist": ["other.py"],
+            }
+        )
+        not_allowed = WebhookAdapter(config)
+        with pytest.raises(ValueError, match="allowlist"):
+            not_allowed._resolve_script_path("noop.py")
+
+        config.extra["script_trigger_allowlist"] = ["noop.py"]
+        allowed = WebhookAdapter(config)
+        assert allowed._resolve_script_path("noop.py") == script.resolve()
+
+    @pytest.mark.asyncio
+    async def test_script_route_does_not_parse_payload_or_call_agent(self):
+        """Script routes use body bytes for auth only; invalid JSON still triggers the script."""
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/script",
+                data=b"not-json and not read by the route",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+            assert data["route"] == "script"
+
+        await asyncio.sleep(0)
+        adapter.handle_message.assert_not_called()
+        adapter._resolve_script_path.assert_called_once_with("noop.py")
+        adapter._run_script_trigger.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_script_route_backpressures_distinct_delivery_while_run_is_active(self):
+        """A distinct busy delivery remains retryable instead of being discarded."""
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        release = asyncio.Event()
+
+        async def blocked_run(**kwargs):
+            await release.wait()
+
+        adapter._run_script_trigger = AsyncMock(side_effect=blocked_run)
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/script",
+                data=b"first",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert first.status == 202
+            await asyncio.sleep(0)
+
+            busy = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert busy.status == 429
+            assert busy.headers["Retry-After"] == "1"
+            assert (await busy.json())["status"] == "busy"
+            adapter._run_script_trigger.assert_awaited_once()
+
+            release.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert "script" not in adapter._script_route_tasks
+
+            retried = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert retried.status == 202
+            assert (await retried.json())["status"] == "accepted"
+            assert adapter._run_script_trigger.await_count == 2
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert "script" not in adapter._script_route_tasks
+
+    @pytest.mark.asyncio
+    async def test_distinct_script_routes_run_concurrently(self):
+        """Single-flight state is route-local, never a global script bottleneck."""
+        routes = {
+            name: {
+                "secret": _INSECURE_NO_AUTH,
+                "script": f"{name}.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+            for name in ("first", "second")
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(
+            side_effect=lambda name: Path("/tmp") / name
+        )
+        started = {name: asyncio.Event() for name in routes}
+        release = asyncio.Event()
+
+        async def blocked_run(**kwargs):
+            started[kwargs["route_name"]].set()
+            await release.wait()
+
+        adapter._run_script_trigger = AsyncMock(side_effect=blocked_run)
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            responses = await asyncio.gather(
+                cli.post(
+                    "/webhooks/first",
+                    data=b"first",
+                    headers={"X-Request-ID": "first-delivery"},
+                ),
+                cli.post(
+                    "/webhooks/second",
+                    data=b"second",
+                    headers={"X-Request-ID": "second-delivery"},
+                ),
+            )
+            assert [response.status for response in responses] == [202, 202]
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started.values())),
+                timeout=1,
+            )
+            assert set(adapter._script_route_tasks) == {"first", "second"}
+
+            release.set()
+            await asyncio.gather(*tuple(adapter._script_route_tasks.values()))
+            assert adapter._script_route_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_headerless_script_retry_uses_stable_body_identity(self):
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post("/webhooks/script", data=b"same authenticated body")
+            assert first.status == 202
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+            retry = await cli.post("/webhooks/script", data=b"same authenticated body")
+            retry_data = await retry.json()
+
+        assert retry.status == 200
+        assert retry_data["status"] == "duplicate"
+        adapter._run_script_trigger.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_distinct_headerless_bodies_do_not_collide_in_same_millisecond(self):
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        app = _create_app(adapter)
+
+        with patch("gateway.platforms.webhook.time.time", return_value=1000.0):
+            async with TestClient(TestServer(app)) as cli:
+                first = await cli.post("/webhooks/script", data=b"first body")
+                assert first.status == 202
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                second = await cli.post("/webhooks/script", data=b"second body")
+
+        assert second.status == 202
+        assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_script_delivery_ids_are_scoped_to_route(self):
+        routes = {
+            name: {
+                "secret": _INSECURE_NO_AUTH,
+                "script": f"{name}.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 0,
+            }
+            for name in ("first", "second")
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(
+            side_effect=lambda name: Path("/tmp") / name
+        )
+        adapter._run_script_trigger = AsyncMock()
+        app = _create_app(adapter)
+
+        headers = {"X-Request-ID": "provider-local-id"}
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post("/webhooks/first", data=b"first", headers=headers)
+            assert first.status == 202
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            second = await cli.post("/webhooks/second", data=b"second", headers=headers)
+
+        assert second.status == 202
+        assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_script_route_cooldown_backpressures_without_consuming_delivery_id(self):
+        """A distinct cooldown delivery can be retried after the quiet period."""
+        routes = {
+            "script": {
+                "secret": _INSECURE_NO_AUTH,
+                "script": "noop.py",
+                "script_mode": "trigger",
+                "script_cooldown_seconds": 10,
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter._resolve_script_path = MagicMock(return_value=Path("/tmp/noop.py"))
+        adapter._run_script_trigger = AsyncMock()
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/script",
+                data=b"first",
+                headers={"X-Request-ID": "script-delivery-1"},
+            )
+            assert first.status == 202
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            cooling_down = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert cooling_down.status == 429
+            assert cooling_down.headers["Retry-After"] == "10"
+            assert (await cooling_down.json())["status"] == "cooldown"
+            adapter._run_script_trigger.assert_awaited_once()
+
+            adapter._script_route_completed_at["script"] = time.time() - 11
+            retried = await cli.post(
+                "/webhooks/script",
+                data=b"retry",
+                headers={"X-Request-ID": "script-delivery-2"},
+            )
+            assert retried.status == 202
+            assert (await retried.json())["status"] == "accepted"
+            await asyncio.sleep(0)
+            assert adapter._run_script_trigger.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_script_timeout_kills_and_reaps_child_process(self):
+        """Timed-out script triggers must not leave orphaned child processes."""
+        adapter = _make_adapter()
+        script = Path("/tmp/noop.py")
+
+        class SlowProc:
+            returncode = None
+
+            def __init__(self):
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                await asyncio.sleep(10)
+                return b"", b""
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                self.waited = True
+                return self.returncode
+
+        proc = SlowProc()
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=script,
+                delivery_id="delivery-1",
+                timeout=0.01,
+            )
+
+        assert proc.killed is True
+        assert proc.waited is True
+
+    @pytest.mark.asyncio
+    async def test_script_cancellation_kills_and_reaps_child_process(self):
+        """Gateway shutdown must not orphan an active script subprocess."""
+        adapter = _make_adapter()
+        started = asyncio.Event()
+
+        class SlowProc:
+            returncode = None
+
+            def __init__(self):
+                self.killed = False
+                self.waited = False
+
+            async def communicate(self):
+                started.set()
+                await asyncio.Event().wait()
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            async def wait(self):
+                self.waited = True
+                return self.returncode
+
+        proc = SlowProc()
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ):
+            task = asyncio.create_task(
+                adapter._run_script_trigger(
+                    route_name="script",
+                    script_path=Path("/tmp/noop.py"),
+                    delivery_id="delivery-cancelled",
+                    timeout=10,
+                )
+            )
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert proc.killed is True
+        assert proc.waited is True
+
+    @pytest.mark.asyncio
+    async def test_script_stdout_delivers_to_configured_target(self):
+        """Non-empty script stdout is delivered when the script route has a real deliver target."""
+        adapter = _make_adapter()
+        mock_target = _wire_mock_target(adapter)
+
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"Gmail: 1 important email.\n", b""
+
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=Proc()),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=Path("/tmp/noop.py"),
+                delivery_id="delivery-stdout",
+                timeout=1,
+                delivery={"deliver": "telegram", "deliver_extra": {"chat_id": "12345"}},
+            )
+
+        mock_target.send.assert_awaited_once()
+        chat_id_arg, content_arg = mock_target.send.await_args.args[0:2]
+        assert chat_id_arg == "12345"
+        assert content_arg == "Gmail: 1 important email."
+
+    @pytest.mark.asyncio
+    async def test_script_empty_stdout_does_not_deliver(self):
+        """Silent script success stays silent even with a delivery target configured."""
+        adapter = _make_adapter()
+        mock_target = _wire_mock_target(adapter)
+
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"\n  \n", b""
+
+        with patch(
+            "gateway.platforms.webhook.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=Proc()),
+        ):
+            await adapter._run_script_trigger(
+                route_name="script",
+                script_path=Path("/tmp/noop.py"),
+                delivery_id="delivery-silent",
+                timeout=1,
+                delivery={"deliver": "telegram", "deliver_extra": {"chat_id": "12345"}},
+            )
+
+        mock_target.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_health_endpoint(self):
         """GET /health returns 200 with status=ok."""
         adapter = _make_adapter()
@@ -1015,6 +1794,31 @@ class TestHTTPHandling:
             mock_site_inst.start.assert_awaited_once()
 
         await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_connect_starts_server_with_oidc_route_without_hmac_secret(self):
+        """OIDC routes validate startup with audience instead of HMAC secret."""
+        routes = {
+            "pubsub": {
+                "auth": "oidc",
+                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
+                "prompt": "x",
+            }
+        }
+        adapter = _make_adapter(routes=routes, host="127.0.0.1", port=0, secret="")
+        with patch("gateway.platforms.webhook.web.AppRunner") as MockRunner, \
+             patch("gateway.platforms.webhook.web.TCPSite") as MockSite:
+            mock_runner_inst = AsyncMock()
+            MockRunner.return_value = mock_runner_inst
+            mock_site_inst = AsyncMock()
+            MockSite.return_value = mock_site_inst
+
+            result = await adapter.connect()
+            assert result is True
+            assert adapter.is_connected
+
+        await adapter.disconnect()
+
 
     @pytest.mark.asyncio
     async def test_disconnect_cleans_up(self):
@@ -1072,7 +1876,7 @@ class TestIdempotency:
             assert resp1.status == 202
 
             # Backdate the cache entry so it appears expired
-            adapter._seen_deliveries["delivery-456"] = time.time() - 3700
+            adapter._seen_deliveries["default:idem:delivery-456"] = time.time() - 3700
 
             resp2 = await cli.post("/webhooks/idem", json={"x": 1}, headers=headers)
             assert resp2.status == 202  # re-accepted
@@ -1147,7 +1951,7 @@ class TestRateLimiting:
             assert resp.status == 202
 
             # Backdate all rate-limit timestamps to > 60 seconds ago
-            adapter._rate_counts["limited"] = deque([time.time() - 120])
+            adapter._rate_counts["default:limited"] = deque([time.time() - 120])
 
             resp = await cli.post(
                 "/webhooks/limited",

@@ -79,10 +79,16 @@ Routes define how different webhook sources are handled. Each route is a named e
 | Property | Required | Description |
 |----------|----------|-------------|
 | `events` | No | List of event types to accept (e.g. `["pull_request"]`). If empty, all events are accepted. Event type is read from `X-GitHub-Event`, `X-GitLab-Event`, or `event_type` in the payload. |
-| `secret` | **Yes** | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
+| `secret` | **Yes** unless `auth: oidc` | HMAC secret for signature validation. Falls back to the global `secret` if not set on the route. Set to `"INSECURE_NO_AUTH"` for testing only (skips validation). |
+| `auth` | No | Authentication mode. Omit for HMAC/GitLab/Svix signatures. Set to `oidc` (or `google_oidc`) to verify an Authorization bearer OIDC token from Google Pub/Sub authenticated push. |
+| `oidc.audience` | Required when `auth: oidc` | Expected JWT audience. For Google Pub/Sub, set this to the push endpoint URL or the audience configured on the push subscription. |
+| `oidc.email` | One of `email` or `subject` | Expected verified service-account email claim. Restricts which Pub/Sub push service account may call the route. |
+| `oidc.subject` | One of `email` or `subject` | Expected JWT `sub` claim. Prefer the immutable service-account subject when available. If both identity fields are configured, both must match. |
+| `oidc.issuer` | No | Accepted issuer(s). Defaults to Google's `accounts.google.com` and `https://accounts.google.com`. |
 | `prompt` | No | Template string with dot-notation payload access (e.g. `{pull_request.title}`). If omitted, the full JSON payload is dumped into the prompt. Payload fields are untrusted — see [Authenticated does not mean trusted](#authenticated-does-not-mean-trusted). |
 | `filters` | No | Declarative payload filters evaluated after auth/body/event filtering and before agent or direct delivery work. Non-matches return `{"status":"ignored","reason":"filter"}` with HTTP 200. |
 | `script` | No | Filter/transform script under `~/.hermes/scripts/`. The webhook payload is passed as JSON on stdin. JSON object stdout replaces the payload before templating; text stdout is exposed as `script_output`; empty stdout, `[SILENT]`, or a nonzero exit code ignores the webhook. |
+| `script_mode` | No | Set to `trigger` to run the authenticated script without parsing or forwarding the request body. Requires global `script_triggers_enabled: true` and a matching `script_trigger_allowlist` entry; omit this setting for normal payload-transform behavior. |
 | `skills` | No | List of skill names to load for the agent run. |
 | `deliver` | No | Where to send the response: `github_comment`, `telegram`, `discord`, `slack`, `signal`, `sms`, `whatsapp`, `matrix`, `mattermost`, `homeassistant`, `email`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, or `log` (default). |
 | `deliver_extra` | No | Additional delivery config — keys depend on `deliver` type (e.g. `repo`, `pr_number`, `chat_id`). Values support the same `{dot.notation}` templates as `prompt`. |
@@ -187,6 +193,28 @@ Script outcomes:
 - Non-JSON text stdout is added to the payload as `script_output`.
 - Empty stdout, exact `[SILENT]`, `{"__hermes_ignore__": true}`, timeout, missing script, or nonzero exit code returns HTTP 200 with `{"status":"ignored","reason":"script"}`.
 
+For payload-independent local jobs, set `script_mode: trigger`. Trigger mode is off by default and requires both an explicit global opt-in and allowlist:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      script_triggers_enabled: true
+      script_trigger_allowlist: ["refresh-index.py"]
+      script_timeout_seconds: 30
+      routes:
+        refresh-index:
+          secret: "replace-with-a-strong-secret"
+          script: "refresh-index.py"
+          script_mode: trigger
+          deliver: telegram
+          deliver_extra:
+            chat_id: "12345"
+```
+
+The trigger script must resolve under the active profile's `~/.hermes/scripts/` directory, including after symlink resolution, and its resolved path must match an allowlist entry. It runs without a shell, receives no request body on stdin, and starts only after authentication, body-size enforcement, rate limiting, and delivery-ID deduplication. Non-empty redacted stdout is sent through `deliver`; empty stdout stays silent. Route-level `script_timeout` may shorten but cannot extend the global `script_timeout_seconds` ceiling.
+
 ### Prompt Templates
 
 Prompts use dot-notation to access nested fields in the webhook payload:
@@ -255,6 +283,30 @@ gh auth login
 ### 4. Test it
 
 Open a pull request on the repository. The webhook fires, Hermes processes the event, and posts a review comment on the PR.
+
+## Google Pub/Sub authenticated push (OIDC)
+
+Google Pub/Sub push subscriptions can authenticate requests with an OIDC JWT in the Authorization bearer header. Configure the route with `auth: oidc` instead of an HMAC `secret`:
+
+```yaml
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      routes:
+        pubsub-alerts:
+          auth: "oidc"
+          oidc:
+            audience: "https://your-server.example.com/webhooks/pubsub-alerts"
+            email: "pubsub-pusher@your-project.iam.gserviceaccount.com"
+          prompt: |
+            Google Pub/Sub message received:
+            Subscription: {subscription}
+            Payload: {__raw__}
+          deliver: "telegram"
+```
+
+Hermes verifies the token signature against Google's JWKS, checks the audience, and accepts Google's standard issuers. Configure `oidc.email` or `oidc.subject` to authorize the specific caller; audience-only routes are rejected because an audience identifies the endpoint, not the service account allowed to invoke it. If your Pub/Sub subscription uses a custom OIDC audience, put that exact value in `oidc.audience`.
 
 ---
 

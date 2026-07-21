@@ -2,7 +2,11 @@
 
 from unittest.mock import MagicMock, patch
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import (
+    COMPRESSED_SUMMARY_METADATA_KEY,
+    ContextCompressor,
+    SUMMARY_PREFIX,
+)
 
 
 def _compressor() -> ContextCompressor:
@@ -89,3 +93,24 @@ def test_handoff_in_protected_head_populates_previous_summary_before_update():
     assert compressor._previous_summary == old_summary
     assert seen_turns
     assert all(old_summary not in str(msg.get("content", "")) for msg in seen_turns)
+
+
+def test_recompression_replaces_protected_head_handoff_in_output():
+    """A recompressed continuation should carry one current handoff, not old+new."""
+    compressor = _compressor()
+    old_summary = "OLD-PROTECTED-HEAD-SUMMARY should not survive as a live head block"
+    new_summary = "UPDATED-SUMMARY includes prior voice continuity and newer turns"
+
+    with patch.object(compressor, "_generate_summary", return_value=new_summary):
+        compressed = compressor.compress(_messages_with_handoff(old_summary))
+
+    rendered = "\n\n".join(str(msg.get("content", "")) for msg in compressed)
+    summary_messages = [
+        msg
+        for msg in compressed
+        if msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
+    ]
+
+    assert len(summary_messages) == 1
+    assert new_summary in rendered
+    assert old_summary not in rendered

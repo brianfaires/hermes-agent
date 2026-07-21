@@ -2383,6 +2383,64 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def discard_failed_compression_child(
+        self,
+        parent_session_id: str,
+        child_session_id: str,
+        *,
+        discard_messages: bool = False,
+    ) -> bool:
+        """Atomically discard an uncommitted compression child and reopen its parent.
+
+        By default a child with messages is preserved. ``discard_messages`` is
+        reserved for the manual-compress caller before its live SessionEntry is
+        repointed; those child rows are derived solely from the intact parent.
+        """
+        if not parent_session_id or parent_session_id == child_session_id:
+            return False
+
+        def _do(conn):
+            parent = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (parent_session_id,),
+            ).fetchone()
+            if parent is None or parent[0] != "compression":
+                return False
+
+            child = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE id = ?",
+                (child_session_id,),
+            ).fetchone()
+            if child is not None:
+                if child[0] != parent_session_id:
+                    return False
+                has_messages = conn.execute(
+                    "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                    (child_session_id,),
+                ).fetchone()
+                has_children = conn.execute(
+                    "SELECT 1 FROM sessions WHERE parent_session_id = ? LIMIT 1",
+                    (child_session_id,),
+                ).fetchone()
+                if has_children is not None or (
+                    has_messages is not None and not discard_messages
+                ):
+                    return False
+                if has_messages is not None:
+                    conn.execute(
+                        "DELETE FROM messages WHERE session_id = ?",
+                        (child_session_id,),
+                    )
+                conn.execute("DELETE FROM sessions WHERE id = ?", (child_session_id,))
+
+            conn.execute(
+                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
+                (parent_session_id,),
+            )
+            return True
+
+        return bool(self._execute_write(_do))
+
     def promote_to_session_reset(
         self, session_id: str, reason: str = "session_reset"
     ) -> bool:

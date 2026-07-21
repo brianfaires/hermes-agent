@@ -36,6 +36,7 @@ def _make_multiplex_runner(monkeypatch):
     )
     secondary_adapter = SimpleNamespace(
         send=AsyncMock(),
+        _running=True,
         enforces_own_access_policy=True,
         _dm_policy="open",
         _group_policy="open",
@@ -125,6 +126,37 @@ def test_adapter_for_source_resolves_secondary_profile_adapter(monkeypatch):
             profile=None,
         )
     ) is default_adapter
+
+
+def test_named_active_profile_routes_default_to_secondary_registry(monkeypatch):
+    """Built-in default is secondary when a named profile owns the primary map."""
+    runner, _old_primary, _old_secondary = _make_multiplex_runner(monkeypatch)
+    ops_adapter = SimpleNamespace(_running=True)
+    default_adapter = SimpleNamespace(_running=True)
+    runner._gateway_profile_name = "ops"
+    runner.adapters = {Platform.WECOM: ops_adapter}
+    runner._profile_adapters = {
+        "default": {Platform.WECOM: default_adapter},
+    }
+
+    default_source = SessionSource(
+        platform=Platform.WECOM,
+        user_id="default-user",
+        chat_id="default-chat",
+        chat_type="dm",
+        profile="default",
+    )
+    ops_source = SessionSource(
+        platform=Platform.WECOM,
+        user_id="ops-user",
+        chat_id="ops-chat",
+        chat_type="dm",
+        profile="ops",
+    )
+
+    assert runner._authorization_adapter(Platform.WECOM, "default") is default_adapter
+    assert runner._adapter_for_source(default_source) is default_adapter
+    assert runner._adapter_for_source(ops_source) is ops_adapter
 
 
 def test_secondary_allowlist_dm_behavior_ignores_unauthorized(monkeypatch):

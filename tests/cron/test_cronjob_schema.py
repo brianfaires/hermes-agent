@@ -28,6 +28,15 @@ def test_cronjob_schema_schedule_description_flags_required_for_create():
     assert "action=create" in schedule_desc
 
 
+def test_cronjob_schema_exposes_prompt_path_for_create_and_update():
+    from tools.cronjob_tools import CRONJOB_SCHEMA
+
+    prompt_path = CRONJOB_SCHEMA["parameters"]["properties"]["prompt_path"]
+    assert prompt_path["type"] == "string"
+    assert "action=create" in prompt_path["description"]
+    assert "absolute file path" in prompt_path["description"].lower()
+
+
 def test_cronjob_schema_required_array_unchanged():
     """`required[]` stays minimal — `action` only.
 

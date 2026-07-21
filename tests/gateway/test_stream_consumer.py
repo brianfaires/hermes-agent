@@ -51,9 +51,9 @@ class TestCleanForDisplay:
         assert "Audio generated" in result
 
     def test_media_tag_with_quotes(self):
-        """MEDIA: tags wrapped in quotes or backticks are removed."""
+        """Standalone MEDIA: tag lines wrapped in quotes or backticks are removed."""
         for wrapper in ['`MEDIA:/path/file.png`', '"MEDIA:/path/file.png"', "'MEDIA:/path/file.png'"]:
-            text = f"Result: {wrapper}"
+            text = f"Result:\n{wrapper}"
             result = GatewayStreamConsumer._clean_for_display(text)
             assert "MEDIA:" not in result, f"Failed for wrapper: {wrapper}"
 
@@ -84,13 +84,12 @@ class TestCleanForDisplay:
         result = GatewayStreamConsumer._clean_for_display(text)
         assert result.strip() == ""
 
-    def test_media_mid_sentence(self):
-        """MEDIA: tag embedded in prose is stripped cleanly."""
+    def test_media_mid_sentence_stays_text(self):
+        """A MEDIA: mention mid-prose is not a directive — the dispatch path
+        does not extract it either, so display must not hide it."""
         text = "I generated this image MEDIA:/tmp/art.png for you."
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "MEDIA:" not in result
-        assert "generated" in result
-        assert "for you." in result
+        assert result == text
 
     def test_preserves_non_media_colons(self):
         """Normal colons and text with 'MEDIA' as a word aren't stripped."""

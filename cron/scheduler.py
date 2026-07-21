@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 
+
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
     import fcntl
@@ -87,6 +88,27 @@ def _set_cron_session_title(session_db, session_id, base_title):
         return deduped
 
 
+_RED_CRON_PREFIX = "❌"
+_WARN_CRON_PREFIX = "⚠️"
+_ATTENTION_PREFIX_RE = re.compile(r"^\s*(?:❌|🚨|🛑|🔴|⚠️|⚠)\s*")
+_WARNING_HEAD_RE = re.compile(
+    r"^\s*(?:warn(?:ing)?|caution|attention)\b|\b(?:status|result)\s*[:—-]\s*warn\b|—\s*warn\b",
+    re.IGNORECASE,
+)
+def _ensure_cron_attention_prefix(content: str, *, failed: bool = False, warn: bool = False) -> str:
+    """Ensure delivered cron failures/warnings start with an attention emoji."""
+    text = content or ""
+    if _ATTENTION_PREFIX_RE.match(text):
+        return text
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    looks_warning = bool(_WARNING_HEAD_RE.search(first_line[:240]))
+    if failed:
+        return f"{_RED_CRON_PREFIX} {text.lstrip()}"
+    if warn or looks_warning:
+        return f"{_WARN_CRON_PREFIX} {text.lstrip()}"
+    return text
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -106,14 +128,14 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         elif "quota" in lower:
             reason = "quota limit"
         return (
-            f"⚠️ Cron '{job_name}' failed: provider {reason}. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider {reason}. "
             "Fallback chain was exhausted or unavailable. "
             "Full details saved in cron output."
         )
 
     if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
         return (
-            f"⚠️ Cron '{job_name}' failed: provider timeout. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider timeout. "
             "Fallback chain was exhausted or unavailable. "
             "Full details saved in cron output."
         )
@@ -123,7 +145,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # not trip a misleading auth message.
     if re.search(r"authenticat|authoriz", lower) or re.search(r"\b(401|403)\b", text):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider authentication error. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider authentication error. "
             "Full details saved in cron output."
         )
 
@@ -137,7 +159,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
-    return f"⚠️ Cron '{job_name}' failed: {cleaned}"
+    return f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: {cleaned}"
 
 
 class CronPromptInjectionBlocked(Exception):
@@ -279,6 +301,7 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
 from cron.executions import create_execution, finish_execution, mark_execution_running
+import cron.hooks as cron_hooks
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -1303,6 +1326,25 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
+def _delivery_target_lost_origin_thread(origin: dict, target: dict) -> bool:
+    """Return True when a delivery target should have preserved origin thread_id.
+
+    ``thread_id`` values are scoped to a platform/channel.  A job may be born
+    in a Discord thread but intentionally deliver to Telegram (or any other
+    home channel); in that case the Discord thread ID is not meaningful for the
+    target and logging a warning is noise.  Warn only when the concrete target
+    is the same platform + chat as the origin and the target has dropped the
+    origin's thread/topic ID.
+    """
+    origin_thread = origin.get("thread_id")
+    if not origin_thread or target.get("thread_id"):
+        return False
+    return (
+        str(origin.get("platform", "")).lower() == str(target.get("platform", "")).lower()
+        and str(origin.get("chat_id", "")) == str(target.get("chat_id", ""))
+    )
+
+
 # Media extension sets — audio routing is centralized in gateway.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
@@ -1442,7 +1484,7 @@ def _is_channel_dm_topic(
     return is_channel
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(job: dict, content: str, adapters=None, loop=None, raw_content: bool = False) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -1450,6 +1492,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
+
+    When ``raw_content`` is True the message is delivered verbatim — no
+    summarize/condense step and no "Cronjob Response" wrapper. Used for
+    system notifications (e.g. cron_calendar_sync duration alerts) that are
+    already fully formed.
 
     Returns None on success, or an error string on failure.
     """
@@ -1478,29 +1525,44 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
-    # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
     user_cfg = None
-    try:
-        user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
-    except Exception:
-        pass
-
-    if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
-        )
+    if raw_content:
+        delivery_content = content or ""
     else:
-        delivery_content = content
+        # Optionally wrap the content with a header/footer so the user knows this
+        # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
+        # in config.yaml for clean output.
+        wrap_response = True
+        try:
+            user_cfg = load_config()
+            wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        except Exception:
+            pass
+
+        if wrap_response:
+            task_name = job.get("name", job["id"])
+            job_id = job.get("id", "")
+            delivery_content = (
+                f"Cronjob Response: {task_name}\n"
+                f"(job_id: {job_id})\n"
+                f"-------------\n\n"
+                f"{content}\n\n"
+                f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+            )
+        else:
+            delivery_content = content
+
+    # Attention alerts must start with their emoji even when cron response
+    # wrapping is enabled. Detect the attention class from the original content
+    # and prefix the final message body that actually reaches chat.
+    _attention_source = (content or "").lstrip()
+    _attention_first_line = _attention_source.splitlines()[0] if _attention_source else ""
+    delivery_content = _ensure_cron_attention_prefix(
+        delivery_content,
+        failed=_attention_source.startswith(("❌", "🚨", "🛑", "🔴")),
+        warn=_attention_source.startswith(("⚠️", "⚠"))
+        or bool(_WARNING_HEAD_RE.search(_attention_first_line[:240])),
+    )
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
@@ -1534,14 +1596,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
 
-        # Diagnostic: log thread_id for topic-aware delivery debugging
+        # Diagnostic: log thread_id for topic-aware delivery debugging.
+        # Thread IDs are platform/channel scoped, so cross-platform or
+        # home-channel delivery is allowed to omit the origin thread.
         origin = _resolve_origin(job) or {}
-        origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if _delivery_target_lost_origin_thread(origin, target):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",
-                job["id"], origin_thread, job.get("deliver", "local"), target,
+                job["id"], origin.get("thread_id"), job.get("deliver", "local"), target,
             )
         elif thread_id:
             logger.debug(
@@ -2346,8 +2409,18 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             result is used for prompt injection. When omitted, the script
             (if any) runs inline as before.
     """
-    user_prompt = str(job.get("prompt") or "")
-    prompt = user_prompt
+    from cron.jobs import read_prompt_file
+
+    prompt_path = str(job.get("prompt_path") or "").strip()
+    inline_prompt = str(job.get("prompt") or "")
+    # Preserve the user-authored source before adding skills or runtime data:
+    # those wrappers use a looser scanner, while this source remains strict.
+    if prompt_path:
+        file_prompt = read_prompt_file(prompt_path)
+        raw_user_prompt = f"{inline_prompt}\n{file_prompt}" if inline_prompt.strip() else file_prompt
+    else:
+        raw_user_prompt = inline_prompt
+    assembled_prompt = raw_user_prompt
     skills = job.get("skills")
     # True when runtime-collected DATA (script stdout, upstream-job output)
     # has been injected into the prompt. Data content legitimately quotes
@@ -2365,23 +2438,23 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             success, script_output = _run_job_script(script_path)
         if success:
             if script_output:
-                prompt = (
+                assembled_prompt = (
                     "## Script Output\n"
                     "The following data was collected by a pre-run script. "
                     "Use it as context for your analysis.\n\n"
                     f"```\n{script_output}\n```\n\n"
-                    f"{prompt}"
+                    f"{assembled_prompt}"
                 )
                 has_injected_data = True
             else:
                 # Script produced no output — nothing to report, skip AI call.
                 return None
         else:
-            prompt = (
+            assembled_prompt = (
                 "## Script Error\n"
                 "The data-collection script failed. Report this to the user.\n\n"
                 f"```\n{script_output}\n```\n\n"
-                f"{prompt}"
+                f"{assembled_prompt}"
             )
             has_injected_data = True
 
@@ -2420,12 +2493,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 if len(latest_output) > _MAX_CONTEXT_CHARS:
                     latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
                 if latest_output:
-                    prompt = (
+                    assembled_prompt = (
                         f"## Output from job '{source_job_id}'\n"
                         "The following is the most recent output from a preceding "
                         "cron job. Use it as context for your analysis.\n\n"
                         f"```\n{latest_output}\n```\n\n"
-                        f"{prompt}"
+                        f"{assembled_prompt}"
                     )
                     has_injected_data = True
                 else:
@@ -2442,12 +2515,16 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "ATTENTION PREFIXES: if your delivered report is a warning, "
+        "start it with a meaningful warning emoji such as ⚠️; if it is "
+        "an error, blocker, or failure, start it with a red/error emoji "
+        "such as ❌, 🚨, 🛑, or 🔴. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
-    prompt = cron_hint + prompt
+    assembled_prompt = cron_hint + assembled_prompt
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
@@ -2457,11 +2534,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
         return _scan_assembled_cron_prompt(
-            prompt,
+            assembled_prompt,
             job,
             has_skills=False,
             has_injected_data=has_injected_data,
-            user_prompt=user_prompt,
+            raw_user_prompt=raw_user_prompt,
         )
 
     from tools.skills_tool import skill_view
@@ -2535,9 +2612,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         )
         parts.insert(0, notice)
 
-    if prompt:
-        parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    if assembled_prompt:
+        parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {assembled_prompt}"])
+    return _scan_assembled_cron_prompt(
+        "\n".join(parts), job, has_skills=True, raw_user_prompt=raw_user_prompt
+    )
 
 
 def _scan_assembled_cron_prompt(
@@ -2546,7 +2625,7 @@ def _scan_assembled_cron_prompt(
     *,
     has_skills: bool = False,
     has_injected_data: bool = False,
-    user_prompt: Optional[str] = None,
+    raw_user_prompt: Optional[str] = None,
 ) -> str:
     """Scan the fully-assembled cron prompt for injection patterns. Raises
     ``CronPromptInjectionBlocked`` when a match fires so ``run_job`` can
@@ -2577,8 +2656,8 @@ def _scan_assembled_cron_prompt(
       code, the same trust class — and data feeds (e.g. a triage bot
       ingesting bug reports) legitimately quote dangerous commands.
 
-    When the looser tier is selected because of injected data only,
-    ``user_prompt`` (the raw, pre-assembly prompt) is additionally scanned
+    When the looser tier is selected because of runtime-loaded content,
+    ``raw_user_prompt`` (the raw, pre-assembly prompt) is additionally scanned
     with the STRICT set so the user-authored surface keeps the full
     create/update-time guarantee at runtime (defense-in-depth for legacy
     jobs that predate the create-time scanner).
@@ -2593,10 +2672,10 @@ def _scan_assembled_cron_prompt(
         # prompt is what actually runs.
         cleaned, scan_error = _scan_cron_skill_assembled(assembled)
         assembled = cleaned
-        if not scan_error and not has_skills and user_prompt:
-            # Data-injection path: keep the strict guarantee on the
-            # user-authored prompt itself.
-            scan_error = _scan_cron_prompt(user_prompt)
+        if not scan_error and raw_user_prompt:
+            # A skill must not downgrade mutable prompt_path content to the
+            # looser assembled-content scanner.
+            scan_error = _scan_cron_prompt(raw_user_prompt)
     else:
         scan_error = _scan_cron_prompt(assembled)
     if scan_error:
@@ -2676,7 +2755,8 @@ def run_job(
         Tuple of (success, full_output_doc, final_response, error_message)
     """
     job_id = job["id"]
-    job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+    prompt_path = str(job.get("prompt_path") or "").strip()
+    job_name = str(job.get("name") or job.get("prompt") or prompt_path or job_id or "cron job")
 
     # ---------------------------------------------------------------
     # no_agent short-circuit — the script IS the job, no LLM involvement.
@@ -2731,7 +2811,7 @@ def run_job(
             # error so the user knows the watchdog itself broke — silent
             # failure for an alerting job is the worst-case outcome.
             alert = (
-                f"⚠ Cron watchdog '{job_name}' script failed\n\n"
+                f"{_RED_CRON_PREFIX} Cron watchdog '{job_name}' script failed\n\n"
                 f"{output}\n\n"
                 f"Time: {now_iso}"
             )
@@ -3726,6 +3806,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     execution_id = job.get("execution_id")
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
+    started_at = time.perf_counter()
     try:
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
@@ -3857,6 +3938,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], success, error, delivery_error=delivery_error)
         finish_execution(execution_id, success=success, error=error)
+        _emit_complete(job, success, time.perf_counter() - started_at, error,
+                       adapters=adapters, loop=loop, output_file=output_file)
         return True
 
     except Exception as e:
@@ -3864,6 +3947,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], False, str(e))
         finish_execution(execution_id, success=False, error=str(e))
+        _emit_complete(job, False, time.perf_counter() - started_at, str(e),
+                       adapters=adapters, loop=loop)
         return False
 
 
@@ -3885,6 +3970,46 @@ def _notify_provider_jobs_changed() -> None:
         logger.debug("on_jobs_changed notify failed: %s", e)
 
 
+def _emit_complete(job: dict, success: bool, duration_seconds: float,
+                   error: Optional[str], adapters=None, loop=None,
+                   output_file=None) -> None:
+    """Fire the COMPLETE cron hook for a finished run.
+
+    The payload carries a ``notify(message, warn=False)`` callback bound to the
+    job's delivery target (with a log fallback) so hook consumers — e.g. an
+    external cron-calendar-sync plugin — can surface a message to the cron's
+    normal target without depending on scheduler internals. Emitted from the
+    shared ``run_one_job`` body so it fires for both the built-in ticker and an
+    external provider (Chronos) fire_due.
+    """
+    def notify(message: str, warn: bool = False) -> None:
+        targets = _resolve_delivery_targets(job)
+        if not targets:
+            if warn:
+                logger.warning("%s", message)
+            else:
+                logger.info("%s", message)
+            return
+        try:
+            if warn:
+                message = _ensure_cron_attention_prefix(message, warn=True)
+            err = _deliver_result(job, message, adapters=adapters, loop=loop, raw_content=True)
+            if err:
+                logger.warning("Job '%s': notification delivery issue: %s", job.get("id"), err)
+        except Exception as e:
+            logger.error("Job '%s': notification delivery failed: %s", job.get("id"), e)
+
+    cron_hooks.emit(
+        cron_hooks.COMPLETE,
+        job=job,
+        success=success,
+        duration_seconds=duration_seconds,
+        error=error,
+        notify=notify,
+        output_file=str(output_file) if output_file else None,
+    )
+
+
 def tick(
     verbose: bool = True,
     adapters=None,
@@ -3892,7 +4017,7 @@ def tick(
     sync: bool = True,
     *,
     can_dispatch=None,
-):
+) -> int:
     """
     Check and run all due jobs.
     

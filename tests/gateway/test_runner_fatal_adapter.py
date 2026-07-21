@@ -56,6 +56,7 @@ class _ReplacementDeliveryAdapter(BasePlatformAdapter):
         )
         self.sent: list[str] = []
         self.connected = True
+        self._running = True
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         return True

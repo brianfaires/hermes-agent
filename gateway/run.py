@@ -31,6 +31,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import shlex
 import site
@@ -44,6 +45,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Awaitable, Callable, Dict, Optional, Any, List, Union
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
@@ -56,6 +58,7 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import consume_detached_task_result, safe_schedule_threadsafe
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
+
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -1507,17 +1510,29 @@ from gateway.config import (
 )
 
 
-class MultiplexConfigError(RuntimeError):
-    """A profile multiplexer config is invalid.
-
-    Distinct from a transient adapter-connect failure: a config error means the
-    operator must fix config.yaml. Fatal configuration errors propagate to the
-    startup guard instead of being treated as retryable adapter noise.
-    """
+from gateway.errors import MultiplexConfigError
 
 
 class SecondaryPortBindingConfigError(MultiplexConfigError):
     """A secondary profile conflicts with the multiplexer's shared listener."""
+
+
+@_contextmanager
+def _hermes_home_runtime_scope(profile_home: "Path"):
+    """Scope ``get_hermes_home()`` and tool subprocess env to one profile home.
+
+    This is intentionally narrower than ``_profile_runtime_scope``: it does not
+    install a secret scope. Single-profile gateways may legitimately receive
+    credentials from their service environment, but their config/SOUL/session
+    paths must still stay pinned to the profile home they were started with.
+    """
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    home_token = set_hermes_home_override(str(profile_home))
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(home_token)
 
 
 @_contextmanager
@@ -1539,20 +1554,18 @@ def _profile_runtime_scope(profile_home: "Path"):
     returns an isolated dict — which is what keeps subprocesses (MCP, kanban)
     from inheriting cross-profile secrets.
     """
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from agent.secret_scope import (
         build_profile_secret_scope,
         set_secret_scope,
         reset_secret_scope,
     )
 
-    home_token = set_hermes_home_override(str(profile_home))
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-    try:
-        yield
-    finally:
-        reset_secret_scope(secret_token)
-        reset_hermes_home_override(home_token)
+    with _hermes_home_runtime_scope(Path(profile_home)):
+        secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
+        try:
+            yield
+        finally:
+            reset_secret_scope(secret_token)
 
 
 def load_gateway_config_for_runner() -> "GatewayConfig":
@@ -1922,9 +1935,12 @@ from gateway.session import (
 )
 from gateway.delivery import DeliveryRouter, looks_like_telegram_private_chat_id
 from gateway.turn_lease import SessionTurnLeaseRegistry
+from gateway.errors import MultiplexConfigError
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from gateway.slash_commands import GatewaySlashCommandsMixin
+from gateway.voice_mixin import GatewayVoiceMixin
+from plugins.platforms.discord.kanban_mirror.runtime import DiscordKanbanMirrorRuntimeMixin
 from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
@@ -2314,48 +2330,6 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-async def _probe_audio_duration(path: str) -> Optional[str]:
-    """Best-effort duration probe. Returns formatted MM:SS / HH:MM:SS, or None on failure."""
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext == ".wav":
-        try:
-            def _wav_duration() -> float:
-                import wave
-                with wave.open(path, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate() or 1
-                    return frames / float(rate)
-            secs = await asyncio.to_thread(_wav_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    if ext in (".ogg", ".opus", ".oga"):
-        try:
-            def _ogg_duration() -> float:
-                from mutagen.oggopus import OggOpus
-                return float(OggOpus(path).info.length)
-            secs = await asyncio.to_thread(_ogg_duration)
-            return _format_duration(secs)
-        except Exception:
-            pass
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-        if proc.returncode == 0:
-            return _format_duration(float(stdout.decode().strip()))
-    except Exception:
-        pass
-
-    return None
-
-
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
     """Consume and return the full pending event for a session.
 
@@ -2531,11 +2505,13 @@ def _gateway_config_home() -> Path:
 
 
 def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error.
+    """Load and parse the active profile's config.yaml, returning {} on error.
 
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
+    Honors the context-local Hermes home override used by gateway profile
+    scoping.  When no override is active, falls back to the module-level
+    ``_hermes_home`` so tests that monkeypatch it still see their fixture.
+    Shares the mtime-keyed raw-yaml cache from
+    ``hermes_cli.config.read_raw_config`` when the paths match.
 
     Managed scope is overlaid on the result (via the shared helper) so the
     gateway honors administrator-pinned values — neither read_raw_config nor a
@@ -3026,7 +3002,13 @@ def _reconnect_backoff(attempt: int) -> int:
     return min(30 * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_CAP)
 
 
-class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
+class GatewayRunner(
+    DiscordKanbanMirrorRuntimeMixin,
+    GatewayAuthorizationMixin,
+    GatewayKanbanWatchersMixin,
+    GatewaySlashCommandsMixin,
+    GatewayVoiceMixin,
+):
     """
     Main gateway controller.
 
@@ -3075,6 +3057,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # secondary profiles do (#64674). Explicit config= injection (tests)
         # is left untouched.
         self.config = config if config is not None else load_gateway_config_for_runner()
+        from hermes_constants import get_hermes_home
+        self._gateway_profile_home = get_hermes_home().resolve()
+        self._gateway_profile_name = self._active_profile_name()
         # Mark the process as a profile multiplexer when configured. This flips
         # agent.secret_scope.get_secret() to fail-closed on any unscoped
         # credential read, so a missed migration crashes loudly instead of
@@ -3281,7 +3266,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Last voice-channel context delivered per session — the VC note is
         # injected only when the live state differs from this value.
         self._session_vc_last: Dict[str, str] = {}
-        self._kanban_notifier_profile = self._active_profile_name()
+        self._kanban_notifier_profile = self._gateway_profile_name
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
         self._teams_pipeline_runtime_error: Optional[str] = None
@@ -3420,6 +3405,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._init_discord_kanban_mirror_runtime()
 
         # Event-loop liveness heartbeat (#66892): rewritten every 30s while
         # the loop is dispatching. External supervisors use the file mtime /
@@ -3552,7 +3538,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if mode not in valid_modes:
                 continue
             key = str(chat_id)
-            # Skip legacy unprefixed keys (warn and skip)
             if ":" not in key:
                 logger.warning(
                     "Skipping legacy unprefixed voice mode key %r during migration. "
@@ -3566,9 +3551,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _save_voice_modes(self) -> None:
         try:
             self._VOICE_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._VOICE_MODE_PATH.write_text(
-                json.dumps(self._voice_mode, indent=2)
-            )
+            self._VOICE_MODE_PATH.write_text(json.dumps(self._voice_mode, indent=2))
         except OSError as e:
             logger.warning("Failed to save voice modes: %s", e)
 
@@ -7650,7 +7633,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             
             # Set up message + fatal error handlers
+            if hasattr(adapter, "set_runtime_profile_home"):
+                adapter.set_runtime_profile_home(self._gateway_profile_home)
             adapter.set_message_handler(self._handle_message)
+            if hasattr(adapter, "gateway_runner"):
+                adapter.gateway_runner = self
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -7759,6 +7746,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             _secondary_connected = await self._start_secondary_profile_adapters()
             connected_count += _secondary_connected
+            self._validate_kanban_router_readiness()
         except MultiplexConfigError as e:
             # Invalid multiplexer config — abort startup cleanly so the operator
             # fixes config.yaml rather than running a half-wired gateway.
@@ -7992,6 +7980,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # When false, users run `hermes kanban daemon` externally or
         # simply don't use kanban; this loop becomes a no-op.
         self._spawn_supervised(self._kanban_dispatcher_watcher, "kanban_dispatcher_watcher")
+
+        self._start_discord_kanban_mirror_runtime()
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -8623,6 +8613,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         del self._failed_platforms[platform]
                         continue
 
+                    if hasattr(adapter, "set_runtime_profile_home"):
+                        adapter.set_runtime_profile_home(self._gateway_profile_home)
                     adapter.set_message_handler(self._handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
@@ -8649,6 +8641,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             error_message=None,
                         )
                         logger.info("✓ %s reconnected successfully", platform.value)
+
+                        # on_ready precedes installation in self.adapters. Re-run
+                        # against the authoritative replacement map before workers
+                        # or outbound recovery can resume.
+                        if platform == Platform.DISCORD:
+                            await self._revalidate_kanban_router_readiness()
 
                         # Rebuild channel directory with the new adapter
                         try:
@@ -9131,6 +9129,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _phase_elapsed(),
             )
 
+            _stop_mirror_runtime = getattr(
+                self, "_stop_discord_kanban_mirror_runtime", None
+            )
+            if _stop_mirror_runtime is not None:
+                await _stop_mirror_runtime()
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
                     continue
@@ -9313,6 +9316,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()
 
+    def _adapter_for_source(
+        self,
+        source: SessionSource,
+        *,
+        require_profile_adapter: bool = False,
+    ) -> Optional[BasePlatformAdapter]:
+        """Resolve the connected adapter that owns a routed profile identity."""
+        if source is None:
+            return None
+        candidate = self._authorization_adapter(
+            getattr(source, "platform", None),
+            getattr(source, "profile", None),
+        )
+        if candidate is None:
+            return None
+        profile = str(getattr(source, "profile", "") or "").strip()
+        if profile and getattr(candidate, "_running", True) is False:
+            # A stamped profile must never fall back to another bot identity,
+            # regardless of platform or which turn path is sending.
+            return None
+        return candidate
+
     async def _start_secondary_profile_adapters(self) -> int:
         """Bring up adapters for every non-active profile this gateway serves.
 
@@ -9493,6 +9518,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform: Platform,
     ) -> None:
         """Install the profile-scoped handlers shared by startup and reconnect."""
+        if hasattr(adapter, "set_runtime_profile_home"):
+            from hermes_cli.profiles import get_profile_dir
+
+            adapter.set_runtime_profile_home(get_profile_dir(profile_name))
         adapter.set_message_handler(self._make_profile_message_handler(profile_name))
         adapter.set_fatal_error_handler(
             self._make_profile_fatal_error_handler(profile_name, platform)
@@ -10167,11 +10196,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
-        # Intercept messages that are responses to a pending clarify.
-        # Open-ended prompts and "Other" responses are captured as free text;
-        # direct replies to multi-choice prompts are accepted too ("2" maps
-        # to the second option, arbitrary text becomes a custom answer). Slash
-        # commands still bypass this path so /stop and friends keep working.
+        # A spoken approval must resolve the tool waiter before ordinary
+        # message/clarify handling. The agent thread is blocked in
+        # tools.approval, so routing this transcript as a normal turn would
+        # leave the command pending until timeout.
+        if self._maybe_resolve_voice_approval_response(event):
+            return ""
+
+        # Intercept responses to a pending clarify. Voice replies may answer a
+        # button-choice prompt directly; this gateway also deliberately accepts
+        # typed numeric/custom answers for the current clarify UI.
         _clarify_mod = None
         try:
             from tools import clarify_gateway as _clarify_mod
@@ -12919,6 +12953,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_id=_run_start_session_id,
                 session_key=session_key,
                 run_generation=run_generation,
+                event=event,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
                 moa_config=getattr(event, "_moa_config", None),
@@ -13469,6 +13504,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_entry.session_id,
                 )
                 response = ""
+
+            # This text-only surface is owned exclusively by the durable outbox.
+            # Attachments/media remain represented in frozen text but are not sent
+            # as side effects until a later attachment-aware outbox slice exists.
+            if self._is_mirrored_kanban_conversation_event(event, source):
+                if response:
+                    if getattr(event, "media_urls", None) or "MEDIA:" in response:
+                        logger.warning(
+                            "Mirrored Kanban response media delivery is fail-closed; queuing frozen text only"
+                        )
+                    await self._deliver_mirrored_kanban_response(
+                        event=event, source=source, content=response,
+                    )
+                return None
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
@@ -14220,11 +14269,214 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return raw.guild.id
         return None
 
+    @staticmethod
+    def _configured_discord_voice_ack(adapter, key: str) -> Optional[str]:
+        """Choose a configured Discord voice acknowledgement, if any."""
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        if not isinstance(config, dict):
+            return None
+        raw = config.get(key)
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        phrases = [str(item).strip() for item in raw if str(item).strip()]
+        return random.choice(phrases) if phrases else None
+
+    @staticmethod
+    def _configured_discord_voice_int(adapter, key: str, default: int) -> int:
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        raw = config.get(key, default) if isinstance(config, dict) else default
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _voice_session_user_turn_count(self, source: SessionSource) -> int:
+        """Return persisted user-turn count for a voice-linked session."""
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return 0
+        try:
+            entry = store.get_or_create_session(source)
+            history = store.load_transcript(entry.session_id) or []
+        except Exception:
+            logger.debug("Could not load voice-session history for join acknowledgement", exc_info=True)
+            return 0
+        return sum(1 for message in history if message.get("role") == "user")
+
+    def _discord_voice_join_ack_text(
+        self,
+        source: SessionSource,
+        *,
+        adapter=None,
+        rejoining_persisted_voice_session: bool = False,
+    ) -> str:
+        """Return the spoken Discord VC join acknowledgement for this session."""
+        try:
+            if self._session_key_for_source(source) in (self._running_agents or {}):
+                return self._configured_discord_voice_ack(adapter, "busy_ack_phrases") or "working, one sec"
+        except Exception:
+            pass
+        if rejoining_persisted_voice_session:
+            return self._configured_discord_voice_ack(adapter, "restart_join_ack_phrases") or "Back online."
+        threshold = self._configured_discord_voice_int(
+            adapter, "session_resume_user_turn_threshold", 2
+        )
+        if self._voice_session_user_turn_count(source) > threshold:
+            return (
+                self._configured_discord_voice_ack(adapter, "session_resume_ack_phrases")
+                or "Picking up where we left off."
+            )
+        return self._configured_discord_voice_ack(adapter, "join_ack_phrases") or t("gateway.voice.connected_spoken")
+
+    async def _wait_for_discord_voice_ready(
+        self, adapter, guild_id: int, *, timeout: float = 3.0,
+    ) -> bool:
+        """Wait briefly for Discord voice to be connected before first playback."""
+        is_in_voice_channel = getattr(adapter, "is_in_voice_channel", None)
+        if not callable(is_in_voice_channel):
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                ready = is_in_voice_channel(guild_id)
+                if inspect.isawaitable(ready):
+                    ready = await ready
+                if ready:
+                    return True
+            except Exception:
+                logger.debug("Discord voice readiness check failed", exc_info=True)
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.1, remaining))
+
+    @staticmethod
+    def _discord_adapter_connected_to_voice_channel(adapter, guild_id: int, channel_id: int) -> bool:
+        voice_clients = getattr(adapter, "_voice_clients", {}) or {}
+        existing = voice_clients.get(int(guild_id)) if isinstance(voice_clients, dict) else None
+        if existing is None:
+            return False
+        try:
+            return bool(existing.is_connected() and getattr(
+                getattr(existing, "channel", None), "id", None,
+            ) == int(channel_id))
+        except Exception:
+            return False
+
+    def _wire_discord_voice_callbacks(self, adapter) -> None:
+        """Bind receive/cleanup callbacks to the profile adapter owning the VC."""
+        if hasattr(adapter, "_voice_input_callback"):
+            async def _input(guild_id, user_id, transcript):
+                await self._handle_voice_channel_input(
+                    guild_id, user_id, transcript, adapter=adapter,
+                )
+            adapter._voice_input_callback = _input
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = lambda chat_id: self._handle_voice_timeout_cleanup(
+                chat_id, adapter=adapter,
+            )
+        if hasattr(adapter, "_voice_mode_getter"):
+            adapter._voice_mode_getter = lambda chat_id: self._voice_mode.get(
+                self._voice_key(Platform.DISCORD, str(chat_id)), "off"
+            )
+
+    def _clear_discord_voice_callbacks_if_idle(self, adapter) -> None:
+        if getattr(adapter, "_voice_clients", {}) or {}:
+            return
+        if hasattr(adapter, "_voice_input_callback"):
+            adapter._voice_input_callback = None
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = None
+
+    async def _handle_discord_auto_voice_join(self, adapter, member, voice_channel) -> bool:
+        """Join configured Discord voice presence on the owning profile adapter."""
+        guild = getattr(voice_channel, "guild", None) or getattr(member, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        channel_id = getattr(voice_channel, "id", None)
+        if guild_id is None or channel_id is None:
+            return False
+        already_connected = self._discord_adapter_connected_to_voice_channel(
+            adapter, int(guild_id), int(channel_id),
+        )
+        self._wire_discord_voice_callbacks(adapter)
+        try:
+            if not await adapter.join_voice_channel(voice_channel):
+                self._clear_discord_voice_callbacks_if_idle(adapter)
+                return False
+        except Exception:
+            logger.warning("Failed to auto-join Discord voice channel", exc_info=True)
+            self._clear_discord_voice_callbacks_if_idle(adapter)
+            return False
+
+        chat_id = str(channel_id)
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(Platform.DISCORD, chat_id)
+        ) in {"voice_only", "all"}
+        adapter._voice_text_channels[int(guild_id)] = int(channel_id)
+        getattr(adapter, "_auto_voice_session_channels", set()).add(chat_id)
+        profile_name = getattr(adapter, "_runtime_profile_name", None)
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=chat_id,
+            chat_name=getattr(voice_channel, "name", None),
+            chat_type="group",
+            user_id=str(getattr(member, "id", "")) or None,
+            user_name=getattr(member, "display_name", None),
+            guild_id=str(guild_id),
+            profile=profile_name,
+        )
+        if hasattr(adapter, "_voice_sources"):
+            adapter._voice_sources[int(guild_id)] = source.to_dict()
+        self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "voice_only"
+        self._save_voice_modes()
+        self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+        if not already_connected:
+            if not await self._wait_for_discord_voice_ready(adapter, int(guild_id)):
+                logger.warning(
+                    "Discord auto-voice greeting skipped: voice connection not ready for guild %s",
+                    guild_id,
+                )
+                return True
+            event = MessageEvent(
+                source=source, text="", message_type=MessageType.TEXT,
+                raw_message=SimpleNamespace(guild_id=int(guild_id), guild=guild),
+            )
+            await self._send_voice_reply(
+                event,
+                self._discord_voice_join_ack_text(
+                    source,
+                    adapter=adapter,
+                    rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                ),
+            )
+        return True
+
+    async def _handle_discord_auto_voice_leave(self, adapter, member, voice_channel) -> bool:
+        guild = getattr(voice_channel, "guild", None) or getattr(member, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        if guild_id is None:
+            return False
+        chat_id = str(getattr(adapter, "_voice_text_channels", {}).get(int(guild_id))
+                      or getattr(voice_channel, "id", ""))
+        try:
+            await adapter.leave_voice_channel(int(guild_id))
+        except Exception:
+            logger.warning("Failed to auto-leave Discord voice channel", exc_info=True)
+        if chat_id:
+            self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
+            self._save_voice_modes()
+            self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            getattr(adapter, "_auto_voice_session_channels", set()).discard(chat_id)
+        self._clear_discord_voice_callbacks_if_idle(adapter)
+        return True
 
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
         adapter = self._adapter_for_source(event.source)
-        if not hasattr(adapter, "join_voice_channel"):
+        if adapter is None or not hasattr(adapter, "join_voice_channel"):
             return "Voice channels are not supported on this platform."
 
         guild_id = self._get_guild_id(event)
@@ -14237,18 +14489,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not voice_channel:
             return "You need to be in a voice channel first."
 
-        # Wire callbacks BEFORE join so voice input arriving immediately
-        # after connection is not lost.
-        if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = self._handle_voice_channel_input
-        if hasattr(adapter, "_on_voice_disconnect"):
-            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
-        # Let the adapter's inactivity timer see the live voice-reply mode so it
-        # doesn't disconnect a deliberately text-only (/voice off) session.
-        if hasattr(adapter, "_voice_mode_getter"):
-            adapter._voice_mode_getter = lambda chat_id: self._voice_mode.get(
-                self._voice_key(Platform.DISCORD, str(chat_id)), "off"
-            )
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            self._voice_key(event.source.platform, event.source.chat_id)
+        ) in {"voice_only", "all"}
+
+        # Wire callbacks BEFORE join so immediate receive/cleanup work remains
+        # bound to this source profile's adapter.
+        self._wire_discord_voice_callbacks(adapter)
 
         try:
             success = await adapter.join_voice_channel(voice_channel)
@@ -14267,9 +14514,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter._voice_text_channels[guild_id] = int(event.source.chat_id)
             if hasattr(adapter, "_voice_sources"):
                 adapter._voice_sources[guild_id] = event.source.to_dict()
-            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "all"
+            self._voice_mode[self._voice_key(event.source.platform, event.source.chat_id)] = "voice_only"
             self._save_voice_modes()
             self._set_adapter_auto_tts_enabled(adapter, event.source.chat_id, enabled=True)
+            try:
+                await self._send_voice_reply(
+                    event,
+                    self._discord_voice_join_ack_text(
+                        event.source,
+                        adapter=adapter,
+                        rejoining_persisted_voice_session=rejoining_persisted_voice_session,
+                    ),
+                )
+            except Exception:
+                logger.debug("Discord voice join greeting failed", exc_info=True)
             return (
                 f"Joined voice channel **{voice_channel.name}**.\n"
                 f"I'll speak my replies and listen to you. Use /voice leave to disconnect."
@@ -14283,7 +14541,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         adapter = self._adapter_for_source(event.source)
         guild_id = self._get_guild_id(event)
 
-        if not guild_id or not hasattr(adapter, "leave_voice_channel"):
+        if not guild_id or adapter is None or not hasattr(adapter, "leave_voice_channel"):
             return "Not in a voice channel."
 
         if not hasattr(adapter, "is_in_voice_channel") or not adapter.is_in_voice_channel(guild_id):
@@ -14301,14 +14559,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter._voice_input_callback = None
         return "Left voice channel."
 
-    def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
-        """Called by the adapter when a voice channel times out.
+    def _handle_voice_timeout_cleanup(self, chat_id: str, *, adapter=None) -> None:
+        """Called by the owning adapter when a voice channel times out.
 
-        Cleans up runner-side voice_mode state that the adapter cannot reach.
+        Cleans up runner-side voice_mode state without crossing profile
+        transports.
         """
         self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
         self._save_voice_modes()
-        adapter = self.adapters.get(Platform.DISCORD)
+        if adapter is None:
+            adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
 
     def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
@@ -14353,14 +14613,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return False
 
     async def _handle_voice_channel_input(
-        self, guild_id: int, user_id: int, transcript: str
+        self, guild_id: int, user_id: int, transcript: str, *, adapter=None,
     ):
-        """Handle transcribed voice from a user in a voice channel.
-
-        Creates a synthetic MessageEvent and processes it through the
-        adapter's full message pipeline (session, typing, agent, TTS reply).
-        """
-        adapter = self.adapters.get(Platform.DISCORD)
+        """Handle transcribed voice through the adapter that owns its profile."""
+        # Live callbacks always supply the owning adapter. The primary lookup is
+        # retained only for direct/backward-compatible callers and tests.
+        if adapter is None:
+            adapter = self.adapters.get(Platform.DISCORD)
         if not adapter:
             return
 
@@ -14368,8 +14627,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not text_ch_id:
             return
 
-        # Build source — reuse the linked text channel's metadata when available
-        # so voice input shares the same session as the bound text conversation.
         source_data = getattr(adapter, "_voice_sources", {}).get(guild_id)
         if source_data:
             source = SessionSource.from_dict(source_data)
@@ -14381,12 +14638,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 chat_id=str(text_ch_id),
                 user_id=str(user_id),
                 user_name=str(user_id),
-                chat_type="channel",
+                chat_type="group",
+                profile=getattr(adapter, "_runtime_profile_name", None),
             )
 
-        # Check authorization before processing voice input
-        if not self._is_user_authorized(source):
+        auto_voice_authorized = (
+            str(source.chat_id) in getattr(adapter, "_auto_voice_session_channels", set())
+            and hasattr(adapter, "_is_auto_voice_user_id_allowed")
+            and adapter._is_auto_voice_user_id_allowed(source.user_id)
+        )
+        if not auto_voice_authorized and not self._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
+            return
+
+        try:
+            from tools.voice_mode import stt_noise_drop_reason
+            noise_reason = stt_noise_drop_reason(transcript)
+        except Exception:
+            noise_reason = None
+        if noise_reason:
+            logger.debug(
+                "Dropping voice transcript before session injection "
+                "(guild=%s user=%s reason=%s): %r",
+                guild_id, user_id, noise_reason, transcript[:100],
+            )
             return
 
         if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
@@ -14419,6 +14694,76 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
         await adapter.handle_message(event)
+
+    def _format_clarify_prompt_for_tts(self, question: str, choices: Optional[list]) -> str:
+        question = " ".join(str(question or "").split())
+        choices = [" ".join(str(choice).split()) for choice in (choices or [])]
+        choices = [choice for choice in choices if choice]
+        if not choices:
+            return f"I need clarification: {question}"
+        options = " ".join(
+            f"Option {index}: {choice}."
+            for index, choice in enumerate(choices, start=1)
+        )
+        return f"I need a choice: {question} {options} Or say another answer."
+
+    @staticmethod
+    def _format_approval_prompt_for_tts(description: str) -> str:
+        description = " ".join(str(description or "dangerous command").split())
+        return (
+            f"Command approval needed. Reason: {description}. "
+            "Use the approval buttons, or say approve or deny."
+        )
+
+    def _maybe_resolve_voice_approval_response(self, event: MessageEvent) -> bool:
+        if event.message_type != MessageType.VOICE:
+            return False
+        choice = {
+            "approve": "once", "approved": "once", "allow": "once", "deny": "deny",
+        }.get((event.text or "").strip().casefold().rstrip(".!?"))
+        if choice is None:
+            return False
+        try:
+            from tools.approval import has_blocking_approval, resolve_gateway_approval
+
+            session_key = self._session_key_for_source(event.source)
+            return bool(
+                has_blocking_approval(session_key)
+                and resolve_gateway_approval(session_key, choice)
+            )
+        except Exception:
+            logger.exception("Voice approval response handling failed")
+            return False
+
+    def _should_send_interactive_prompt_voice(self, event: MessageEvent) -> bool:
+        mode = self._voice_mode.get(
+            self._voice_key(event.source.platform, event.source.chat_id), "off",
+        )
+        return mode == "all" or (
+            mode == "voice_only" and event.message_type == MessageType.VOICE
+        )
+
+    def _schedule_interactive_prompt_voice(
+        self, event: MessageEvent, spoken_prompt: str, loop, log_message: str,
+    ) -> bool:
+        if not self._should_send_interactive_prompt_voice(event) or not spoken_prompt.strip():
+            return False
+        return safe_schedule_threadsafe(
+            self._send_voice_reply(event, spoken_prompt), loop,
+            logger=logger, log_message=log_message,
+        ) is not None
+
+    def _maybe_send_clarify_voice_prompt(self, *, event, question, choices, loop) -> bool:
+        return self._schedule_interactive_prompt_voice(
+            event, self._format_clarify_prompt_for_tts(question, choices), loop,
+            "Clarify voice prompt failed to schedule",
+        )
+
+    def _maybe_send_approval_voice_prompt(self, *, event, description, loop) -> bool:
+        return self._schedule_interactive_prompt_voice(
+            event, self._format_approval_prompt_for_tts(description), loop,
+            "Approval voice prompt failed to schedule",
+        )
 
     def _should_send_voice_reply(
         self,
@@ -14479,29 +14824,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return bool(getattr(self.config, "stt_echo_transcripts", True))
 
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
-        """Generate TTS audio and send as a voice message before the text reply."""
-        import uuid as _uuid
+        """Generate profile-scoped TTS and deliver on the source adapter only."""
         audio_path = None
         actual_path = None
         try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
-
-            tts_text = _strip_markdown_for_tts(text[:4000])
-            if not tts_text:
+            adapter = self._adapter_for_source(event.source)
+            if adapter is None:
+                logger.warning(
+                    "Auto voice reply skipped: no connected adapter for source profile %r",
+                    getattr(event.source, "profile", None),
+                )
                 return
 
-            # Telegram's adapter only sends native voice bubbles for OGG/Opus.
-            # Other platforms keep the existing MP3 default.
-            audio_ext = "ogg" if event.source.platform == Platform.TELEGRAM else "mp3"
-            audio_path = os.path.join(
-                tempfile.gettempdir(), "hermes_voice",
-                f"tts_reply_{_uuid.uuid4().hex[:12]}.{audio_ext}",
-            )
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+            with self._runtime_scope_for_source(event.source):
+                from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
 
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
+                tts_text = _strip_markdown_for_tts(text[:4000])
+                if not tts_text:
+                    return
+                audio_ext = "ogg" if event.source.platform == Platform.TELEGRAM else "mp3"
+                from gateway.platforms.base import gateway_tts_temp_path
+                audio_path = gateway_tts_temp_path("tts_reply", audio_ext)
+                result_json = await asyncio.to_thread(
+                    text_to_speech_tool, text=tts_text, output_path=audio_path
+                )
+
             try:
                 result = json.loads(result_json)
             except (json.JSONDecodeError, TypeError):
@@ -14514,7 +14861,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
                 return
 
-            adapter = self._adapter_for_source(event.source)
+            # Use the source-bound adapter resolved before synthesis; a missing
+            # secondary adapter fails closed rather than crossing profiles.
+            reply_anchor = self._reply_anchor_for_event(event)
+            thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+            if thread_meta is not None:
+                thread_meta = dict(thread_meta)
+                thread_meta["notify"] = True
+            else:
+                thread_meta = {"notify": True}
 
             # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)
@@ -14523,21 +14878,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     and hasattr(adapter, "is_in_voice_channel")
                     and adapter.is_in_voice_channel(guild_id)):
                 await adapter.play_in_voice_channel(guild_id, actual_path)
+            elif hasattr(adapter, "play_tts"):
+                await adapter.play_tts(
+                    chat_id=event.source.chat_id,
+                    audio_path=actual_path,
+                    reply_to=reply_anchor,
+                    metadata=thread_meta,
+                )
             elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-                # Mark the auto voice reply as notify-worthy.  Mirrors the
-                # final-text path in gateway/platforms/base.py which sets
-                # ``notify=True`` so platform adapters that gate push
-                # notifications (Telegram "important" mode) deliver the
-                # final voice reply as a normal notification instead of a
-                # silent message.  Clone first so we don't mutate metadata
-                # shared with concurrent typing-indicator state.
-                if thread_meta is not None:
-                    thread_meta = dict(thread_meta)
-                    thread_meta["notify"] = True
-                else:
-                    thread_meta = {"notify": True}
                 send_kwargs: Dict[str, Any] = {
                     "chat_id": event.source.chat_id,
                     "audio_path": actual_path,
@@ -14727,11 +15075,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _thread_metadata = self._thread_metadata_for_source(source, event_message_id)
 
         try:
-            user_config = _load_gateway_config()
-            model, runtime_kwargs = self._resolve_session_agent_runtime(
-                source=source,
-                user_config=user_config,
-            )
+            with self._runtime_scope_for_source(source):
+                user_config = _load_gateway_config()
+                model, runtime_kwargs = self._resolve_session_agent_runtime(
+                    source=source,
+                    user_config=user_config,
+                )
             if not runtime_kwargs.get("api_key"):
                 await adapter.send(
                     source.chat_id,
@@ -14774,43 +15123,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.warning("Background task vision enrichment failed: %s", e)
 
             def run_sync():
-                agent = AIAgent(
-                    model=turn_route["model"],
-                    **turn_route["runtime"],
-                    max_iterations=max_iterations,
-                    quiet_mode=True,
-                    verbose_logging=False,
-                    enabled_toolsets=enabled_toolsets,
-                    disabled_toolsets=disabled_toolsets,
-                    reasoning_config=reasoning_config,
-                    service_tier=self._service_tier,
-                    request_overrides=turn_route.get("request_overrides"),
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
-                    session_id=task_id,
-                    platform=platform_key,
-                    user_id=source.user_id,
-                    user_id_alt=source.user_id_alt,
-                    user_name=source.user_name,
-                    chat_id=source.chat_id,
-                    chat_name=source.chat_name,
-                    chat_type=source.chat_type,
-                    thread_id=source.thread_id,
-                    session_db=getattr(self._session_db, "_db", self._session_db),
-                    # Reload from disk — do not reuse the startup snapshot (#60955).
-                    fallback_model=self._refresh_fallback_model(),
-                )
-                try:
-                    return agent.run_conversation(
-                        user_message=enriched_prompt,
-                        task_id=task_id,
+                with self._runtime_scope_for_source(source):
+                    agent = AIAgent(
+                        model=turn_route["model"],
+                        **turn_route["runtime"],
+                        max_iterations=max_iterations,
+                        quiet_mode=True,
+                        verbose_logging=False,
+                        enabled_toolsets=enabled_toolsets,
+                        disabled_toolsets=disabled_toolsets,
+                        reasoning_config=reasoning_config,
+                        service_tier=self._service_tier,
+                        request_overrides=turn_route.get("request_overrides"),
+                        providers_allowed=pr.get("only"),
+                        providers_ignored=pr.get("ignore"),
+                        providers_order=pr.get("order"),
+                        provider_sort=pr.get("sort"),
+                        provider_require_parameters=pr.get("require_parameters", False),
+                        provider_data_collection=pr.get("data_collection"),
+                        session_id=task_id,
+                        platform=platform_key,
+                        user_id=source.user_id,
+                        user_id_alt=source.user_id_alt,
+                        user_name=source.user_name,
+                        chat_id=source.chat_id,
+                        chat_name=source.chat_name,
+                        chat_type=source.chat_type,
+                        thread_id=source.thread_id,
+                        session_db=getattr(self._session_db, "_db", self._session_db),
+                        # Reload from disk — do not reuse the startup snapshot (#60955).
+                        fallback_model=self._refresh_fallback_model(),
                     )
-                finally:
-                    self._cleanup_agent_resources(agent)
+                    try:
+                        return agent.run_conversation(
+                            user_message=enriched_prompt,
+                            task_id=task_id,
+                        )
+                    finally:
+                        self._cleanup_agent_resources(agent)
 
             result = await self._run_in_executor_with_context(run_sync)
 
@@ -16372,6 +16722,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapters = getattr(self, "adapters", None) or {}
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+
+        kanban_board = ""
+        kanban_task = ""
+        if context.source.platform == Platform.DISCORD and context.source.thread_id:
+            try:
+                from plugins.platforms.discord.kanban_mirror.context import resolve_mirrored_kanban_thread
+
+                mirrored = resolve_mirrored_kanban_thread(context.source.thread_id)
+            except Exception:
+                mirrored = None
+            if mirrored is not None and getattr(mirrored, "safe_default_task_id", None):
+                kanban_board = str(getattr(mirrored, "board_slug", "") or "")
+                kanban_task = str(getattr(mirrored, "safe_default_task_id", "") or "")
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -16383,6 +16746,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            kanban_board=kanban_board,
+            kanban_task=kanban_task,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -16591,6 +16956,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 this to echo transcripts back to the user before the agent loop.
         """
         if not getattr(self.config, "stt_enabled", True):
+            from gateway.voice_mixin import _probe_audio_duration
+
             notes = []
             for path in audio_paths:
                 abs_path = os.path.abspath(path)
@@ -16612,6 +16979,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return prefix, []
 
         from tools.transcription_tools import transcribe_audio
+        from tools.voice_mode import clean_voice_transcript
 
         enriched_parts = []
         successful_transcripts: List[str] = []
@@ -16620,7 +16988,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
-                    transcript = result["transcript"]
+                    transcript = clean_voice_transcript(result["transcript"])
                     successful_transcripts.append(transcript)
                     # Pass the transcript through as a plain quoted line. The
                     # earlier wording ("The user sent a voice message~ Here's
@@ -17366,6 +17734,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cache_keys: dict | None = None,
         user_id: str | None = None,
         user_id_alt: str | None = None,
+        profile_home: str | None = None,
     ) -> str:
         """Compute a stable string key from agent config values.
 
@@ -17393,6 +17762,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         broke #27371's per-user-peer contract in multi-user gateways.
         Per-user agent rebuilds in shared threads trade prompt-cache
         warmth for correct memory attribution.
+
+        ``profile_home`` is included because SOUL.md, config, skills, memory,
+        session DB, and tool subprocess environment are profile-scoped.  A
+        cached agent built under one home must never be reused after the gateway
+        resolves the same session key under another home.
         """
         import hashlib, json as _j
 
@@ -17419,6 +17793,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _cache_keys_sorted,
                 str(user_id or ""),
                 str(user_id_alt or ""),
+                str(profile_home or ""),
             ],
             sort_keys=True,
             default=str,
@@ -18441,6 +18816,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_key: str = None,
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
+        buffer_only: bool = False,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of
         running a local AIAgent.
@@ -18739,6 +19115,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         session_key: str = None,
         run_generation: Optional[int] = None,
+        event: Optional[MessageEvent] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
@@ -18752,29 +19129,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         run the whole turn inside ``_profile_runtime_scope`` so config/skills/
         memory resolve to that profile's home AND credentials resolve from that
         profile's secret scope (never the process-global ``os.environ``). When
-        multiplexing is off this is a transparent pass-through — zero behavior
-        change for single-profile gateways.
+        multiplexing is off, pin config/SOUL/session paths to the gateway's
+        startup profile home while leaving credentials on the normal
+        single-profile resolution path.
         """
-        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        with self._runtime_scope_for_source(source):
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
+                event=event,
                 _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
             )
 
-        profile_home = self._resolve_profile_home_for_source(source)
-        with _profile_runtime_scope(profile_home):
-            return await self._run_agent_inner(
-                message, context_prompt, history, source, session_id,
-                session_key=session_key, run_generation=run_generation,
-                _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                channel_prompt=channel_prompt, moa_config=moa_config,
-                persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-            )
+    def _runtime_profile_home_for_source(self, source: SessionSource) -> "Path":
+        """Return the Hermes home that must scope this gateway turn."""
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return self._resolve_profile_home_for_source(source)
+        profile_home = getattr(self, "_gateway_profile_home", None)
+        if profile_home is not None:
+            return Path(profile_home)
+        from hermes_constants import get_hermes_home
+        return get_hermes_home()
+
+    def _runtime_scope_for_source(self, source: SessionSource):
+        """Return the profile/home scope context manager for a gateway turn."""
+        profile_home = self._runtime_profile_home_for_source(source)
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return _profile_runtime_scope(profile_home)
+        return _hermes_home_runtime_scope(profile_home)
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
         """Resolve the profile name for an inbound source via configured routes.
@@ -18889,6 +19274,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         session_key: str = None,
         run_generation: Optional[int] = None,
+        event: Optional[MessageEvent] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
@@ -18908,6 +19294,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        _mirrored_outbox_turn = self._is_mirrored_kanban_conversation_event(event, source)
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -18919,6 +19306,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event_message_id,
+                buffer_only=_mirrored_outbox_turn,
             )
 
         from run_agent import AIAgent
@@ -19096,7 +19484,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _voice_ack_fired = [False]
         _voice_ack_guild: List[Optional[int]] = [None]
         if source.platform == Platform.DISCORD:
-            _va = self.adapters.get(Platform.DISCORD)
+            _va = self._adapter_for_source(source)
             # source.chat_id is the linked text channel; resolve the guild whose
             # voice connection is bound to it (mirrors DiscordAdapter.play_tts).
             _vtc = getattr(_va, "_voice_text_channels", None)
@@ -19114,12 +19502,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not _run_still_current():
                 return
             _voice_ack_fired[0] = True
-            _adapter = self.adapters.get(Platform.DISCORD)
+            _adapter = self._adapter_for_source(source)
             if _adapter is None or not hasattr(_adapter, "play_ack_in_voice"):
                 return
             try:
                 safe_schedule_threadsafe(
-                    _adapter.play_ack_in_voice(_voice_ack_guild[0]),
+                    _adapter.play_ack_in_voice(
+                        _voice_ack_guild[0],
+                        model_name=self._voice_ack_model_for_source(source),
+                    ),
                     _voice_ack_loop,
                     logger=logger,
                     log_message="voice ack scheduling error",
@@ -19264,8 +19655,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             last_tool[0] = tool_name
 
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import (
+                get_tool_emoji,
+                shorten_tool_display_args,
+                shorten_tool_display_value,
+            )
             emoji = get_tool_emoji(tool_name, default="⚙️")
+            display_args = shorten_tool_display_args(tool_name, args or {})
+            display_preview = shorten_tool_display_value(tool_name, "preview", preview) if preview else preview
 
             # Markdown-capable platforms render a terminal command as a fenced
             # code block instead of the compact `terminal: "cmd…"` preview.
@@ -19289,12 +19686,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if (
                 getattr(_progress_adapter, "supports_code_blocks", False)
                 and tool_name == "terminal"
-                and isinstance(args, dict)
-                and isinstance(args.get("command"), str)
-                and args["command"].strip()
+                and isinstance(display_args, dict)
+                and isinstance(display_args.get("command"), str)
+                and display_args["command"].strip()
             ):
                 from agent.display import get_tool_preview_max_len
-                _cmd_full = args["command"].rstrip()
+                _cmd_full = display_args["command"].rstrip()
                 # Consecutive terminal calls: drop the repeated
                 # "💻 terminal" header so back-to-back commands render as
                 # adjacent code blocks under a single header.
@@ -19321,18 +19718,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     progress_queue.put(_code_block_full)
                     return
                 last_was_terminal_block[0] = False
-                if args:
+                if display_args:
                     from agent.display import get_tool_preview_max_len
                     _pl = get_tool_preview_max_len()
-                    args_str = json.dumps(args, ensure_ascii=False, default=str)
+                    args_str = json.dumps(display_args, ensure_ascii=False, default=str)
                     # When tool_preview_length is 0 (default), don't truncate
                     # in verbose mode — the user explicitly asked for full
                     # detail.  Platform message-length limits handle the rest.
                     if _pl > 0 and len(args_str) > _pl:
                         args_str = args_str[:_pl - 3] + "..."
-                    msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
-                elif preview:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_name}({list(display_args.keys())})\n{args_str}"
+                elif display_preview:
+                    msg = f"{emoji} {tool_name}: \"{display_preview}\""
+
                 else:
                     msg = f"{emoji} {tool_name}..."
                 progress_queue.put(msg)
@@ -19355,8 +19753,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 _pl = get_tool_preview_max_len()
                 _cap = _pl if _pl > 0 else 40
-                if len(preview) > _cap:
-                    preview = preview[:_cap - 3] + "..."
+                display_preview = shorten_tool_display_value(tool_name, "preview", preview)
+                if len(display_preview) > _cap:
+                    display_preview = display_preview[:_cap - 3] + "..."
                 # Friendly labels: render a human-phrased line for built-in
                 # tools ("🔍 Searching the web for ...") by prefixing the verb
                 # onto the preview the callback already computed (so the
@@ -19367,9 +19766,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if verb_drops_preview(tool_name):
                         msg = f"{emoji} {_verb}"
                     else:
-                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
+                        msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{display_preview}"
                 else:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_name}: \"{display_preview}\""
                 last_was_terminal_block[0] = False
             else:
                 msg = f"{emoji} {tool_name}..."
@@ -19408,6 +19807,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else {"thread_id": _progress_thread_id}
         ) if _progress_thread_id else None
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
+        if source.platform == Platform.DISCORD:
+            _progress_metadata = dict(_progress_metadata or {})
+            _progress_metadata["suppress_embeds"] = True
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
@@ -20098,6 +20500,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cache_keys=self._extract_cache_busting_config(user_config),
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
+                profile_home=str(self._runtime_profile_home_for_source(source).resolve()),
             )
             agent = None
             reused_cached_agent = False
@@ -20373,7 +20776,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
-            agent.status_callback = _status_callback_sync
+            agent.status_callback = None if _mirrored_outbox_turn else _status_callback_sync
             # Credits / out-of-band notices (usage bands, depletion, restored).
             # Messaging has no persistent status bar, so each notice is a
             # standalone push: render to a single plaintext line and deliver via
@@ -20403,7 +20806,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     log_message="notice_callback delivery scheduling error",
                 )
 
-            agent.notice_callback = _notice_callback_sync
+            agent.notice_callback = None if _mirrored_outbox_turn else _notice_callback_sync
             agent.notice_clear_callback = None
             agent.event_callback = _event_callback_sync
             agent.reasoning_config = reasoning_config
@@ -20544,6 +20947,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _clarify_mod.clear_session(session_key or "")
                     return "[clarify prompt could not be delivered]"
 
+                try:
+                    if event is not None:
+                        self._maybe_send_clarify_voice_prompt(
+                            event=event,
+                            question=question,
+                            choices=list(choices) if choices else None,
+                            loop=_loop_for_step,
+                        )
+                except Exception as exc:
+                    # Best-effort only: the visual clarify prompt is already
+                    # delivered, and a TTS failure must not cancel the waiter.
+                    logger.warning("Clarify voice prompt failed: %s", exc)
+
                 timeout = _clarify_mod.get_clarify_timeout()
                 response = _clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
                 if response is None or response == "":
@@ -20677,6 +21093,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             raise RuntimeError("send_exec_approval: loop unavailable")
                         _approval_result = _approval_fut.result(timeout=15)
                         if _approval_result.success:
+                            try:
+                                if event is not None:
+                                    self._maybe_send_approval_voice_prompt(
+                                        event=event,
+                                        description=desc,
+                                        loop=_loop_for_step,
+                                    )
+                            except Exception as exc:
+                                logger.warning("Approval voice prompt failed: %s", exc)
                             return
                         logger.warning(
                             "Button-based approval failed (send returned error), falling back to text: %s",
@@ -20712,6 +21137,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if _approval_send_fut is not None:
                         _approval_send_fut.result(timeout=15)
+                        try:
+                            if event is not None:
+                                self._maybe_send_approval_voice_prompt(
+                                    event=event,
+                                    description=desc,
+                                    loop=_loop_for_step,
+                                )
+                        except Exception as exc:
+                            logger.warning("Approval voice prompt failed: %s", exc)
                 except Exception as _e:
                     logger.error("Failed to send approval request: %s", _e)
 
@@ -21223,7 +21657,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 await asyncio.sleep(0.05)
 
-        stream_task = asyncio.create_task(_start_stream_consumer())
+        if not _mirrored_outbox_turn:
+            stream_task = asyncio.create_task(_start_stream_consumer())
         
         # Track this agent as running for this session (for interrupt support)
         # We do this in a callback after the agent is created
@@ -21969,6 +22404,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_id=session_id,
                     session_key=next_session_key,
                     run_generation=run_generation,
+                    event=pending_event,
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
@@ -22387,6 +22823,31 @@ async def _await_thread_exit(
     while thread.is_alive() and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(poll)
     return not thread.is_alive()
+
+
+def _start_profile_scoped_cron_provider(
+    cron_provider,
+    stop_event: threading.Event,
+    *,
+    profile_home: Path,
+    **start_kwargs,
+) -> None:
+    """Run the cron provider pinned to the gateway's startup profile home.
+
+    Cron ticks run in a long-lived background thread, outside per-message
+    runtime scopes.  If another import or hot env reload mutates process-global
+    state, the scheduler must still resolve jobs/scripts/output under the
+    profile home this gateway was started for.
+    """
+    from cron import scheduler as cron_scheduler
+
+    previous_home = getattr(cron_scheduler, "_hermes_home", None)
+    cron_scheduler._hermes_home = Path(profile_home).resolve()
+    try:
+        with _hermes_home_runtime_scope(Path(profile_home).resolve()):
+            cron_provider.start(stop_event, **start_kwargs)
+    finally:
+        cron_scheduler._hermes_home = previous_home
 
 
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
@@ -22856,9 +23317,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             runner._draining or runner._external_drain_active
         )
     cron_thread = threading.Thread(
-        target=cron_provider.start,
-        args=(cron_stop,),
-        kwargs=cron_start_kwargs,
+        target=_start_profile_scoped_cron_provider,
+        args=(cron_provider, cron_stop),
+        kwargs={
+            "profile_home": runner._gateway_profile_home,
+            **cron_start_kwargs,
+        },
         daemon=True,
         name="cron-scheduler",
     )

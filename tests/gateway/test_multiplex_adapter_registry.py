@@ -1,6 +1,7 @@
 """Phase 3: secondary-profile adapter registry + same-token conflict detection."""
 import logging
 import asyncio
+from types import SimpleNamespace
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -103,6 +104,52 @@ class TestCredentialFingerprint:
         class _Adapter:
             config = _Cfg()
         assert GatewayRunner._adapter_credential_fingerprint(_Adapter()) is None
+
+
+class TestOutboundAdapterResolution:
+    def _runner(self):
+        from types import SimpleNamespace
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._gateway_profile_name = "ops"
+        runner.adapters = {}
+        runner._profile_adapters = {}
+        return runner, SimpleNamespace
+
+    def test_primary_profile_uses_primary_discord_adapter(self):
+        runner, ns = self._runner()
+        primary = ns(_running=True)
+        runner.adapters[Platform.DISCORD] = primary
+        assert runner._adapter_for_source(ns(platform=Platform.DISCORD, profile="ops")) is primary
+
+    def test_secondary_profile_uses_its_connected_discord_adapter(self):
+        runner, ns = self._runner()
+        secondary = ns(_running=True)
+        runner.adapters[Platform.DISCORD] = ns(_running=True)
+        runner._profile_adapters = {"reviewer": {Platform.DISCORD: secondary}}
+        assert runner._adapter_for_source(
+            ns(platform=Platform.DISCORD, profile="reviewer")
+        ) is secondary
+
+    @pytest.mark.parametrize("candidate", [None, False])
+    def test_explicit_discord_profile_never_falls_back(self, candidate):
+        runner, ns = self._runner()
+        runner.adapters[Platform.DISCORD] = ns(_running=True)
+        if candidate is not None:
+            runner._profile_adapters = {
+                "reviewer": {Platform.DISCORD: ns(_running=candidate)}
+            }
+        assert runner._adapter_for_source(
+            ns(platform=Platform.DISCORD, profile="reviewer")
+        ) is None
+
+    def test_non_discord_profile_never_falls_back_to_primary_adapter(self):
+        runner, ns = self._runner()
+        primary = ns(_running=True)
+        runner.adapters[Platform.TELEGRAM] = primary
+        assert runner._adapter_for_source(
+            ns(platform=Platform.TELEGRAM, profile="reviewer")
+        ) is None
 
 
 class TestProfileMessageHandler:

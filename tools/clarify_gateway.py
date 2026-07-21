@@ -212,6 +212,21 @@ def resolve_text_response_for_session(session_key: str, response: str) -> bool:
         entry.clarify_id,
         _coerce_text_response(entry, response),
     )
+def get_pending_for_voice_capture(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the oldest pending clarify for a spoken response.
+
+    A voice reply cannot activate the visual ``Other`` button first, so it
+    may answer a button-choice clarify directly. Typed replies retain their
+    stricter ``awaiting_text`` gate, preventing ordinary typed messages from
+    consuming a button prompt.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is not None:
+                return entry
+        return None
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:

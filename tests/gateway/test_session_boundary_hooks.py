@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
@@ -22,6 +22,21 @@ def _make_source() -> SessionSource:
 
 def _make_event(text: str) -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
+
+
+def _make_discord_voice_event(text: str) -> MessageEvent:
+    return MessageEvent(
+        text=text,
+        source=SessionSource(
+            platform=Platform.DISCORD,
+            user_id="u1",
+            chat_id="c1",
+            user_name="tester",
+            chat_type="channel",
+        ),
+        message_type=MessageType.VOICE,
+        message_id="m1",
+    )
 
 
 def _make_runner():
@@ -176,6 +191,19 @@ async def test_hook_error_does_not_break_reset(mock_invoke_hook):
 
     # Should still return a success message despite hook errors
     assert "Session reset" in result or "New session" in result
+
+
+@pytest.mark.asyncio
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_discord_voice_reset_returns_short_spoken_notice(mock_invoke_hook):
+    """A spoken /new alias should not TTS the full reset body and random tip."""
+    runner = _make_runner()
+
+    result = await runner._handle_reset_command(_make_discord_voice_event("/new"))
+
+    assert "Session reset" in result or "New session" in result
+    assert result.voice_text == "Fresh session. What's up?"
+    assert "Tip:" in result
 
 
 @pytest.mark.asyncio

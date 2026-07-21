@@ -747,6 +747,31 @@ class TestAudioRecorderProperties:
 # transcribe_recording
 # ============================================================================
 
+class TestSttCancellationSuffix:
+    def test_drops_transcripts_ending_with_cancel_or_strike_that(self):
+        from tools.voice_mode import is_stt_cancellation
+
+        assert is_stt_cancellation("draft an email, cancel that") is True
+        assert is_stt_cancellation("Never mind — strike that.") is True
+        assert is_stt_cancellation("cancel that please") is False
+        assert is_stt_cancellation("uncancel that") is False
+
+
+class TestCleanVoiceTranscript:
+    def test_strips_thinking_fillers_and_their_punctuation(self):
+        from tools.voice_mode import clean_voice_transcript
+
+        assert clean_voice_transcript("load ummm, luna") == "load luna"
+        assert clean_voice_transcript("Ohhh... load uh, luna") == "load luna"
+
+    def test_strips_leading_acknowledgements_only(self):
+        from tools.voice_mode import clean_voice_transcript
+
+        assert clean_voice_transcript("yeah, okay — k, load luna") == "load luna"
+        assert clean_voice_transcript("load okay luna") == "load okay luna"
+        assert clean_voice_transcript("uh-huh, load luna") == "uh-huh, load luna"
+
+
 class TestTranscribeRecording:
     def test_delegates_to_transcribe_audio(self):
         mock_transcribe = MagicMock(return_value={
@@ -761,6 +786,30 @@ class TestTranscribeRecording:
         assert result["success"] is True
         assert result["transcript"] == "hello world"
         mock_transcribe.assert_called_once_with("/tmp/test.wav", model="whisper-1")
+
+    def test_filters_spoken_cancellation(self):
+        mock_transcribe = MagicMock(return_value={
+            "success": True,
+            "transcript": "Write an email to Sam. Strike that.",
+        })
+
+        with patch("tools.transcription_tools.transcribe_audio", mock_transcribe):
+            from tools.voice_mode import transcribe_recording
+            result = transcribe_recording("/tmp/test.wav")
+
+        assert result == {"success": True, "transcript": "", "filtered": True}
+
+    def test_preserves_spoken_fillers(self):
+        mock_transcribe = MagicMock(return_value={
+            "success": True,
+            "transcript": "Yeah, quote the word ummm exactly.",
+        })
+
+        with patch("tools.transcription_tools.transcribe_audio", mock_transcribe):
+            from tools.voice_mode import transcribe_recording
+            result = transcribe_recording("/tmp/test.wav")
+
+        assert result["transcript"] == "Yeah, quote the word ummm exactly."
 
     def test_filters_whisper_hallucination(self):
         mock_transcribe = MagicMock(return_value={
@@ -874,6 +923,37 @@ class TestWhisperHallucinationFilter:
         assert is_whisper_hallucination("Hello, how are you?") is False
         assert is_whisper_hallucination("Thank you for your help with the project.") is False
         assert is_whisper_hallucination("Can you explain this code?") is False
+
+
+class TestSttNoiseFragmentFilter:
+    def test_drops_non_english_and_symbol_noise(self):
+        from tools.voice_mode import stt_noise_drop_reason
+
+        assert stt_noise_drop_reason("ご視聴ありがとうございました") == "mostly_non_english_script"
+        assert stt_noise_drop_reason("字幕由 Amara.org 社群提供") == "mostly_non_english_script"
+        assert stt_noise_drop_reason("... --- !!!") == "symbol_or_punctuation_junk"
+        assert stt_noise_drop_reason("♬ ♪ ♫") == "symbol_or_punctuation_junk"
+        assert stt_noise_drop_reason("xqzrtp") == "low_information_gibberish"
+
+    def test_preserves_intentional_short_english_and_technical_fragments(self):
+        from tools.voice_mode import stt_noise_drop_reason
+
+        for transcript in [
+            "yes",
+            "no",
+            "stop",
+            "hold",
+            "wait",
+            "OK",
+            "approve",
+            "deny",
+            "C++",
+            "GPT-5",
+            "Brian",
+            "1234",
+            "docker エラー 404",
+        ]:
+            assert stt_noise_drop_reason(transcript) is None
 
 
 # ============================================================================

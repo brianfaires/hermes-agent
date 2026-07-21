@@ -1,6 +1,8 @@
 """Tests for agent/display.py — build_tool_preview() and inline diff previews."""
 
 import json
+from pathlib import Path
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -12,8 +14,11 @@ from agent.display import (
     get_cute_tool_message,
     redact_tool_args_for_display,
     set_tool_preview_max_len,
+    shorten_tool_display_args,
+    shorten_tool_display_value,
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
+    _set_args_include_pipefail_option,
     render_edit_diff_with_delta,
 )
 
@@ -214,6 +219,152 @@ class TestBuildToolPreview:
         assert build_tool_preview("terminal", 0) is None
         assert build_tool_preview("terminal", "") is None
         assert build_tool_preview("terminal", []) is None
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "patch", "write_file"])
+    def test_repo_paths_are_shortened_for_display_only(self, tool_name, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import agent.display as display_mod
+        repo_root = Path(display_mod.__file__).resolve().parent.parent
+        value = f"{repo_root}/gateway/run.py"
+        expected = f"{repo_root.name}/gateway/run.py"
+
+        assert shorten_tool_display_value(tool_name, "path", value) == expected
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "patch", "write_file"])
+    def test_profile_paths_are_shortened_for_display_only(self, tool_name, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        value = f"{tmp_path}/profiles/ops/scripts/kanban/discord_forum_mirror.py"
+        expected = "ops/scripts/kanban/discord_forum_mirror.py"
+
+        assert shorten_tool_display_value(tool_name, "path", value) == expected
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "patch", "write_file"])
+    def test_hermes_home_paths_are_shortened_for_display_only(self, tool_name, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        value = f"{hermes_home}/cron/jobs.json"
+        expected = ".hermes/cron/jobs.json"
+
+        assert shorten_tool_display_value(tool_name, "path", value) == expected
+
+    @pytest.mark.parametrize("tool_name", ["read_file", "patch", "write_file"])
+    def test_home_paths_are_shortened_for_display_only(self, tool_name, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        home = str(Path.home()).rstrip("/")
+        value = f"{home}/Documents/Runbooks/ops.md"
+        expected = "~/Documents/Runbooks/ops.md"
+
+        assert shorten_tool_display_value(tool_name, "path", value) == expected
+
+    def test_terminal_strict_shell_prefix_is_shortened_for_display_only(self):
+        args = {"command": "set -euo pipefail python scripts/check.py --target important"}
+
+        assert shorten_tool_display_value("terminal", "command", args["command"]) == "...python scripts/check.py --target important"
+
+    def test_terminal_strict_shell_prefix_with_newline_is_shortened_for_display_only(self):
+        args = {"command": "set -euo pipefail\npython scripts/check.py --target important"}
+
+        assert shorten_tool_display_value("terminal", "command", args["command"]) == "...python scripts/check.py --target important"
+
+    @pytest.mark.parametrize("flags", ["-e", "-u", "-eu"])
+    def test_terminal_short_strict_shell_prefix_with_newline_is_shortened_for_display_only(self, flags):
+        command = f"set {flags}\npython scripts/check.py --target important"
+
+        assert shorten_tool_display_value("terminal", "command", command) == "...python scripts/check.py --target important"
+
+    def test_terminal_set_o_pipefail_prefix_is_shortened_for_display_only(self):
+        args = {"command": "set -o pipefail; python scripts/check.py --target important"}
+
+        assert shorten_tool_display_value("terminal", "command", args["command"]) == "...python scripts/check.py --target important"
+
+    def test_terminal_unrelated_pipefail_text_is_not_shortened(self):
+        command = "printf 'pipefail is mentioned but not enabled' && python scripts/check.py"
+        args = {"command": command}
+
+        assert shorten_tool_display_value("terminal", "command", command) == command
+
+    def test_terminal_set_without_pipefail_is_not_shortened(self):
+        command = "set -o nounset; echo pipefail"
+        args = {"command": command}
+
+        assert shorten_tool_display_value("terminal", "command", command) == command
+
+    @pytest.mark.parametrize(
+        "setup",
+        ["set -- -e", "set positional -u", "set -eu -- positional", "set -- -o pipefail"],
+    )
+    def test_terminal_positional_set_args_are_not_shortened(self, setup):
+        command = f"{setup}\necho visible"
+
+        assert shorten_tool_display_value("terminal", "command", command) == command
+        assert build_tool_preview("terminal", {"command": command}) == command.replace("\n", " ")
+
+    def test_shortened_args_copy_preserves_original_execution_inputs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import agent.display as display_mod
+        repo_root = Path(display_mod.__file__).resolve().parent.parent
+        original = f"{repo_root}/tests/agent/test_display.py"
+        args = {
+            "path": original,
+            "content": "keep this content visible",
+        }
+
+        display_args = shorten_tool_display_args("write_file", args)
+
+        assert display_args["path"] == f"{repo_root.name}/tests/agent/test_display.py"
+        assert display_args["content"] == "keep this content visible"
+        assert args["path"] == original
+
+
+class TestSetArgsIncludePipefailOption:
+    """Tests for _set_args_include_pipefail_option flag pattern validation."""
+
+    def test_single_flag_o_exact_match(self):
+        """Exact match: -o or +o."""
+        assert _set_args_include_pipefail_option(["set", "-o", "pipefail"])
+        assert _set_args_include_pipefail_option(["set", "+o", "pipefail"])
+
+    def test_combined_flags_with_o(self):
+        """Combined flag strings with o: -euo, -eo, -op, etc."""
+        assert _set_args_include_pipefail_option(["set", "-euo", "pipefail"])
+        assert _set_args_include_pipefail_option(["set", "-eo", "pipefail"])
+        assert _set_args_include_pipefail_option(["set", "-op", "pipefail"])
+        assert _set_args_include_pipefail_option(["set", "+euo", "pipefail"])
+
+    def test_five_letter_flags_with_o(self):
+        """Maximum length (5 letters) with o included."""
+        assert _set_args_include_pipefail_option(["set", "-euopx", "pipefail"])
+        assert _set_args_include_pipefail_option(["set", "+abcod", "pipefail"])
+
+    def test_flags_without_o_not_matched(self):
+        """Flags without o: -e, -u, -eup (no o)."""
+        assert not _set_args_include_pipefail_option(["set", "-e", "pipefail"])
+        assert not _set_args_include_pipefail_option(["set", "-u", "pipefail"])
+        assert not _set_args_include_pipefail_option(["set", "-eup", "pipefail"])
+
+    def test_invalid_flag_too_long(self):
+        """Flags longer than 5 letters are rejected (shell limitation)."""
+        assert not _set_args_include_pipefail_option(["set", "-euopxyz", "pipefail"])
+
+    def test_invalid_flag_non_alpha(self):
+        """Flags with non-alphabetic characters are rejected."""
+        assert not _set_args_include_pipefail_option(["set", "-eo1", "pipefail"])
+        assert not _set_args_include_pipefail_option(["set", "-e-o", "pipefail"])
+        assert not _set_args_include_pipefail_option(["set", "-e_o", "pipefail"])
+
+    def test_pipefail_as_first_token_not_matched(self):
+        """pipefail as first token (not preceded by flags) returns false."""
+        assert not _set_args_include_pipefail_option(["pipefail"])
+
+    def test_pipefail_not_in_tokens(self):
+        """No pipefail in tokens returns false."""
+        assert not _set_args_include_pipefail_option(["set", "-euo"])
+        assert not _set_args_include_pipefail_option(["set", "-euo", "other"])
+
+    def test_multiple_tokens_before_pipefail(self):
+        """Only immediate previous token matters."""
+        assert _set_args_include_pipefail_option(["set", "-e", "-u", "-o", "pipefail"])
+        assert not _set_args_include_pipefail_option(["set", "-e", "pipefail"])
 
 
 class TestCuteToolMessagePreviewLength:

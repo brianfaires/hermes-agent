@@ -208,10 +208,11 @@ TOOLSETS = {
     },
     
     "memory": {
-        "description": "Persistent memory across sessions (personal notes + user profile)",
+        "description": "Built-in file-backed memory tool (MEMORY.md / USER.md)",
         "tools": ["memory"],
         "includes": []
     },
+
 
     "context_engine": {
         "description": "Runtime tools exposed by the active context engine",

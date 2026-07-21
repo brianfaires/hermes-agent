@@ -44,7 +44,7 @@ async def test_enrich_message_with_transcription_surfaces_path_when_stt_disabled
         "tools.transcription_tools.transcribe_audio",
         side_effect=AssertionError("transcribe_audio should not be called when STT is disabled"),
     ), patch(
-        "gateway.run._probe_audio_duration",
+        "gateway.voice_mixin._probe_audio_duration",
         new=AsyncMock(return_value="0:12"),
     ):
         result, transcripts = await runner._enrich_message_with_transcription(
@@ -67,7 +67,7 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
     runner.config = GatewayConfig(stt_enabled=False)
 
     with patch(
-        "gateway.run._probe_audio_duration",
+        "gateway.voice_mixin._probe_audio_duration",
         new=AsyncMock(return_value=None),
     ):
         result, transcripts = await runner._enrich_message_with_transcription(
@@ -141,6 +141,23 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
     assert "(The user sent a message with no text content)" not in result
     # Crucially, the transcripts are still surfaced so callers can echo them.
     assert transcripts == ["hello from a captionless voice note"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_message_with_transcription_cleans_voice_fillers():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": True, "transcript": "Okay, load ummm luna"},
+    ):
+        result, transcripts = await runner._enrich_message_with_transcription("", ["/tmp/voice.ogg"])
+
+    assert transcripts == ["load luna"]
+    assert '\"load luna\"' in result
 
 
 @pytest.mark.asyncio

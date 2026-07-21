@@ -100,9 +100,44 @@ class TestReplyToModeConfig:
         assert adapter._reply_to_mode == "first"
 
 
+class TestDiscordOutboundFormatting:
+    def test_escapes_markdown_markers_in_plain_text(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+        assert adapter.format_message('quoted "hindsight*config*" > value') == 'quoted "hindsight\\*config\\*" \\> value'
+
+    def test_preserves_fenced_code_blocks(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = "before *literal*\n```python\nprint('*keep*')\n```\nafter _literal_"
+
+        assert adapter.format_message(content) == "before \\*literal\\*\n```python\nprint('*keep*')\n```\nafter \\_literal\\_"
+
+    def test_preserves_inline_code_spans(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = "paths: `~/.hermes/config.yaml`, `delegate_task`, `-m <model>` and plain_a > b"
+
+        assert adapter.format_message(content) == "paths: `~/.hermes/config.yaml`, `delegate_task`, `-m <model>` and plain\\_a \\> b"
+
+    def test_inline_code_escaped_backtick_renders_literal_backtick(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+        assert adapter.format_message(r"literal: `\``") == "literal: `` ` ``"
+
+    def test_inline_code_escaped_backtick_inside_span_uses_longer_delimiter(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+        content = r"Use `foo \` bar` and *plain* text"
+
+        assert adapter.format_message(content) == "Use ``foo ` bar`` and \\*plain\\* text"
+
+
 def _make_discord_adapter(reply_to_mode: str = "first"):
     """Create a DiscordAdapter with mocked client and channel for send() tests."""
-    config = PlatformConfig(enabled=True, token="test-token", reply_to_mode=reply_to_mode)
+    config = PlatformConfig(
+        enabled=True,
+        token="test-token",
+        reply_to_mode=reply_to_mode,
+        extra={"allowed_channels": "12345"},
+    )
     adapter = DiscordAdapter(config)
 
     # Mock the Discord client and channel.
@@ -110,6 +145,7 @@ def _make_discord_adapter(reply_to_mode: str = "first"):
     # the fetched Message via to_reference(fail_if_not_exists=False) so a
     # deleted target degrades to "send without reply chip" instead of a 400.
     mock_channel = AsyncMock()
+    mock_channel.id = 12345
     ref_message = MagicMock()
     ref_reference = MagicMock(name="MessageReference")
     ref_message.to_reference = MagicMock(return_value=ref_reference)

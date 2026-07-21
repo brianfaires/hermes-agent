@@ -270,6 +270,70 @@ def test_dashboard_workspace_picker_explains_persistence_contract():
         "This workspace and any files left in it are deleted when the task completes."
         in bundle
     )
+def test_branch_display_formats_persistent_git_branches(client):
+    cases = [
+        ({"workspace_kind": "dir", "workspace_path": "/tmp/repo", "branch_name": "work/new-feature"}, "`work/new-feature`"),
+        ({"workspace_kind": "dir", "workspace_path": "/tmp/repo", "branch_name": "brian/main"}, "`brian/main` (main)"),
+        ({"workspace_kind": "dir", "workspace_path": "/tmp/repo", "branch_name": "<merged to brian/main>"}, "<merged to brian/main>"),
+        ({"workspace_kind": "worktree", "workspace_path": "/tmp/wt", "branch_name": "feature-branch/on-a-worktree"}, "`feature-branch/on-a-worktree` (worktree)"),
+    ]
+
+    for payload, expected in cases:
+        r = client.post(
+            "/api/plugins/kanban/tasks",
+            json={"title": expected, **payload},
+        )
+        assert r.status_code == 200, r.text
+        task = r.json()["task"]
+        assert task["branch_name"] == payload["branch_name"]
+        assert task["branch_display"] == expected
+
+
+def test_dashboard_create_rejects_invalid_branch_name(client):
+    response = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "bad branch",
+            "workspace_kind": "dir",
+            "branch_name": "bad branch",
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_dashboard_update_rejects_invalid_branch_name(client):
+    task = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "valid branch",
+            "workspace_kind": "dir",
+            "branch_name": "work/valid",
+        },
+    ).json()["task"]
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"branch_name": "bad branch"},
+    )
+
+    assert response.status_code == 400
+    assert client.get(
+        f"/api/plugins/kanban/tasks/{task['id']}"
+    ).json()["task"]["branch_name"] == "work/valid"
+
+
+def test_dashboard_branch_field_and_drawer_label_are_bundled():
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text()
+
+    assert "const [branchName, setBranchName]" in js
+    assert "body.branch_name = branchTrim" in js
+    assert 'title: "Branch" }, "Branch: ", branch)' in js
+    assert 'tx(i18n, "branch", "Branch")' in js
+    assert "function branchDisplay" in js
+
 
 
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
@@ -1749,6 +1813,27 @@ def test_home_channels_lists_only_platforms_with_home(client, with_home_channels
     )
     for h in r.json()["home_channels"]:
         assert h["subscribed"] is False
+
+
+def test_home_channels_telegram_only_policy_hides_and_rejects_discord(client, with_home_channels, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    # Use the active test HERMES_HOME; dashboard fixtures already isolate it.
+    import os
+    with open(os.path.join(os.environ["HERMES_HOME"], "config.yaml"), "w", encoding="utf-8") as f:
+        f.write("kanban:\n  notification_policy:\n    mode: telegram_home_only\n")
+
+    r = client.get("/api/plugins/kanban/home-channels")
+    assert r.status_code == 200
+    assert {h["platform"] for h in r.json()["home_channels"]} == {"telegram"}
+
+    t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    r = client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/discord")
+    assert r.status_code == 403
+    conn = kb.connect()
+    try:
+        assert kb.list_notify_subs(conn, t["id"]) == []
+    finally:
+        conn.close()
 
 
 def test_home_channels_no_task_id_all_unsubscribed(client, with_home_channels):

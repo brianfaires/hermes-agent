@@ -8,7 +8,9 @@ source or to another configured platform.
 Configuration lives in config.yaml under platforms.webhook.extra.routes.
 Each route defines:
   - events: which event types to accept (header-based filtering)
-  - secret: HMAC secret for signature validation (REQUIRED)
+  - secret: HMAC secret for signature validation (REQUIRED unless auth=oidc)
+  - auth: optional auth mode; "oidc" verifies Authorization: Bearer JWTs
+    signed by Google OIDC (for Google Pub/Sub authenticated push)
   - prompt: template string formatted with the webhook payload
   - skills: optional list of skills to load for the agent
   - deliver: where to send the response (github_comment, telegram, etc.)
@@ -19,7 +21,8 @@ Each route defines:
     and sub-second delivery matter more than agent reasoning.
 
 Security:
-  - HMAC secret is required per route (validated at startup)
+  - HMAC secret or OIDC audience plus caller identity is required per route
+    (validated at startup)
   - Rate limiting per route (fixed-window, configurable)
   - Idempotency cache prevents duplicate agent runs on webhook retries
   - Body size limits checked before reading payload
@@ -37,11 +40,13 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 try:
@@ -51,6 +56,14 @@ try:
 except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
+
+try:
+    import jwt
+
+    JWT_AVAILABLE = True
+except ImportError:
+    JWT_AVAILABLE = False
+    jwt = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -101,6 +114,10 @@ DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 _RATE_WINDOW_SECONDS = 60.0
+_OIDC_AUTH_MODES = frozenset({"oidc", "google_oidc"})
+_DEFAULT_GOOGLE_OIDC_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+_DEFAULT_GOOGLE_OIDC_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
+
 # Hostnames/IP literals that only serve connections originating on the same
 # machine. Anything else is treated as a public bind for safety-rail purposes.
 _LOOPBACK_HOSTS = frozenset({
@@ -193,6 +210,13 @@ class WebhookAdapter(BasePlatformAdapter):
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
 
+        # Script routes are single-flight per route. Providers such as Pub/Sub
+        # retry aggressively when a script is slow; overlapping copies can
+        # exhaust the gateway's process/thread allowance. A short post-run
+        # cooldown absorbs retries already in flight when the script finishes.
+        self._script_route_tasks: Dict[str, asyncio.Task] = {}
+        self._script_route_completed_at: Dict[str, float] = {}
+
         # Rate limiting: per-route timestamps in a fixed window.
         self._rate_counts: Dict[str, Deque[float]] = {}
         self._rate_limit: int = int(config.extra.get("rate_limit", 30))  # per minute
@@ -210,6 +234,22 @@ class WebhookAdapter(BasePlatformAdapter):
         self._route_processor = WebhookRouteProcessor(
             script_timeout_seconds=self._script_timeout_seconds
         )
+        # Payload-independent local triggers are distinct from route transform
+        # scripts. Require a global opt-in plus a resolved-path allowlist,
+        # because dynamic webhook routes can be created outside static config.
+        self._script_triggers_enabled = (
+            config.extra.get("script_triggers_enabled", False) is True
+        )
+        raw_trigger_allowlist = config.extra.get("script_trigger_allowlist", [])
+        self._script_trigger_allowlist = (
+            tuple(raw_trigger_allowlist)
+            if isinstance(raw_trigger_allowlist, (list, tuple))
+            else ()
+        )
+        # PyJWKClient caches fetched signing keys internally. Reuse one client
+        # per adapter so authenticated pushes do not fetch Google's JWKS on
+        # every request.
+        self._oidc_jwk_clients: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -221,25 +261,31 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Validate routes at startup — secret is required per route
         for name, route in self._routes.items():
-            secret = route.get("secret", self._global_secret)
-            if not secret:
-                raise ValueError(
-                    f"[webhook] Route '{name}' has no HMAC secret. "
-                    f"Set 'secret' on the route or globally. "
-                    f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
-                )
+            if self._route_uses_oidc_auth(route):
+                self._validate_oidc_route_config(route, name)
+            else:
+                secret = route.get("secret", self._global_secret)
+                if not secret:
+                    raise ValueError(
+                        f"[webhook] Route '{name}' has no HMAC secret. "
+                        f"Set 'secret' on the route or globally. "
+                        f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'. "
+                        f"For Google Pub/Sub push auth, set auth='oidc' and oidc.audience."
+                    )
 
-            # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
-            # non-loopback bind. The escape hatch is for local testing only;
-            # serving an unauthenticated route on a public interface is a
-            # deployment-grade footgun we'd rather crash early than ship.
-            if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-                raise ValueError(
-                    f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
-                    f"but is bound to non-loopback host '{self._host}'. "
-                    f"INSECURE_NO_AUTH is for local testing only. "
-                    f"Refusing to start to prevent accidental exposure."
-                )
+                # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
+                # non-loopback bind. The escape hatch is for local testing only;
+                # serving an unauthenticated route on a public interface is a
+                # deployment-grade footgun we'd rather crash early than ship.
+                if secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
+                    raise ValueError(
+                        f"[webhook] Route '{name}' uses INSECURE_NO_AUTH secret "
+                        f"but is bound to non-loopback host '{self._host}'. "
+                        f"INSECURE_NO_AUTH is for local testing only. "
+                        f"Refusing to start to prevent accidental exposure."
+                    )
+            if str(route.get("script_mode") or "").strip().lower() == "trigger":
+                self._resolve_script_path(str(route.get("script") or "").strip())
             # deliver_only routes bypass the agent — the POST body becomes a
             # direct push notification via the configured delivery target.
             # Validate up-front so misconfiguration surfaces at startup rather
@@ -412,13 +458,19 @@ class WebhookAdapter(BasePlatformAdapter):
         window.append(now)
         return True
 
-    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
-        """Return True when this delivery should be processed."""
+    def _delivery_id_is_seen(self, delivery_id: str, now: float) -> bool:
+        """Return whether a delivery ID is still inside the idempotency window."""
         seen_at = self._seen_deliveries.get(delivery_id)
         if seen_at is not None and now - seen_at < self._idempotency_ttl:
-            return False
+            return True
         if seen_at is not None:
             self._seen_deliveries.pop(delivery_id, None)
+        return False
+
+    def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
+        """Record an accepted delivery, returning False for a recent duplicate."""
+        if self._delivery_id_is_seen(delivery_id, now):
+            return False
         self._seen_deliveries[delivery_id] = now
         if len(self._seen_deliveries) > max(self._rate_limit * 2, 128):
             self._prune_seen_deliveries(now)
@@ -460,6 +512,24 @@ class WebhookAdapter(BasePlatformAdapter):
             new_dynamic: Dict[str, dict] = {}
             for k, v in data.items():
                 if k in self._static_routes:
+                    continue
+                if str(v.get("script_mode") or "").strip().lower() == "trigger":
+                    try:
+                        self._resolve_script_path(str(v.get("script") or "").strip())
+                    except ValueError as e:
+                        logger.warning(
+                            "[webhook] Dynamic script-trigger route '%s' skipped: %s",
+                            k,
+                            e,
+                        )
+                        continue
+                if self._route_uses_oidc_auth(v):
+                    try:
+                        self._validate_oidc_route_config(v, k)
+                    except ValueError as e:
+                        logger.warning("[webhook] Dynamic route '%s' skipped: %s", k, e)
+                        continue
+                    new_dynamic[k] = v
                     continue
                 effective_secret = v.get("secret", self._global_secret)
                 if not effective_secret:
@@ -537,6 +607,15 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response(
                 {"error": "Unknown or unconfigured profile"}, status=404
             )
+        active_profile = getattr(self.gateway_runner, "_gateway_profile_name", None)
+        if not isinstance(active_profile, str) or not active_profile.strip():
+            active_profile = "default"
+        profile_scope = (
+            profile.strip()
+            if isinstance(profile, str) and profile.strip()
+            else active_profile.strip()
+        )
+        route_scope = f"{profile_scope}:{route_name}"
 
         if not route_config:
             return web.json_response(
@@ -583,30 +662,57 @@ class WebhookAdapter(BasePlatformAdapter):
         # INSECURE_NO_AUTH mode). Missing/empty secrets must fail closed here,
         # not only during connect(), so direct handler reuse cannot turn a
         # network webhook route into an unauthenticated agent-dispatch surface.
-        secret = route_config.get("secret", self._global_secret)
-        if not secret:
-            logger.error(
-                "[webhook] Route %s has no HMAC secret; refusing request",
-                route_name,
-            )
-            return web.json_response(
-                {"error": "Webhook route is missing an HMAC secret"},
-                status=403,
-            )
-        if secret != _INSECURE_NO_AUTH:
-            if not self._validate_signature(request, raw_body, secret):
+        if self._route_uses_oidc_auth(route_config):
+            if not await asyncio.to_thread(
+                self._validate_oidc_token, request, route_config
+            ):
                 logger.warning(
-                    "[webhook] Invalid signature for route %s", route_name
+                    "[webhook] Invalid OIDC bearer token for route %s", route_name
                 )
                 return web.json_response(
-                    {"error": "Invalid signature"}, status=401
+                    {"error": "Invalid OIDC token"}, status=401
                 )
+        else:
+            secret = route_config.get("secret", self._global_secret)
+            if not secret:
+                logger.error(
+                    "[webhook] Route %s has no HMAC secret; refusing request",
+                    route_name,
+                )
+                return web.json_response(
+                    {"error": "Webhook route is missing an HMAC secret"},
+                    status=403,
+                )
+            if secret != _INSECURE_NO_AUTH:
+                if not self._validate_signature(request, raw_body, secret):
+                    logger.warning(
+                        "[webhook] Invalid signature for route %s", route_name
+                    )
+                    return web.json_response(
+                        {"error": "Invalid signature"}, status=401
+                    )
 
         # ── Rate limiting (after auth) ───────────────────────────
         now = time.time()
-        if not self._record_rate_limit_hit(route_name, now):
+        if not self._record_rate_limit_hit(route_scope, now):
             return web.json_response(
                 {"error": "Rate limit exceeded"}, status=429
+            )
+
+        # Explicit script-trigger mode: authenticate, rate-limit, dedupe, then
+        # run a local script without parsing or passing through webhook payload
+        # text. Plain `script` remains the upstream payload-transform feature.
+        if (
+            str(route_config.get("script_mode") or "").strip().lower() == "trigger"
+            and route_config.get("script")
+        ):
+            return await self._handle_script_trigger(
+                route_name=route_name,
+                route_config=route_config,
+                request=request,
+                raw_body=raw_body,
+                now=now,
+                delivery_scope=route_scope,
             )
 
         # Parse payload
@@ -731,7 +837,8 @@ class WebhookAdapter(BasePlatformAdapter):
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
         now = time.time()
-        if not self._record_delivery_id(delivery_id, now):
+        delivery_key = f"{route_scope}:{delivery_id}"
+        if not self._record_delivery_id(delivery_key, now):
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
@@ -800,7 +907,8 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
-        session_chat_id = f"webhook:{route_name}:{delivery_id}"
+        profile_segment = f"{profile_scope}:" if profile is not None else ""
+        session_chat_id = f"webhook:{profile_segment}{route_name}:{delivery_id}"
 
         # Store delivery info for send().  Read by every send() invocation
         # for this chat_id (interim status messages and the final response),
@@ -950,9 +1058,474 @@ class WebhookAdapter(BasePlatformAdapter):
                 e,
             )
 
+    async def _handle_script_trigger(
+        self,
+        *,
+        route_name: str,
+        route_config: dict,
+        request: "web.Request",
+        raw_body: bytes,
+        now: float,
+        delivery_scope: Optional[str] = None,
+    ) -> "web.Response":
+        """Run a configured local script without parsing webhook payload text."""
+        delivery_id = next(
+            (
+                str(request.headers.get(name) or "").strip()
+                for name in ("X-GitHub-Delivery", "svix-id", "X-Request-ID")
+                if str(request.headers.get(name) or "").strip()
+            ),
+            "",
+        )
+        if not delivery_id:
+            # Headerless providers still need stable retry identity. The body
+            # has already passed authentication and size checks; hash it rather
+            # than exposing payload content to the script path or response.
+            delivery_id = f"body-{hashlib.sha256(raw_body).hexdigest()[:32]}"
+        delivery_key = f"script:{delivery_scope or route_name}:{delivery_id}"
+        if self._delivery_id_is_seen(delivery_key, now):
+            logger.info(
+                "[webhook] Skipping duplicate script delivery %s", delivery_id
+            )
+            return web.json_response(
+                {"status": "duplicate", "delivery_id": delivery_id},
+                status=200,
+            )
+
+        active_task = self._script_route_tasks.get(route_name)
+        if active_task is not None and not active_task.done():
+            logger.info(
+                "[webhook] Backpressuring script trigger while route is active route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return web.json_response(
+                {"status": "busy", "route": route_name, "delivery_id": delivery_id},
+                status=429,
+                headers={"Retry-After": "1"},
+            )
+
+        cooldown = max(0.0, float(route_config.get("script_cooldown_seconds", 10)))
+        completed_at = self._script_route_completed_at.get(route_name)
+        if completed_at is not None and now - completed_at < cooldown:
+            retry_after = max(1, int(cooldown - (now - completed_at) + 0.999))
+            logger.info(
+                "[webhook] Backpressuring script trigger during cooldown route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return web.json_response(
+                {"status": "cooldown", "route": route_name, "delivery_id": delivery_id},
+                status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        script_name = str(route_config.get("script") or "").strip()
+        try:
+            script_path = self._resolve_script_path(script_name)
+        except ValueError as e:
+            logger.warning(
+                "[webhook] Invalid script route=%s script=%r error=%s",
+                route_name,
+                script_name,
+                e,
+            )
+            return web.json_response(
+                {"status": "error", "error": "Invalid script route", "delivery_id": delivery_id},
+                status=500,
+            )
+
+        # Mark the delivery seen only after it has passed backpressure and
+        # validation. Distinct busy/cooldown requests must remain retryable.
+        if not self._record_delivery_id(delivery_key, now):
+            return web.json_response(
+                {"status": "duplicate", "delivery_id": delivery_id},
+                status=200,
+            )
+
+        try:
+            requested_timeout = float(
+                route_config.get("script_timeout", self._script_timeout_seconds)
+            )
+        except (TypeError, ValueError):
+            requested_timeout = float(self._script_timeout_seconds)
+        # Routes may shorten, but never silently extend, the global ceiling.
+        timeout = max(1.0, min(requested_timeout, float(self._script_timeout_seconds)))
+        logger.info(
+            "[webhook] script-trigger route=%s script=%s delivery=%s",
+            route_name,
+            script_path.name,
+            delivery_id,
+        )
+        delivery = {
+            "deliver": route_config.get("deliver", "log"),
+            "deliver_extra": self._render_delivery_extra(
+                route_config.get("deliver_extra", {}), {}
+            ),
+        }
+        task = asyncio.create_task(
+            self._run_guarded_script_trigger(
+                route_name=route_name,
+                script_path=script_path,
+                delivery_id=delivery_id,
+                timeout=timeout,
+                delivery=delivery,
+            )
+        )
+        self._script_route_tasks[route_name] = task
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+        return web.json_response(
+            {"status": "accepted", "route": route_name, "delivery_id": delivery_id},
+            status=202,
+        )
+
+    async def _run_guarded_script_trigger(
+        self,
+        *,
+        route_name: str,
+        script_path: Path,
+        delivery_id: str,
+        timeout: float,
+        delivery: Optional[dict] = None,
+    ) -> None:
+        """Run one script for a route and record when its cooldown begins."""
+        try:
+            await self._run_script_trigger(
+                route_name=route_name,
+                script_path=script_path,
+                delivery_id=delivery_id,
+                timeout=timeout,
+                delivery=delivery,
+            )
+        finally:
+            self._script_route_completed_at[route_name] = time.time()
+            current_task = asyncio.current_task()
+            if self._script_route_tasks.get(route_name) is current_task:
+                self._script_route_tasks.pop(route_name, None)
+
+    def _resolve_script_path(self, script_name: str) -> Path:
+        """Resolve an explicitly enabled and allowlisted trigger script."""
+        if not script_name:
+            raise ValueError("missing script")
+        if not self._script_triggers_enabled:
+            raise ValueError("script triggers are disabled")
+        from hermes_constants import get_hermes_home
+
+        scripts_dir = (get_hermes_home() / "scripts").resolve()
+        script_path = Path(script_name)
+        if script_path.is_absolute():
+            resolved = script_path.resolve()
+        else:
+            resolved = (scripts_dir / script_path).resolve()
+        try:
+            resolved.relative_to(scripts_dir)
+        except ValueError as e:
+            raise ValueError("script must be under ~/.hermes/scripts") from e
+        if not resolved.is_file():
+            raise ValueError("script does not exist")
+        allowed_paths: set[Path] = set()
+        for allowed_name in self._script_trigger_allowlist:
+            if not isinstance(allowed_name, str) or not allowed_name.strip():
+                continue
+            allowed = Path(allowed_name).expanduser()
+            allowed_resolved = (
+                allowed.resolve()
+                if allowed.is_absolute()
+                else (scripts_dir / allowed).resolve()
+            )
+            try:
+                allowed_resolved.relative_to(scripts_dir)
+            except ValueError:
+                continue
+            allowed_paths.add(allowed_resolved)
+        if resolved not in allowed_paths:
+            raise ValueError("script is not in script_trigger_allowlist")
+        return resolved
+
+    async def _run_script_trigger(
+        self,
+        *,
+        route_name: str,
+        script_path: Path,
+        delivery_id: str,
+        timeout: float,
+        delivery: Optional[dict] = None,
+    ) -> None:
+        """Run a script trigger, optionally delivering non-empty stdout."""
+        if script_path.suffix == ".py":
+            cmd = [sys.executable, str(script_path)]
+        elif script_path.suffix in {".sh", ".bash"}:
+            cmd = ["bash", str(script_path)]
+        else:
+            cmd = [str(script_path)]
+        proc = None
+        try:
+            from tools.environments.local import _sanitize_subprocess_env
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_path.parent),
+                env=_sanitize_subprocess_env(os.environ.copy()),
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.CancelledError:
+            if proc is not None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    logger.exception(
+                        "[webhook] failed to kill cancelled script route=%s script=%s delivery=%s",
+                        route_name,
+                        script_path.name,
+                        delivery_id,
+                    )
+                try:
+                    await proc.wait()
+                except Exception:
+                    logger.exception(
+                        "[webhook] failed to reap cancelled script route=%s script=%s delivery=%s",
+                        route_name,
+                        script_path.name,
+                        delivery_id,
+                    )
+            raise
+        except asyncio.TimeoutError:
+            assert proc is not None
+            logger.error(
+                "[webhook] script timeout route=%s script=%s delivery=%s timeout=%s",
+                route_name,
+                script_path.name,
+                delivery_id,
+                timeout,
+            )
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            except Exception:
+                logger.exception(
+                    "[webhook] failed to kill timed-out script route=%s script=%s delivery=%s",
+                    route_name,
+                    script_path.name,
+                    delivery_id,
+                )
+                return
+            try:
+                await proc.wait()
+            except Exception:
+                logger.exception(
+                    "[webhook] failed to reap timed-out script route=%s script=%s delivery=%s",
+                    route_name,
+                    script_path.name,
+                    delivery_id,
+                )
+            return
+        except Exception:
+            logger.exception(
+                "[webhook] script failed to start route=%s script=%s delivery=%s",
+                route_name,
+                script_path.name,
+                delivery_id,
+            )
+            return
+        if proc.returncode == 0:
+            logger.info(
+                "[webhook] script complete route=%s script=%s delivery=%s stdout_bytes=%d stderr_bytes=%d",
+                route_name,
+                script_path.name,
+                delivery_id,
+                len(stdout or b""),
+                len(stderr or b""),
+            )
+            await self._deliver_script_stdout(
+                stdout or b"",
+                route_name=route_name,
+                delivery_id=delivery_id,
+                delivery=delivery or {},
+            )
+        else:
+            logger.error(
+                "[webhook] script exited nonzero route=%s script=%s delivery=%s returncode=%s stdout_bytes=%d stderr_bytes=%d",
+                route_name,
+                script_path.name,
+                delivery_id,
+                proc.returncode,
+                len(stdout or b""),
+                len(stderr or b""),
+            )
+
+    async def _deliver_script_stdout(
+        self,
+        stdout: bytes,
+        *,
+        route_name: str,
+        delivery_id: str,
+        delivery: dict,
+    ) -> None:
+        """Deliver non-empty script stdout to the configured target."""
+        content = stdout.decode("utf-8", errors="replace").strip()
+        if not content:
+            return
+        try:
+            from agent.redact import redact_sensitive_text
+
+            content = redact_sensitive_text(content)
+        except Exception:
+            logger.exception(
+                "[webhook] script stdout redaction failed route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return
+        if delivery.get("deliver", "log") == "log":
+            logger.info(
+                "[webhook] script stdout suppressed route=%s delivery=%s bytes=%d",
+                route_name,
+                delivery_id,
+                len(stdout),
+            )
+            return
+        try:
+            result = await self._direct_deliver(content, delivery)
+        except Exception:
+            logger.exception(
+                "[webhook] script stdout delivery failed route=%s delivery=%s",
+                route_name,
+                delivery_id,
+            )
+            return
+        if not result.success:
+            logger.warning(
+                "[webhook] script stdout target rejected route=%s target=%s delivery=%s error=%s",
+                route_name,
+                delivery.get("deliver", "log"),
+                delivery_id,
+                result.error,
+            )
+
     # ------------------------------------------------------------------
     # Signature validation
     # ------------------------------------------------------------------
+
+    def _route_uses_oidc_auth(self, route_config: dict) -> bool:
+        """Return True when route auth is an OIDC bearer JWT instead of HMAC."""
+        return str(route_config.get("auth", "")).strip().lower() in _OIDC_AUTH_MODES
+
+    def _get_oidc_config(self, route_config: dict) -> dict:
+        """Normalize route OIDC config, accepting nested and legacy-flat keys."""
+        nested = route_config.get("oidc")
+        cfg = dict(nested) if isinstance(nested, dict) else {}
+        for flat_key, cfg_key in (
+            ("oidc_audience", "audience"),
+            ("oidc_issuer", "issuer"),
+            ("oidc_email", "email"),
+            ("oidc_subject", "subject"),
+            ("oidc_jwks_url", "jwks_url"),
+        ):
+            if flat_key in route_config and cfg_key not in cfg:
+                cfg[cfg_key] = route_config[flat_key]
+        return cfg
+
+    def _get_oidc_audience(self, route_config: dict, route_name: str = "") -> str:
+        cfg = self._get_oidc_config(route_config)
+        audience = str(cfg.get("audience") or "").strip()
+        if not audience:
+            label = f" '{route_name}'" if route_name else ""
+            raise ValueError(
+                f"OIDC route{label} requires oidc.audience (Google Pub/Sub push audience)"
+            )
+        return audience
+
+    def _validate_oidc_route_config(
+        self, route_config: dict, route_name: str = ""
+    ) -> tuple[str, str, str]:
+        """Require an audience and an expected Google caller identity."""
+        audience = self._get_oidc_audience(route_config, route_name)
+        cfg = self._get_oidc_config(route_config)
+        jwks_url = str(cfg.get("jwks_url") or _DEFAULT_GOOGLE_OIDC_JWKS_URL).strip()
+        if jwks_url != _DEFAULT_GOOGLE_OIDC_JWKS_URL:
+            raise ValueError(
+                "Google Pub/Sub OIDC routes must use the Google JWKS endpoint"
+            )
+        expected_email = str(cfg.get("email") or "").strip()
+        expected_subject = str(cfg.get("subject") or "").strip()
+        if not expected_email and not expected_subject:
+            label = f" '{route_name}'" if route_name else ""
+            raise ValueError(
+                f"OIDC route{label} requires oidc.email or oidc.subject to authorize the caller"
+            )
+        return audience, expected_email, expected_subject
+
+    def _validate_oidc_token(self, request: "web.Request", route_config: dict) -> bool:
+        """Validate an Authorization bearer JWT for Google Pub/Sub push."""
+        if not JWT_AVAILABLE or jwt is None:
+            logger.warning("[webhook] PyJWT unavailable; cannot verify OIDC token")
+            return False
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return False
+        token = auth_header[7:].strip()
+        if not token:
+            return False
+
+        try:
+            cfg = self._get_oidc_config(route_config)
+            audience, expected_email, expected_subject = self._validate_oidc_route_config(
+                route_config
+            )
+            jwks_url = str(cfg.get("jwks_url") or _DEFAULT_GOOGLE_OIDC_JWKS_URL).strip()
+            issuer_value = cfg.get("issuer")
+            if issuer_value:
+                if isinstance(issuer_value, str):
+                    issuer = tuple(i.strip() for i in issuer_value.split(",") if i.strip())
+                elif isinstance(issuer_value, (list, tuple)):
+                    issuer = tuple(str(i).strip() for i in issuer_value if str(i).strip())
+                else:
+                    return False
+            else:
+                issuer = _DEFAULT_GOOGLE_OIDC_ISSUERS
+
+            jwk_client = self._oidc_jwk_clients.get(jwks_url)
+            if jwk_client is None:
+                jwk_client = jwt.PyJWKClient(jwks_url)
+                self._oidc_jwk_clients[jwks_url] = jwk_client
+            signing_key = jwk_client.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
+                audience=audience,
+                issuer=issuer,
+                options={"require": ["exp", "aud", "iss"]},
+                leeway=int(cfg.get("leeway_seconds", 30)),
+            )
+        except Exception as e:
+            logger.warning("[webhook] OIDC token verification failed: %s", e)
+            return False
+
+        if expected_email:
+            token_email = str(claims.get("email") or "").strip()
+            if token_email != expected_email:
+                logger.warning("[webhook] OIDC token email claim did not match expected email")
+                return False
+            if claims.get("email_verified") is not True:
+                logger.warning("[webhook] OIDC token email claim is not verified")
+                return False
+
+        if expected_subject:
+            token_subject = str(claims.get("sub") or "").strip()
+            if token_subject != expected_subject:
+                logger.warning("[webhook] OIDC token subject claim did not match expected subject")
+                return False
+
+        return True
 
     def _validate_signature(
         self, request: "web.Request", body: bytes, secret: str

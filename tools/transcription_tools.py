@@ -33,6 +33,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
@@ -112,6 +113,7 @@ GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-lar
 # Singleton for the local model — loaded once, reused across calls
 _local_model: Optional[object] = None
 _local_model_name: Optional[str] = None
+_local_model_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -1142,10 +1144,11 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
 
     try:
         # Lazy-load the model (downloads on first use, ~150 MB for 'base')
-        if _local_model is None or _local_model_name != model_name:
-            logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
-            _local_model = _load_local_whisper_model(model_name)
-            _local_model_name = model_name
+        with _local_model_lock:
+            if _local_model is None or _local_model_name != model_name:
+                logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
+                _local_model = _load_local_whisper_model(model_name)
+                _local_model_name = model_name
 
         # Language: config.yaml (stt.local.language) > env var > auto-detect.
         _forced_lang = (
@@ -1173,11 +1176,12 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
                 "evicting cached model and retrying on CPU (int8).",
                 exc,
             )
-            _local_model = None
-            _local_model_name = None
-            from faster_whisper import WhisperModel
-            _local_model = WhisperModel(model_name, device="cpu", compute_type="int8")
-            _local_model_name = model_name
+            with _local_model_lock:
+                _local_model = None
+                _local_model_name = None
+                from faster_whisper import WhisperModel
+                _local_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                _local_model_name = model_name
             segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
             transcript = " ".join(segment.text.strip() for segment in segments)
 
@@ -1707,6 +1711,37 @@ def _transcribe_deepinfra(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def warm_local_stt_model(model: Optional[str] = None) -> Dict[str, Any]:
+    """Preload the configured local faster-whisper model for low-latency voice.
+
+    This does not transcribe audio; it only pays the model load/download cost
+    before the first real utterance reaches STT.  Non-local STT providers are
+    left untouched.
+    """
+    global _local_model, _local_model_name
+
+    stt_config = _load_stt_config()
+    if not is_stt_enabled(stt_config):
+        return {"success": False, "warmed": False, "reason": "stt_disabled"}
+    provider = _get_provider(stt_config)
+    if provider != "local":
+        return {"success": True, "warmed": False, "provider": provider}
+    if not _HAS_FASTER_WHISPER and not _try_lazy_install_stt():
+        return {"success": False, "warmed": False, "error": "faster-whisper not installed"}
+
+    local_cfg = stt_config.get("local", {})
+    model_name = _normalize_local_model(model or local_cfg.get("model", DEFAULT_LOCAL_MODEL))
+    with _local_model_lock:
+        if _local_model is None or _local_model_name != model_name:
+            logger.info("Warming faster-whisper model '%s' for voice input", model_name)
+            _local_model = _load_local_whisper_model(model_name)
+            _local_model_name = model_name
+            logger.info("Warmed faster-whisper model '%s' for voice input", model_name)
+        else:
+            logger.debug("faster-whisper model '%s' already warm", model_name)
+    return {"success": True, "warmed": True, "provider": "local", "model": model_name}
 
 
 def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:

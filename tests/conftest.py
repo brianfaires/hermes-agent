@@ -687,6 +687,9 @@ def _live_system_guard(request, monkeypatch):
         "daemon-reload", "try-restart", "reload-or-restart",
     )
     _PROCESS_KILLERS = ("pkill", "killall", "taskkill", "skill", "fuser")
+    _COMMAND_WRAPPERS = ("setsid", "nohup", "command", "exec")
+    _SHELLS = ("sh", "bash", "dash", "zsh")
+    _SUDO_OPTIONS_WITH_VALUE = ("-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u")
 
     def _cmd_to_string(cmd) -> str:
         if cmd is None:
@@ -721,28 +724,88 @@ def _live_system_guard(request, monkeypatch):
             tokens = cmd_str.split()
         return any(verb in tokens for verb in _MUTATING_VERBS)
 
+    def _has_process_killer_executable(tokens) -> bool:
+        tokens = [str(token) for token in tokens]
+        index = 0
+        while index < len(tokens):
+            head = tokens[index].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if head == "sudo":
+                index += 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    option = tokens[index]
+                    index += 1
+                    if option in _SUDO_OPTIONS_WITH_VALUE and index < len(tokens):
+                        index += 1
+                continue
+            if head == "env":
+                index += 1
+                while index < len(tokens):
+                    token = tokens[index]
+                    if token.startswith("-") or ("=" in token and not token.startswith("=")):
+                        index += 1
+                        continue
+                    break
+                continue
+            if head in _COMMAND_WRAPPERS:
+                index += 1
+                while index < len(tokens) and tokens[index].startswith("-"):
+                    index += 1
+                continue
+            if head in _SHELLS:
+                for option_index in range(index + 1, len(tokens) - 1):
+                    option = tokens[option_index]
+                    if option.startswith("-") and "c" in option[1:]:
+                        script = tokens[option_index + 1]
+                        try:
+                            lexer = _shlex.shlex(
+                                script,
+                                posix=True,
+                                punctuation_chars=";&|",
+                            )
+                            lexer.whitespace_split = True
+                            lexer.commenters = ""
+                            nested = list(lexer)
+                        except ValueError:
+                            nested = script.split()
+                        segments = []
+                        segment = []
+                        for token in nested:
+                            if token and all(char in ";&|" for char in token):
+                                if segment:
+                                    segments.append(segment)
+                                    segment = []
+                            else:
+                                segment.append(token)
+                        if segment:
+                            segments.append(segment)
+                        return any(
+                            _has_process_killer_executable(part)
+                            for part in segments
+                        )
+                return False
+            return head in _PROCESS_KILLERS
+        return False
+
     def _is_process_killer(cmd) -> bool:
         cmd_str = _cmd_to_string(cmd)
-        try:
-            tokens = _shlex.split(cmd_str)
-        except ValueError:
-            tokens = cmd_str.split()
-        if not tokens:
+        if isinstance(cmd, (list, tuple)):
+            tokens = list(cmd)
+        else:
+            try:
+                tokens = _shlex.split(cmd_str)
+            except ValueError:
+                tokens = cmd_str.split()
+        if not tokens or not _has_process_killer_executable(tokens):
             return False
-        for tok in tokens:
-            head = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            if head in _PROCESS_KILLERS:
-                low = cmd_str.lower()
-                # pkill -f pattern: catch hermes-themed patterns + a
-                # plain "python" -f which would catch the live gateway
-                # whose cmdline contains "python -m hermes_cli.main".
-                if (
-                    "hermes" in low
-                    or "gateway" in low
-                    or ("python" in low and "-f" in tokens)
-                ):
-                    return True
-        return False
+        low = cmd_str.lower()
+        # pkill -f pattern: catch hermes-themed patterns + a
+        # plain "python" -f which would catch the live gateway
+        # whose cmdline contains "python -m hermes_cli.main".
+        return (
+            "hermes" in low
+            or "gateway" in low
+            or ("python" in low and "-f" in low)
+        )
 
     def _check_subprocess_cmd(name, cmd):
         if _is_blocked_systemctl(cmd):

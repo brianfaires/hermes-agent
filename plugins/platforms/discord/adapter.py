@@ -23,13 +23,16 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 from collections import defaultdict
+from copy import copy
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 from agent.async_utils import (
     consume_detached_task_result as _consume_background_task_result,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,151 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
     ),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)[\s\S]*$", re.IGNORECASE),
 )
+_DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
+_DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+_DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _load_profile_stt_aliases() -> Dict[str, Any]:
+    """Load Discord STT aliases from the profile-local voice command catalog."""
+    path = get_hermes_home() / "voice" / "commands.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            aliases = tomllib.load(handle).get("stt_aliases")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not load Discord STT aliases from %s: %s", path, exc)
+        return {}
+    if not isinstance(aliases, dict):
+        logger.warning("Discord STT aliases in %s must be a TOML table", path)
+        return {}
+    return aliases
+
+
+def _discord_config_id_set(raw: Any) -> set[str]:
+    """Normalize a Discord channel policy value to a set of string IDs."""
+    if isinstance(raw, list):
+        return {str(part).strip() for part in raw if str(part).strip()}
+    s = str(raw).strip() if raw is not None else ""
+    if s:
+        return {part.strip() for part in s.split(",") if part.strip()}
+    return set()
+
+
+def _discord_policy_sets(extra: Optional[Dict[str, Any]] = None) -> tuple[set[str], set[str]]:
+    """Return (allowed_channels, ignored_channels) for Discord sends.
+
+    Prefer the resolved adapter config when it carries channel policy keys, but
+    fall back to the profile-scoped environment values populated by the gateway
+    config loader. Some live PlatformConfig instances do not include top-level
+    ``discord.allowed_channels`` in ``extra``; treating that as unrestricted
+    bypasses the profile boundary on outbound delivery.
+    """
+    if extra is not None and "allowed_channels" in extra:
+        allowed_raw = extra.get("allowed_channels")
+    else:
+        allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
+
+    if extra is not None and "ignored_channels" in extra:
+        ignored_raw = extra.get("ignored_channels")
+    else:
+        ignored_raw = os.getenv("DISCORD_IGNORED_CHANNELS", "")
+
+    return _discord_config_id_set(allowed_raw), _discord_config_id_set(ignored_raw)
+
+
+def _discord_outbound_scope_allowed(channel_ids: set[str], allowed_channels: set[str], ignored_channels: set[str]) -> Tuple[bool, str]:
+    """Apply Discord outbound allow/deny policy to channel/thread scope IDs."""
+    if ignored_channels and ("*" in ignored_channels or (channel_ids & ignored_channels)):
+        return False, "channel in DISCORD_IGNORED_CHANNELS"
+    if allowed_channels and "*" not in allowed_channels and not (channel_ids & allowed_channels):
+        return False, "channel not in DISCORD_ALLOWED_CHANNELS"
+    return True, "allowed"
+
+
+def _normalize_discord_stt_alias_text(text: str) -> str:
+    """Normalize a spoken transcript or configured STT alias for exact matching."""
+    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _format_discord_inline_code_span(body: str) -> str:
+    """Render inline-code content with a delimiter that can contain backticks."""
+    max_run = max((len(match.group(0)) for match in re.finditer(r"`+", body)), default=0)
+    delimiter = "`" * (max_run + 1)
+    if body.startswith("`") or body.endswith("`"):
+        return f"{delimiter} {body} {delimiter}"
+    return f"{delimiter}{body}{delimiter}"
+
+
+def _escape_discord_markdown_segment(segment: str) -> str:
+    """Escape Discord markdown in prose while preserving inline code spans."""
+    escaped: list[str] = []
+    pos = 0
+    length = len(segment)
+
+    while pos < length:
+        if segment[pos] != "`":
+            next_tick = segment.find("`", pos)
+            end = length if next_tick == -1 else next_tick
+            escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:end]))
+            pos = end
+            continue
+
+        delimiter_end = pos
+        while delimiter_end < length and segment[delimiter_end] == "`":
+            delimiter_end += 1
+        delimiter = segment[pos:delimiter_end]
+        body_start = delimiter_end
+        body_chars: list[str] = []
+        cursor = body_start
+        closed = False
+
+        while cursor < length:
+            if segment[cursor] == "\n":
+                break
+            if segment.startswith(delimiter, cursor):
+                escaped.append(_format_discord_inline_code_span("".join(body_chars)))
+                pos = cursor + len(delimiter)
+                closed = True
+                break
+            if segment[cursor] == "\\" and cursor + 1 < length and segment[cursor + 1] == "`":
+                body_chars.append("`")
+                cursor += 2
+                continue
+            body_chars.append(segment[cursor])
+            cursor += 1
+
+        if closed:
+            continue
+
+        # Unmatched backticks are prose, not code. Escape only the surrounding
+        # Discord markdown markers; backticks themselves do not need escaping.
+        escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:cursor]))
+        pos = cursor
+
+    return "".join(escaped)
+
+
+def _escape_discord_markdown_outside_code(content: str) -> str:
+    """Escape Discord markdown markers in prose while preserving code spans.
+
+    Discord has no parse-mode toggle. Sending literal text such as
+    ``hindsight*config*`` otherwise renders ``config`` in italics, which is
+    especially confusing when Hermes quotes user-provided strings or config
+    keys. Preserve fenced and inline code because those are intentional
+    formatting. Inside inline code, treat ``\\``` as an escaped literal backtick
+    and rewrap with a longer delimiter so Discord renders the backtick itself.
+    """
+    parts = _DISCORD_FENCED_CODE_RE.split(content or "")
+    escaped: list[str] = []
+    for part in parts:
+        if part.startswith("```") and part.endswith("```"):
+            escaped.append(part)
+        else:
+            escaped.append(_escape_discord_markdown_segment(part))
+    return "".join(escaped)
 
 try:
     import discord
@@ -112,6 +260,9 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import SessionSource
+from gateway.voice_acknowledgements import VoiceAcknowledgementCatalog
+from hermes_constants import get_hermes_home
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker, convert_table_to_bullets
 from utils import atomic_json_write, env_float, env_int
@@ -131,6 +282,7 @@ from gateway.platforms.base import (
     _prefix_within_utf16_limit,
     utf16_len,
     validate_inbound_media_size,
+    gateway_tts_temp_path,
 )
 from tools.url_safety import is_safe_url
 
@@ -221,15 +373,30 @@ class _DiscordNonConversationalMessageTracker:
 
     _MAX_TRACKED = 2000
 
-    def __init__(self, max_tracked: int = _MAX_TRACKED):
+    def __init__(
+        self,
+        max_tracked: int = _MAX_TRACKED,
+        profile_home: Optional[_Path] = None,
+    ):
         self._max_tracked = max_tracked
+        self._profile_home = (
+            _Path(profile_home).resolve() if profile_home is not None else None
+        )
         self._ids: dict[str, None] = dict.fromkeys(self._load())
+
+    def set_profile_home(self, profile_home: Optional[_Path]) -> None:
+        """Pin persistence to the adapter's owning profile and reload its IDs."""
+        resolved = _Path(profile_home).resolve() if profile_home is not None else None
+        if resolved == self._profile_home:
+            return
+        self._profile_home = resolved
+        self._ids = dict.fromkeys(self._load())
 
     def _state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
 
         return (
-            get_hermes_home()
+            (self._profile_home or get_hermes_home())
             / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
             / _DISCORD_NONCONVERSATIONAL_STATE_FILENAME
         )
@@ -275,6 +442,11 @@ def _metadata_marks_nonconversational(metadata: Optional[Dict[str, Any]]) -> boo
     if not isinstance(metadata, dict):
         return False
     return any(bool(metadata.get(key)) for key in _DISCORD_NONCONVERSATIONAL_METADATA_KEYS)
+
+
+def _metadata_suppresses_embeds(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a Discord send should disable URL embeds/previews."""
+    return isinstance(metadata, dict) and bool(metadata.get("suppress_embeds"))
 
 
 def _looks_like_nonconversational_history_message(content: str) -> bool:
@@ -417,8 +589,12 @@ class VoiceReceiver:
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
 
-        # Debug logging counter (instance-level to avoid cross-instance races)
+        # Debug counters for first-join receive diagnostics.  Warnings are
+        # rate-limited, but these counters let logs explain whether a missing
+        # transcript died in NaCl, Opus, buffering, or silence detection.
         self._packet_debug_count = 0
+        self._rtp_stats: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._last_stats_log: Dict[int, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -531,21 +707,40 @@ class VoiceReceiver:
         if ssrc == self._bot_ssrc:
             return
 
-        # Calculate dynamic RTP header size (RFC 9335 / rtpsize mode)
+        # Calculate dynamic RTP header size (RFC 3550).  Discord voice packets
+        # can arrive in two subtly different AEAD layouts while the socket is
+        # settling after a join/rejoin:
+        #
+        # * normal rtpsize: the RTP extension preamble is cleartext and part of
+        #   the associated data (AAD), so encrypted payload starts after it;
+        # * early/rekey packets observed live: the fixed RTP header is the AAD
+        #   and the extension preamble is encrypted with the payload.
+        #
+        # Treat the normal layout as primary, but fall back to the fixed-header
+        # layout on decrypt failure.  Without this fallback a first utterance
+        # after joining can be dropped before STT ever sees audio.
         cc = first_byte & 0x0F  # CSRC count
         has_extension = bool(first_byte & 0x10)  # extension bit
         has_padding = bool(first_byte & 0x20)  # padding bit (RFC 3550 §5.1)
-        header_size = 12 + (4 * cc) + (4 if has_extension else 0)
+        fixed_header_size = 12 + (4 * cc)
+        header_size = fixed_header_size + (4 if has_extension else 0)
 
         if len(data) < header_size + 4:  # need at least header + nonce
             return
 
-        # Read extension length from preamble (for skipping after decrypt)
+        # Read extension length from preamble when the extension preamble is
+        # cleartext.  Some first-join packets encrypt the extension preamble, so
+        # this value is only trusted for clear-extension candidate layouts.
         ext_data_len = 0
+        ext_full_header_size = header_size
         if has_extension:
             ext_preamble_offset = 12 + (4 * cc)
             ext_words = struct.unpack_from(">H", data, ext_preamble_offset + 2)[0]
             ext_data_len = ext_words * 4
+            # RFC 3550 extension length covers only extension data after the
+            # 4-byte preamble.  Some clients include that data in the AEAD AAD,
+            # while others encrypt it with the Opus payload.
+            ext_full_header_size = header_size + ext_data_len
 
         if self._packet_debug_count <= 10:
             with self._lock:
@@ -555,28 +750,69 @@ class VoiceReceiver:
                 ssrc, seq, known_user, header_size, ext_data_len,
             )
 
-        header = bytes(data[:header_size])
-        payload_with_nonce = data[header_size:]
+        with self._lock:
+            stats = self._rtp_stats[ssrc]
+            stats["packets"] += 1
 
         # --- NaCl transport decrypt (aead_xchacha20_poly1305_rtpsize) ---
-        if len(payload_with_nonce) < 4:
-            return
-        nonce = bytearray(24)
-        nonce[:4] = payload_with_nonce[-4:]
-        encrypted = bytes(payload_with_nonce[:-4])
-
         try:
-            import nacl.secret  # noqa: E402 — delayed import, only in voice path
-            box = nacl.secret.Aead(self._secret_key)
-            decrypted = box.decrypt(encrypted, header, bytes(nonce))
-        except Exception as e:
-            if self._packet_debug_count <= 10:
-                logger.warning("NaCl decrypt failed: %s (hdr=%d, enc=%d)", e, header_size, len(encrypted))
-            return
+            decrypted, skip_ext_data, layout = self._decrypt_rtp_payload_candidates(
+                data=data,
+                fixed_header_size=fixed_header_size,
+                preamble_header_size=header_size,
+                full_header_size=ext_full_header_size,
+                has_extension=has_extension,
+                ext_data_len=ext_data_len,
+            )
+        except Exception as primary_error:
+            # Discord can rotate or finalize the voice session key after our
+            # socket listener is installed.  A receiver that captured the old
+            # key will then fail every packet for the whole join until the user
+            # leaves/rejoins.  Refresh from the live connection once before
+            # declaring the packet dead.
+            refreshed_secret = self._refresh_secret_key_if_changed()
+            if refreshed_secret:
+                try:
+                    decrypted, skip_ext_data, layout = self._decrypt_rtp_payload_candidates(
+                        data=data,
+                        fixed_header_size=fixed_header_size,
+                        preamble_header_size=header_size,
+                        full_header_size=ext_full_header_size,
+                        has_extension=has_extension,
+                        ext_data_len=ext_data_len,
+                    )
+                    logger.info("NaCl decrypt recovered after voice secret refresh (ssrc=%d)", ssrc)
+                except Exception as retry_error:
+                    primary_error = retry_error
+                    refreshed_secret = False
+
+            if not refreshed_secret:
+                with self._lock:
+                    stats = self._rtp_stats[ssrc]
+                    stats["decrypt_failed"] += 1
+                if self._packet_debug_count <= 10:
+                    enc_len = max(0, len(data) - header_size - 4)
+                    logger.warning(
+                        "NaCl decrypt failed: %s (hdr=%d, enc=%d, ssrc=%d, ext=%s, ext_data=%d)",
+                        primary_error, header_size, enc_len, ssrc, has_extension, ext_data_len,
+                    )
+                self._maybe_log_rtp_stats(ssrc, reason="decrypt_failed")
+                return
+
+        with self._lock:
+            stats = self._rtp_stats[ssrc]
+            stats["decrypted"] += 1
+            stats[f"layout_{layout}"] += 1
+        if self._packet_debug_count <= 10 and layout != "preamble":
+            logger.info(
+                "NaCl decrypt recovered with %s layout (ssrc=%d, hdr=%d)",
+                layout, ssrc,
+                fixed_header_size if layout == "encrypted_extension" else ext_full_header_size,
+            )
 
         # Skip encrypted extension data to get the actual opus payload
-        if ext_data_len and len(decrypted) > ext_data_len:
-            decrypted = decrypted[ext_data_len:]
+        if skip_ext_data and len(decrypted) > skip_ext_data:
+            decrypted = decrypted[skip_ext_data:]
 
         # --- Strip RTP padding (RFC 3550 §5.1) ---
         # When the P bit is set, the last payload byte holds the count of
@@ -631,15 +867,148 @@ class VoiceReceiver:
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
+                stats = self._rtp_stats[ssrc]
+                stats["decoded"] += 1
+                stats["pcm_bytes"] += len(pcm)
         except Exception as e:
             with self._lock:
                 self._decoders.pop(ssrc, None)
+                stats = self._rtp_stats[ssrc]
+                stats["decode_failed"] += 1
             logger.debug(
                 "Opus decode error for SSRC %s; reset decoder: %s",
                 ssrc,
                 e,
             )
             return
+
+    def _decrypt_rtp_payload_candidates(
+        self,
+        *,
+        data: bytes,
+        fixed_header_size: int,
+        preamble_header_size: int,
+        full_header_size: int,
+        has_extension: bool,
+        ext_data_len: int,
+    ) -> tuple[bytes, int, str]:
+        """Try Discord RTP AEAD layouts seen around VC joins/rekeys.
+
+        Discord's sender-side implementation encrypts with whichever RTP
+        header bytes it has already assembled as AAD.  In receive traffic we
+        have observed extension packets where either the fixed RTP header, the
+        extension preamble, or the full extension block is treated as AAD.
+        Trying all sane variants keeps first-join audio from being dropped when
+        clients disagree about extension placement.
+        """
+        candidates: list[tuple[str, int, int, bool]] = []
+
+        def add(name: str, header_size: int, skip_ext: int, encrypted_ext: bool = False) -> None:
+            if header_size < fixed_header_size or header_size + 4 > len(data):
+                return
+            if any(existing[1] == header_size and existing[3] == encrypted_ext for existing in candidates):
+                return
+            candidates.append((name, header_size, skip_ext, encrypted_ext))
+
+        if has_extension:
+            # Full extension block cleartext / AAD: nothing to strip after decrypt.
+            add("full_extension", full_header_size, 0)
+            # Extension preamble cleartext / AAD, extension data encrypted before Opus.
+            add("preamble", preamble_header_size, ext_data_len)
+            # Extension preamble + data encrypted with the Opus payload.
+            add("encrypted_extension", fixed_header_size, 0, encrypted_ext=True)
+        else:
+            add("fixed", fixed_header_size, 0)
+
+        last_error: Optional[Exception] = None
+        for name, header_size, skip_ext, encrypted_ext in candidates:
+            try:
+                decrypted = self._decrypt_rtp_payload(data, header_size)
+                if encrypted_ext:
+                    if len(decrypted) < 4:
+                        raise ValueError("encrypted extension payload shorter than preamble")
+                    words = struct.unpack_from(">H", decrypted, 2)[0]
+                    encrypted_ext_len = words * 4
+                    if len(decrypted) < 4 + encrypted_ext_len:
+                        raise ValueError(
+                            "encrypted extension payload shorter than declared extension data"
+                        )
+                    decrypted = decrypted[4 + encrypted_ext_len:]
+                    skip_ext = 0
+                return decrypted, skip_ext, name
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ValueError("no RTP decrypt candidates")
+
+    def _refresh_secret_key_if_changed(self) -> bool:
+        """Refresh the cached Discord voice secret if the live connection changed.
+
+        VoiceReceiver is installed immediately after ``channel.connect()``.  On
+        some Discord rejoins the first RTP packets arrive after the underlying
+        VoiceConnectionState has rotated/finalized ``secret_key``.  Keeping the
+        constructor-time key makes every packet for that join fail NaCl decrypt.
+        """
+        try:
+            conn = self._vc._connection
+            live_key = bytes(conn.secret_key)
+        except Exception:
+            return False
+        if not live_key or live_key == self._secret_key:
+            return False
+        self._secret_key = live_key
+        try:
+            self._dave_session = conn.dave_session
+        except Exception:
+            pass
+        logger.info("VoiceReceiver refreshed Discord voice secret key")
+        return True
+
+    def _maybe_log_rtp_stats(self, ssrc: int, *, reason: str) -> None:
+        """Rate-limited per-SSRC receive stats for first-join troubleshooting."""
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_stats_log.get(ssrc, 0.0)
+            if now - last < 5.0:
+                return
+            self._last_stats_log[ssrc] = now
+            stats = dict(self._rtp_stats.get(ssrc, {}))
+            user_id = self._ssrc_to_user.get(ssrc, 0)
+            buf_len = len(self._buffers.get(ssrc, b""))
+        logger.info(
+            "Voice RTP stats ssrc=%s user=%s reason=%s packets=%d decrypted=%d "
+            "decoded=%d decrypt_failed=%d decode_failed=%d pcm_bytes=%d buffer=%d "
+            "layouts=%s/%s/%s/%s",
+            ssrc,
+            user_id or "unknown",
+            reason,
+            stats.get("packets", 0),
+            stats.get("decrypted", 0),
+            stats.get("decoded", 0),
+            stats.get("decrypt_failed", 0),
+            stats.get("decode_failed", 0),
+            stats.get("pcm_bytes", 0),
+            buf_len,
+            stats.get("layout_fixed", 0),
+            stats.get("layout_preamble", 0),
+            stats.get("layout_full_extension", 0),
+            stats.get("layout_encrypted_extension", 0),
+        )
+
+    def _decrypt_rtp_payload(self, data: bytes, header_size: int) -> bytes:
+        """Decrypt a Discord RTP packet using ``header_size`` bytes as AAD."""
+        if len(data) < header_size + 4:
+            raise ValueError("packet shorter than RTP header plus nonce")
+        payload_with_nonce = data[header_size:]
+        if len(payload_with_nonce) < 4:
+            raise ValueError("RTP payload shorter than nonce suffix")
+        nonce = bytearray(24)
+        nonce[:4] = payload_with_nonce[-4:]
+        encrypted = bytes(payload_with_nonce[:-4])
+        import nacl.secret  # noqa: E402 — delayed import, only in voice path
+        box = nacl.secret.Aead(self._secret_key)
+        return box.decrypt(encrypted, bytes(data[:header_size]), bytes(nonce))
 
     # ------------------------------------------------------------------
     # Silence detection
@@ -675,6 +1044,7 @@ class VoiceReceiver:
         """Return list of (user_id, pcm_bytes) for completed utterances."""
         now = time.monotonic()
         completed = []
+        log_events = []
 
         with self._lock:
             ssrc_user_map = dict(self._ssrc_to_user)
@@ -695,13 +1065,19 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         completed.append((user_id, bytes(buf)))
+                        self._rtp_stats[ssrc]["utterances"] += 1
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    log_events.append((ssrc, "utterance_complete"))
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user — discard
+                    self._rtp_stats[ssrc]["stale_discards"] += 1
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    log_events.append((ssrc, "stale_discard"))
 
+        for ssrc, reason in log_events:
+            self._maybe_log_rtp_stats(ssrc, reason=reason)
         return completed
 
     # ------------------------------------------------------------------
@@ -837,6 +1213,7 @@ class DiscordAdapter(BasePlatformAdapter):
     _SPLIT_THRESHOLD = 1900  # near the 2000-char split point
     supports_code_blocks = True  # Discord markdown renders fenced code blocks natively
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
+    voice_reply_text_order = "before_tts"  # post reply text before TTS playback in voice sessions
 
     # Auto-disconnect from voice channel after this many seconds of inactivity
     VOICE_TIMEOUT = 300
@@ -856,12 +1233,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._text_batch_split_delay_seconds = env_float("HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", 2.0)
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
-        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
+        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> session/control channel_id
+        self._auto_voice_session_channels: set[str] = set()  # channels bound by presence-triggered auto voice
         self._voice_sources: Dict[int, Dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         # Phase 2: voice listening
         self._voice_receivers: Dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
+        self._voice_session_generations: Dict[int, int] = {}  # guild_id -> stale STT guard
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
         # Resolves the current voice-reply mode ("off"|"voice_only"|"all") for a
@@ -875,6 +1254,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._voice_ack_catalog = VoiceAcknowledgementCatalog.load()
+        self._stt_aliases = _load_profile_stt_aliases()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -884,6 +1265,14 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        self._kanban_backfill_task: Optional[asyncio.Task] = None
+        self._kanban_inbound_task: Optional[asyncio.Task] = None
+        from plugins.platforms.discord.kanban_mirror.supervision import LoopSupervisor
+        self._kanban_supervisor = LoopSupervisor()
+        self._kanban_ingestor = None
+        self._kanban_mirror_conn = None
+        self._kanban_backfilled_threads: set[str] = set()
+        self._kanban_thread_backfills: Dict[str, asyncio.Task] = {}
         # WebSocket-level liveness probe. Discord REST and Gateway are distinct
         # transports: a REST 200 cannot prove that this client is still receiving
         # Gateway events. Sample the current Discord WebSocket's ready/open/ACK
@@ -941,6 +1330,16 @@ class DiscordAdapter(BasePlatformAdapter):
         # Mirrors the Telegram #58563 fix. Entries are dropped on finalize.
         self._last_overflow_preview: Dict[tuple, str] = {}
         self._warned_fail_closed_default = False
+
+    def set_runtime_profile_home(self, profile_home: Optional[_Path | str]) -> None:
+        """Pin every durable Discord state store to this adapter's profile."""
+        super().set_runtime_profile_home(profile_home)
+        home = self._runtime_profile_home
+        self._nonconversational_messages.set_profile_home(home)
+        if home is not None:
+            from plugins.platforms.discord.recovery import DiscordRecoveryStore
+
+            self._discord_recovery_store = DiscordRecoveryStore(home)
 
     def _config_value(
         self, key: str, default: Any, *, env_key: Optional[str] = None
@@ -1161,6 +1560,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
 
+                # Discord may emit on_ready more than once on RESUME/reconnect.
+                # Ownership is gateway-wide, so ask the runner to re-check every
+                # multiplex identity rather than claiming it locally.
+                runner = getattr(adapter_self, "gateway_runner", None)
+                revalidate = getattr(runner, "_revalidate_kanban_router_readiness", None)
+                if callable(revalidate):
+                    await revalidate()
+
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
@@ -1168,23 +1575,43 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 if adapter_self._missed_message_backfill_enabled():
                     adapter_self._ensure_missed_message_backfill_task()
+                if adapter_self._auto_voice_channel_id() is not None:
+                    asyncio.create_task(adapter_self._sync_auto_voice_presence())
+
+            @self._client.event
+            async def on_disconnect():
+                adapter_self._ready_event.clear()
+                await adapter_self._stop_kanban_ingress_runtime()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
                 await adapter_self._dispatch_discord_message(message)
 
             @self._client.event
+            async def on_raw_reaction_add(payload):
+                """Route supported Discord reaction intent signals into Kanban."""
+                await adapter_self._handle_raw_reaction_add(payload)
+
+            @self._client.event
+            async def on_raw_reaction_remove(payload):
+                """Allow a later re-add of a supported Kanban reaction to dispatch again."""
+                await adapter_self._handle_raw_reaction_remove(payload)
+
+            @self._client.event
             async def on_voice_state_update(member, before, after):
-                """Track voice channel join/leave events."""
-                # Only track channels where the bot is connected
+                """Track voice channel join/leave events and auto-manage configured voice presence."""
+                # Ignore the bot itself
+                if member == adapter_self._client.user:
+                    return
+
+                await adapter_self._handle_auto_voice_state_update(member, before, after)
+
+                # Only log channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
                     return
                 guild_id = member.guild.id
                 if guild_id not in bot_guild_ids:
-                    return
-                # Ignore the bot itself
-                if member == adapter_self._client.user:
                     return
 
                 joined = before.channel is None and after.channel is not None
@@ -1327,13 +1754,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 await asyncio.wait_for(self._ready_event.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 pass
+        kanban_observed, _kanban_relevant = await self._observe_kanban_message(message)
         admitted, role_authorized = self._discord_message_admission(
             message, claim=True,
         )
         if not admitted:
             return False
+        if kanban_observed:
+            return True
+        kanban_route = await self._maybe_handle_kanban_inbox(message)
+        if kanban_route.consumed:
+            return True
+        if not self._is_kanban_ingress(kanban_route):
+            return False
         return await self._handle_message(
-            message, role_authorized=role_authorized,
+            message, role_authorized=role_authorized, kanban_route=kanban_route,
         )
 
     async def _cancel_bot_task(self) -> None:
@@ -1599,6 +2034,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True
+        self._kanban_router_ingress_identity = None
         # Cancel the liveness probe first so it can't fire a spurious fatal
         # error / reconnect while we're intentionally tearing the adapter down.
         await self._cancel_liveness_task()
@@ -1635,6 +2071,8 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
 
+        await self._stop_kanban_ingress_runtime()
+
         self._running = False
         self._client = None
         self._ready_event.clear()
@@ -1646,10 +2084,29 @@ class DiscordAdapter(BasePlatformAdapter):
 
         logger.info("[%s] Disconnected", self.name)
 
+    async def _stop_kanban_ingress_runtime(self) -> None:
+        """Revoke and drain this adapter's ingress runtime, restartably."""
+        self._kanban_router_ingress_identity = None
+        await self._kanban_supervisor.stop()
+        self._kanban_inbound_task = None
+        self._kanban_backfill_task = None
+        for task in self._kanban_thread_backfills.values():
+            if not task.done():
+                task.cancel()
+        if self._kanban_thread_backfills:
+            await asyncio.gather(*self._kanban_thread_backfills.values(), return_exceptions=True)
+        self._kanban_thread_backfills.clear()
+        self._kanban_backfilled_threads.clear()
+        if self._kanban_mirror_conn is not None:
+            self._kanban_mirror_conn.close()
+        self._kanban_mirror_conn = None
+        self._kanban_ingestor = None
+
     def _command_sync_state_path(self) -> _Path:
         from hermes_constants import get_hermes_home
 
-        directory = get_hermes_home() / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+        home = getattr(self, "_runtime_profile_home", None) or get_hermes_home()
+        directory = home / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -1702,33 +2159,40 @@ class DiscordAdapter(BasePlatformAdapter):
             return "same slash-command fingerprint already synced"
         return None
 
+    def _command_sync_entry_for_attempt(self, state: dict, app_id: Any, fingerprint: str) -> dict:
+        """Return persisted sync state for an in-flight attempt.
+
+        A previous successful sync only proves that exact fingerprint reached
+        Discord.  If a later desired command set fails after recording its
+        attempt, keeping the old ``last_success_at`` would poison the cache and
+        make the gateway skip every future retry for the unsynced fingerprint.
+        """
+        key = self._command_sync_state_key(app_id)
+        previous = state.get(key) if isinstance(state.get(key), dict) else {}
+        entry = dict(previous)
+        if previous.get("fingerprint") != fingerprint:
+            entry.pop("last_success_at", None)
+            entry.pop("summary", None)
+        entry["fingerprint"] = fingerprint
+        entry["last_attempt_at"] = time.time()
+        return entry
+
     def _record_command_sync_attempt(self, app_id: Any, fingerprint: str) -> None:
         state = self._read_command_sync_state()
-        state[self._command_sync_state_key(app_id)] = {
-            **(
-                state.get(self._command_sync_state_key(app_id))
-                if isinstance(state.get(self._command_sync_state_key(app_id)), dict)
-                else {}
-            ),
-            "fingerprint": fingerprint,
-            "last_attempt_at": time.time(),
-        }
+        state[self._command_sync_state_key(app_id)] = self._command_sync_entry_for_attempt(
+            state,
+            app_id,
+            fingerprint,
+        )
         self._write_command_sync_state(state)
 
     def _record_command_sync_rate_limit(self, app_id: Any, fingerprint: str, retry_after: float) -> None:
         retry_after = max(1.0, float(retry_after))
         state = self._read_command_sync_state()
-        state[self._command_sync_state_key(app_id)] = {
-            **(
-                state.get(self._command_sync_state_key(app_id))
-                if isinstance(state.get(self._command_sync_state_key(app_id)), dict)
-                else {}
-            ),
-            "fingerprint": fingerprint,
-            "last_attempt_at": time.time(),
-            "retry_after_until": time.time() + retry_after,
-            "retry_after": retry_after,
-        }
+        entry = self._command_sync_entry_for_attempt(state, app_id, fingerprint)
+        entry["retry_after_until"] = time.time() + retry_after
+        entry["retry_after"] = retry_after
+        state[self._command_sync_state_key(app_id)] = entry
         self._write_command_sync_state(state)
 
     def _record_command_sync_success(self, app_id: Any, fingerprint: str, summary: dict) -> None:
@@ -2828,9 +3292,6 @@ class DiscordAdapter(BasePlatformAdapter):
         Forum channels (type 15) reject direct messages — a thread post is
         created automatically.
         """
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
         try:
             # Determine target channel: thread_id in metadata takes precedence.
             thread_id = None
@@ -2838,6 +3299,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 thread_id = metadata["thread_id"]
             nonconversational = _metadata_marks_nonconversational(metadata)
             final_delivery = bool(metadata and metadata.get("notify"))
+            suppress_embeds = _metadata_suppresses_embeds(metadata)
+
+            if not self._client:
+                return SendResult(success=False, error="Not connected")
 
             if thread_id:
                 # Fetch the thread directly — threads are addressed by their own ID.
@@ -2853,6 +3318,17 @@ class DiscordAdapter(BasePlatformAdapter):
                     channel = await self._client.fetch_channel(int(chat_id))
                 if not channel:
                     return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord outbound send: target=%s thread=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    thread_id or "",
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
 
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
@@ -2889,10 +3365,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 else:  # "first" (default) or "off"
                     chunk_reference = reference if i == 0 else None
                 try:
-                    msg = await channel.send(
-                        content=chunk,
-                        reference=chunk_reference,
-                    )
+                    send_kwargs = {
+                        "content": chunk,
+                        "reference": chunk_reference,
+                    }
+                    if suppress_embeds:
+                        send_kwargs["suppress_embeds"] = True
+                    msg = await channel.send(**send_kwargs)
                 except Exception as e:
                     err_text = str(e)
                     if (
@@ -2911,10 +3390,13 @@ class DiscordAdapter(BasePlatformAdapter):
                             reply_to,
                         )
                         reference = None
-                        msg = await channel.send(
-                            content=chunk,
-                            reference=None,
-                        )
+                        retry_kwargs = {
+                            "content": chunk,
+                            "reference": None,
+                        }
+                        if suppress_embeds:
+                            retry_kwargs["suppress_embeds"] = True
+                        msg = await channel.send(**retry_kwargs)
                     else:
                         raise
                 message_ids.append(str(msg.id))
@@ -3133,7 +3615,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 self._last_overflow_preview.pop(_preview_key, None)
 
             try:
-                await msg.edit(content=formatted)
+                edit_kwargs = {"content": formatted}
+                if _metadata_suppresses_embeds(metadata):
+                    edit_kwargs["suppress"] = True
+                await msg.edit(**edit_kwargs)
                 if _saturated_preview:
                     self._last_overflow_preview[_preview_key] = formatted
             except Exception as edit_err:
@@ -3309,6 +3794,16 @@ class DiscordAdapter(BasePlatformAdapter):
         if not channel:
             return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+        allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed_to_send:
+            logger.warning(
+                "[%s] Blocked Discord file outbound send: target=%s reason=%s",
+                self.name,
+                chat_id,
+                deny_reason,
+            )
+            return SendResult(success=False, error=deny_reason)
+
         filename = file_name or os.path.basename(file_path)
         with open(file_path, "rb") as fh:
             file = discord.File(fh, filename=filename)
@@ -3360,6 +3855,16 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to resolve channel for multi-image send: %s", self.name, e)
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
+            return
+
+        allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed_to_send:
+            logger.warning(
+                "[%s] Blocked Discord multi-image outbound send: target=%s reason=%s",
+                self.name,
+                chat_id,
+                deny_reason,
+            )
             return
 
         CHUNK = 10
@@ -3460,11 +3965,32 @@ class DiscordAdapter(BasePlatformAdapter):
         When the bot is in a voice channel for this chat's guild, play
         directly in the VC instead of sending as a file attachment.
         """
+        linked_voice_text_channel = False
         for gid, text_ch_id in self._voice_text_channels.items():
-            if str(text_ch_id) == str(chat_id) and self.is_in_voice_channel(gid):
+            if str(text_ch_id) != str(chat_id):
+                continue
+            linked_voice_text_channel = True
+            if self.is_in_voice_channel(gid):
                 logger.info("[%s] Playing TTS in voice channel (guild=%d)", self.name, gid)
                 success = await self.play_in_voice_channel(gid, audio_path)
                 return SendResult(success=success)
+
+        # Auto-managed Discord voice uses the linked text channel as the
+        # transcript/control surface. If the voice client is not actually
+        # connected yet (startup race, reconnect, permission blip), fail closed
+        # instead of dropping a generated voice-message attachment into the
+        # transcript channel.
+        auto_channel_id = self._auto_voice_channel_id()
+        if linked_voice_text_channel or (
+            auto_channel_id is not None and str(auto_channel_id) == str(chat_id)
+        ):
+            logger.warning(
+                "[%s] Suppressing text-channel TTS fallback for voice-linked Discord channel %s; no active voice connection",
+                self.name,
+                chat_id,
+            )
+            return SendResult(success=False, error="No active Discord voice connection for voice-linked text channel")
+
         return await self.send_voice(chat_id=chat_id, audio_path=audio_path, **kwargs)
 
     async def send_voice(
@@ -3485,6 +4011,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord voice outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
 
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=f"Audio file not found: {audio_path}")
@@ -3559,11 +4095,16 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _load_voice_fx_config(self) -> Dict[str, Any]:
-        """Read voice mixer / ambient / ack settings from config.yaml.
+        """Read voice mixer, ambient, and acknowledgement settings from config.yaml.
 
         All settings live under ``discord.voice_fx`` in config.yaml (NOT the
         .env file — these are behavioral, not secrets).  The feature is OFF by
-        default; users opt in with ``discord.voice_fx.enabled: true``.
+        default; users opt in with ``discord.voice_fx.enabled: true``.  The
+        acknowledgement lists are ``cancellation_ack_phrases``,
+        ``model_switch_ack_phrases``, ``join_ack_phrases``, ``busy_ack_phrases``,
+        ``restart_join_ack_phrases``, and ``session_resume_ack_phrases``.
+        ``session_resume_user_turn_threshold`` controls when the session-resume
+        acknowledgement applies.
 
         Returns a dict with safe defaults so callers never KeyError.
         """
@@ -3582,6 +4123,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 "Give me a sec.",
                 "On it.",
             ],
+            "cancellation_ack_phrases": [
+                "Sure thing.",
+                "Ignored.",
+                "Consider it unsaid.",
+            ],
+            "model_switch_ack_phrases": ["Model switched."],
+            "join_ack_phrases": [],
+            "busy_ack_phrases": [],
+            "restart_join_ack_phrases": ["Back online."],
+            "session_resume_ack_phrases": ["Picking up where we left off."],
+            "session_resume_user_turn_threshold": 2,
         }
         try:
             from hermes_cli.config import read_raw_config
@@ -3645,13 +4197,43 @@ class DiscordAdapter(BasePlatformAdapter):
             if error:
                 logger.error("Voice mixer stream error (guild=%d): %s", guild_id, error)
 
+        audio_source_base = getattr(discord, "AudioSource", None)
+        if isinstance(audio_source_base, type):
+            class _DiscordMixerSource(audio_source_base):
+                def __init__(self, wrapped_mixer):
+                    self._wrapped_mixer = wrapped_mixer
+
+                def read(self) -> bytes:
+                    return self._wrapped_mixer.read()
+
+                def is_opus(self) -> bool:
+                    return False
+
+                def cleanup(self) -> None:
+                    cleanup = getattr(self._wrapped_mixer, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
+
+            source = _DiscordMixerSource(mixer)
+        else:
+            # Test/mock fallback only. Real discord.py exposes AudioSource and
+            # rejects sources that are not instances of it.
+            source = mixer
+
         if vc.is_playing():
             vc.stop()
-        vc.play(mixer, after=_after)
+        vc.play(source, after=_after)
         self._voice_mixers[guild_id] = mixer
         logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
 
-    async def play_ack_in_voice(self, guild_id: int, phrase: Optional[str] = None) -> bool:
+    async def play_ack_in_voice(
+        self,
+        guild_id: int,
+        phrase: Optional[str] = None,
+        *,
+        model_name: str = "",
+        voice_settings: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Speak a short acknowledgement over the ambient bed.
 
         Called from the gateway's tool-progress hook on the first tool call of
@@ -3664,22 +4246,30 @@ class DiscordAdapter(BasePlatformAdapter):
         if mixer is None:
             return False
         if phrase is None:
-            import random
-            phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
-            phrase = random.choice(phrases)
+            selected = None
+            catalog = vars(self).get("_voice_ack_catalog")
+            if catalog:
+                selected = catalog.choose("tool_call", model_name=model_name)
+            if selected is not None:
+                phrase = selected.text
+                voice_settings = selected.voice_settings
+            else:
+                import random
+                phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
+                phrase = random.choice(phrases)
 
         # Synthesise the ack via the configured TTS provider, then layer it.
-        import uuid as _uuid
-        audio_path = os.path.join(
-            tempfile.gettempdir(), "hermes_voice",
-            f"ack_{_uuid.uuid4().hex[:12]}.mp3",
-        )
-        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+        with self._runtime_profile_scope(None):
+            audio_path = gateway_tts_temp_path("ack", "mp3")
         try:
-            from tools.tts_tool import text_to_speech_tool
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=phrase, output_path=audio_path
-            )
+            with self._runtime_profile_scope(None):
+                from tools.tts_tool import text_to_speech_tool
+                result_json = await asyncio.to_thread(
+                    text_to_speech_tool,
+                    text=phrase,
+                    output_path=audio_path,
+                    voice_settings=voice_settings,
+                )
             result = json.loads(result_json)
             actual = result.get("file_path", audio_path)
             if not result.get("success") or not os.path.isfile(actual):
@@ -3707,10 +4297,273 @@ class DiscordAdapter(BasePlatformAdapter):
                     except OSError:
                         pass
 
+    def _voice_ack_model_name(self, guild_id: int) -> str:
+        """Resolve the active LLM for a linked Discord voice session."""
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_voice_ack_model_for_source", None)
+        source_data = getattr(self, "_voice_sources", {}).get(guild_id)
+        if not callable(resolver) or not source_data:
+            return ""
+        try:
+            return str(resolver(SessionSource.from_dict(source_data)) or "")
+        except Exception:
+            logger.debug("Could not resolve Discord voice acknowledgement model", exc_info=True)
+            return ""
+
+    async def play_cancellation_ack_in_voice(
+        self,
+        guild_id: int,
+        *,
+        model_name: str = "",
+    ) -> bool:
+        """Speak a configured acknowledgement after dropping a voice transcript."""
+        if not self.is_in_voice_channel(guild_id):
+            return False
+        model_name = model_name or self._voice_ack_model_name(guild_id)
+        selected = None
+        catalog = vars(self).get("_voice_ack_catalog")
+        if catalog:
+            selected = catalog.choose("cancellation", model_name=model_name)
+        voice_settings = selected.voice_settings if selected is not None else None
+        if selected is not None:
+            phrase = selected.text
+        else:
+            import random
+
+            raw_phrases = getattr(self, "_voice_fx_cfg", {}).get("cancellation_ack_phrases") or []
+            phrases = [str(item).strip() for item in raw_phrases if str(item).strip()]
+            if not phrases:
+                phrases = ["Sure thing.", "Ignored.", "Consider it unsaid."]
+            phrase = random.choice(phrases)
+        audio_path = gateway_tts_temp_path("cancellation_ack", "mp3")
+        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+        try:
+            from tools.tts_tool import text_to_speech_tool
+            result_json = await asyncio.to_thread(
+                text_to_speech_tool,
+                text=phrase,
+                output_path=audio_path,
+                voice_settings=voice_settings,
+            )
+            result = json.loads(result_json)
+            actual = result.get("file_path", audio_path)
+            if not result.get("success") or not os.path.isfile(actual):
+                return False
+            return await self.play_in_voice_channel(guild_id, actual)
+        except Exception as e:
+            logger.debug("play_cancellation_ack_in_voice failed: %s", e)
+            return False
+        finally:
+            for p in {audio_path, locals().get("actual")}:
+                if p and os.path.isfile(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
     def voice_mixer_active(self, guild_id: int) -> bool:
         """True when a continuous mixer is installed for this guild."""
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
+    def _auto_voice_channel_id(self) -> Optional[int]:
+        """Configured Discord voice channel that explicitly enables hands-free mode."""
+        raw = self.config.extra.get("auto_voice_channel_id")
+        if raw in (None, ""):
+            return None
+        try:
+            channel_id = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid discord.auto_voice_channel_id: %r", raw)
+            return None
+        return channel_id if channel_id > 0 else None
+
+    def _auto_voice_user_ids(self) -> set[str]:
+        """Explicit Discord user IDs allowed to trigger auto voice mode."""
+        raw = self.config.extra.get("auto_voice_user_ids")
+        if raw in (None, ""):
+            return set()
+        if isinstance(raw, (list, tuple, set)):
+            items = raw
+        else:
+            items = str(raw).split(",")
+        return {_clean_discord_id(str(item)) for item in items if str(item).strip()}
+
+    def _is_auto_voice_member_allowed(self, member, guild=None) -> bool:
+        explicit_users = self._auto_voice_user_ids()
+        member_id = str(getattr(member, "id", ""))
+        if explicit_users:
+            return _clean_discord_id(member_id) in explicit_users
+        return self._is_allowed_user(member_id, member, guild=guild, is_dm=False)
+
+    def _is_auto_voice_user_id_allowed(self, user_id: str | int) -> bool:
+        """Return True when ``user_id`` is explicitly allowed for auto voice."""
+        explicit_users = self._auto_voice_user_ids()
+        if not explicit_users:
+            return False
+        return _clean_discord_id(str(user_id)) in explicit_users
+
+    def _is_voice_speaker_allowed(self, user_id: str | int, *, guild=None) -> bool:
+        """Authorize captured voice input for the active voice session."""
+        explicit_users = self._auto_voice_user_ids()
+        cleaned = _clean_discord_id(str(user_id))
+        if explicit_users:
+            return cleaned in explicit_users
+        return self._is_allowed_user(cleaned, guild=guild, is_dm=False)
+
+    async def _get_channel_by_id(self, channel_id: int):
+        """Return a Discord channel from cache or API fetch."""
+        if not self._client:
+            return None
+        channel = self._client.get_channel(int(channel_id))
+        if channel is not None:
+            return channel
+        fetch = getattr(self._client, "fetch_channel", None)
+        if fetch is None:
+            return None
+        try:
+            return await fetch(int(channel_id))
+        except Exception as e:
+            logger.warning("Failed to fetch Discord channel %s: %s", channel_id, e)
+            return None
+
+    def _has_allowed_human_in_voice_channel(self, channel) -> bool:
+        """True when at least one authorized non-bot user is present."""
+        guild = getattr(channel, "guild", None)
+        for member in getattr(channel, "members", []) or []:
+            if getattr(member, "bot", False):
+                continue
+            if self._is_auto_voice_member_allowed(member, guild=guild):
+                return True
+        return False
+
+    def _is_auto_voice_guild(self, guild_id: int) -> bool:
+        """Return True when this guild is connected to the configured auto voice channel."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None:
+            return False
+        vc = self._voice_clients.get(guild_id)
+        channel = getattr(vc, "channel", None) if vc else None
+        return getattr(channel, "id", None) == auto_channel_id
+
+    async def _sync_auto_voice_presence(self) -> None:
+        """Join the configured voice channel on startup if an authorized user is already there."""
+        channel_id = self._auto_voice_channel_id()
+        if channel_id is None:
+            return
+        channel = await self._get_channel_by_id(channel_id)
+        if channel is None:
+            logger.warning("Configured Discord auto voice channel %s was not found", channel_id)
+            return
+        if not self._has_allowed_human_in_voice_channel(channel):
+            return
+        runner = getattr(self, "gateway_runner", None)
+        if runner and hasattr(runner, "_handle_discord_auto_voice_join"):
+            member = next(
+                (
+                    m for m in getattr(channel, "members", []) or []
+                    if not getattr(m, "bot", False)
+                    and self._is_auto_voice_member_allowed(m, guild=getattr(channel, "guild", None))
+                ),
+                None,
+            )
+            if member is not None:
+                await runner._handle_discord_auto_voice_join(self, member, channel)
+
+    async def _handle_auto_voice_state_update(self, member, before, after) -> None:
+        """Join/leave auto voice mode based only on configured Discord VC presence."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None or getattr(member, "bot", False):
+            return
+        guild = getattr(member, "guild", None)
+        if not self._is_auto_voice_member_allowed(member, guild=guild):
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        before_id = getattr(before_channel, "id", None)
+        after_id = getattr(after_channel, "id", None)
+        moved_into_auto = after_id == auto_channel_id and before_id != auto_channel_id
+        moved_out_of_auto = before_id == auto_channel_id and after_id != auto_channel_id
+        if not moved_into_auto and not moved_out_of_auto:
+            return
+
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return
+        if moved_into_auto and hasattr(runner, "_handle_discord_auto_voice_join"):
+            await runner._handle_discord_auto_voice_join(self, member, after_channel)
+        elif moved_out_of_auto and hasattr(runner, "_handle_discord_auto_voice_leave"):
+            if before_channel is not None and self._has_allowed_human_in_voice_channel(before_channel):
+                return
+            await runner._handle_discord_auto_voice_leave(self, member, before_channel)
+
+    def _configured_stt_aliases(self) -> Dict[str, str]:
+        """Return normalized Discord STT alias phrase -> replacement text.
+
+        Aliases live in ``voice/commands.toml``, keyed by replacement text
+        with one or more spoken phrases per entry:
+
+            [stt_aliases]
+            "/new" = ["reset session", "new session", "start over"]
+            "/queue continue" = ["keep going"]
+        """
+        raw = getattr(self, "_stt_aliases", {})
+        if not isinstance(raw, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for target, phrases in raw.items():
+            replacement = str(target or "").strip()
+            if not replacement:
+                continue
+            if isinstance(phrases, str):
+                phrases = [phrases]
+            if not isinstance(phrases, (list, tuple, set)):
+                continue
+            for phrase in phrases:
+                norm = _normalize_discord_stt_alias_text(str(phrase or ""))
+                if norm:
+                    aliases[norm] = replacement
+        return aliases
+
+    def _rewrite_stt_alias(self, transcript: str) -> str:
+        """Rewrite an exact Discord voice transcript alias to configured text."""
+        aliases = self._configured_stt_aliases()
+        if not aliases:
+            return transcript
+        from tools.voice_mode import clean_voice_transcript
+
+        candidate = clean_voice_transcript(transcript)
+        replacement = aliases.get(_normalize_discord_stt_alias_text(candidate))
+        if not replacement:
+            return transcript
+        logger.info("Discord STT alias matched; rewriting voice transcript to configured target")
+        return replacement
+
+    def _schedule_stt_warmup(self) -> None:
+        """Best-effort background warmup for local STT on first VC join."""
+        existing = getattr(self, "_stt_warmup_task", None)
+        if existing and not existing.done():
+            return
+
+        async def _warm() -> None:
+            try:
+                from tools.transcription_tools import warm_local_stt_model
+                result = await asyncio.to_thread(warm_local_stt_model)
+                if result.get("success") and result.get("warmed"):
+                    logger.info(
+                        "Voice STT warmup complete (provider=%s model=%s)",
+                        result.get("provider"), result.get("model"),
+                    )
+                elif result.get("success"):
+                    logger.debug("Voice STT warmup skipped: %s", result)
+                elif result.get("reason") == "stt_disabled":
+                    logger.debug("Voice STT warmup skipped: STT disabled")
+                else:
+                    logger.warning("Voice STT warmup failed: %s", result)
+            except Exception as exc:
+                logger.warning("Voice STT warmup failed: %s", exc)
+
+        self._stt_warmup_task = asyncio.ensure_future(_warm())
 
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
@@ -3731,33 +4584,41 @@ class DiscordAdapter(BasePlatformAdapter):
 
             vc = await channel.connect()
             self._voice_clients[guild_id] = vc
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             self._reset_voice_timeout(guild_id)
 
             # Start voice receiver (Phase 2: listen to users)
             try:
-                receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+                receiver = VoiceReceiver(
+                    vc,
+                    allowed_user_ids=self._auto_voice_user_ids() or self._allowed_user_ids,
+                )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
                 self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
                     self._voice_listen_loop(guild_id)
                 )
+                self._schedule_stt_warmup()
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
 
-            # Phase 3: install the continuous mixer (ambient bed + ducked
-            # speech).  Best-effort — if it fails we fall back to the legacy
-            # one-shot FFmpegPCMAudio playback path in play_in_voice_channel.
-            if getattr(self, "_voice_fx_cfg", {}).get("enabled"):
-                try:
-                    await self._install_voice_mixer(guild_id, vc)
-                except Exception as e:
-                    logger.warning("Voice mixer failed to start: %s", e)
-
+            # Do not start an outbound stream while idle. TTS uses the one-shot
+            # playback path in play_in_voice_channel, so Discord only shows
+            # Hermes speaking while it has meaningful audio to send.
             return True
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            # Invalidate any in-flight STT before cancelling the listen loop.
+            # leave_voice_channel() can await Discord disconnect while a drained
+            # STT worker finishes in the background; bumping the generation first
+            # prevents that late transcript from entering a closing/new session.
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             # Stop voice receiver first
             receiver = self._voice_receivers.pop(guild_id, None)
             if receiver:
@@ -3781,11 +4642,37 @@ class DiscordAdapter(BasePlatformAdapter):
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
                 task.cancel()
-            self._voice_text_channels.pop(guild_id, None)
+            session_channel_id = self._voice_text_channels.pop(guild_id, None)
+            auto_voice_session_channels = getattr(self, "_auto_voice_session_channels", None)
+            if isinstance(auto_voice_session_channels, set) and session_channel_id is not None:
+                auto_voice_session_channels.discard(str(session_channel_id))
             self._voice_sources.pop(guild_id, None)
 
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
+
+    async def stop_voice_playback(self, guild_id: int) -> bool:
+        """Stop active TTS in one guild while keeping the voice connection alive.
+
+        A continuous mixer owns the Discord voice stream, so only its speech
+        children may be removed. Legacy one-shot playback has no mixer and can
+        stop the VoiceClient directly.
+        """
+        mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
+        if mixer is not None:
+            mixer.stop_speech()
+            return True
+
+        vc = self._voice_clients.get(guild_id)
+        if vc is None:
+            return False
+        try:
+            if vc.is_playing():
+                vc.stop()
+                return True
+        except Exception as exc:
+            logger.debug("Failed to stop Discord voice playback for guild %s: %s", guild_id, exc)
+        return False
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
@@ -3879,6 +4766,8 @@ class DiscordAdapter(BasePlatformAdapter):
         task = self._voice_timeout_tasks.pop(guild_id, None)
         if task:
             task.cancel()
+        if self._is_auto_voice_guild(guild_id):
+            return
         self._voice_timeout_tasks[guild_id] = asyncio.ensure_future(
             self._voice_timeout_handler(guild_id)
         )
@@ -4028,43 +4917,111 @@ class DiscordAdapter(BasePlatformAdapter):
                 # guild-scoped and not cross-guild.
                 _vc_guild = self._client.get_guild(guild_id) if self._client is not None else None
                 for user_id, pcm_data in completed:
-                    if not self._is_allowed_user(
-                        str(user_id),
-                        guild=_vc_guild,
-                        is_dm=False,
-                    ):
+                    if not self._is_voice_speaker_allowed(user_id, guild=_vc_guild):
                         continue
                     # A user speaking to the bot is activity too — not just the
                     # bot's own playback. Reset the inactivity timer so an active
                     # listener isn't disconnected mid-conversation (this also
                     # covers voice-on text-only sessions that never play audio).
                     self._reset_voice_timeout(guild_id)
-                    await self._process_voice_input(guild_id, user_id, pcm_data)
+                    session_generation = self._voice_session_generations.get(guild_id, 0)
+                    await self._process_voice_input(
+                        guild_id, user_id, pcm_data,
+                        session_generation=session_generation,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error("Voice listen loop error: %s", e, exc_info=True)
 
-    async def _process_voice_input(self, guild_id: int, user_id: int, pcm_data: bytes):
+    async def _process_voice_worker(self, awaitable, phase: str, wav_path: str):
+        """Run voice file work to completion even if leave cancels the listener.
+
+        ``leave_voice_channel`` cancels the listen loop immediately on user
+        disconnect.  If that cancellation lands while ffmpeg or STT is using the
+        temporary WAV, the old flow unlinked the file from ``finally`` while the
+        worker thread still needed it.  Drain the worker first so a disconnect
+        cannot turn a valid utterance into ``FileNotFoundError``.
+        """
+        task = asyncio.create_task(awaitable)
+        logged_cancel = False
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not logged_cancel:
+                    logger.info(
+                        "Voice input %s continuing after listener cancellation (%s)",
+                        phase, os.path.basename(wav_path),
+                    )
+                    logged_cancel = True
+
+    async def _process_voice_input(
+        self,
+        guild_id: int,
+        user_id: int,
+        pcm_data: bytes,
+        *,
+        session_generation: Optional[int] = None,
+    ):
         """Convert PCM -> WAV -> STT -> callback."""
-        from tools.voice_mode import is_whisper_hallucination
+        from tools.voice_mode import (
+            is_stt_cancellation,
+            is_whisper_hallucination,
+            stt_noise_drop_reason,
+        )
 
         tmp_f = tempfile.NamedTemporaryFile(suffix=".wav", prefix="vc_listen_", delete=False)
         wav_path = tmp_f.name
         tmp_f.close()
         try:
-            await asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path)
+            await self._process_voice_worker(
+                asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path),
+                "wav conversion",
+                wav_path,
+            )
 
-            from tools.transcription_tools import transcribe_audio
-            result = await asyncio.to_thread(transcribe_audio, wav_path)
+            with self._runtime_profile_scope(None):
+                from tools.transcription_tools import transcribe_audio
+                result = await self._process_voice_worker(
+                    asyncio.to_thread(transcribe_audio, wav_path),
+                    "transcription",
+                    wav_path,
+                )
 
             if not result.get("success"):
                 return
             transcript = result.get("transcript", "").strip()
             if not transcript or is_whisper_hallucination(transcript):
                 return
+            noise_reason = stt_noise_drop_reason(transcript)
+            if noise_reason:
+                logger.debug(
+                    "Dropping Discord voice transcript before callback "
+                    "(reason=%s): %r",
+                    noise_reason,
+                    transcript[:100],
+                )
+                return
+
+            if is_stt_cancellation(transcript):
+                logger.info("Dropped Discord voice transcript after spoken cancellation")
+                await self.play_cancellation_ack_in_voice(guild_id)
+                return
+
+            if (
+                session_generation is not None
+                and self._voice_session_generations.get(guild_id, 0) != session_generation
+            ):
+                logger.info(
+                    "Dropping stale Discord voice transcript for guild=%s "
+                    "after voice session changed",
+                    guild_id,
+                )
+                return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:
                 await self._voice_input_callback(
@@ -4523,6 +5480,16 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord image outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
+
             # Download the image and send as a Discord file attachment
             # (Discord renders attachments inline, unlike plain URLs)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
@@ -4601,6 +5568,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed_to_send, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed_to_send:
+                logger.warning(
+                    "[%s] Blocked Discord animation outbound send: target=%s reason=%s",
+                    self.name,
+                    chat_id,
+                    deny_reason,
+                )
+                return SendResult(success=False, error=deny_reason)
 
             # Download the GIF and send as a Discord file attachment
             # (Discord renders .gif attachments as auto-playing animations inline)
@@ -4860,12 +5837,14 @@ class DiscordAdapter(BasePlatformAdapter):
     def format_message(self, content: str) -> str:
         """Format message for Discord.
 
-        Converts GFM markdown tables to bullet-list groups since Discord
-        does not render pipe tables natively.
+        Convert GFM tables, which Discord does not render natively, then
+        escape markdown markers in prose while preserving fenced and inline
+        code spans.
         """
         if not content:
             return content
-        return convert_table_to_bullets(content)
+        converted = convert_table_to_bullets(content)
+        return _escape_discord_markdown_outside_code(converted)
 
     async def _run_simple_slash(
         self,
@@ -5825,6 +6804,42 @@ class DiscordAdapter(BasePlatformAdapter):
             keys.add(f"#{parent_name}")
 
         return keys
+    def _discord_allowed_channels(self) -> set:
+        """Return Discord channel IDs this adapter may receive/send in.
+
+        An empty set means unrestricted, matching the existing inbound
+        ``DISCORD_ALLOWED_CHANNELS`` semantics. A ``"*"`` entry allows all.
+        """
+        allowed_channels, _ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return allowed_channels
+
+    def _discord_ignored_channels(self) -> set:
+        """Return Discord channel IDs this adapter must never send/respond in."""
+        _allowed_channels, ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return ignored_channels
+
+    def _discord_channel_scope_ids(self, channel: Any) -> set:
+        """Return the Discord keys governing a channel/thread send target."""
+        return self._discord_channel_keys_from_channel(
+            channel, self._get_parent_channel_id(channel)
+        )
+
+    def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
+        """Enforce this profile's Discord channel policy on outbound sends.
+
+        Inbound handling already gates normal messages, but delivery paths
+        (origin/home-channel/cron/tool sends) can target a Discord channel by
+        stored session origin. Re-check the resolved send target here so a
+        profile cannot deliver into a channel its own Discord adapter config
+        denies. Threads inherit their parent channel's policy when the parent
+        ID is available; explicit thread IDs on the allowlist also work.
+        """
+        if DISCORD_AVAILABLE and isinstance(channel, discord.DMChannel):
+            return True, "allowed"
+
+        channel_ids = self._discord_channel_scope_ids(channel)
+        allowed_channels, ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        return _discord_outbound_scope_allowed(channel_ids, allowed_channels, ignored_channels)
 
     def _discord_thread_require_mention(self) -> bool:
         """Return whether thread participation requires @mention to follow up.
@@ -7054,12 +8069,493 @@ class DiscordAdapter(BasePlatformAdapter):
                     raise Exception(f"HTTP {resp.status}")
                 return await resp.read()
 
+    async def _kanban_runtime(self):
+        """Return the config-gated durable ingestor, initialized lazily."""
+        from plugins.platforms.discord.kanban_mirror.inbox import load_config
+
+        cfg = load_config()
+        if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
+            return cfg, None
+        # Only the configured ingress identity may own historical persistence.
+        # Re-check the live identity on every reconnect/worker pass: a stale
+        # startup boolean would let a swapped multiplex bot freeze its policy.
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        if not identity:
+            return cfg, None
+        profile, expected_bot_id = identity
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
+        )
+        actual_bot_id = str(
+            getattr(getattr(client, "user", None), "id", "") or ""
+        )
+        if (profile != getattr(self, "_kanban_router_profile", None)
+                or not self._running or self._disconnecting or not ready
+                or not actual_bot_id or actual_bot_id != str(expected_bot_id)):
+            self._kanban_router_ingress_identity = None
+            return cfg, None
+        if self._kanban_ingestor is None:
+            from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor
+            from plugins.platforms.discord.kanban_mirror.state import connect_mirror, mirror_db_path
+
+            self._kanban_mirror_conn = connect_mirror(mirror_db_path(cfg.board_slug or "default"))
+            self._kanban_ingestor = DiscordBackfillIngestor(
+                self._kanban_mirror_conn,
+                page_size=int(self.config.extra.get("kanban_backfill_page_size", 100)),
+                max_pages=int(self.config.extra.get("kanban_backfill_max_pages", 10)),
+                max_age_seconds=int(self.config.extra.get("kanban_backfill_max_age_seconds", 7 * 86400)),
+            )
+        return cfg, self._kanban_ingestor
+
+    def start_kanban_ingress_workers(self) -> None:
+        """Idempotently start durable workers for a validated, ready ingress."""
+        identity = getattr(self, "_kanban_router_ingress_identity", None)
+        client = getattr(self, "_client", None)
+        client_ready = getattr(client, "is_ready", None)
+        ready = bool(client_ready()) if callable(client_ready) else bool(
+            getattr(self, "_ready_event", None) and self._ready_event.is_set()
+        )
+        actual = str(getattr(getattr(client, "user", None), "id", "") or "")
+        if (not identity or identity[0] != getattr(self, "_kanban_router_profile", None)
+                or actual != str(identity[1]) or not self._running
+                or self._disconnecting or not ready):
+            return
+        self._kanban_inbound_task = self._kanban_supervisor.start(
+            "pending-inbound", self._run_kanban_pending_inbound
+        )
+        self._kanban_backfill_task = self._kanban_supervisor.start(
+            "reconnect-backfill", self._run_kanban_reconnect_backfill
+        )
+
+    def _discord_inbound(self, message: Any, *, relevant: bool):
+        from plugins.platforms.discord.kanban_mirror.backfill import DiscordInbound
+
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference is not None else None
+        replied_author = getattr(resolved, "author", None)
+        created_at = getattr(message, "created_at", None)
+        timestamp = int(created_at.timestamp()) if created_at is not None else None
+        user_id = str(getattr(author, "id", "") or "")
+        guild = getattr(message, "guild", None)
+        is_dm = isinstance(channel, discord.DMChannel) or guild is None
+        allowed_users = getattr(self, "_allowed_user_ids", set()) or set()
+        allowed_roles = getattr(self, "_allowed_role_ids", set()) or set()
+        authorized = self._is_allowed_user(user_id, author, guild=guild, is_dm=is_dm)
+        if user_id in allowed_users:
+            authorization_reason = "allowed_user"
+        elif authorized and allowed_roles:
+            authorization_reason = "allowed_role"
+        elif authorized:
+            authorization_reason = "open_policy"
+        else:
+            authorization_reason = "user_and_role_not_allowed"
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        return DiscordInbound(
+            message_id=str(message.id), thread_id=str(channel.id),
+            content=getattr(message, "content", None),
+            author_label=(str(getattr(author, "display_name", "") or "").strip()
+                          or str(getattr(author, "name", "") or "").strip() or "unknown"),
+            created_at=timestamp,
+            replied_to_message_id=(str(getattr(reference, "message_id", "") or "") or None),
+            relevant=relevant,
+            forum_channel_id=str(getattr(channel, "parent_id", "") or "") or None,
+            author_id=str(getattr(author, "id", "") or "") or None,
+            mentioned_user_ids=tuple(str(getattr(u, "id")) for u in (getattr(message, "mentions", None) or ()) if getattr(u, "id", None)),
+            replied_to_author_id=str(getattr(replied_author, "id", "") or "") or None,
+            replied_to_author_is_bot=bool(getattr(replied_author, "bot", False)),
+            authorized=authorized,
+            authorization_reason=authorization_reason,
+            authorization_policy={
+                "ingress_adapter": self.name,
+                "ingress_bot_id": str(getattr(client_user, "id", "") or ""),
+                "guild_id": str(getattr(guild, "id", "") or ""),
+                "is_dm": is_dm,
+                "allowed_user_ids": sorted(str(value) for value in allowed_users),
+                "allowed_role_ids": sorted(str(value) for value in allowed_roles),
+            },
+        )
+
+    async def _run_kanban_pending_inbound(self) -> None:
+        delay = 0.25
+        while self._running and not self._disconnecting:
+            try:
+                cfg, _ = await self._kanban_runtime()
+                if not (cfg.enabled and cfg.conversation_router_enabled):
+                    return
+                handler = getattr(self, "_kanban_pending_handler", self._process_kanban_pending_inbound)
+                if self._kanban_mirror_conn is None:
+                    delay = min(5.0, delay * 2)
+                else:
+                    from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner
+                    count = await PendingInboundRunner(self._kanban_mirror_conn, handler).run_once()
+                    delay = 0.05 if count else min(2.0, delay * 1.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[%s] durable Kanban inbound runner failed", self.name)
+                delay = min(5.0, delay * 2)
+            await asyncio.sleep(delay)
+
+    async def _process_kanban_pending_inbound(self, pending):
+        from plugins.platforms.discord.kanban_mirror.inbox import DiscordReplyContext, handle_reply
+        from plugins.platforms.discord.kanban_mirror.inbound import ProcessResult
+        from gateway.platforms.base import MessageEvent, MessageType
+        p = pending.payload
+        if p.get("authorized") is not True:
+            return ProcessResult(
+                "disposition", disposition="unauthorized",
+                detail=str(p.get("authorization_reason") or "authorization denied"),
+            )
+        ctx = DiscordReplyContext(
+            message_id=pending.message_id, author_id=p.get("author_id"),
+            author_label=p.get("author_label") or "unknown",
+            forum_channel_id=p.get("forum_channel_id") or "", thread_id=pending.thread_id,
+            content=p.get("content") or "", reply_to_message_id=p.get("replied_to_message_id"),
+            mentioned_user_ids=tuple(p.get("mentioned_user_ids") or ()),
+            replied_to_author_id=p.get("replied_to_author_id"),
+            replied_to_author_is_bot=bool(p.get("replied_to_author_is_bot")),
+        )
+        result = await asyncio.to_thread(handle_reply, ctx)
+        retry_reasons = {"binding_unavailable", "unmapped_thread", "missing_task", "invalid_profile", "ambiguous_owner", "ambiguous_profile_mentions"}
+        if result.reason in retry_reasons:
+            return ProcessResult("retry", detail=result.reason)
+        if result.reason != "conversation_routed":
+            return ProcessResult("disposition", disposition=result.reason, detail=result.ack)
+        source = self.build_source(
+            pending.thread_id, chat_type="group", user_id=p.get("author_id"),
+            user_name=p.get("author_label"), thread_id=pending.thread_id,
+            parent_chat_id=p.get("forum_channel_id"), message_id=pending.message_id,
+        )
+        source.profile = result.route_profile
+        event = MessageEvent(
+            text=p.get("content") or "", message_type=MessageType.TEXT, source=source,
+            message_id=pending.message_id, reply_to_message_id=p.get("replied_to_message_id"),
+            channel_context=result.card_context, outbound_profile=result.route_profile,
+            outbound_profiles=result.route_profiles, correlation_id=result.correlation_id,
+            route_marker=("discord-kanban-directive" if result.action and
+                          result.action.startswith("directive:") else
+                          "discord-kanban-conversation"),
+        )
+        await self._dispatch_message_event(event)
+        return ProcessResult("routed", correlation_id=result.correlation_id)
+
+    async def _fetch_kanban_history_page(self, thread_id: str, after: str | None, limit: int):
+        """Fakeable discord.py history seam used by durable reconnect recovery."""
+        from plugins.platforms.discord.kanban_mirror.backfill import HistoryPage
+
+        # Defense in depth: history must not even be fetched if this adapter is
+        # not the currently validated ingress identity.
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return HistoryPage([], has_more=False)
+
+        channel = self._client.get_channel(int(thread_id)) if self._client else None
+        if channel is None and self._client and hasattr(self._client, "fetch_channel"):
+            channel = await self._client.fetch_channel(int(thread_id))
+        if channel is None:
+            raise LookupError(f"Discord mirror thread unavailable: {thread_id}")
+        kwargs = {"limit": limit, "oldest_first": True}
+        if after is not None:
+            kwargs["after"] = discord.Object(id=int(after))
+        messages = [item async for item in channel.history(**kwargs)]
+        converted = [
+            self._discord_inbound(
+                item,
+                relevant=(
+                    not bool(getattr(getattr(item, "author", None), "bot", False))
+                    and bool(getattr(item, "content", None))
+                    and getattr(item, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+                ),
+            )
+            for item in messages
+        ]
+        return HistoryPage(converted, has_more=len(messages) >= limit)
+
+    async def fetch_after(self, thread_id: str, after: str | None, limit: int):
+        return await self._fetch_kanban_history_page(thread_id, after, limit)
+
+    async def _backfill_kanban_thread(self, thread_id: str) -> None:
+        cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None or thread_id in self._kanban_backfilled_threads:
+            return
+        try:
+            await ingestor.backfill(thread_id, self)
+        except Exception:
+            logger.warning("[%s] Discord mirror backfill failed for thread_id=%s; will retry", self.name, thread_id, exc_info=True)
+            return
+        self._kanban_backfilled_threads.add(thread_id)
+
+    async def _ensure_kanban_thread_backfill(self, thread_id: str) -> None:
+        task = self._kanban_thread_backfills.get(thread_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._backfill_kanban_thread(thread_id))
+            self._kanban_thread_backfills[thread_id] = task
+        await task
+
+    async def _backfill_kanban_mirror_threads(self) -> None:
+        _cfg, ingestor = await self._kanban_runtime()
+        if ingestor is None:
+            return
+        # A reconnect must retry every registered thread from its durable cursor.
+        self._kanban_backfilled_threads.clear()
+        rows = self._kanban_mirror_conn.execute(
+            "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+        ).fetchall()
+        await asyncio.gather(*(self._ensure_kanban_thread_backfill(str(row[0])) for row in rows))
+
+    async def _run_kanban_reconnect_backfill(self) -> None:
+        """Autonomously retry failed reconnect scans from durable cursors."""
+        while self._running and not self._disconnecting:
+            cfg, ingestor = await self._kanban_runtime()
+            if not (cfg.enabled and cfg.conversation_router_enabled) or ingestor is None:
+                return
+            rows = self._kanban_mirror_conn.execute(
+                "SELECT DISTINCT thread_id FROM mirror_binding_epochs ORDER BY thread_id"
+            ).fetchall()
+            await asyncio.gather(*(
+                self._ensure_kanban_thread_backfill(str(row[0])) for row in rows
+                if str(row[0]) not in self._kanban_backfilled_threads
+            ))
+            await asyncio.sleep(2.0)
+
+    def kanban_supervisor_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Expose content-free adapter worker health to the gateway."""
+        return self._kanban_supervisor.snapshot()
+
+    async def _observe_kanban_message(self, message: Any) -> tuple[bool, bool]:
+        cfg, ingestor = await self._kanban_runtime()
+        channel = getattr(message, "channel", None)
+        parent_id = str(getattr(channel, "parent_id", "") or "")
+        if ingestor is None or parent_id not in cfg.forum_channel_ids:
+            return False, False
+        thread_id = str(getattr(channel, "id", "") or "")
+        if not thread_id:
+            return False, False
+        # Observation happens on every multiplexed bot, but only the designated
+        # ingress identity may persist the authoritative authorization decision.
+        ingress_bot_id = str(getattr(cfg, "conversation_router_ingress_bot_id", "") or "")
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        if ingress_bot_id and current_bot_id != ingress_bot_id:
+            return True, False
+        # Finish older ordered history first. The ingestor's per-thread lock also
+        # serializes a reconnect fetch racing this live gateway event.
+        await self._ensure_kanban_thread_backfill(thread_id)
+        relevant = (
+            not bool(getattr(getattr(message, "author", None), "bot", False))
+            and bool(getattr(message, "content", None))
+            and getattr(message, "type", None) in {discord.MessageType.default, discord.MessageType.reply}
+        )
+        await ingestor.ingest_live(self._discord_inbound(message, relevant=relevant))
+        return True, relevant
+
+    def _is_kanban_ingress(self, result: Any) -> bool:
+        """Allow routed conversation dispatch only on the designated bot."""
+        ingress_bot_id = str(getattr(result, "ingress_bot_id", "") or "")
+        if not ingress_bot_id:
+            return True
+        client_user = getattr(getattr(self, "_client", None), "user", None)
+        current_bot_id = str(getattr(client_user, "id", "") or "")
+        return current_bot_id == ingress_bot_id
+
+    async def _maybe_handle_kanban_inbox(self, message: DiscordMessage):
+        """Inspect mapped Discord Forum replies before chat dispatch."""
+        try:
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_message
+
+            result = await maybe_handle_discord_message(
+                message,
+                mark_nonconversational=self._nonconversational_messages.mark_many,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+            )
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban inbox failed for message_id=%s",
+                self.name,
+                getattr(message, "id", "unknown"),
+                exc_info=True,
+            )
+            from plugins.platforms.discord.kanban_mirror.inbox import (
+                KanbanReplyInboxResult,
+                load_config as load_kanban_inbox_config,
+            )
+
+            cfg = load_kanban_inbox_config()
+            channel = getattr(message, "channel", None)
+            channel_ids = {
+                str(value)
+                for value in (
+                    getattr(channel, "id", None),
+                    getattr(channel, "parent_id", None),
+                )
+                if value is not None
+            }
+            fail_closed = bool(
+                cfg.enabled
+                and cfg.conversation_router_enabled
+                and cfg.forum_channel_ids
+                and channel_ids.intersection(cfg.forum_channel_ids)
+            )
+            return KanbanReplyInboxResult(
+                consumed=fail_closed,
+                reason="conversation_router_error" if fail_closed else "error",
+                action="conversation" if fail_closed else None,
+                ingress_bot_id=cfg.conversation_router_ingress_bot_id,
+            )
+        if result.consumed:
+            logger.info(
+                "[%s] Discord on_message consumed by Kanban inbox: message_id=%s task_id=%s action=%s reason=%s",
+                self.name,
+                getattr(message, "id", "unknown"),
+                result.task_id,
+                result.action,
+                result.reason,
+            )
+        return result
+
+    async def _handle_raw_reaction_add(self, payload: Any) -> bool:
+        """Handle supported Discord reaction-add events before normal dispatch."""
+        user_id = str(getattr(payload, "user_id", "") or "")
+        if not user_id:
+            return False
+        member = getattr(payload, "member", None)
+        if bool(getattr(member, "bot", False)):
+            if os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip() != "all":
+                return False
+        else:
+            guild = getattr(member, "guild", None) if member is not None else None
+            if not self._is_allowed_user(user_id, author=member, guild=guild):
+                logger.warning("[%s] Ignoring unauthorized Discord Kanban reaction from user_id=%s", self.name, user_id)
+                return False
+        if self._client and self._client.user is not None:
+            if user_id == str(getattr(self._client.user, "id", "") or ""):
+                return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
+        try:
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_reaction
+
+            result = await maybe_handle_discord_reaction(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
+            )
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban reaction inbox failed; continuing normal dispatch for message_id=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                exc_info=True,
+            )
+            return False
+        if result.reason == "conversation_routed" and result.route_profile:
+            from gateway.platforms.base import MessageEvent, MessageType
+            source = self.build_source(
+                str(getattr(payload, "channel_id", "")), chat_type="group",
+                user_id=user_id, user_name=getattr(member, "display_name", None),
+                thread_id=str(getattr(payload, "channel_id", "")),
+                parent_chat_id=str(getattr(channel, "parent_id", "") or ""),
+                message_id=result.correlation_id,
+            )
+            source.profile = result.route_profile
+            await self._dispatch_message_event(MessageEvent(
+                text=(f"Discord Kanban reaction directive: {result.action}. "
+                      f"Reacted message: {getattr(payload, 'message_id', '')}."),
+                message_type=MessageType.TEXT, source=source,
+                message_id=result.correlation_id, channel_context=result.card_context,
+                outbound_profile=result.route_profile,
+                outbound_profiles=result.route_profiles,
+                correlation_id=result.correlation_id,
+                route_marker="discord-kanban-directive",
+            ))
+            return True
+        if result.consumed:
+            logger.info(
+                "[%s] Discord reaction consumed by Kanban inbox: message_id=%s thread=%s task_id=%s action=%s reason=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                getattr(payload, "channel_id", "unknown"),
+                result.task_id,
+                result.action,
+                result.reason,
+            )
+            return True
+        return False
+
+    async def _handle_raw_reaction_remove(self, payload: Any) -> bool:
+        """Clear a supported Kanban reaction receipt after an authorized removal."""
+        user_id = str(getattr(payload, "user_id", "") or "")
+        if not user_id:
+            return False
+        member = getattr(payload, "member", None)
+        guild = getattr(member, "guild", None) if member is not None else None
+        if member is None and self._client is not None:
+            guild_id = getattr(payload, "guild_id", None)
+            try:
+                guild = self._client.get_guild(int(guild_id)) if guild_id is not None else None
+                if guild is not None:
+                    member = guild.get_member(int(user_id))
+                    if member is None:
+                        member = await guild.fetch_member(int(user_id))
+            except Exception:
+                logger.debug("[%s] Could not resolve member for reaction removal", self.name, exc_info=True)
+        if bool(getattr(member, "bot", False)):
+            return False
+        if not self._is_allowed_user(user_id, author=member, guild=guild):
+            return False
+        if self._client and self._client.user is not None:
+            if user_id == str(getattr(self._client.user, "id", "") or ""):
+                return False
+        channel = None
+        if self._client is not None:
+            channel_id = getattr(payload, "channel_id", None)
+            channel = getattr(self._client, "get_channel", lambda _id: None)(channel_id)
+            if channel is None and hasattr(self._client, "fetch_channel"):
+                try:
+                    channel = await self._client.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug(
+                        "[%s] Could not resolve reaction channel_id=%s",
+                        self.name, channel_id, exc_info=True,
+                    )
+        try:
+            from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_reaction_remove
+            result = await maybe_handle_discord_reaction_remove(
+                payload,
+                current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
+                resolved_channel=channel,
+            )
+        except Exception:
+            logger.warning(
+                "[%s] Discord Kanban reaction removal failed for message_id=%s",
+                self.name,
+                getattr(payload, "message_id", "unknown"),
+                exc_info=True,
+            )
+            return False
+        return bool(result.consumed)
+
     async def _handle_message(
         self,
         message: DiscordMessage,
         role_authorized: bool = False,
         *,
         recovered: bool = False,
+        kanban_route: Any | None = None,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -7111,7 +8607,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids.add(parent_channel_id)
             channel_keys = self._discord_channel_keys(message, parent_channel_id)
 
-            # Check allowed channels - if set, only respond in these channels
+            # Check allowed channels - if set, only respond in the explicitly
+            # allowed thread or its currently resolved parent. Participation
+            # may bypass mention requirements below, never channel policy.
             allowed_channels_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
             if allowed_channels_raw:
                 allowed_channels = {ch.strip() for ch in allowed_channels_raw.split(",") if ch.strip()}
@@ -7151,7 +8649,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 and not self._discord_thread_require_mention()
             )
 
-            if require_mention and not is_free_channel and not in_bot_thread:
+            if (
+                require_mention
+                and not is_free_channel
+                and not in_bot_thread
+                and not getattr(kanban_route, "route_profile", None)
+            ):
                 if not self._self_is_explicitly_mentioned(message) and not mention_prefix:
                     return False
         # Auto-thread: when enabled, automatically create a thread for every
@@ -7162,7 +8665,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
+            # Free-response channels only bypass the mention gate; they should
+            # still honor auto-threading so a profile-owned text channel can
+            # respond to every top-level comment while isolating each
+            # conversation in its own thread.  Voice-linked transcript chats
+            # remain inline to avoid spawning threads from live STT chatter.
+            skip_thread = bool(channel_keys & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
@@ -7507,6 +9015,9 @@ class DiscordAdapter(BasePlatformAdapter):
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+        _card_context = getattr(kanban_route, "card_context", None)
+        if _card_context:
+            _channel_context = "\n\n".join(part for part in (_card_context, _channel_context) if part)
 
         reply_to_id = None
         reply_to_text = None
@@ -7529,6 +9040,27 @@ class DiscordAdapter(BasePlatformAdapter):
             auto_skill=_skills,
             channel_prompt=_channel_prompt,
             channel_context=_channel_context,
+            outbound_profile=(
+                getattr(kanban_route, "route_profile", None)
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else None
+            ),
+            outbound_profiles=(
+                getattr(kanban_route, "route_profiles", ())
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else ()
+            ),
+            correlation_id=getattr(kanban_route, "correlation_id", None),
+            route_marker=(
+                ("discord-kanban-directive" if
+                 str(getattr(kanban_route, "action", "")).startswith("directive:") else
+                 "discord-kanban-conversation")
+                if (getattr(kanban_route, "action", None) == "conversation" or
+                    str(getattr(kanban_route, "action", "")).startswith("directive:"))
+                else None
+            ),
         )
 
         # Track thread participation so the bot won't require @mention for
@@ -7546,8 +9078,47 @@ class DiscordAdapter(BasePlatformAdapter):
         ):
             self._enqueue_text_event(event)
         else:
-            await self.handle_message(event)
+            await self._dispatch_message_event(event)
         return True
+
+    async def _dispatch_message_event(self, event: MessageEvent) -> None:
+        """Dispatch a routed Kanban turn through each exact profile identity."""
+        target_profiles = getattr(event, "outbound_profiles", ()) or (
+            (event.outbound_profile,) if getattr(event, "outbound_profile", None) else ()
+        )
+        if not target_profiles:
+            await self.handle_message(event)
+            return
+        runner = getattr(self, "gateway_runner", None)
+        resolver = getattr(runner, "_adapter_for_source", None)
+        deliveries = []
+        for target_profile in target_profiles:
+            routed_event = copy(event)
+            routed_event.source = copy(event.source)
+            routed_event.source.profile = target_profile
+            routed_event.outbound_profile = target_profile
+            target = resolver(routed_event.source, require_profile_adapter=True) if resolver else None
+            if target is None:
+                logger.error(
+                    "[Discord] Kanban outbound profile '%s' has no connected adapter; refusing fallback",
+                    target_profile,
+                )
+                continue
+            deliveries.append((target_profile, target.handle_message(routed_event)))
+        if len(deliveries) == 1 and len(target_profiles) == 1:
+            await deliveries[0][1]
+            return
+        if deliveries:
+            results = await asyncio.gather(
+                *(delivery for _profile, delivery in deliveries), return_exceptions=True
+            )
+            for (target_profile, _delivery), result in zip(deliveries, results):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "[Discord] Kanban outbound profile '%s' dispatch failed",
+                        target_profile,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
     # ------------------------------------------------------------------
     # Text message aggregation (handles Discord client-side splits)
@@ -7628,7 +9199,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # into handle_message → the agent's streaming request,
             # aborting the response the user was waiting on.  The new
             # chunk is handled by the fresh flush task regardless.
-            await asyncio.shield(self.handle_message(event))
+            await asyncio.shield(self._dispatch_message_event(event))
         except asyncio.CancelledError:
             # Only reached if cancel landed before the pop — the shielded
             # handle_message is unaffected either way.  Let the task exit
@@ -8972,6 +10543,52 @@ async def _standalone_send(
         media_files = media_files or []
         last_data = None
         warnings = []
+
+        allowed_channels, ignored_channels = _discord_policy_sets(getattr(pconfig, "extra", None))
+        channel_ids = {str(chat_id)}
+        if thread_id:
+            channel_ids.add(str(thread_id))
+        if thread_id and (allowed_channels or ignored_channels):
+            # REST-only delivery does not have a hydrated discord.py Thread
+            # object. Include the caller-provided chat_id first so explicit
+            # origin delivery to an authorized parent continues to work without
+            # a network probe, then probe the target thread when needed so
+            # parent deny rules still fence stale/leaked thread targets.
+            try:
+                info_url = f"https://discord.com/api/v10/channels/{thread_id}"
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), **_sess_kw) as info_sess:
+                    async with info_sess.get(info_url, headers=json_headers, **_req_kw) as info_resp:
+                        if info_resp.status == 200:
+                            info = await info_resp.json()
+                            parent_id = info.get("parent_id")
+                            if parent_id:
+                                channel_ids.add(str(parent_id))
+                        else:
+                            logger.warning(
+                                "Discord standalone outbound policy probe failed for thread %s: HTTP %s",
+                                thread_id,
+                                info_resp.status,
+                            )
+                            return {
+                                "error": "Discord outbound policy could not verify the thread parent"
+                            }
+            except Exception:
+                logger.warning(
+                    "Discord standalone outbound policy probe failed for thread %s",
+                    thread_id,
+                    exc_info=True,
+                )
+                return {
+                    "error": "Discord outbound policy could not verify the thread parent"
+                }
+
+        allowed_to_send, deny_reason = _discord_outbound_scope_allowed(
+            channel_ids,
+            allowed_channels,
+            ignored_channels,
+        )
+        if not allowed_to_send:
+            return {"error": deny_reason}
 
         # Thread endpoint: Discord threads are channels; send directly to the thread ID.
         if thread_id:

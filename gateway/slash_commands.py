@@ -21,6 +21,7 @@ import hashlib
 import inspect
 import logging
 import os
+import random
 import re
 import shlex
 import sys
@@ -40,6 +41,7 @@ from gateway.session import (
     build_session_key,
     is_shared_multi_user_session,
 )
+from gateway.voice_acknowledgements import VoiceAcknowledgement
 from hermes_cli.config import atomic_config_write, cfg_get, clear_model_endpoint_credentials
 from utils import (
     atomic_json_write,
@@ -102,6 +104,66 @@ class GatewaySlashCommandsMixin:
         """
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
         return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
+
+    def _model_switch_voice_ack(
+        self,
+        event: MessageEvent,
+        *,
+        model_name: str,
+        command_model_name: str = "",
+    ):
+        """Resolve a concise spoken acknowledgement for a successful model switch."""
+        adapter = self._adapter_for_source(event.source)
+        config = getattr(adapter, "_voice_fx_cfg", None)
+        raw_phrases = config.get("model_switch_ack_phrases") if isinstance(config, dict) else None
+
+        def _provider_free_name(value: str) -> str:
+            return str(value or "").strip().rsplit("/", 1)[-1]
+
+        spoken_name = _provider_free_name(command_model_name) or _provider_free_name(model_name)
+        catalog = vars(adapter).get("_voice_ack_catalog") if adapter is not None else None
+        selected = catalog.choose("model_switch", model_name=model_name) if catalog else None
+        if selected is not None:
+            return VoiceAcknowledgement(
+                text=selected.text.replace("[name]", spoken_name),
+                weight=selected.weight,
+                voice_settings=selected.voice_settings,
+                include_models=selected.include_models,
+                exclude_models=selected.exclude_models,
+            )
+
+        if isinstance(raw_phrases, dict):
+            configured_names = (_provider_free_name(model_name), _provider_free_name(command_model_name))
+            raw_phrases = next(
+                (
+                    raw_phrases[name]
+                    for name in configured_names
+                    if name and name in raw_phrases
+                ),
+                raw_phrases.get("default"),
+            )
+        if isinstance(raw_phrases, str):
+            raw_phrases = [raw_phrases]
+        if isinstance(raw_phrases, (list, tuple, set)):
+            phrases = [str(phrase).strip() for phrase in raw_phrases if str(phrase).strip()]
+            if phrases:
+                text = random.choice(phrases).replace("[name]", spoken_name)
+                return VoiceAcknowledgement(text, 1, {}, ("*",), ())
+        return VoiceAcknowledgement("Model switched.", 1, {}, ("*",), ())
+
+    def _model_switch_voice_text(
+        self,
+        event: MessageEvent,
+        *,
+        model_name: str,
+        command_model_name: str = "",
+    ) -> str:
+        """Return only model-switch acknowledgement text for compatibility."""
+        return self._model_switch_voice_ack(
+            event,
+            model_name=model_name,
+            command_model_name=command_model_name,
+        ).text
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
@@ -309,9 +371,10 @@ class GatewaySlashCommandsMixin:
         except Exception:
             _tip_line = ""
 
+        voice_text = t("gateway.reset.voice_notice")
         if session_info:
-            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
-        return EphemeralReply(f"{header}{_tip_line}")
+            return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}", voice_text=voice_text)
+        return EphemeralReply(f"{header}{_tip_line}", voice_text=voice_text)
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.
@@ -483,23 +546,36 @@ class GatewaySlashCommandsMixin:
                     if platform_str and chat_id:
                         def _sub():
                             from hermes_cli import kanban_db as _kb
+                            from hermes_cli.kanban_notifications import resolve_notify_target
                             conn = _kb.connect(board=requested_board)
                             try:
-                                _kb.add_notify_sub(
-                                    conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
+                                notifier_profile = getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name()
+                                target = resolve_notify_target(
+                                    platform=platform_str,
+                                    chat_id=chat_id,
                                     thread_id=thread_id or None,
                                     user_id=user_id,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
+                                    notifier_profile=notifier_profile,
                                 )
+                                if target is None:
+                                    return False
+                                _kb.add_notify_sub(
+                                    conn, task_id=task_id,
+                                    platform=target.platform, chat_id=target.chat_id,
+                                    thread_id=target.thread_id,
+                                    user_id=target.user_id,
+                                    notifier_profile=target.notifier_profile,
+                                )
+                                return True
                             finally:
                                 conn.close()
-                        await asyncio.to_thread(_sub)
-                        output = (
-                            output.rstrip()
-                            + "\n"
-                            + t("gateway.kanban.subscribed_suffix", task_id=task_id)
-                        )
+                        subscribed = await asyncio.to_thread(_sub)
+                        if subscribed:
+                            output = (
+                                output.rstrip()
+                                + "\n"
+                                + t("gateway.kanban.subscribed_suffix", task_id=task_id)
+                            )
                 except Exception as exc:
                     logger.warning("kanban create auto-subscribe failed: %s", exc)
 
@@ -1067,6 +1143,22 @@ class GatewaySlashCommandsMixin:
 
         return "\n".join(lines)
 
+    async def _stop_voice_playback_for_event(self, event: MessageEvent) -> bool:
+        """Best-effort stop for Discord TTS associated with a ``/stop`` event."""
+        if event.source.platform != Platform.DISCORD:
+            return False
+        adapter = self._adapter_for_source(event.source)
+        if adapter is None or not hasattr(adapter, "stop_voice_playback"):
+            return False
+        guild_id = self._get_guild_id(event)
+        if not guild_id:
+            return False
+        try:
+            return bool(await adapter.stop_voice_playback(guild_id))
+        except Exception as exc:
+            logger.debug("Failed to stop Discord TTS for /stop: %s", exc)
+            return False
+
     async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /stop command - interrupt a running agent.
 
@@ -1080,6 +1172,7 @@ class GatewaySlashCommandsMixin:
         """
         from gateway.run import _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
         source = event.source
+        await self._stop_voice_playback_for_event(event)
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
@@ -1444,7 +1537,8 @@ class GatewaySlashCommandsMixin:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
-        from gateway.run import _hermes_home, _load_gateway_config
+        from gateway.run import _load_gateway_config
+        from hermes_constants import get_hermes_home, get_hermes_home_override
         import yaml
         from hermes_cli.model_switch import (
             switch_model as _switch_model, parse_model_flags_detailed,
@@ -1454,13 +1548,16 @@ class GatewaySlashCommandsMixin:
         )
         from hermes_cli.providers import get_label
 
+        # Slash commands are dispatched before the normal agent-turn runtime
+        # scope. Pin /model to the inbound source profile explicitly so global
+        # persistence writes that profile's config.yaml, not the gateway
+        # process home (e.g. default gateway routing an ops Discord bot event).
+        if not get_hermes_home_override() and hasattr(self, "_runtime_scope_for_source"):
+            with self._runtime_scope_for_source(event.source):
+                return await self._handle_model_command(event)
+
         raw_args = event.get_command_args().strip()
         source = event.source
-        _command_profile_home = None
-        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
-            _command_profile_home = getattr(
-                self, "_resolve_profile_home_for_source"
-            )(source)
 
         # Parse --provider, --global, --session, --once, and --refresh flags
         parsed_flags = parse_model_flags_detailed(raw_args)
@@ -1497,7 +1594,7 @@ class GatewaySlashCommandsMixin:
         user_provs = None
         custom_provs = None
         excluded_provs = []
-        config_path = (_command_profile_home or _hermes_home) / "config.yaml"
+        config_path = get_hermes_home() / "config.yaml"
         try:
             cfg = _load_gateway_config()
             if cfg:
@@ -1572,7 +1669,7 @@ class GatewaySlashCommandsMixin:
                     _cur_provider = current_provider
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
-                    _picker_profile_home = _command_profile_home
+                    _picker_source = source
 
                     async def _on_model_selected_scoped(
                         _chat_id: str, model_id: str, provider_slug: str
@@ -1799,13 +1896,11 @@ class GatewaySlashCommandsMixin:
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
-                        if _picker_profile_home is None:
-                            return await _on_model_selected_scoped(
-                                _chat_id, model_id, provider_slug
-                            )
-                        from gateway.run import _profile_runtime_scope
-
-                        with _profile_runtime_scope(_picker_profile_home):
+                        # Picker callbacks run later, after command dispatch has
+                        # left its context. Reinstall the same source-owned
+                        # profile scope for both multiplexed and single-profile
+                        # gateways before reading or persisting config.
+                        with _self._runtime_scope_for_source(_picker_source):
                             return await _on_model_selected_scoped(
                                 _chat_id, model_id, provider_slug
                             )
@@ -2107,7 +2202,16 @@ class GatewaySlashCommandsMixin:
             else:
                 lines.append(t("gateway.model.session_only_hint"))
 
-            return "\n".join(lines)
+            model_switch_ack = self._model_switch_voice_ack(
+                event,
+                model_name=result.new_model,
+                command_model_name=model_input,
+            )
+            return EphemeralReply(
+                "\n".join(lines),
+                voice_text=model_switch_ack.text,
+                voice_settings=model_switch_ack.voice_settings,
+            )
 
         # Expensive-model confirmation gate (typed /model <name> path).
         # The pickers (Telegram/Discord inline keyboards, TUI, dashboard)
@@ -3516,7 +3620,14 @@ class GatewaySlashCommandsMixin:
                 loop = asyncio.get_running_loop()
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True)
+                    lambda: tmp_agent._compress_context(
+                        head,
+                        "",
+                        approx_tokens=approx_tokens,
+                        focus_topic=focus_topic,
+                        force=True,
+                        skip_pre_rotation_flush=True,
+                    )
                 )
 
                 # Re-append the verbatim tail after the compressed head,
@@ -3530,7 +3641,9 @@ class GatewaySlashCommandsMixin:
                 # compacted in place (compression.in_place / #38763: same id,
                 # transcript replaced with the compacted set).
                 new_session_id = tmp_agent.session_id
-                rotated = new_session_id != session_entry.session_id
+                rotated = bool(
+                    getattr(tmp_agent, "_last_compression_rotated", False)
+                ) and new_session_id != session_entry.session_id
                 _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
 
                 # Persist the compressed transcript BEFORE repointing the live
@@ -3565,6 +3678,51 @@ class GatewaySlashCommandsMixin:
                     if not await self.async_session_store.rewrite_transcript(
                         new_session_id, compressed
                     ):
+                        raw_db = getattr(self._session_db, "_db", self._session_db)
+                        rollback = getattr(
+                            raw_db, "discard_failed_compression_child", None
+                        )
+                        recovered = False
+                        if callable(rollback):
+                            recovered = await asyncio.to_thread(
+                                rollback,
+                                session_entry.session_id,
+                                new_session_id,
+                                discard_messages=True,
+                            )
+                        if recovered:
+                            tmp_agent.session_id = session_entry.session_id
+                            tmp_agent._last_compression_rotated = False
+                            try:
+                                from hermes_cli.goals import migrate_goal_to_session
+
+                                migrate_goal_to_session(
+                                    new_session_id,
+                                    session_entry.session_id,
+                                    reason="compression-rollback",
+                                )
+                            except Exception as _goal_rollback_err:
+                                logger.debug(
+                                    "Could not restore goal after compression rollback: %s",
+                                    _goal_rollback_err,
+                                )
+                            try:
+                                from gateway.session_context import set_current_session_id
+
+                                set_current_session_id(session_entry.session_id)
+                            except Exception:
+                                pass
+                            try:
+                                from hermes_logging import set_session_context
+
+                                set_session_context(session_entry.session_id)
+                            except Exception:
+                                pass
+                        else:
+                            logger.error(
+                                "Manual /compress could not roll back failed child %s",
+                                new_session_id,
+                            )
                         raise RuntimeError(
                             f"failed to persist compressed transcript for "
                             f"session {new_session_id}"
@@ -3585,6 +3743,9 @@ class GatewaySlashCommandsMixin:
                         "(session_id unchanged) and in-place mode is off — "
                         "preserving original transcript instead of overwriting "
                         "it (#44794)."
+                    )
+                    raise RuntimeError(
+                        "compression did not create a durable continuation session"
                     )
                 # Reset stored token count — transcript changed, old value is stale
                 await self.async_session_store.update_session(

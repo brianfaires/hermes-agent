@@ -1,6 +1,7 @@
 """Tests for Discord free-response defaults and mention gating."""
 
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import sys
@@ -125,6 +126,26 @@ def adapter(monkeypatch):
     adapter._text_batch_delay_seconds = 0  # disable batching for tests
     adapter.handle_message = AsyncMock()
     return adapter
+
+
+def test_persistent_runtime_state_uses_pinned_profile_home(adapter, tmp_path, monkeypatch):
+    default_home = tmp_path / "default"
+    profile_home = tmp_path / "profiles" / "ops"
+    default_home.mkdir(parents=True)
+    profile_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+
+    adapter.set_runtime_profile_home(profile_home)
+    assert adapter._discord_recovery_store._hermes_home == profile_home.resolve()
+    adapter._nonconversational_messages.mark_many(["status-message-1"])
+    adapter._write_command_sync_state({"app": {"fingerprint": "abc"}})
+
+    nonconversational = profile_home / "gateway" / "discord_nonconversational_messages.json"
+    command_sync = profile_home / "gateway" / "discord_command_sync_state.json"
+    assert json.loads(nonconversational.read_text()) == ["status-message-1"]
+    assert json.loads(command_sync.read_text()) == {"app": {"fingerprint": "abc"}}
+    assert not (default_home / "gateway" / nonconversational.name).exists()
+    assert not (default_home / "gateway" / command_sync.name).exists()
 
 
 def make_message(*, channel, content: str, mentions=None, msg_type=None):
@@ -272,6 +293,9 @@ async def test_discord_can_still_require_mentions_when_enabled(adapter, monkeypa
 async def test_discord_free_response_channel_overrides_mention_requirement(adapter, monkeypatch):
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789,999")
+    # Keep this assertion focused on mention gating; auto-thread behavior has
+    # its own coverage below.
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
 
     message = make_message(channel=FakeTextChannel(channel_id=789), content="allowed without mention")
 
@@ -287,6 +311,7 @@ async def test_discord_free_response_channel_can_come_from_config_extra(adapter,
     monkeypatch.delenv("DISCORD_REQUIRE_MENTION", raising=False)
     monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
     adapter.config.extra["free_response_channels"] = ["789", "999"]
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
 
     message = make_message(channel=FakeTextChannel(channel_id=789), content="allowed from config")
 
@@ -332,6 +357,52 @@ async def test_discord_forum_parent_in_free_response_list_allows_forum_thread(ad
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "allowed from forum thread"
     assert event.source.chat_id == "333"
+
+
+@pytest.mark.asyncio
+async def test_tracked_thread_fails_closed_when_parent_is_missing(adapter, monkeypatch):
+    """Participation bypasses mentions, not an active channel allowlist."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "222")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    adapter._threads.mark("333")
+
+    thread = FakeThread(channel_id=333, name="Forum topic", parent=None)
+    message = make_message(channel=thread, content="follow-up without mention")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tracked_thread_revalidates_changed_parent_allowlist(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "222")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    adapter._threads.mark("333")
+
+    moved_parent = FakeForumChannel(channel_id=444, name="moved-forum")
+    thread = FakeThread(channel_id=333, name="Forum topic", parent=moved_parent)
+    message = make_message(channel=thread, content="follow-up after policy change")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_untracked_thread_still_obeys_allowlist_when_parent_is_missing(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "222")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+    thread = FakeThread(channel_id=333, name="Forum topic", parent=None)
+    message = make_message(channel=thread, content="untracked follow-up")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -655,21 +726,18 @@ async def test_discord_voice_linked_channel_skips_mention_requirement_and_auto_t
 
 
 @pytest.mark.asyncio
-async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypatch):
-    """Free-response channels should reply inline, never spawn a new thread.
+async def test_discord_free_response_channel_still_auto_threads(adapter, monkeypatch):
+    """Free-response channels bypass mentions but still honor auto-threading.
 
-    Without this, every message in a free-response channel would auto-create
-    a fresh thread (since the channel bypasses the @mention gate, every
-    message looks like a fresh trigger).  That turns a "lightweight chat"
-    channel into a thread-spawning machine — see the docs at
-    website/docs/user-guide/messaging/discord.md which already describe
-    this as the intended behavior.
+    This lets a profile-owned text channel respond to every top-level comment
+    while isolating each conversation in a thread.
     """
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789")
     monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)  # default true
 
-    adapter._auto_create_thread = AsyncMock()
+    fake_thread = FakeThread(channel_id=790, name="auto-thread")
+    adapter._auto_create_thread = AsyncMock(return_value=fake_thread)
 
     message = make_message(
         channel=FakeTextChannel(channel_id=789),
@@ -678,11 +746,12 @@ async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypa
 
     await adapter._handle_message(message)
 
-    adapter._auto_create_thread.assert_not_awaited()
+    adapter._auto_create_thread.assert_awaited_once()
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "casual chat in free-response channel"
-    assert event.source.chat_type == "group"
+    assert event.source.chat_type == "thread"
+    assert event.source.thread_id == "790"
 
 
 
@@ -1485,4 +1554,88 @@ async def test_discord_non_reply_free_channel_skips_backfill(adapter, monkeypatc
     await adapter._handle_message(message)
 
     adapter._fetch_channel_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_kanban_owner_route_bypasses_mention_gate_and_sets_profile_context(
+    adapter, monkeypatch
+):
+    from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxResult
+
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    parent = FakeForumChannel(channel_id=1001)
+    thread = FakeThread(channel_id=2002, parent=parent)
+    message = make_message(channel=thread, content="plain owner conversation", mentions=[])
+    route = KanbanReplyInboxResult(
+        consumed=False,
+        reason="conversation_routed",
+        task_id="t_owner",
+        action="conversation",
+        route_profile="ops",
+        card_context="Kanban card t_owner (board operations, owner profile ops).",
+        ingress_bot_id="999",
+    )
+
+    target_adapter = SimpleNamespace(handle_message=AsyncMock())
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: target_adapter
+    )
+
+    await adapter._handle_message(message, kanban_route=route)
+
+    adapter.handle_message.assert_not_awaited()
+    target_adapter.handle_message.assert_awaited_once()
+    event = target_adapter.handle_message.await_args.args[0]
+    assert event.text == "plain owner conversation"
+    assert event.source.profile == "ops"
+    assert event.outbound_profile == "ops"
+    assert event.channel_context.startswith("Kanban card t_owner")
+
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fails_closed_without_target_adapter(adapter):
+    source = SimpleNamespace(profile="reviewer")
+    event = SimpleNamespace(source=source, outbound_profile="reviewer")
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: None
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_kanban_event_stays_on_ingress_adapter(adapter):
+    event = SimpleNamespace(source=SimpleNamespace(profile="reviewer"), outbound_profile=None)
+
+    await adapter._dispatch_message_event(event)
+
+    adapter.handle_message.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_kanban_outbound_broker_fans_out_with_shared_correlation(adapter):
+    targets = {profile: SimpleNamespace(handle_message=AsyncMock()) for profile in ("ops", "reviewer")}
+    event = SimpleNamespace(
+        source=SimpleNamespace(profile="ops"),
+        outbound_profile="ops",
+        outbound_profiles=("ops", "reviewer"),
+        correlation_id="discord:shared",
+    )
+    adapter.gateway_runner = SimpleNamespace(
+        _adapter_for_source=lambda source, require_profile_adapter=False: targets[source.profile]
+    )
+
+    await adapter._dispatch_message_event(event)
+
+    for profile, target in targets.items():
+        target.handle_message.assert_awaited_once()
+        routed = target.handle_message.await_args.args[0]
+        assert routed.source.profile == profile
+        assert routed.outbound_profile == profile
+        assert routed.correlation_id == "discord:shared"
+    assert event.source.profile == "ops"
 

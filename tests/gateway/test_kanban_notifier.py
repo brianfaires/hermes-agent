@@ -1,9 +1,13 @@
 import asyncio
+import logging
+import sqlite3
 from pathlib import Path
 
 
 from gateway.config import Platform
+from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 from hermes_cli import kanban_db as kb
 
 
@@ -35,12 +39,59 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
+def test_gateway_kanban_create_discord_origin_subscribes_telegram_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    db_path = home / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    _write_telegram_only_policy(home, monkeypatch)
+    kb.init_db()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._kanban_notifier_profile = "ops"
+    runner._active_profile_name = lambda: "ops"
+    event = MessageEvent(
+        text="/kanban create 'gateway policy' --assignee worker",
+        message_id="m1",
+        source=SessionSource(
+            platform=Platform.DISCORD,
+            user_id="u1",
+            chat_id="discord-channel",
+            thread_id="discord-thread",
+            chat_type="group",
+        ),
+    )
+
+    result = asyncio.run(runner._handle_kanban_command(event))
+    assert "Created" in result
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn)
+    finally:
+        conn.close()
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "tg-home"
+    assert subs[0]["thread_id"] == "tg-thread"
+
+
 def _make_runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
+
+
+def _write_telegram_only_policy(path: Path, monkeypatch):
+    (path / "config.yaml").write_text(
+        "kanban:\n  notification_policy:\n    mode: telegram_home_only\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(path))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc:fake")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "tg-home")
+    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "tg-thread")
 
 
 def _create_completed_subscription(summary="done once"):
@@ -86,6 +137,49 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     assert len(adapter.sent) == 1
     assert "Kanban" in adapter.sent[0]["text"]
     assert tid in adapter.sent[0]["text"]
+
+
+def test_kanban_notifier_reroutes_discord_row_to_telegram_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    db_path = home / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    _write_telegram_only_policy(home, monkeypatch)
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="notify policy", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="discord",
+            chat_id="discord-channel",
+            thread_id="discord-thread",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    tg_adapter = RecordingAdapter()
+    discord_adapter = RecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.TELEGRAM: tg_adapter, Platform.DISCORD: discord_adapter}
+    runner._kanban_sub_fail_counts = {}
+    artifact_targets = []
+
+    async def fake_artifacts(**kwargs):
+        artifact_targets.append((kwargs["chat_id"], dict(kwargs["metadata"])))
+
+    runner._deliver_kanban_artifacts = fake_artifacts
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(tg_adapter.sent) == 1
+    assert tg_adapter.sent[0]["chat_id"] == "tg-home"
+    assert tg_adapter.sent[0]["metadata"] == {"thread_id": "tg-thread"}
+    assert discord_adapter.sent == []
+    assert artifact_targets == [("tg-home", {"thread_id": "tg-thread"})]
 
 
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):
@@ -146,6 +240,35 @@ class FailingAdapter:
     async def send(self, chat_id, text, metadata=None):
         self.attempts += 1
         raise RuntimeError("simulated send failure")
+
+
+def test_kanban_notifier_tick_failure_log_includes_diagnostic_context(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "io-error.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    def _raise_disk_io_error(conn, task_id=None):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(kb, "list_notify_subs", _raise_disk_io_error)
+    caplog.set_level(logging.WARNING, logger="gateway.run")
+
+    runner = _make_runner(RecordingAdapter())
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    messages = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "gateway.run"
+    )
+    assert "kanban notifier tick failed" in messages
+    assert "OperationalError" in messages
+    assert "OperationalError('disk I/O error')" in messages
+    assert "operation=list_notify_subs" in messages
+    assert "board=default" in messages
+    assert "db_path=" in messages
+    assert ".db" in messages
 
 
 def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
@@ -292,6 +415,41 @@ def test_notifier_owning_profile_adapter_no_default_fallback(tmp_path, monkeypat
     # The claim is rewound (adapter resolved to None → treated as disconnected),
     # so the event is still unseen and will deliver once beta's adapter connects.
     assert [ev.kind for ev in _unseen_terminal_events_for(tid, "chat-beta")] == ["completed"]
+
+
+def test_notifier_delivers_through_secondary_only_adapter(tmp_path, monkeypatch):
+    """A valid owning-profile adapter counts as active without a primary peer."""
+    db_path = tmp_path / "secondary-only.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="secondary only", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-beta",
+            notifier_profile="beta",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    secondary_adapter = RecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {}
+    runner._profile_adapters = {
+        "beta": {Platform.TELEGRAM: secondary_adapter},
+    }
+    runner._kanban_sub_fail_counts = {}
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(secondary_adapter.sent) == 1
+    assert "done" in secondary_adapter.sent[0]["text"].lower()
 
 
 def _unseen_terminal_events_for(tid, chat_id):

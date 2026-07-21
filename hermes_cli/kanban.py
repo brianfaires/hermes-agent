@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import sqlite3
 import os
 import shlex
 import sys
@@ -122,13 +123,12 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
     if value is None:
         return None
-    branch = value.strip()
-    if not branch:
+    try:
+        branch = kb.normalize_branch_name(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc).replace("branch_name", "--branch")) from exc
+    if branch is None:
         raise argparse.ArgumentTypeError("--branch requires a non-empty name")
-    if branch.startswith("-"):
-        raise argparse.ArgumentTypeError("--branch must not start with '-'")
-    if any(ch.isspace() for ch in branch):
-        raise argparse.ArgumentTypeError("--branch must not contain whitespace")
     return branch
 
 
@@ -314,7 +314,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="scratch | worktree | worktree:<path> | dir:<path> "
                                "(default: scratch)")
     p_create.add_argument("--branch", default=None,
-                          help="Branch name for worktree tasks, e.g. wt/t6-wire")
+                          help="Branch name for persistent workspace tasks, e.g. brian/main or wt/t6-wire")
     p_create.add_argument("--project", default=None,
                           help="Link to a project (id or slug). Anchors the task's "
                                "worktree under the project's primary repo with a "
@@ -726,6 +726,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--notifier-profile", default=None,
         help="Profile gateway that owns/delivers this subscription (default: active profile)",
     )
+    p_nsub.add_argument(
+        "--force-policy-override", action="store_true",
+        help="Bypass kanban.notification_policy for explicit manual subscriptions",
+    )
+
+    p_naudit = sub.add_parser(
+        "notify-audit",
+        help="Dry-run: list existing notification subscriptions disallowed by policy",
+    )
+    p_naudit.add_argument("--json", action="store_true")
 
     p_nlist = sub.add_parser(
         "notify-list",
@@ -992,6 +1002,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "heartbeat": _cmd_heartbeat,
             "assignees": _cmd_assignees,
             "notify-subscribe":   _cmd_notify_subscribe,
+            "notify-audit":       _cmd_notify_audit,
             "notify-list":        _cmd_notify_list,
             "notify-unsubscribe": _cmd_notify_unsubscribe,
             "context":  _cmd_context,
@@ -1059,17 +1070,32 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
     return 2
 
 
+def _board_inventory_db_path(slug: str) -> Path:
+    """Return the on-disk DB path for board inventory, ignoring env pins."""
+    return kb.board_db_path(slug)
+
+
+def _board_inventory_note() -> str | None:
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    if override:
+        return (
+            f"HERMES_KANBAN_DB is pinned to {override}; board inventory "
+            "below reads the real board DBs on disk."
+        )
+    return None
+
+
 def _board_task_counts(slug: str) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
-        path = kb.kanban_db_path(board=slug)
+        path = _board_inventory_db_path(slug)
         if not path.exists():
             return {}
-        with kb.connect_closing(board=slug) as conn:
+        with sqlite3.connect(path) as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
             ).fetchall()
-        return {r["status"]: int(r["n"]) for r in rows}
+        return {status: int(n) for status, n in rows}
     except Exception:
         return {}
 
@@ -1090,6 +1116,9 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
     if not boards:
         print("(no boards — create one with `hermes kanban boards create <slug>`)")
         return 0
+    note = _board_inventory_note()
+    if note:
+        print(note)
     print(f"{'':2s}  {'SLUG':24s}  {'NAME':28s}  COUNTS")
     for b in boards:
         marker = "●" if b["is_current"] else " "
@@ -1185,11 +1214,14 @@ def _cmd_boards_show(args: argparse.Namespace) -> int:
     meta = kb.read_board_metadata(current)
     counts = _board_task_counts(current)
     total = sum(counts.values())
+    note = _board_inventory_note()
     print(f"Current board: {current}")
     print(f"  Display name: {meta.get('name', '')}")
     if meta.get("description"):
         print(f"  Description:  {meta['description']}")
-    print(f"  DB path:      {meta['db_path']}")
+    print(f"  DB path:      {kb.board_db_path(current)}")
+    if note:
+        print(f"  Note:         {note}")
     print(f"  Tasks:        {total} total"
           + (f" ({', '.join(f'{k}={v}' for k, v in sorted(counts.items()))})"
              if counts else ""))
@@ -1333,8 +1365,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except argparse.ArgumentTypeError as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
-    if branch_name and ws_kind != "worktree":
-        print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
+    if branch_name and ws_kind == "scratch":
+        print("kanban: --branch is only valid with --workspace dir or worktree", file=sys.stderr)
         return 2
     try:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))
@@ -2582,17 +2614,57 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         if kb.get_task(conn, args.task_id) is None:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
+        platform = args.platform
+        chat_id = args.chat_id
+        thread_id = args.thread_id
+        user_id = args.user_id
+        notifier_profile = args.notifier_profile or _profile_author()
+        if not getattr(args, "force_policy_override", False):
+            from hermes_cli.kanban_notifications import resolve_notify_target
+            target = resolve_notify_target(
+                platform=platform,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                notifier_profile=notifier_profile,
+            )
+            if target is None:
+                print("subscription rejected by kanban.notification_policy", file=sys.stderr)
+                return 2
+            platform = target.platform
+            chat_id = target.chat_id
+            thread_id = target.thread_id
+            user_id = target.user_id
+            notifier_profile = target.notifier_profile
         kb.add_notify_sub(
             conn, task_id=args.task_id,
-            platform=args.platform, chat_id=args.chat_id,
-            thread_id=args.thread_id, user_id=args.user_id,
-            notifier_profile=args.notifier_profile or _profile_author(),
+            platform=platform, chat_id=chat_id,
+            thread_id=thread_id, user_id=user_id,
+            notifier_profile=notifier_profile,
         )
-    print(f"Subscribed {args.platform}:{args.chat_id}"
-          + (f":{args.thread_id}" if args.thread_id else "")
+    print(f"Subscribed {platform}:{chat_id}"
+          + (f":{thread_id}" if thread_id else "")
           + f" to {args.task_id}")
     return 0
 
+
+def _cmd_notify_audit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_notifications import audit_notify_subs
+    with kb.connect_closing() as conn:
+        rows = audit_notify_subs(conn)
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No noncompliant notification subscriptions found.")
+        return 0
+    for s in rows:
+        thr = f":{s['thread_id']}" if s.get("thread_id") else ""
+        print(
+            f"{s['task_id']} {s['platform']}:{s['chat_id']}{thr} -> "
+            f"{s.get('policy_target') or 'blocked'}"
+        )
+    return 0
 
 def _cmd_notify_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:

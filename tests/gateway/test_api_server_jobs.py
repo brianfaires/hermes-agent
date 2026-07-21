@@ -170,6 +170,49 @@ class TestCreateJob:
                 assert call_kwargs["origin"]["user_agent"] == "cron-client"
 
     @pytest.mark.asyncio
+    async def test_create_job_with_prompt_path(self, adapter):
+        app = _create_app(adapter)
+        mock_create = MagicMock(return_value=SAMPLE_JOB)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
+                f"{_MOD}._cron_create", mock_create
+            ), patch(f"{_MOD}._cron_read_prompt_file", return_value="Prompt from file"):
+                resp = await cli.post(
+                    "/api/jobs",
+                    json={
+                        "name": "test-job",
+                        "schedule": "*/5 * * * *",
+                        "prompt_path": "/tmp/digest.md",
+                    },
+                )
+                assert resp.status == 200
+                call_kwargs = mock_create.call_args[1]
+                assert call_kwargs["prompt"] == ""
+                assert call_kwargs["prompt_path"] == "/tmp/digest.md"
+
+    @pytest.mark.asyncio
+    async def test_create_job_combines_prompt_and_prompt_path(self, adapter):
+        app = _create_app(adapter)
+        mock_create = MagicMock(return_value=SAMPLE_JOB)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
+                f"{_MOD}._cron_create", mock_create
+            ), patch(f"{_MOD}._cron_read_prompt_file", return_value="Prompt from file"):
+                resp = await cli.post(
+                    "/api/jobs",
+                    json={
+                        "name": "test-job",
+                        "schedule": "*/5 * * * *",
+                        "prompt": "inline",
+                        "prompt_path": "/tmp/digest.md",
+                    },
+                )
+                assert resp.status == 200
+                call_kwargs = mock_create.call_args[1]
+                assert call_kwargs["prompt"] == "inline"
+                assert call_kwargs["prompt_path"] == "/tmp/digest.md"
+
+    @pytest.mark.asyncio
     async def test_create_job_missing_name(self, adapter):
         """POST /api/jobs without name returns 400."""
         app = _create_app(adapter)
@@ -342,6 +385,39 @@ class TestUpdateJob:
                 sanitized = call_args[0][1]
                 assert "name" in sanitized
                 assert "schedule" in sanitized
+
+    @pytest.mark.asyncio
+    async def test_update_job_accepts_prompt_path(self, adapter):
+        app = _create_app(adapter)
+        mock_update = MagicMock(return_value={**SAMPLE_JOB, "prompt_path": "/tmp/digest.md"})
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
+                f"{_MOD}._cron_update", mock_update
+            ), patch(f"{_MOD}._cron_read_prompt_file", return_value="Prompt from file"):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"prompt_path": "/tmp/digest.md"},
+                )
+                assert resp.status == 200
+                sanitized = mock_update.call_args[0][1]
+                assert sanitized["prompt_path"] == "/tmp/digest.md"
+
+    @pytest.mark.asyncio
+    async def test_update_job_combines_prompt_and_prompt_path(self, adapter):
+        app = _create_app(adapter)
+        mock_update = MagicMock(return_value=SAMPLE_JOB)
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
+                f"{_MOD}._cron_update", mock_update
+            ), patch(f"{_MOD}._cron_read_prompt_file", return_value="Prompt from file"):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"prompt": "inline", "prompt_path": "/tmp/digest.md"},
+                )
+                assert resp.status == 200
+                sanitized = mock_update.call_args[0][1]
+                assert sanitized["prompt"] == "inline"
+                assert sanitized["prompt_path"] == "/tmp/digest.md"
 
     @pytest.mark.asyncio
     async def test_update_job_rejects_unknown_fields(self, adapter):

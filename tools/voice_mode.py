@@ -872,6 +872,117 @@ def is_whisper_hallucination(transcript: str) -> bool:
     return False
 
 
+_INTENTIONAL_SHORT_UTTERANCES = {
+    "yes",
+    "yeah",
+    "yep",
+    "no",
+    "nope",
+    "ok",
+    "okay",
+    "stop",
+    "hold",
+    "wait",
+    "pause",
+    "cancel",
+    "approve",
+    "deny",
+}
+
+
+def stt_noise_drop_reason(transcript: str) -> Optional[str]:
+    """Return a debug-only reason when an STT fragment is obvious noise.
+
+    The filter is intentionally conservative: it drops punctuation/symbol-only
+    fragments, non-English-script fragments with little/no ASCII signal, and a
+    narrow class of low-information gibberish while preserving short intentional
+    commands, names, technical strings, and numeric utterances.
+    """
+    text = " ".join(str(transcript or "").strip().split())
+    if not text:
+        return "empty"
+
+    lowered = text.lower().strip(".,!?;:()[]{}\"'")
+    if lowered in _INTENTIONAL_SHORT_UTTERANCES:
+        return None
+
+    chars = [ch for ch in text if not ch.isspace()]
+    if not chars:
+        return "empty"
+
+    letters = [ch for ch in chars if ch.isalpha()]
+    digits = [ch for ch in chars if ch.isdigit()]
+    ascii_alnum = [ch for ch in chars if ch.isascii() and ch.isalnum()]
+    non_ascii_letters = [ch for ch in letters if not ch.isascii()]
+
+    if not letters and not digits:
+        return "symbol_or_punctuation_junk"
+
+    # Preserve numeric-only utterances: "one two three" may transcribe as
+    # digits and can be an intentional command/answer.
+    if digits and not letters:
+        return None
+
+    ascii_signal_ratio = len(ascii_alnum) / max(1, len(chars))
+    if non_ascii_letters and ascii_signal_ratio <= 0.50:
+        return "mostly_non_english_script"
+
+    # Drop only the most obvious ASCII gibberish: a long alphabetic token with
+    # no vowels. Ambiguous short sounds ("hm", "sh") are left alone.
+    word_tokens = re.findall(r"[A-Za-z]+", text)
+    if (
+        len(word_tokens) == 1
+        and len(word_tokens[0]) >= 6
+        and not re.search(r"[aeiouy]", word_tokens[0], flags=re.IGNORECASE)
+    ):
+        return "low_information_gibberish"
+
+    return None
+
+
+def is_stt_noise_fragment(transcript: str) -> bool:
+    """Return True when an STT transcript is obvious background/noise junk."""
+    return stt_noise_drop_reason(transcript) is not None
+
+
+_STT_CANCELLATION_SUFFIXES = ("cancel that", "strike that")
+_STT_CANCELLATION_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_VOICE_THINKING_FILLER_RE = re.compile(
+    r"(?<!\w)(?:oh+|uh+|um+)(?![\w\-—])[\s,.;:!?]*",
+    re.IGNORECASE,
+)
+_VOICE_INITIAL_ACK_RE = re.compile(
+    r"^\s*(?:(?:yeah|okay|k)(?!\w)[\s,.;:!?\-—]*)+",
+    re.IGNORECASE,
+)
+
+
+def clean_voice_transcript(transcript: str) -> str:
+    """Remove spoken disfluencies before matching voice-command aliases.
+
+    ``oh``, ``uh``, and ``um`` accept repeated final letters because STT often
+    renders a pause as ``ohhh`` or ``ummm``. Leading acknowledgement words are
+    removed only at the start, so normal speech elsewhere is preserved.
+    """
+    cleaned = _VOICE_THINKING_FILLER_RE.sub("", str(transcript or ""))
+    cleaned = _VOICE_INITIAL_ACK_RE.sub("", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def is_stt_cancellation(transcript: str) -> bool:
+    """Return whether a transcript ends with a spoken cancellation instruction.
+
+    The match is case- and punctuation-insensitive, but requires the phrase to
+    be its own trailing words: ``uncancel that`` is not a cancellation.
+    """
+    normalized = _STT_CANCELLATION_PUNCT_RE.sub(" ", str(transcript or "").casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return any(
+        normalized == suffix or normalized.endswith(f" {suffix}")
+        for suffix in _STT_CANCELLATION_SUFFIXES
+    )
+
+
 # ============================================================================
 # STT dispatch
 # ============================================================================
@@ -895,9 +1006,13 @@ def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str
     else:
         result = transcribe_audio(wav_path, model=model)
 
-    # Filter out Whisper hallucinations (common on silent/near-silent audio)
+    # Filter out Whisper hallucinations (common on silent audio)
     if result.get("success") and is_whisper_hallucination(result.get("transcript", "")):
         logger.info("Filtered Whisper hallucination: %r", result["transcript"])
+        return {"success": True, "transcript": "", "filtered": True}
+
+    if result.get("success") and is_stt_cancellation(result.get("transcript", "")):
+        logger.info("Dropped voice transcript after spoken cancellation")
         return {"success": True, "transcript": "", "filtered": True}
 
     return result

@@ -155,6 +155,20 @@ BOARD_COLUMNS: list[str] = [
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 
 
+def _branch_display(task: kanban_db.Task) -> Optional[str]:
+    """Human card label for the git branch associated with a task."""
+    branch = (task.branch_name or "").strip()
+    if not branch:
+        return None
+    if branch.startswith("<") and branch.endswith(">"):
+        return branch
+    if branch in ("main", "master") or branch.endswith("/main"):
+        return f"`{branch}` (main)"
+    if task.workspace_kind == "worktree":
+        return f"`{branch}` (worktree)"
+    return f"`{branch}`"
+
+
 def _task_dict(
     task: kanban_db.Task,
     *,
@@ -172,6 +186,7 @@ def _task_dict(
     # ``task_runs.summary`` (the kanban-worker pattern) instead of
     # ``tasks.result``. ``None`` when no run has produced a summary yet.
     d["latest_summary"] = latest_summary
+    d["branch_display"] = _branch_display(task)
     # Keep body short on list endpoints; full body comes from /tasks/:id.
     return d
 
@@ -601,6 +616,7 @@ class CreateTaskBody(BaseModel):
     priority: int = 0
     workspace_kind: str = "scratch"
     workspace_path: Optional[str] = None
+    branch_name: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
     idempotency_key: Optional[str] = None
@@ -623,6 +639,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             created_by="dashboard",
             workspace_kind=payload.workspace_kind,
             workspace_path=payload.workspace_path,
+            branch_name=payload.branch_name,
             tenant=payload.tenant,
             priority=payload.priority,
             parents=payload.parents,
@@ -808,6 +825,7 @@ class UpdateTaskBody(BaseModel):
     priority: Optional[int] = None
     title: Optional[str] = None
     body: Optional[str] = None
+    branch_name: Optional[str] = None
     result: Optional[str] = None
     block_reason: Optional[str] = None
     # Structured handoff fields — forwarded to complete_task when status
@@ -908,8 +926,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                      int(time.time())),
                 )
 
-        # --- title / body -------------------------------------------------
-        if payload.title is not None or payload.body is not None:
+        # --- title / body / branch ----------------------------------------
+        if payload.title is not None or payload.body is not None or payload.branch_name is not None:
             with kanban_db.write_txn(conn):
                 sets, vals = [], []
                 if payload.title is not None:
@@ -920,6 +938,17 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 if payload.body is not None:
                     sets.append("body = ?")
                     vals.append(payload.body)
+                if payload.branch_name is not None:
+                    current = kanban_db.get_task(conn, task_id)
+                    try:
+                        branch_name = kanban_db.normalize_branch_name(
+                            payload.branch_name,
+                            workspace_kind=(current.workspace_kind if current else None),
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    sets.append("branch_name = ?")
+                    vals.append(branch_name)
                 vals.append(task_id)
                 conn.execute(
                     f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals,
@@ -1742,7 +1771,10 @@ def _configured_home_channels() -> list[dict]:
     except Exception:
         return []
     result: list[dict] = []
+    from hermes_cli.kanban_notifications import is_notify_target_allowed
     for platform, pcfg in gw_cfg.platforms.items():
+        if not is_notify_target_allowed(platform.value):
+            continue
         if not pcfg or not pcfg.home_channel:
             continue
         hc = pcfg.home_channel
@@ -1816,6 +1848,12 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
     Idempotent — re-subscribing is a no-op at the DB layer. 404 if the
     platform has no home channel configured. 404 if the task doesn't exist.
     """
+    from hermes_cli.kanban_notifications import is_notify_target_allowed
+    if not is_notify_target_allowed(platform):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Kanban notification policy does not allow {platform!r} subscriptions.",
+        )
     homes = _configured_home_channels()
     home = next((h for h in homes if h["platform"] == platform), None)
     if not home:

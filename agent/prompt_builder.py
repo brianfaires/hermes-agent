@@ -203,7 +203,6 @@ KANBAN_GUIDANCE = (
     "The `kanban_*` tools in your schema are your primary coordination surface — "
     "they write directly to the shared SQLite DB and work regardless of terminal "
     "backend (local/docker/modal/ssh).\n"
-    "\n"
     "## Lifecycle\n"
     "\n"
     "1. **Orient.** Call `kanban_show()` first (no args — it defaults to your "
@@ -283,11 +282,7 @@ KANBAN_GUIDANCE = (
     "- Do not shell out to `hermes kanban <verb>` for board operations. Use "
     "the `kanban_*` tools — they work across all terminal backends.\n"
     "- Do not complete a task you didn't actually finish. Block it.\n"
-    "- Do not call `clarify` to ask questions. You are running headless — "
-    "there is no live user to answer. The call will time out and the task "
-    "will sit silently in `running` with no signal to the operator. Instead: "
-    "`kanban_comment` the context, then `kanban_block(reason=...)` so the "
-    "task surfaces on the board as needing input.\n"
+    "- Do not call `clarify`: this worker is headless. Comment context and block instead.\n"
     "- Do not assign follow-up work to yourself. Assign it to the right "
     "specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
@@ -386,16 +381,10 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "in doubt and the calls are independent, batch them."
 )
 
-# OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
-# where GPT models abandon work on partial results, skip prerequisite lookups,
-# hallucinate instead of using tools, and declare "done" without verification.
-# Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
-# Also applied to xAI Grok — same failure modes in practice (claims completion
-# without tool calls, suggests workarounds instead of using existing tools,
-# replies with plans/suggestions instead of executing). The body is
-# family-agnostic; the OPENAI_ prefix reflects origin, not exclusivity.
-OPENAI_MODEL_EXECUTION_GUIDANCE = (
-    "# Execution discipline\n"
+# Model execution policies are assembled from a persistence strategy plus shared
+# grounding/safety guidance.  Keep routing data-driven so a model or family can
+# receive a narrow override without changing established behavior elsewhere.
+_LEGACY_TOOL_PERSISTENCE_GUIDANCE = (
     "<tool_persistence>\n"
     "- Use tools whenever they improve correctness, completeness, or grounding.\n"
     "- Do not stop early when another tool call would materially improve the result.\n"
@@ -403,8 +392,24 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "strategy before giving up.\n"
     "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
     "the result.\n"
-    "</tool_persistence>\n"
-    "\n"
+    "</tool_persistence>"
+)
+
+_BOUNDED_TOOL_PERSISTENCE_GUIDANCE = (
+    "<tool_persistence>\n"
+    "- Use tools only as needed to complete the user's explicit request.\n"
+    "- Verification must be proportional to the task. For simple, reversible tasks, "
+    "perform at most one direct verification.\n"
+    "- Do not investigate adjacent issues or optional improvements.\n"
+    "- After the requested result is confirmed, stop and return the result.\n"
+    "- Continue only when the requested task remains incomplete, a tool failed, "
+    "the result is ambiguous, or a stated acceptance criterion remains unmet.\n"
+    "- If a necessary tool returns empty or partial results, retry with a different "
+    "query or strategy before giving up.\n"
+    "</tool_persistence>"
+)
+
+_MODEL_EXECUTION_COMMON_GUIDANCE = (
     "<mandatory_tool_use>\n"
     "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
     "- Arithmetic, math, calculations → use terminal or execute_code\n"
@@ -453,6 +458,31 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
 )
+
+OPENAI_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline\n"
+    f"{_LEGACY_TOOL_PERSISTENCE_GUIDANCE}\n\n"
+    f"{_MODEL_EXECUTION_COMMON_GUIDANCE}"
+)
+BOUNDED_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline\n"
+    f"{_BOUNDED_TOOL_PERSISTENCE_GUIDANCE}\n\n"
+    f"{_MODEL_EXECUTION_COMMON_GUIDANCE}"
+)
+
+_MODEL_EXECUTION_GUIDANCE_POLICIES = (
+    (("gpt-5.6-sol", "gpt-5.6-terra"), BOUNDED_MODEL_EXECUTION_GUIDANCE),
+    (("gpt", "codex", "grok"), OPENAI_MODEL_EXECUTION_GUIDANCE),
+)
+
+
+def resolve_model_execution_guidance(model: str) -> str | None:
+    """Return the first matching execution policy for a model name."""
+    model_lower = (model or "").lower()
+    for markers, guidance in _MODEL_EXECUTION_GUIDANCE_POLICIES:
+        if any(marker in model_lower for marker in markers):
+            return guidance
+    return None
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
@@ -1354,6 +1384,35 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
     return manifest
 
 
+def _skills_dirs_signature(
+    skills_dirs: list[Path],
+) -> tuple[tuple[str, tuple[tuple[str, tuple[int, int]], ...]], ...]:
+    """Return path+manifest signature for non-snapshotted skills dirs.
+
+    Cache keys built from external dir *paths* alone never invalidate when a
+    skill inside one of those dirs changes; include each dir's manifest
+    (relative path, mtime, size) so edits are picked up like local skills.
+    """
+    signature = []
+    for skills_dir in skills_dirs:
+        try:
+            manifest = _build_skills_manifest(skills_dir)
+        except Exception:
+            manifest = {}
+        signature.append(
+            (
+                str(skills_dir.resolve()),
+                tuple(
+                    sorted(
+                        (rel, (values[0], values[1]))
+                        for rel, values in manifest.items()
+                    )
+                ),
+            )
+        )
+    return tuple(signature)
+
+
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     """Load the disk snapshot if it exists and its manifest still matches."""
     snapshot_path = _skills_prompt_snapshot_path()
@@ -1536,7 +1595,7 @@ def build_skills_system_prompt(
     disabled = get_disabled_skill_names(_platform_hint or None)
     cache_key = (
         str(skills_dir),
-        tuple(str(d) for d in external_dirs),
+        _skills_dirs_signature(external_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,

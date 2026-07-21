@@ -95,6 +95,7 @@ def adapter(monkeypatch, tmp_path):
     adapter._handle_message = AsyncMock(return_value=True)
     monkeypatch.setenv("DISCORD_MISSED_MESSAGE_BACKFILL", "true")
     monkeypatch.setenv("DISCORD_ALLOW_ALL_USERS", "true")
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "*")
     return adapter
 
 
