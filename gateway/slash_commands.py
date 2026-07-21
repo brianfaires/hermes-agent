@@ -3532,7 +3532,14 @@ class GatewaySlashCommandsMixin:
                 loop = asyncio.get_running_loop()
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True)
+                    lambda: tmp_agent._compress_context(
+                        head,
+                        "",
+                        approx_tokens=approx_tokens,
+                        focus_topic=focus_topic,
+                        force=True,
+                        skip_pre_rotation_flush=True,
+                    )
                 )
 
                 # Re-append the verbatim tail after the compressed head,
@@ -3546,7 +3553,9 @@ class GatewaySlashCommandsMixin:
                 # compacted in place (compression.in_place / #38763: same id,
                 # transcript replaced with the compacted set).
                 new_session_id = tmp_agent.session_id
-                rotated = new_session_id != session_entry.session_id
+                rotated = bool(
+                    getattr(tmp_agent, "_last_compression_rotated", False)
+                ) and new_session_id != session_entry.session_id
                 _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
 
                 # Persist the compressed transcript BEFORE repointing the live
@@ -3581,6 +3590,51 @@ class GatewaySlashCommandsMixin:
                     if not await self.async_session_store.rewrite_transcript(
                         new_session_id, compressed
                     ):
+                        raw_db = getattr(self._session_db, "_db", self._session_db)
+                        rollback = getattr(
+                            raw_db, "discard_failed_compression_child", None
+                        )
+                        recovered = False
+                        if callable(rollback):
+                            recovered = await asyncio.to_thread(
+                                rollback,
+                                session_entry.session_id,
+                                new_session_id,
+                                discard_messages=True,
+                            )
+                        if recovered:
+                            tmp_agent.session_id = session_entry.session_id
+                            tmp_agent._last_compression_rotated = False
+                            try:
+                                from hermes_cli.goals import migrate_goal_to_session
+
+                                migrate_goal_to_session(
+                                    new_session_id,
+                                    session_entry.session_id,
+                                    reason="compression-rollback",
+                                )
+                            except Exception as _goal_rollback_err:
+                                logger.debug(
+                                    "Could not restore goal after compression rollback: %s",
+                                    _goal_rollback_err,
+                                )
+                            try:
+                                from gateway.session_context import set_current_session_id
+
+                                set_current_session_id(session_entry.session_id)
+                            except Exception:
+                                pass
+                            try:
+                                from hermes_logging import set_session_context
+
+                                set_session_context(session_entry.session_id)
+                            except Exception:
+                                pass
+                        else:
+                            logger.error(
+                                "Manual /compress could not roll back failed child %s",
+                                new_session_id,
+                            )
                         raise RuntimeError(
                             f"failed to persist compressed transcript for "
                             f"session {new_session_id}"
@@ -3601,6 +3655,9 @@ class GatewaySlashCommandsMixin:
                         "(session_id unchanged) and in-place mode is off — "
                         "preserving original transcript instead of overwriting "
                         "it (#44794)."
+                    )
+                    raise RuntimeError(
+                        "compression did not create a durable continuation session"
                     )
                 # Reset stored token count — transcript changed, old value is stale
                 await self.async_session_store.update_session(

@@ -704,6 +704,7 @@ def compress_context(
     task_id: str = "default",
     focus_topic: Optional[str] = None,
     force: bool = False,
+    skip_pre_rotation_flush: bool = False,
 ) -> Tuple[list, str]:
     """Compress conversation context and split the session in SQLite.
 
@@ -721,6 +722,10 @@ def compress_context(
             by the manual ``/compress`` slash command so users can retry
             immediately after an auto-compress abort.  Auto-compress
             callers use the default ``False``.
+        skip_pre_rotation_flush: Skip flushing ``messages`` into the parent
+            before rotation when the caller loaded them from that same DB.
+            Gateway ``/compress`` uses this to avoid duplicating its canonical
+            parent transcript; live in-agent compression keeps the default.
 
     Returns:
         ``(compressed_messages, new_system_prompt)`` tuple.  When
@@ -791,6 +796,7 @@ def compress_context(
     # Set True once the in-place DB write actually completes (the DB block can
     # raise and skip it). Surfaced to the gateway via agent._last_compaction_in_place.
     compacted_in_place = False
+    agent._last_compression_rotated = False
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
@@ -1236,10 +1242,11 @@ def compress_context(
                     # Flush any un-persisted current-turn messages to the OLD
                     # session before ending it, so they survive in the preserved
                     # parent transcript (#47202). (In-place skips this — see above.)
-                    try:
-                        agent._flush_messages_to_session_db(messages)
-                    except Exception:
-                        pass  # best-effort — don't block compression on a flush error
+                    if not skip_pre_rotation_flush:
+                        try:
+                            agent._flush_messages_to_session_db(messages)
+                        except Exception:
+                            pass  # best-effort — don't block compression on a flush error
                     # Propagate title to the new session with auto-numbering
                     old_title = agent._session_db.get_session_title(agent.session_id)
                     agent._session_db.end_session(agent.session_id, "compression")
@@ -1316,22 +1323,6 @@ def compress_context(
                         agent._session_db_created = True
                         raise
                     agent._session_db_created = True
-                    # Carry a persistent /goal onto the continuation session.
-                    # Compression mints a fresh child id; load_goal does a flat
-                    # per-session lookup with no parent walk, so without this an
-                    # active goal silently dies at the boundary (#33618).
-                    try:
-                        from hermes_cli.goals import migrate_goal_to_session
-                        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
-                    except Exception as _goal_err:
-                        logger.debug("Could not migrate goal on compression: %s", _goal_err)
-                    # Auto-number the title for the continuation session
-                    if old_title:
-                        try:
-                            new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                            agent._session_db.set_session_title(agent.session_id, new_title)
-                        except (ValueError, Exception) as e:
-                            logger.debug("Could not propagate title on compression: %s", e)
 
                 # Shared post-write steps (both modes target agent.session_id, which
                 # in-place keeps and rotation has already reassigned to the new id):
@@ -1352,19 +1343,74 @@ def compress_context(
                         for message in compressed
                         if isinstance(message, dict)
                     }
+                    agent._last_compression_rotated = True
+                    # Only migrate goal/title after the child transcript is
+                    # durable. A failed write must leave the parent authoritative.
+                    try:
+                        from hermes_cli.goals import migrate_goal_to_session
+
+                        migrate_goal_to_session(
+                            old_session_id, agent.session_id, reason="compression"
+                        )
+                    except Exception as _goal_err:
+                        logger.debug("Could not migrate goal on compression: %s", _goal_err)
+                    if old_title:
+                        try:
+                            new_title = agent._session_db.get_next_title_in_lineage(old_title)
+                            agent._session_db.set_session_title(agent.session_id, new_title)
+                        except Exception as _title_err:
+                            logger.debug("Could not propagate title on compression: %s", _title_err)
             except Exception as e:
-                # If the rotation rolled back to the parent (orphan-avoidance
-                # above), agent.session_id is the still-indexed parent and
-                # old_session_id was cleared — so this is recovery, not an
-                # un-indexed orphan. Otherwise an earlier step failed before the
-                # child was created and the warning's original meaning holds.
+                parent_id = locals().get("old_session_id")
+                child_id = agent.session_id
+                recovered = False
+                if (
+                    not in_place
+                    and parent_id
+                    and child_id
+                    and child_id != parent_id
+                ):
+                    rollback = getattr(
+                        agent._session_db, "discard_failed_compression_child", None
+                    )
+                    if callable(rollback):
+                        try:
+                            recovered = bool(rollback(parent_id, child_id))
+                        except Exception as _rollback_err:
+                            logger.warning(
+                                "Compression rollback failed for %s -> %s: %s",
+                                parent_id,
+                                child_id,
+                                _rollback_err,
+                            )
+                    if recovered:
+                        agent.session_id = parent_id
+                        agent._session_db_created = True
+                        agent._last_compression_rotated = False
+                        old_session_id = None
+                        try:
+                            from gateway.session_context import set_current_session_id
+
+                            set_current_session_id(parent_id)
+                        except Exception:
+                            os.environ["HERMES_SESSION_ID"] = parent_id
+                        try:
+                            from hermes_logging import set_session_context
+
+                            set_session_context(parent_id)
+                        except Exception:
+                            pass
+
                 if locals().get("old_session_id") is None and not in_place:
                     logger.warning(
                         "Compression rotation aborted and rolled back to the "
                         "parent session (%s): %s", agent.session_id or "?", e,
                     )
                 else:
-                    logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+                    logger.warning(
+                        "Session DB compression split failed — new session will NOT be indexed: %s",
+                        e,
+                    )
 
         # Compaction-boundary bookkeeping, computed once. `old_session_id` is only
         # bound in the rotation branch; in-place leaves it unset. `_boundary_parent`
