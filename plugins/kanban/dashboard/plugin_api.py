@@ -945,9 +945,11 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 if branch_name_provided:
                     current = kanban_db.get_task(conn, task_id)
                     try:
-                        branch_name = kanban_db.normalize_branch_name(
-                            payload.branch_name,
-                            workspace_kind=(current.workspace_kind if current else None),
+                        _kind, _path, branch_name = kanban_db.normalize_workspace_metadata(
+                            workspace_kind=(current.workspace_kind if current else "scratch"),
+                            workspace_path=(current.workspace_path if current else None),
+                            branch_name=payload.branch_name,
+                            require_dir_path=True,
                         )
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc)) from exc

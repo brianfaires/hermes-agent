@@ -308,6 +308,7 @@ def test_dashboard_update_rejects_invalid_branch_name(client):
         json={
             "title": "valid branch",
             "workspace_kind": "dir",
+            "workspace_path": "/tmp/repo",
             "branch_name": "work/valid",
         },
     ).json()["task"]
@@ -329,6 +330,7 @@ def test_dashboard_update_can_clear_branch_name(client):
         json={
             "title": "clear branch",
             "workspace_kind": "dir",
+            "workspace_path": "/tmp/repo",
             "branch_name": "work/clear-me",
         },
     ).json()["task"]

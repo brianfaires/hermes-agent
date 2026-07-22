@@ -2438,10 +2438,22 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _is_valid_git_branch_name(branch: str) -> bool:
+    """Return whether ``branch`` satisfies Git's check-ref-format rules."""
+    if branch == "HEAD" or branch.startswith("/") or branch.endswith(("/", ".")):
+        return False
+    if "//" in branch or ".." in branch or "@{" in branch or "\\" in branch:
+        return False
+    forbidden = set(" ~^:?*[")
+    if any(ord(char) < 32 or ord(char) == 127 or char in forbidden for char in branch):
+        return False
+    return all(component and not component.startswith(".") and not component.endswith(".lock") for component in branch.split("/"))
+
+
 def normalize_branch_name(
     branch_name: Optional[str], *, workspace_kind: Optional[str] = None
 ) -> Optional[str]:
-    """Normalize branch metadata using the CLI's established syntax contract."""
+    """Normalize branch metadata using Git's branch-ref syntax contract."""
     if branch_name is None:
         return None
     branch = str(branch_name).strip()
@@ -2449,13 +2461,41 @@ def normalize_branch_name(
         return None
     if branch.startswith("-"):
         raise ValueError("branch_name must not start with '-'")
-    if not (branch.startswith("<") and branch.endswith(">")) and any(
-        char.isspace() for char in branch
-    ):
-        raise ValueError("branch_name must not contain whitespace")
+    # Angle-bracket placeholders are display metadata, not refs. Preserve the
+    # established contract for states such as ``<detached>``.
+    is_placeholder = branch.startswith("<") and branch.endswith(">")
+    if not is_placeholder and not _is_valid_git_branch_name(branch):
+        raise ValueError(f"branch_name is not a valid Git branch name: {branch!r}")
     if workspace_kind == "scratch":
         raise ValueError("branch_name is only valid for persistent workspaces")
     return branch
+
+
+def normalize_workspace_metadata(
+    *,
+    workspace_kind: str,
+    workspace_path: Optional[str],
+    branch_name: Optional[str],
+    require_dir_path: bool = False,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Validate and normalize workspace/branch metadata before persistence."""
+    kind = str(workspace_kind or "scratch").strip()
+    if kind not in VALID_WORKSPACE_KINDS:
+        raise ValueError(
+            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, got {kind!r}"
+        )
+
+    normalized_path: Optional[str] = None
+    if workspace_path is not None and str(workspace_path).strip():
+        path = Path(str(workspace_path).strip()).expanduser()
+        if not path.is_absolute():
+            raise ValueError("workspace_path must be absolute")
+        normalized_path = str(path)
+    if require_dir_path and kind == "dir" and normalized_path is None:
+        raise ValueError("workspace_kind='dir' requires workspace_path")
+
+    branch = normalize_branch_name(branch_name, workspace_kind=kind)
+    return kind, normalized_path, branch
 
 
 def create_task(
@@ -2644,6 +2684,13 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
+    workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
+        branch_name=branch_name,
+        require_dir_path=True,
+    )
+
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
@@ -2698,6 +2745,9 @@ def create_task(
                             )
                         except Exception:
                             branch_name = None
+                    branch_name = normalize_branch_name(
+                        branch_name, workspace_kind=workspace_kind
+                    )
 
                 conn.execute(
                     """
@@ -6142,20 +6192,38 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
 def set_workspace_path(
     conn: sqlite3.Connection, task_id: str, path: Path | str
 ) -> None:
+    task = get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"unknown task: {task_id}")
+    _kind, normalized_path, _branch = normalize_workspace_metadata(
+        workspace_kind=task.workspace_kind,
+        workspace_path=str(path),
+        branch_name=task.branch_name,
+        require_dir_path=True,
+    )
     with write_txn(conn):
         conn.execute(
             "UPDATE tasks SET workspace_path = ? WHERE id = ?",
-            (str(path), task_id),
+            (normalized_path, task_id),
         )
 
 
 def set_branch_name(
     conn: sqlite3.Connection, task_id: str, branch_name: str
 ) -> None:
+    task = get_task(conn, task_id)
+    if task is None:
+        raise ValueError(f"unknown task: {task_id}")
+    _kind, _path, normalized_branch = normalize_workspace_metadata(
+        workspace_kind=task.workspace_kind,
+        workspace_path=task.workspace_path,
+        branch_name=branch_name,
+        require_dir_path=True,
+    )
     with write_txn(conn):
         conn.execute(
             "UPDATE tasks SET branch_name = ? WHERE id = ?",
-            (str(branch_name), task_id),
+            (normalized_branch, task_id),
         )
 
 

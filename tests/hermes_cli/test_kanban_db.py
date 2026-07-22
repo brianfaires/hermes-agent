@@ -277,15 +277,72 @@ def test_create_task_persists_dir_branch_name(kanban_home, tmp_path):
     assert "Branch:   work/new-feature" in context
 
 
-@pytest.mark.parametrize("branch_name", ["-option-like", "bad branch"])
+def test_create_task_accepts_git_at_branch_name(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="valid Git edge branch",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            branch_name="@",
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert task is not None
+    assert task.branch_name == "@"
+
+
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "-option-like",
+        "bad branch",
+        "bad..branch",
+        "bad.lock",
+        "bad~branch",
+        "bad/",
+        "HEAD",
+    ],
+)
 def test_create_task_rejects_invalid_branch_name(kanban_home, branch_name):
     with kb.connect() as conn, pytest.raises(ValueError, match="branch_name"):
         kb.create_task(
             conn,
             title="bad branch metadata",
             workspace_kind="dir",
+            workspace_path="/tmp/kanban-branch-test",
             branch_name=branch_name,
         )
+
+
+def test_set_branch_name_uses_persistence_boundary_validation(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="branch update",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+        )
+        with pytest.raises(ValueError, match="branch_name"):
+            kb.set_branch_name(conn, task_id, "bad..branch")
+        kb.set_branch_name(conn, task_id, " work/valid ")
+        assert kb.get_task(conn, task_id).branch_name == "work/valid"
+
+
+@pytest.mark.parametrize("workspace_kind", ["scratch", "dir", "worktree"])
+def test_create_task_rejects_relative_workspace_path(kanban_home, workspace_kind):
+    with kb.connect() as conn, pytest.raises(ValueError, match="absolute"):
+        kb.create_task(
+            conn,
+            title="relative workspace",
+            workspace_kind=workspace_kind,
+            workspace_path="relative/path",
+        )
+
+
+def test_create_dir_task_requires_workspace_path_without_board_default(kanban_home):
+    with kb.connect() as conn, pytest.raises(ValueError, match="workspace_path"):
+        kb.create_task(conn, title="missing workspace", workspace_kind="dir")
 
 
 def test_branch_name_requires_persistent_workspace(kanban_home):
