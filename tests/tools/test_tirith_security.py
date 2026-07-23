@@ -1489,6 +1489,34 @@ class TestPackageSimilarityFindings:
 
         assert result == {"action": "warn", "findings": findings, "summary": ""}
 
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_distinct_warning_after_exact_matches_remains_warning(self, mock_cfg, mock_run):
+        """Filtering happens before the display cap so later warnings survive."""
+        mock_cfg.return_value = _CFG
+        exact_finding = {
+            "rule_id": "threat_package_similar_name",
+            "description": (
+                "Package ''pytest' in pypi is within edit distance 1 of popular "
+                "package 'pytest'. This could indicate a typosquatting attempt."
+            ),
+        }
+        distinct_finding = {
+            "rule_id": "threat_package_similar_name",
+            "description": (
+                "Package ''lodash.get' in npm is within edit distance 1 of popular "
+                "package 'lodash-get'. This could indicate a typosquatting attempt."
+            ),
+        }
+        mock_run.return_value = _mock_run(
+            2,
+            _json_stdout([exact_finding] * 50 + [distinct_finding]),
+        )
+
+        result = check_command_security("npm install lodash.get")
+
+        assert result == {"action": "warn", "findings": [distinct_finding], "summary": ""}
+
 
 # ---------------------------------------------------------------------------
 # mkdtemp OSError → no_space (disk-full leak prevention)

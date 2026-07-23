@@ -830,7 +830,7 @@ def check_command_security(command: str) -> dict:
     try:
         data = json.loads(result.stdout) if result.stdout.strip() else {}
         raw_findings = data.get("findings", [])
-        findings = raw_findings[:_MAX_FINDINGS]
+        findings = raw_findings
         summary = (data.get("summary", "") or "")[:_MAX_SUMMARY_LEN]
     except (json.JSONDecodeError, AttributeError):
         # JSON parse failure degrades findings/summary, not the verdict
@@ -869,7 +869,7 @@ def check_command_security(command: str) -> dict:
         action = "allow"
         summary = ""
 
-    return {"action": action, "findings": findings, "summary": summary}
+    return {"action": action, "findings": findings[:_MAX_FINDINGS], "summary": summary}
 
 
 def _is_app_tld_finding(finding: dict) -> bool:
