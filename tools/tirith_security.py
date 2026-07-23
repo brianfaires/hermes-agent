@@ -842,14 +842,12 @@ def check_command_security(command: str) -> dict:
 
     had_findings = bool(findings)
 
-    # Tirith 0.3.3 can incorrectly flag canonical package names as a
-    # threat_package_similar_name finding with a claimed distance of one. Filter
-    # those exact canonical matches and normalize retained package warnings so
-    # the approval prompt names both packages and the reported distance.
+    # Tirith 0.3.3 can incorrectly flag an identical package-name pair as a
+    # threat_package_similar_name finding with a claimed distance of one.
     findings = [
-        normalized
+        finding
         for finding in findings
-        if (normalized := _normalize_package_similarity_finding(finding)) is not None
+        if not _is_exact_package_similarity_finding(finding)
     ]
 
     # Suppress warn verdicts that consist solely of a lookalike_tld finding for
@@ -864,8 +862,8 @@ def check_command_security(command: str) -> dict:
             findings = []
             summary = ""
 
-    # A warn with no surviving findings means every external finding was a
-    # canonical package-name false positive. Do not ask the user to approve a
+    # A warn with no surviving findings means every external finding was an
+    # identical package-name false positive. Do not ask the user to approve a
     # command that the scanner's own evidence says is an exact match.
     if action == "warn" and had_findings and not findings:
         action = "allow"
@@ -898,37 +896,21 @@ _PACKAGE_SIMILARITY_DESCRIPTION = re.compile(
 )
 
 
-def _canonical_package_name(name: str) -> str:
-    """Return the PEP 503 comparison form for a package name."""
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def _normalize_package_similarity_finding(finding: dict) -> dict | None:
-    """Drop exact package-name false positives and format real near matches.
+def _is_exact_package_similarity_finding(finding: dict) -> bool:
+    """Return whether Tirith reported an identical package-name pair.
 
     Tirith encodes the package names and claimed edit distance only in its
-    human-readable description. If that format changes, retain the original
-    finding rather than risking a false negative.
+    human-readable description. Compare the extracted values exactly: package
+    naming rules differ across ecosystems, so normalization could hide a real
+    typosquatting warning.
     """
     if not isinstance(finding, dict) or finding.get("rule_id") != "threat_package_similar_name":
-        return finding
+        return False
 
     description = finding.get("description")
     match = _PACKAGE_SIMILARITY_DESCRIPTION.search(str(description or ""))
     if match is None:
-        return finding
+        return False
 
-    package_name, distance, popular_name = match.groups()
-    if _canonical_package_name(package_name) == _canonical_package_name(popular_name):
-        return None
-
-    normalized = dict(finding)
-    normalized["title"] = (
-        "Package name similar to popular package: "
-        f"'{package_name}' ≈ '{popular_name}' (edit distance {distance})"
-    )
-    normalized["description"] = (
-        f"Package '{package_name}' in PyPI is within edit distance {distance} "
-        f"of popular package '{popular_name}'. This could indicate a typosquatting attempt."
-    )
-    return normalized
+    package_name, _distance, popular_name = match.groups()
+    return package_name == popular_name

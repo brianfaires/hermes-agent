@@ -1451,7 +1451,7 @@ class TestIsAppTldFinding:
 class TestPackageSimilarityFindings:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
-    def test_canonical_exact_package_match_is_suppressed(self, mock_cfg, mock_run):
+    def test_exact_package_match_is_suppressed(self, mock_cfg, mock_run):
         """A scanner claim that pytest is similar to pytest must not prompt."""
         mock_cfg.return_value = _CFG
         findings = [{
@@ -1471,31 +1471,23 @@ class TestPackageSimilarityFindings:
 
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
-    def test_true_near_package_match_remains_a_clear_warning(self, mock_cfg, mock_run):
-        """A distinct package name remains warn-worthy with accurate text."""
+    def test_distinct_npm_package_names_remain_warning(self, mock_cfg, mock_run):
+        """Package-name punctuation differences are not normalized away."""
         mock_cfg.return_value = _CFG
         findings = [{
             "rule_id": "threat_package_similar_name",
             "severity": "MEDIUM",
-            "title": "malformed upstream title",
+            "title": "Package name similar to popular package: 'lodash.get' ≈ 'lodash-get'",
             "description": (
-                "Package ''pytests' in pypi is within edit distance 1 of popular "
-                "package 'pytest'. This could indicate a typosquatting attempt."
+                "Package ''lodash.get' in npm is within edit distance 1 of popular "
+                "package 'lodash-get'. This could indicate a typosquatting attempt."
             ),
         }]
         mock_run.return_value = _mock_run(2, _json_stdout(findings))
 
-        result = check_command_security("uv pip install 'pytests==1.0.0'")
+        result = check_command_security("npm install lodash.get")
 
-        assert result["action"] == "warn"
-        assert result["findings"][0]["title"] == (
-            "Package name similar to popular package: 'pytests' ≈ 'pytest' "
-            "(edit distance 1)"
-        )
-        assert result["findings"][0]["description"] == (
-            "Package 'pytests' in PyPI is within edit distance 1 of popular "
-            "package 'pytest'. This could indicate a typosquatting attempt."
-        )
+        assert result == {"action": "warn", "findings": findings, "summary": ""}
 
 
 # ---------------------------------------------------------------------------
