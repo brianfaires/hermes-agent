@@ -316,6 +316,19 @@ async def test_channel_in_allowlist_passes(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_profile_channel_allowlist_overrides_process_env(adapter, monkeypatch):
+    adapter.config.extra["allowed_channels"] = "1111"
+    adapter._allowed_user_ids = {"100200300"}
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "9999")
+
+    allowed = _make_interaction("100200300", channel_id=1111)
+    leaked = _make_interaction("100200300", channel_id=9999)
+
+    assert await adapter._check_slash_authorization(allowed, "/help") is True
+    assert await adapter._check_slash_authorization(leaked, "/help") is False
+
+
+@pytest.mark.asyncio
 async def test_channel_allowlist_wildcard_passes(adapter, monkeypatch):
     """``*`` in DISCORD_ALLOWED_CHANNELS = allow any channel, matching on_message."""
     monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "*")

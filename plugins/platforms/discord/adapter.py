@@ -130,13 +130,11 @@ def _discord_config_id_set(raw: Any) -> set[str]:
 
 
 def _discord_policy_sets(extra: Optional[Dict[str, Any]] = None) -> tuple[set[str], set[str]]:
-    """Return (allowed_channels, ignored_channels) for Discord sends.
+    """Return profile-scoped (allowed_channels, ignored_channels) policy.
 
     Prefer the resolved adapter config when it carries channel policy keys, but
-    fall back to the profile-scoped environment values populated by the gateway
-    config loader. Some live PlatformConfig instances do not include top-level
-    ``discord.allowed_channels`` in ``extra``; treating that as unrestricted
-    bypasses the profile boundary on outbound delivery.
+    fall back to environment values for callers that construct adapters without
+    config extras.
     """
     if extra is not None and "allowed_channels" in extra:
         allowed_raw = extra.get("allowed_channels")
@@ -2401,12 +2399,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 return {item.strip() for item in raw.split(",") if item.strip()}
         raw = os.getenv("DISCORD_MISSED_MESSAGE_BACKFILL_CHANNELS", "")
         if not raw.strip():
-            allowed = {
-                item.strip()
-                for item in os.getenv("DISCORD_ALLOWED_CHANNELS", "").split(",")
-                if item.strip()
-            }
-            return allowed | self._discord_free_response_channels()
+            return self._discord_allowed_channels() | self._discord_free_response_channels()
         return {item.strip() for item in raw.split(",") if item.strip()}
 
     def _missed_message_backfill_window_seconds(self) -> float:
@@ -5041,10 +5034,9 @@ class DiscordAdapter(BasePlatformAdapter):
         """True when *channel_ids* intersect ``DISCORD_ALLOWED_CHANNELS``."""
         if not channel_ids:
             return False
-        allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "").strip()
-        if not allowed_raw:
+        allowed = self._discord_allowed_channels()
+        if not allowed:
             return False
-        allowed = {c.strip() for c in allowed_raw.split(",") if c.strip()}
         if "*" in allowed:
             return True
         return bool(channel_ids & allowed)
@@ -5268,9 +5260,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 else None,
             )
 
-            allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
-            if allowed_raw:
-                allowed = {c.strip() for c in allowed_raw.split(",") if c.strip()}
+            allowed = self._discord_allowed_channels()
+            if allowed:
                 if "*" not in allowed:
                     if not channel_ids:
                         # Channel policy is configured but the interaction
@@ -6810,7 +6801,8 @@ class DiscordAdapter(BasePlatformAdapter):
         An empty set means unrestricted, matching the existing inbound
         ``DISCORD_ALLOWED_CHANNELS`` semantics. A ``"*"`` entry allows all.
         """
-        allowed_channels, _ignored_channels = _discord_policy_sets(getattr(self.config, "extra", None))
+        extra = getattr(getattr(self, "config", None), "extra", None)
+        allowed_channels, _ignored_channels = _discord_policy_sets(extra)
         return allowed_channels
 
     def _discord_ignored_channels(self) -> set:
@@ -8610,9 +8602,8 @@ class DiscordAdapter(BasePlatformAdapter):
             # Check allowed channels - if set, only respond in the explicitly
             # allowed thread or its currently resolved parent. Participation
             # may bypass mention requirements below, never channel policy.
-            allowed_channels_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
-            if allowed_channels_raw:
-                allowed_channels = {ch.strip() for ch in allowed_channels_raw.split(",") if ch.strip()}
+            allowed_channels = self._discord_allowed_channels()
+            if allowed_channels:
                 if "*" not in allowed_channels and not (channel_keys & allowed_channels):
                     logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_keys)
                     return False

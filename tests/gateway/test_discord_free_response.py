@@ -220,6 +220,27 @@ async def test_discord_defaults_to_require_mention(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discord_profile_channel_policy_overrides_process_env(adapter, monkeypatch):
+    adapter.config.extra.update(
+        {
+            "allowed_channels": "123",
+            "free_response_channels": "123",
+            "require_mention": True,
+        }
+    )
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "999")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+
+    message = make_message(channel=FakeTextChannel(channel_id=123), content="hello")
+
+    assert adapter._discord_channel_ids_allowed({"123"}) is True
+    assert adapter._discord_channel_ids_allowed({"999"}) is False
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_discord_free_response_in_server_channels(adapter, monkeypatch):
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
     monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)

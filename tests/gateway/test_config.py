@@ -662,6 +662,21 @@ class TestLoadGatewayConfig:
         assert extra["websocket_heartbeat_ack_max_age_seconds"] == 75
         assert extra["websocket_max_latency_seconds"] == 30
 
+    def test_discord_allowed_channels_seed_platform_extra(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "discord:\n  allowed_channels: 111,222\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "999")
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.DISCORD].extra["allowed_channels"] == "111,222"
+
     def test_session_reset_from_nested_gateway_section(self, tmp_path, monkeypatch):
         """``gateway.session_reset`` (nested form) must reach default_reset_policy,
         mirroring the gateway.multiplex_profiles precedent."""

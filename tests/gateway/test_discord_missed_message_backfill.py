@@ -534,6 +534,20 @@ def test_default_recovery_scope_includes_allowed_and_free_response_channels(adap
     assert adapter._missed_message_backfill_channels() == {"100", "200", "300"}
 
 
+def test_default_recovery_scope_prefers_profile_channel_policy(adapter, monkeypatch):
+    adapter.config.extra.update(
+        {
+            "allowed_channels": "100,200",
+            "free_response_channels": "200,300",
+        }
+    )
+    monkeypatch.delenv("DISCORD_MISSED_MESSAGE_BACKFILL_CHANNELS", raising=False)
+    monkeypatch.setenv("DISCORD_ALLOWED_CHANNELS", "900")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "901")
+
+    assert adapter._missed_message_backfill_channels() == {"100", "200", "300"}
+
+
 @pytest.mark.asyncio
 async def test_persistent_responded_record_suppresses_backfill(adapter):
     message = make_message(message_id=77)
