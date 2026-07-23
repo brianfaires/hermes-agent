@@ -94,13 +94,15 @@ class ProfileGatewayProcess:
     pid: int
 
 
-def _get_service_pids() -> set:
+def _get_service_pids(all_profiles: bool = True) -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
     Used to avoid killing freshly-restarted service processes when sweeping
     for stale manual gateway processes after a service restart.  Relies on the
     service manager having committed the new PID before the restart command
-    returns (true for both systemd and launchd in practice).
+    returns (true for both systemd and launchd in practice).  ``all_profiles``
+    retains the global sweep behavior; status probes use ``False`` so another
+    profile's service PID cannot be reported as a manual process for this one.
     """
     pids: set = set()
 
@@ -126,6 +128,8 @@ def _get_service_pids() -> set:
                     if not parts or not parts[0].endswith(".service"):
                         continue
                     svc = parts[0]
+                    if not all_profiles and svc != f"{get_service_name()}.service":
+                        continue
                     try:
                         show = subprocess.run(
                             scope_args + ["show", svc, "--property=MainPID", "--value"],
@@ -610,7 +614,7 @@ def find_gateway_pids(
             _append_unique_pid(pids, get_running_pid(), _exclude)
         except Exception:
             pass
-    for pid in _get_service_pids():
+    for pid in _get_service_pids(all_profiles=all_profiles):
         _append_unique_pid(pids, pid, _exclude)
     try:
         include_restart_managers = not supports_systemd_services()

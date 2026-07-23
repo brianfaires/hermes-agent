@@ -1018,7 +1018,7 @@ def test_gateway_install_noninteractive_skips_legacy_unit_prompt(monkeypatch, tm
 
 
 def test_find_gateway_pids_falls_back_to_pid_file_when_process_scan_fails(monkeypatch):
-    monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda **kwargs: set())
     monkeypatch.setattr(gateway, "is_windows", lambda: False)
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: 321)
 
@@ -1048,7 +1048,7 @@ def test_find_gateway_pids_falls_back_to_pid_file_when_process_scan_fails(monkey
 def test_find_gateway_pids_includes_restart_managers_without_systemd(monkeypatch):
     calls = []
 
-    monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda **kwargs: set())
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
     monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
 
@@ -1060,6 +1060,60 @@ def test_find_gateway_pids_includes_restart_managers_without_systemd(monkeypatch
 
     assert gateway.find_gateway_pids(all_profiles=True) == [708]
     assert calls == [(set(), True, True)]
+
+
+def test_find_gateway_pids_excludes_other_profile_systemd_service(monkeypatch):
+    """A default service must not make an inactive ops service look manual."""
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: True)
+    monkeypatch.setattr(gateway, "get_service_name", lambda: "hermes-gateway-ops")
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr(gateway, "_scan_gateway_pids", lambda *args, **kwargs: [])
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "list-units" in cmd:
+            return SimpleNamespace(
+                stdout=(
+                    "hermes-gateway.service loaded active running Hermes Gateway\n"
+                    "hermes-gateway-ops.service loaded inactive dead Hermes Gateway\n"
+                )
+            )
+        if cmd[-4:] == ["show", "hermes-gateway-ops.service", "--property=MainPID", "--value"]:
+            return SimpleNamespace(stdout="0\n")
+        if cmd[-4:] == ["show", "hermes-gateway.service", "--property=MainPID", "--value"]:
+            return SimpleNamespace(stdout="3164677\n")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    assert gateway.find_gateway_pids() == []
+    assert all("hermes-gateway.service" not in cmd for cmd in calls if "show" in cmd)
+    assert gateway.find_gateway_pids(all_profiles=True) == [3164677]
+
+
+def test_find_gateway_pids_keeps_same_profile_manual_process_for_mismatch(monkeypatch):
+    """A real unsupervised current-profile process remains visible to status."""
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda **kwargs: set())
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: True)
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr(
+        gateway,
+        "_scan_gateway_pids",
+        lambda exclude_pids, all_profiles=False, include_restart_managers=False: [4321],
+    )
+
+    snapshot = gateway.GatewayRuntimeSnapshot(
+        manager="systemd (user)",
+        service_installed=True,
+        service_running=False,
+        gateway_pids=tuple(gateway.find_gateway_pids()),
+        service_scope="user",
+    )
+
+    assert snapshot.gateway_pids == (4321,)
+    assert snapshot.has_process_service_mismatch is True
 
 
 def test_reap_unsupervised_orphans_noop_on_systemd_hosts(monkeypatch):
