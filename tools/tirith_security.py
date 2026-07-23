@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -839,6 +840,18 @@ def check_command_security(command: str) -> dict:
         elif action == "warn":
             summary = "security warning detected (details unavailable)"
 
+    had_findings = bool(findings)
+
+    # Tirith 0.3.3 can incorrectly flag canonical package names as a
+    # threat_package_similar_name finding with a claimed distance of one. Filter
+    # those exact canonical matches and normalize retained package warnings so
+    # the approval prompt names both packages and the reported distance.
+    findings = [
+        normalized
+        for finding in findings
+        if (normalized := _normalize_package_similarity_finding(finding)) is not None
+    ]
+
     # Suppress warn verdicts that consist solely of a lookalike_tld finding for
     # the .app TLD.  .app is a legitimate gTLD used by many production services
     # and the "can be confused with file extensions" heuristic generates false
@@ -850,6 +863,13 @@ def check_command_security(command: str) -> dict:
             action = "allow"
             findings = []
             summary = ""
+
+    # A warn with no surviving findings means every external finding was a
+    # canonical package-name false positive. Do not ask the user to approve a
+    # command that the scanner's own evidence says is an exact match.
+    if action == "warn" and had_findings and not findings:
+        action = "allow"
+        summary = ""
 
     return {"action": action, "findings": findings, "summary": summary}
 
@@ -869,3 +889,46 @@ def _is_app_tld_finding(finding: dict) -> bool:
         if val is not None and ".app" in str(val).lower():
             return True
     return False
+
+
+_PACKAGE_SIMILARITY_DESCRIPTION = re.compile(
+    r"Package\s+'+([^']+)'\s+in\s+[^\s]+\s+is\s+within\s+edit\s+distance\s+(\d+)\s+"
+    r"of\s+popular\s+package\s+'([^']+)'",
+    re.IGNORECASE,
+)
+
+
+def _canonical_package_name(name: str) -> str:
+    """Return the PEP 503 comparison form for a package name."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _normalize_package_similarity_finding(finding: dict) -> dict | None:
+    """Drop exact package-name false positives and format real near matches.
+
+    Tirith encodes the package names and claimed edit distance only in its
+    human-readable description. If that format changes, retain the original
+    finding rather than risking a false negative.
+    """
+    if not isinstance(finding, dict) or finding.get("rule_id") != "threat_package_similar_name":
+        return finding
+
+    description = finding.get("description")
+    match = _PACKAGE_SIMILARITY_DESCRIPTION.search(str(description or ""))
+    if match is None:
+        return finding
+
+    package_name, distance, popular_name = match.groups()
+    if _canonical_package_name(package_name) == _canonical_package_name(popular_name):
+        return None
+
+    normalized = dict(finding)
+    normalized["title"] = (
+        "Package name similar to popular package: "
+        f"'{package_name}' ≈ '{popular_name}' (edit distance {distance})"
+    )
+    normalized["description"] = (
+        f"Package '{package_name}' in PyPI is within edit distance {distance} "
+        f"of popular package '{popular_name}'. This could indicate a typosquatting attempt."
+    )
+    return normalized

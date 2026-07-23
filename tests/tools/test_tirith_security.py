@@ -1445,6 +1445,60 @@ class TestIsAppTldFinding:
 
 
 # ---------------------------------------------------------------------------
+# Package-name similarity false-positive handling
+# ---------------------------------------------------------------------------
+
+class TestPackageSimilarityFindings:
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_canonical_exact_package_match_is_suppressed(self, mock_cfg, mock_run):
+        """A scanner claim that pytest is similar to pytest must not prompt."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "threat_package_similar_name",
+            "severity": "MEDIUM",
+            "title": "Package name similar to popular package: 'pytest ≈ pytest",
+            "description": (
+                "Package ''pytest' in pypi is within edit distance 1 of popular "
+                "package 'pytest'. This could indicate a typosquatting attempt."
+            ),
+        }]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings))
+
+        result = check_command_security("uv pip install 'pytest==9.0.2'")
+
+        assert result == {"action": "allow", "findings": [], "summary": ""}
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_true_near_package_match_remains_a_clear_warning(self, mock_cfg, mock_run):
+        """A distinct package name remains warn-worthy with accurate text."""
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "threat_package_similar_name",
+            "severity": "MEDIUM",
+            "title": "malformed upstream title",
+            "description": (
+                "Package ''pytests' in pypi is within edit distance 1 of popular "
+                "package 'pytest'. This could indicate a typosquatting attempt."
+            ),
+        }]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings))
+
+        result = check_command_security("uv pip install 'pytests==1.0.0'")
+
+        assert result["action"] == "warn"
+        assert result["findings"][0]["title"] == (
+            "Package name similar to popular package: 'pytests' ≈ 'pytest' "
+            "(edit distance 1)"
+        )
+        assert result["findings"][0]["description"] == (
+            "Package 'pytests' in PyPI is within edit distance 1 of popular "
+            "package 'pytest'. This could indicate a typosquatting attempt."
+        )
+
+
+# ---------------------------------------------------------------------------
 # mkdtemp OSError → no_space (disk-full leak prevention)
 # ---------------------------------------------------------------------------
 
