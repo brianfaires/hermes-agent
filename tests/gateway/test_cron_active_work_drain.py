@@ -62,7 +62,7 @@ class TestActiveCronJobCount:
         runner, _adapter = make_restart_runner()
 
         with patch(
-            "cron.scheduler.get_running_job_ids", side_effect=ImportError("boom")
+            "cron.scheduler.get_running_job_count", side_effect=ImportError("boom")
         ):
             assert runner._active_cron_job_count() == 0
 

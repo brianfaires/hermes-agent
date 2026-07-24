@@ -38,10 +38,10 @@ def test_secondary_profile_pairing_stores_created(tmp_path, monkeypatch):
 
     runner = _bare_runner()
 
-    async def _no_secondary(profile_name, profile_home, claimed):
-        return 0
+    async def _connected_secondary(profile_name, profile_home, claimed):
+        return 1
 
-    runner._start_one_profile_adapters = _no_secondary
+    runner._start_one_profile_adapters = _connected_secondary
     runner._adapter_credential_fingerprint = lambda adapter: None
 
     with patch("hermes_cli.profiles.profiles_to_serve", return_value=[
@@ -66,10 +66,10 @@ def test_pairing_store_scoped_to_profile_dir(tmp_path, monkeypatch):
 
     runner = _bare_runner()
 
-    async def _no_secondary(profile_name, profile_home, claimed):
-        return 0
+    async def _connected_secondary(profile_name, profile_home, claimed):
+        return 1
 
-    runner._start_one_profile_adapters = _no_secondary
+    runner._start_one_profile_adapters = _connected_secondary
     runner._adapter_credential_fingerprint = lambda adapter: None
 
     with patch("hermes_cli.profiles.profiles_to_serve", return_value=[

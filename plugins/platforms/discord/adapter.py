@@ -8065,7 +8065,7 @@ class DiscordAdapter(BasePlatformAdapter):
         """Return the config-gated durable ingestor, initialized lazily."""
         from plugins.platforms.discord.kanban_mirror.inbox import load_config
 
-        cfg = load_config()
+        cfg = getattr(self, "_kanban_inbox_config", None) or load_config()
         if not (cfg.enabled and cfg.conversation_router_enabled and cfg.forum_channel_ids):
             return cfg, None
         # Only the configured ingress identity may own historical persistence.
@@ -8211,7 +8211,8 @@ class DiscordAdapter(BasePlatformAdapter):
             replied_to_author_id=p.get("replied_to_author_id"),
             replied_to_author_is_bot=bool(p.get("replied_to_author_is_bot")),
         )
-        result = await asyncio.to_thread(handle_reply, ctx)
+        cfg = getattr(self, "_kanban_inbox_config", None)
+        result = await asyncio.to_thread(handle_reply, ctx, config=cfg)
         retry_reasons = {"binding_unavailable", "unmapped_thread", "missing_task", "invalid_profile", "ambiguous_owner", "ambiguous_profile_mentions"}
         if result.reason in retry_reasons:
             return ProcessResult("retry", detail=result.reason)
@@ -8361,6 +8362,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             result = await maybe_handle_discord_message(
                 message,
+                config=getattr(self, "_kanban_inbox_config", None),
                 mark_nonconversational=self._nonconversational_messages.mark_many,
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
             )
@@ -8376,7 +8378,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 load_config as load_kanban_inbox_config,
             )
 
-            cfg = load_kanban_inbox_config()
+            cfg = getattr(self, "_kanban_inbox_config", None) or load_kanban_inbox_config()
             channel = getattr(message, "channel", None)
             channel_ids = {
                 str(value)
@@ -8443,6 +8445,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             result = await maybe_handle_discord_reaction(
                 payload,
+                config=getattr(self, "_kanban_inbox_config", None),
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
                 resolved_channel=channel,
             )
@@ -8528,6 +8531,7 @@ class DiscordAdapter(BasePlatformAdapter):
             from plugins.platforms.discord.kanban_mirror.inbox import maybe_handle_discord_reaction_remove
             result = await maybe_handle_discord_reaction_remove(
                 payload,
+                config=getattr(self, "_kanban_inbox_config", None),
                 current_bot_id=str(getattr(getattr(self._client, "user", None), "id", "") or ""),
                 resolved_channel=channel,
             )

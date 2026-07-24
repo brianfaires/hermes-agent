@@ -3126,6 +3126,9 @@ class GatewayRunner(
         # sites are untouched when multiplexing is off (this dict is empty).
         # Populated by _start_secondary_profile_adapters().
         self._profile_adapters: Dict[str, Dict[Platform, BasePlatformAdapter]] = {}
+        # Explicit adapter/shared-ingress coverage. Empty adapter maps are not
+        # evidence that a profile started successfully.
+        self._served_profiles: set[str] = {self._gateway_profile_name}
         self._warn_if_docker_media_delivery_is_risky()
         _gateway_runner_ref = _weakref.ref(self)
 
@@ -4485,8 +4488,8 @@ class GatewayRunner(
         can't be imported (e.g. a minimal test double for this class).
         """
         try:
-            from cron.scheduler import get_running_job_ids
-            return len(get_running_job_ids())
+            from cron.scheduler import get_running_job_count
+            return get_running_job_count()
         except Exception:
             return 0
 
@@ -9404,6 +9407,12 @@ class GatewayRunner(
         only point that sees every profile's resolved credentials together.
         """
         if not getattr(self.config, "multiplex_profiles", False):
+            try:
+                from gateway.status import write_runtime_status
+
+                write_runtime_status(served_profiles=[])
+            except Exception:
+                logger.debug("could not clear served_profiles", exc_info=True)
             return 0
 
         try:
@@ -9412,6 +9421,10 @@ class GatewayRunner(
             return 0
 
         active = get_active_profile_name() or "default"
+        if not isinstance(getattr(self, "_served_profiles", None), set):
+            self._served_profiles = {active}
+        else:
+            self._served_profiles.add(active)
         connected = 0
         # (platform, token-fingerprint) -> profile that claimed it. Detects two
         # profiles trying to poll the same bot credential (impossible to do
@@ -9426,9 +9439,14 @@ class GatewayRunner(
             if profile_name == active:
                 continue  # handled by the primary startup loop
             try:
-                connected += await self._start_one_profile_adapters(
+                started = await self._start_one_profile_adapters(
                     profile_name, profile_home, claimed
                 )
+                connected += started
+                if started > 0:
+                    self._served_profiles.add(profile_name)
+                elif profile_name not in self._served_profiles:
+                    self._profile_adapters.pop(profile_name, None)
             except SecondaryPortBindingConfigError as e:
                 logger.warning(
                     "Skipping secondary profile '%s' due to port-binding config error: %s",
@@ -9447,7 +9465,9 @@ class GatewayRunner(
         try:
             from gateway.status import write_runtime_status
             from gateway.pairing import PairingStore
-            served = [active] + sorted(self._profile_adapters.keys())
+            served = [active] + sorted(
+                name for name in self._served_profiles if name != active
+            )
             # Per-profile PairingStores so authz_mixin can route pairing
             # checks to the right whitelist. The active profile gets a store
             # at its HERMES_HOME; additional served profiles get one under
@@ -9497,6 +9517,14 @@ class GatewayRunner(
 
         profile_map = self._profile_adapters.setdefault(profile_name, {})
         connected = 0
+        relay_cfg = profile_cfg.platforms.get(Platform.RELAY)
+        shared_relay_adapter = getattr(self, "adapters", {}).get(Platform.RELAY)
+        shared_relay = bool(
+            relay_cfg is not None
+            and relay_cfg.enabled
+            and shared_relay_adapter is not None
+            and getattr(shared_relay_adapter, "_running", True) is not False
+        )
         for platform, platform_config in profile_cfg.platforms.items():
             if not platform_config.enabled:
                 continue
@@ -9559,6 +9587,14 @@ class GatewayRunner(
             except Exception as e:
                 logger.error("✗ %s error (profile: %s): %s", platform.value, profile_name, e)
                 await self._safe_adapter_disconnect(adapter, platform)
+        if connected or shared_relay:
+            served_profiles = getattr(self, "_served_profiles", None)
+            if not isinstance(served_profiles, set):
+                served_profiles = set()
+                self._served_profiles = served_profiles
+            served_profiles.add(profile_name)
+        elif not profile_map:
+            self._profile_adapters.pop(profile_name, None)
         return connected
 
     def _configure_profile_adapter(
@@ -22359,11 +22395,90 @@ async def _await_thread_exit(
     return not thread.is_alive()
 
 
+@dataclasses.dataclass(frozen=True)
+class _CronRuntimeSpec:
+    profile: str
+    home: Path
+    adapters: dict
+
+
+def _cron_runtime_specs(runner) -> list[_CronRuntimeSpec]:
+    """Describe the distinct profile-local schedulers owned by *runner*."""
+    primary = _CronRuntimeSpec(
+        str(runner._gateway_profile_name),
+        Path(runner._gateway_profile_home).resolve(),
+        runner.adapters,
+    )
+    specs = [primary]
+    seen = {primary.profile}
+    profile_adapters = getattr(runner, "_profile_adapters", {})
+    served_profiles = getattr(runner, "_served_profiles", None)
+    if not isinstance(served_profiles, set):
+        served_profiles = {primary.profile, *profile_adapters}
+    for profile in sorted(served_profiles):
+        profile = str(profile)
+        if not profile or profile in seen:
+            continue
+        seen.add(profile)
+        home = primary.home.parent / profile if primary.home.parent.name == "profiles" else primary.home / "profiles" / profile
+        specs.append(_CronRuntimeSpec(profile, home.resolve(), profile_adapters.get(profile, {})))
+    return specs
+
+
+@dataclasses.dataclass(frozen=True)
+class _KanbanRuntimeOwner:
+    profile: str
+    home: Path
+    raw_config: dict
+    mirror_config: Any
+    inbox_config: Any
+
+
+def _read_profile_raw_config(home: Path) -> dict:
+    try:
+        import yaml
+
+        loaded = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, UnicodeError, ValueError):
+        return {}
+
+
+def _resolve_kanban_runtime_owner(runner) -> Optional[_KanbanRuntimeOwner]:
+    """Resolve one profile that owns the process-global Discord Kanban runtime.
+
+    Mirror and inbox configuration remain profile-local.  Multiple enabled
+    owners are rejected rather than merging boards, tokens, or authorization
+    policy across profiles.
+    """
+    from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
+    from plugins.platforms.discord.kanban_mirror.inbox import load_config as load_inbox_config
+
+    owners = []
+    for spec in _cron_runtime_specs(runner):
+        # Config defaults (notably the mirror token .env path) are resolved
+        # through get_hermes_home(), so parsing must happen inside the owning
+        # profile scope rather than merely passing that profile's raw mapping.
+        with _profile_runtime_scope(spec.home):
+            raw = _read_profile_raw_config(spec.home)
+            mirror = load_mirror_config(raw)
+            inbox = load_inbox_config(raw)
+        if mirror.enabled or inbox.enabled:
+            owners.append(_KanbanRuntimeOwner(spec.profile, spec.home, raw, mirror, inbox))
+    if len(owners) > 1:
+        names = ", ".join(owner.profile for owner in owners)
+        raise MultiplexConfigError(
+            "Discord Kanban singleton runtime is enabled in multiple profiles: " + names
+        )
+    return owners[0] if owners else None
+
+
 def _start_profile_scoped_cron_provider(
     cron_provider,
     stop_event: threading.Event,
     *,
     profile_home: Path,
+    scope_secrets: bool = False,
     **start_kwargs,
 ) -> None:
     """Run the cron provider pinned to the gateway's startup profile home.
@@ -22373,15 +22488,9 @@ def _start_profile_scoped_cron_provider(
     state, the scheduler must still resolve jobs/scripts/output under the
     profile home this gateway was started for.
     """
-    from cron import scheduler as cron_scheduler
-
-    previous_home = getattr(cron_scheduler, "_hermes_home", None)
-    cron_scheduler._hermes_home = Path(profile_home).resolve()
-    try:
-        with _hermes_home_runtime_scope(Path(profile_home).resolve()):
-            cron_provider.start(stop_event, **start_kwargs)
-    finally:
-        cron_scheduler._hermes_home = previous_home
+    scope = _profile_runtime_scope if scope_secrets else _hermes_home_runtime_scope
+    with scope(Path(profile_home).resolve()):
+        cron_provider.start(stop_event, **start_kwargs)
 
 
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
@@ -22841,26 +22950,32 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # use live adapters (E2EE support).
     from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
     cron_stop = threading.Event()
-    cron_provider = resolve_cron_scheduler()
-    cron_start_kwargs = {"adapters": runner.adapters, "loop": asyncio.get_running_loop()}
-    # External cron providers own their remote scheduling contract. Only the
-    # in-process ticker polls local due jobs, so only it receives the local
-    # external-drain dispatch gate.
-    if isinstance(cron_provider, InProcessCronScheduler):
-        cron_start_kwargs["can_dispatch"] = lambda: not (
-            runner._draining or runner._external_drain_active
+    cron_runtimes = []
+    loop = asyncio.get_running_loop()
+    for cron_spec in _cron_runtime_specs(runner):
+        with _profile_runtime_scope(cron_spec.home):
+            cron_provider = resolve_cron_scheduler()
+        cron_start_kwargs = {"adapters": cron_spec.adapters, "loop": loop}
+        # External cron providers own their remote scheduling contract. Only the
+        # in-process ticker polls local due jobs, so only it receives the local
+        # external-drain dispatch gate.
+        if isinstance(cron_provider, InProcessCronScheduler):
+            cron_start_kwargs["can_dispatch"] = lambda: not (
+                runner._draining or runner._external_drain_active
+            )
+        cron_thread = threading.Thread(
+            target=_start_profile_scoped_cron_provider,
+            args=(cron_provider, cron_stop),
+            kwargs={
+                "profile_home": cron_spec.home,
+                "scope_secrets": bool(getattr(runner.config, "multiplex_profiles", False)),
+                **cron_start_kwargs,
+            },
+            daemon=True,
+            name=f"cron-scheduler-{cron_spec.profile}",
         )
-    cron_thread = threading.Thread(
-        target=_start_profile_scoped_cron_provider,
-        args=(cron_provider, cron_stop),
-        kwargs={
-            "profile_home": runner._gateway_profile_home,
-            **cron_start_kwargs,
-        },
-        daemon=True,
-        name="cron-scheduler",
-    )
-    cron_thread.start()
+        cron_thread.start()
+        cron_runtimes.append((cron_spec, cron_provider, cron_thread))
 
     # Gateway-only periodic housekeeping (channel dir, cache cleanup, paste
     # sweep, curator) — runs independently of which cron provider is active.
@@ -22906,15 +23021,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # silently dropped (#58818). Awaiting keeps the loop alive so the in-flight
     # delivery finishes before we tear down.
     cron_stop.set()
-    try:
-        cron_provider.stop()
-    except Exception as e:
-        logger.debug("Cron provider stop() error: %s", e)
-    if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
-        logger.warning(
-            "Cron ticker did not exit within %.0fs of shutdown — an in-flight "
-            "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT,
-        )
+    for cron_spec, cron_provider, _cron_thread in cron_runtimes:
+        try:
+            cron_provider.stop()
+        except Exception as e:
+            logger.debug("Cron provider stop() error for profile %s: %s", cron_spec.profile, e)
+    deadline = loop.time() + _CRON_SHUTDOWN_DRAIN_TIMEOUT
+    for cron_spec, _cron_provider, cron_thread in cron_runtimes:
+        remaining = max(0.0, deadline - loop.time())
+        if not await _await_thread_exit(cron_thread, timeout=remaining):
+            logger.warning(
+                "Cron scheduler for profile %s did not exit within the shared %.0fs "
+                "shutdown budget — an in-flight delivery may have been dropped.",
+                cron_spec.profile, _CRON_SHUTDOWN_DRAIN_TIMEOUT,
+            )
     await _await_thread_exit(
         housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT
     )

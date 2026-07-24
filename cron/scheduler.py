@@ -359,7 +359,11 @@ def _is_cron_silence_response(text: str) -> bool:
 # ---------------------------------------------------------------------------
 _parallel_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _parallel_pool_max_workers: Optional[int] = None
+_parallel_pools: dict[str, tuple[Optional[int], concurrent.futures.ThreadPoolExecutor]] = {}
+_retired_parallel_pools: list[concurrent.futures.ThreadPoolExecutor] = []
+_pool_lock = threading.RLock()
 _running_job_ids: set = set()
+_running_job_contexts: dict[tuple[str, str], contextvars.Context] = {}
 _running_lock = threading.Lock()
 
 # Job IDs the gateway shutdown path force-killed the tool subprocess of
@@ -372,6 +376,31 @@ _running_lock = threading.Lock()
 _interrupted_job_ids: set = set()
 
 
+def _profile_job_key(job_id: str) -> tuple[str, str]:
+    return str(_get_hermes_home().resolve()), str(job_id)
+
+
+def _register_running_job(job_id: str) -> bool:
+    """Atomically claim *job_id* for the active profile."""
+    key = _profile_job_key(job_id)
+    with _running_lock:
+        if key in _running_job_ids or job_id in _running_job_ids:
+            return False
+        _running_job_ids.add(key)
+        # Shutdown marking gets a distinct context from the worker's context,
+        # so it can safely enter it while the run is still active.
+        _running_job_contexts[key] = contextvars.copy_context()
+        return True
+
+
+def _release_running_job(job_id: str) -> None:
+    key = _profile_job_key(job_id)
+    with _running_lock:
+        _running_job_ids.discard(key)
+        _running_job_ids.discard(job_id)
+        _running_job_contexts.pop(key, None)
+
+
 def get_running_job_ids() -> "frozenset[str]":
     """Thread-safe snapshot of cron job IDs currently executing.
 
@@ -380,15 +409,23 @@ def get_running_job_ids() -> "frozenset[str]":
     i.e. for the job's *entire* run, tool calls included, not just the
     ticker's dispatch instant.
 
-    The gateway shutdown path (``gateway/run.py::GatewayRunner.
-    _drain_active_agents``) reads this to treat in-flight cron work as
-    active the same way it already treats in-flight chat sessions via
-    ``_running_agents`` — cron jobs run through their own thread pool here,
-    entirely outside that dict, so without this the drain is structurally
-    blind to them (#60432).
+    Job-store recovery reads this profile-local view. The gateway shutdown
+    path uses ``get_running_job_count`` for a process-wide count across all
+    profiles, because cron jobs run outside ``_running_agents`` (#60432).
     """
+    profile_home = str(_get_hermes_home().resolve())
     with _running_lock:
-        return frozenset(_running_job_ids)
+        return frozenset(
+            item if isinstance(item, str) else item[1]
+            for item in _running_job_ids
+            if isinstance(item, str) or item[0] == profile_home
+        )
+
+
+def get_running_job_count() -> int:
+    """Return the process-wide in-flight count across every profile."""
+    with _running_lock:
+        return len(_running_job_ids)
 
 
 def mark_running_jobs_interrupted(reason: str) -> list:
@@ -416,12 +453,19 @@ def mark_running_jobs_interrupted(reason: str) -> list:
     Returns the list of job IDs marked, for the caller to log.
     """
     with _running_lock:
-        job_ids = list(_running_job_ids)
-        _interrupted_job_ids.update(job_ids)
+        current_ctx = contextvars.copy_context()
+        running = []
+        for item in sorted(_running_job_ids, key=str):
+            if isinstance(item, str):
+                running.append((item, current_ctx.copy()))
+            else:
+                running.append((item, _running_job_contexts.get(item, current_ctx).copy()))
+        _interrupted_job_ids.update(item for item, _ctx in running)
     marked = []
-    for job_id in job_ids:
+    for item, profile_ctx in running:
+        job_id = item if isinstance(item, str) else item[1]
         try:
-            mark_job_run(job_id, False, reason)
+            profile_ctx.run(mark_job_run, job_id, False, reason)
             marked.append(job_id)
         except Exception as e:
             logger.warning("Failed to mark job %s interrupted: %s", job_id, e)
@@ -439,8 +483,9 @@ def _is_interrupted(job_id: str) -> bool:
     Unlike ``_consume_interrupted_flag`` below, this does not clear the
     flag: the later, authoritative check (right before ``last_status`` is
     written) still needs to see it."""
+    key = _profile_job_key(job_id)
     with _running_lock:
-        return job_id in _interrupted_job_ids
+        return key in _interrupted_job_ids or job_id in _interrupted_job_ids
 
 
 def _consume_interrupted_flag(job_id: str) -> bool:
@@ -451,8 +496,10 @@ def _consume_interrupted_flag(job_id: str) -> bool:
     ``last_status``. Consuming (discarding) rather than just checking keeps
     the flag from leaking across a later, unrelated run of the same job ID
     (recurring jobs reuse their ID every fire)."""
+    key = _profile_job_key(job_id)
     with _running_lock:
-        if job_id in _interrupted_job_ids:
+        if key in _interrupted_job_ids or job_id in _interrupted_job_ids:
+            _interrupted_job_ids.discard(key)
             _interrupted_job_ids.discard(job_id)
             return True
         return False
@@ -522,17 +569,25 @@ _terminal_cwd_lock = _ReadWriteLock()
 
 
 def _get_parallel_pool(max_workers: Optional[int]) -> concurrent.futures.ThreadPoolExecutor:
-    """Return (or create) the persistent parallel pool."""
+    """Return (or create) the active profile's persistent parallel pool."""
     global _parallel_pool, _parallel_pool_max_workers
-    if _parallel_pool is None or _parallel_pool_max_workers != max_workers:
-        if _parallel_pool is not None:
-            _parallel_pool.shutdown(wait=False, cancel_futures=False)
-        _parallel_pool = concurrent.futures.ThreadPoolExecutor(
+    profile_home = str(_get_hermes_home().resolve())
+    with _pool_lock:
+        existing = _parallel_pools.get(profile_home)
+        if existing is not None and existing[0] == max_workers:
+            _parallel_pool, _parallel_pool_max_workers = existing[1], existing[0]
+            return existing[1]
+        pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix="cron-parallel",
+            thread_name_prefix=f"cron-parallel-{Path(profile_home).name}",
         )
-        _parallel_pool_max_workers = max_workers
-    return _parallel_pool
+        if existing is not None:
+            # Another tick may still hold this pool between lookup and submit.
+            # Keep it alive until bounded process-exit cleanup.
+            _retired_parallel_pools.append(existing[1])
+        _parallel_pools[profile_home] = (max_workers, pool)
+        _parallel_pool, _parallel_pool_max_workers = pool, max_workers
+        return pool
 
 
 def _get_sequential_pool() -> concurrent.futures.ThreadPoolExecutor:
@@ -555,13 +610,18 @@ def _get_sequential_pool() -> concurrent.futures.ThreadPoolExecutor:
 def _shutdown_parallel_pool() -> None:
     """Shut down the persistent pools on process exit."""
     global _parallel_pool, _parallel_pool_max_workers, _sequential_pool
-    if _parallel_pool is not None:
-        _parallel_pool.shutdown(wait=True, cancel_futures=False)
+    with _pool_lock:
+        pools = [pool for _workers, pool in _parallel_pools.values()]
+        pools.extend(_retired_parallel_pools)
+        _parallel_pools.clear()
+        _retired_parallel_pools.clear()
         _parallel_pool = None
         _parallel_pool_max_workers = None
-    if _sequential_pool is not None:
-        _sequential_pool.shutdown(wait=True, cancel_futures=False)
-        _sequential_pool = None
+        if _sequential_pool is not None:
+            pools.append(_sequential_pool)
+            _sequential_pool = None
+    for pool in dict.fromkeys(pools):
+        pool.shutdown(wait=True, cancel_futures=False)
 
 
 atexit.register(_shutdown_parallel_pool)
@@ -2735,6 +2795,26 @@ def _guard_job_credential_exfil(job: dict) -> None:
         raise RuntimeError(f"Cron job '{job_id}' blocked for safety: {err}")
 
 
+def _refresh_cron_runtime_secrets() -> None:
+    """Refresh credentials without cross-profile process-env mutation."""
+    from agent.secret_scope import (
+        current_secret_scope,
+        is_multiplex_active,
+        refresh_profile_secret_scope,
+    )
+
+    if is_multiplex_active() and current_secret_scope() is not None:
+        refresh_profile_secret_scope(_get_hermes_home())
+        return
+
+    # Preserve the legacy single-profile rotation path, including external
+    # secret-source refresh and its process-global dotenv semantics.
+    from hermes_cli.env_loader import load_hermes_dotenv, reset_secret_source_cache
+
+    reset_secret_source_cache()
+    load_hermes_dotenv(hermes_home=_get_hermes_home())
+
+
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None
 ) -> tuple[bool, str, str, Optional[str]]:
@@ -3099,24 +3179,11 @@ def run_job(
             os.environ["TERMINAL_CWD"] = _job_workdir
             logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
 
-        # Re-read .env and config.yaml fresh every run so provider/key
-        # changes take effect without a gateway restart. Route through
-        # load_hermes_dotenv (not a bare load_dotenv) and reset the secret-
-        # source cache first: startup already applied external secrets and
-        # recorded this HERMES_HOME in _APPLIED_HOMES, so a naive reload would
-        # re-apply only the .env placeholder and never re-resolve a Bitwarden/
-        # BSM-backed secret — leaving cron jobs 401'ing on the placeholder
-        # (#33465). Clearing the cache forces the re-pull; the resolved secret
-        # overrides the placeholder only when secrets.bitwarden.override_existing
-        # is set (mirrors startup), and the Bitwarden value-cache keeps the
-        # forced re-pull off the network. load_hermes_dotenv also handles the
-        # utf-8/latin-1 encoding fallback internally.
-        from hermes_cli.env_loader import (
-            load_hermes_dotenv,
-            reset_secret_source_cache,
-        )
-        reset_secret_source_cache()
-        load_hermes_dotenv(hermes_home=_get_hermes_home())
+        # Refresh provider/key values every run. Multiplex schedulers rebuild
+        # only the current profile's context-local scope, never os.environ;
+        # legacy single-profile schedulers retain load_hermes_dotenv and the
+        # external-secret-source refresh behavior (#33465).
+        _refresh_cron_runtime_secrets()
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
@@ -4138,11 +4205,9 @@ def tick(
                     job.get("name", job_id),
                 )
                 return None
-            with _running_lock:
-                if job_id in _running_job_ids:
-                    logger.info("Job '%s' already running — skipping", job.get("name", job_id))
-                    return None
-                _running_job_ids.add(job_id)
+            if not _register_running_job(job_id):
+                logger.info("Job '%s' already running — skipping", job.get("name", job_id))
+                return None
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
@@ -4153,14 +4218,12 @@ def tick(
                 try:
                     return ctx.run(_process_job, j)
                 finally:
-                    with _running_lock:
-                        _running_job_ids.discard(j["id"])
+                    ctx.run(_release_running_job, j["id"])
 
             try:
                 return pool.submit(_run_and_release)
             except Exception as submit_err:
-                with _running_lock:
-                    _running_job_ids.discard(job_id)
+                _release_running_job(job_id)
                 finish_execution(
                     execution["id"],
                     success=False,

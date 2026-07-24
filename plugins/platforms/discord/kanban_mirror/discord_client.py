@@ -97,18 +97,20 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def load_discord_token(env_path: Path) -> str:
-    """Load the live Discord token from ``env_path``, then ``os.environ``.
+def load_discord_token(env_path: Path, *, allow_process_fallback: bool = True) -> str:
+    """Load the live Discord token from ``env_path``.
 
-    Unlike v1 (Ops-profile local), this does not fall back to any other
-    profile's ``.env`` file — only the explicit ``env_path`` and the process
-    environment are consulted.
+    Legacy single-profile/CLI callers may fall back to ``os.environ``. A
+    multiplex-owned runtime passes ``allow_process_fallback=False`` so a
+    secondary owner can never inherit the default profile's process token.
     """
     values = parse_env_file(env_path)
     token = values.get("DISCORD_BOT_TOKEN", "").strip()
     if token:
         return token
-    return os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if allow_process_fallback:
+        return os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    return ""
 
 
 def _multipart_payload(payload: dict[str, Any], attachments: list[str]) -> tuple[bytes, str]:

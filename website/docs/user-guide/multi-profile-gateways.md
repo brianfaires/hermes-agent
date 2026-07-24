@@ -183,10 +183,25 @@ migration, no orphaned history.
 #### 5. One PID/lock and one status surface
 
 There is a single process-level PID and lock (the multiplexer, under the default
-home). `hermes status` reports the multiplexer and the profiles it serves;
-`hermes status -p <name>` slices to one profile. Each profile still writes its
-own `runtime_status.json` under its own home, so existing per-profile readers
-keep working.
+home). Its `gateway_state.json` `served_profiles` list is the source of truth for
+adapter coverage. `hermes profile list`, `hermes status -p <name>`, and
+`hermes -p <name> cron status` therefore report a secondary as **served by the
+multiplexer**, rather than treating its intentionally stopped standalone service
+as the runtime status.
+
+Adapter coverage and scheduled-job health are separate signals. The shared
+gateway starts one profile-scoped cron scheduler for every served profile (the
+default profile exactly once), and each scheduler writes its heartbeat under
+that profile's own `cron/` directory. Cron status can consequently report a
+live adapter multiplexer while still warning that one profile's scheduler is
+missing or stale.
+
+Discord's Kanban mirror/reply-inbox remains a process singleton, but its owner
+is the one served profile that enables the feature. The daemon, board,
+credentials, authorization policy, and outbound Discord adapter all come from
+that owning profile. Enabling the singleton in more than one served profile is
+a startup configuration error; Hermes never merges profile secrets or falls
+back to another profile's bot identity.
 
 #### What does **not** change
 

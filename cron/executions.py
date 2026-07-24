@@ -19,6 +19,7 @@ from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
 EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
@@ -26,8 +27,15 @@ _PROCESS_ID = uuid.uuid4().hex
 
 
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+    # Keep the public monkeypatch surface, but otherwise resolve the active
+    # profile dynamically so multiplex scheduler threads never share a ledger.
+    path = (
+        EXECUTIONS_FILE
+        if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE
+        else get_hermes_home().resolve() / "cron" / "executions.db"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")

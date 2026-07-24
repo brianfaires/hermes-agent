@@ -450,6 +450,9 @@ def _inject_session_context_env(env: dict) -> None:
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment."""
+    from agent.secret_scope import scoped_subprocess_environment
+
+    base_env = scoped_subprocess_environment(base_env or {})
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
@@ -568,7 +571,9 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     ``inherit_credentials=False`` and copy just those keys back from
     ``os.environ`` into the returned dict.
     """
-    env = os.environ.copy()
+    from agent.secret_scope import scoped_subprocess_environment
+
+    env = scoped_subprocess_environment(os.environ)
 
     # Tier 1 — always strip.
     for key in _ALWAYS_STRIP_KEYS:

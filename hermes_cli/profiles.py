@@ -626,6 +626,7 @@ class ProfileInfo:
     path: Path
     is_default: bool
     gateway_running: bool
+    gateway_served_by_multiplexer: bool = False
     model: Optional[str] = None
     provider: Optional[str] = None
     has_env: bool = False
@@ -650,6 +651,45 @@ class ProfileInfo:
     # surfaces a "review" badge in this case so the user can edit or
     # accept.
     description_auto: bool = False
+
+
+@dataclass(frozen=True)
+class MultiplexGatewayCoverage:
+    """A live default gateway that explicitly advertises a served profile."""
+
+    gateway_home: Path
+    pid: int
+    served_profiles: tuple[str, ...]
+
+
+def get_multiplex_gateway_coverage(profile_name: str) -> Optional[MultiplexGatewayCoverage]:
+    """Return validated multiplexer coverage for *profile_name*, if any.
+
+    ``gateway_state.json`` is authoritative for adapter coverage.  Process
+    validation prevents stale state from making a retired named service look
+    healthy after the multiplexer has exited.
+    """
+    name = normalize_profile_name(profile_name or "default")
+    gateway_home = _get_default_hermes_home().resolve()
+    try:
+        from gateway.status import (
+            get_runtime_status_running_pid,
+            read_runtime_status,
+        )
+
+        runtime = read_runtime_status(gateway_home / "gateway_state.json")
+        served = tuple(
+            str(item).strip() for item in (runtime or {}).get("served_profiles", ())
+            if str(item).strip()
+        )
+        if name not in served:
+            return None
+        pid = get_runtime_status_running_pid(runtime, expected_home=gateway_home)
+        if pid is None:
+            return None
+        return MultiplexGatewayCoverage(gateway_home, pid, served)
+    except Exception:
+        return None
 
 
 def _read_distribution_meta(profile_dir: Path) -> tuple:
@@ -882,6 +922,7 @@ def list_profiles() -> List[ProfileInfo]:
     # Default profile
     default_home = _get_default_hermes_home()
     if default_home.is_dir():
+        default_coverage = get_multiplex_gateway_coverage("default")
         model, provider = _read_config_model(default_home)
         dist_name, dist_version, dist_source = _read_distribution_meta(default_home)
         meta = read_profile_meta(default_home)
@@ -890,6 +931,7 @@ def list_profiles() -> List[ProfileInfo]:
             path=default_home,
             is_default=True,
             gateway_running=_check_gateway_running(default_home),
+            gateway_served_by_multiplexer=default_coverage is not None,
             model=model,
             provider=provider,
             has_env=(default_home / ".env").exists(),
@@ -925,11 +967,13 @@ def list_profiles() -> List[ProfileInfo]:
                 alias_path = None
             dist_name, dist_version, dist_source = _read_distribution_meta(entry)
             meta = read_profile_meta(entry)
+            multiplex_coverage = get_multiplex_gateway_coverage(name)
             profiles.append(ProfileInfo(
                 name=name,
                 path=entry,
                 is_default=False,
                 gateway_running=_check_gateway_running(entry),
+                gateway_served_by_multiplexer=multiplex_coverage is not None,
                 model=model,
                 provider=provider,
                 has_env=(entry / ".env").exists(),

@@ -26,15 +26,34 @@ class DiscordKanbanMirrorRuntimeMixin:
 
         self._kanban_mirror_supervisor = LoopSupervisor()
         self._kanban_router_board_slug = None
+        self._kanban_runtime_owner = None
+
+    def _get_kanban_runtime_owner(self):
+        if self._kanban_runtime_owner is None:
+            from gateway.run import _resolve_kanban_runtime_owner
+
+            self._kanban_runtime_owner = _resolve_kanban_runtime_owner(self)
+        return self._kanban_runtime_owner
 
     def _start_discord_kanban_mirror_runtime(self) -> None:
-        from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
         from plugins.platforms.discord.kanban_mirror.daemon import run_mirror_daemon
 
-        if load_mirror_config().enabled:
+        owner = self._get_kanban_runtime_owner()
+        if owner is not None and owner.mirror_config.enabled:
+            async def run_owned_mirror() -> None:
+                from gateway.run import _profile_runtime_scope
+
+                with _profile_runtime_scope(owner.home):
+                    await run_mirror_daemon(
+                        lambda: self._running,
+                        allow_process_token_fallback=not bool(
+                            getattr(self.config, "multiplex_profiles", False)
+                        ),
+                    )
+
             self._kanban_mirror_supervisor.start(
                 "reconciliation-lifecycle",
-                lambda: run_mirror_daemon(lambda: self._running),
+                run_owned_mirror,
             )
         self._start_kanban_router_runtime()
 
@@ -84,9 +103,23 @@ class DiscordKanbanMirrorRuntimeMixin:
 
     def _validate_kanban_router_readiness(self) -> str | None:
         """Validate configured ownership against live Discord bot identities."""
-        from plugins.platforms.discord.kanban_mirror.inbox import load_config, validate_router_config
-        from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
-        cfg = load_config()
+        from plugins.platforms.discord.kanban_mirror.inbox import validate_router_config
+        get_owner = getattr(self, "_get_kanban_runtime_owner", None)
+        if get_owner is not None:
+            owner = get_owner()
+        else:
+            # Preserve the mixin's independently-testable/single-profile seam:
+            # lightweight hosts written before owner resolution was introduced
+            # may bind this method without binding the full runtime initializer.
+            from types import SimpleNamespace
+            from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
+            from plugins.platforms.discord.kanban_mirror.inbox import load_config
+
+            owner = SimpleNamespace(
+                mirror_config=load_mirror_config(),
+                inbox_config=load_config(),
+            )
+        cfg = owner.inbox_config if owner is not None else None
         # Readiness is identity-bearing and must never survive a failed
         # revalidation (for example, bots swapped during reconnect).
         all_adapters = self._all_kanban_profile_adapters()
@@ -94,12 +127,12 @@ class DiscordKanbanMirrorRuntimeMixin:
             adapter._kanban_router_ingress_identity = None
             adapter._kanban_router_profile = profile
         adapters = self._kanban_profile_adapters()
-        if not (cfg.enabled and cfg.conversation_router_enabled):
+        if cfg is None or not (cfg.enabled and cfg.conversation_router_enabled):
             return None
         try:
             ingress_profile = validate_router_config(
                 cfg, multiplex_profiles=bool(getattr(self.config, "multiplex_profiles", False)),
-                mirror_config=load_mirror_config(),
+                mirror_config=owner.mirror_config,
             )
         except ValueError as exc:
             raise MultiplexConfigError(str(exc)) from exc
@@ -122,6 +155,7 @@ class DiscordKanbanMirrorRuntimeMixin:
             if profile == ingress_profile
         )
         ingress._kanban_router_ingress_identity = (ingress_profile, ingress_bot_id)
+        ingress._kanban_inbox_config = cfg
         self._kanban_router_ingress_profile = ingress_profile
         ingress.start_kanban_ingress_workers()
         return ingress_profile
@@ -146,8 +180,22 @@ class DiscordKanbanMirrorRuntimeMixin:
     def _start_kanban_router_runtime(self, *, interval: float = 5.0,
                                      health_interval: float = 30.0) -> None:
         """Idempotently attach router recovery and health to the ingress gateway."""
-        from plugins.platforms.discord.kanban_mirror.inbox import load_config as load_inbox_config
-        cfg = load_inbox_config()
+        get_owner = getattr(self, "_get_kanban_runtime_owner", None)
+        if callable(get_owner):
+            owner = get_owner()
+        else:
+            # Preserve the independently-testable legacy/single-profile seam.
+            from types import SimpleNamespace
+            from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
+            from plugins.platforms.discord.kanban_mirror.inbox import load_config
+
+            owner = SimpleNamespace(
+                mirror_config=load_mirror_config(),
+                inbox_config=load_config(),
+            )
+        cfg = owner.inbox_config if owner is not None else None
+        if cfg is None:
+            return
         ingress_profile = getattr(
             self,
             "_kanban_router_ingress_profile",
@@ -171,7 +219,7 @@ class DiscordKanbanMirrorRuntimeMixin:
             conn = connect_mirror(mirror_db_path(board_slug))
             try:
                 while self._running:
-                    current = load_inbox_config()
+                    current = cfg
                     ingress_connected = self._discord_adapter_for_profile(ingress_profile) is not None
                     active = bool(
                         current.enabled and current.conversation_router_enabled
@@ -206,7 +254,7 @@ class DiscordKanbanMirrorRuntimeMixin:
             worker_id = f"gateway-log-{id(self):x}"
             try:
                 while self._running:
-                    current = load_inbox_config()
+                    current = cfg
                     active = bool(
                         current.enabled and current.conversation_router_enabled
                         and current.conversation_log_enabled
@@ -238,7 +286,7 @@ class DiscordKanbanMirrorRuntimeMixin:
             conn = connect_mirror(mirror_db_path(board_slug))
             try:
                 while self._running:
-                    current = load_inbox_config()
+                    current = cfg
                     ingress_connected = self._discord_adapter_for_profile(ingress_profile) is not None
                     active = bool(current.enabled and current.conversation_router_enabled and ingress_connected)
                     snapshot = health_snapshot(

@@ -810,7 +810,7 @@ class TestSecondaryProfileConfigHandling:
 
         assert connected == 0
         assert duplicate.disconnected is True
-        assert runner._profile_adapters["reviewer"] == {}
+        assert "reviewer" not in runner._profile_adapters
 
     def test_port_binding_set_covers_known_listeners(self):
         from gateway.run import _PORT_BINDING_PLATFORM_VALUES

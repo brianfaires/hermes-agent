@@ -398,21 +398,8 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         return
     _APPLIED_HOMES.add(home_key)
 
-    try:
-        cfg = _load_secrets_config(home_path)
-    except Exception:  # noqa: BLE001 — config errors must not block startup
-        return
-    if not cfg:
-        return
-
-    try:
-        from agent.secret_sources.registry import apply_all
-    except ImportError:
-        return
-
-    try:
-        report = apply_all(cfg, home_path)
-    except Exception:  # noqa: BLE001 — belt-and-braces; apply_all shouldn't raise
+    report = resolve_external_secret_sources(home_path)
+    if report is None:
         return
 
     if report.applied_any:
@@ -441,6 +428,30 @@ def _apply_external_secret_sources(home_path: Path) -> None:
             print(f"  {src.label}: {warn}", file=sys.stderr)
     for conflict in report.conflicts:
         print(f"  Secret sources: {conflict}", file=sys.stderr)
+
+
+def resolve_external_secret_sources(
+    home_path: Path,
+    *,
+    environ: dict[str, str] | None = None,
+):
+    """Resolve configured external sources into the supplied environment mapping."""
+    try:
+        cfg = _load_secrets_config(home_path)
+    except Exception:  # noqa: BLE001 — config errors must not block startup
+        return None
+    if not cfg:
+        return None
+
+    try:
+        from agent.secret_sources.registry import apply_all
+    except ImportError:
+        return None
+
+    try:
+        return apply_all(cfg, home_path, environ=environ)
+    except Exception:  # noqa: BLE001 — belt-and-braces; apply_all shouldn't raise
+        return None
 
 
 def _load_secrets_config(home_path: Path) -> dict:

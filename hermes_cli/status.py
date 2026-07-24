@@ -494,7 +494,14 @@ def show_status(args):
 
         snapshot = get_gateway_runtime_snapshot()
         is_running = snapshot.running
-        print(f"  Status:       {check_mark(is_running)} {'running' if is_running else 'stopped'}")
+        from hermes_cli.profiles import get_active_profile_name, get_multiplex_gateway_coverage
+        profile_name = get_active_profile_name() or "default"
+        multiplex = None if is_running else get_multiplex_gateway_coverage(profile_name)
+        if multiplex is not None:
+            print(f"  Status:       {check_mark(True)} served by multiplexer")
+            print(f"  Adapter:      covered by PID {multiplex.pid}")
+        else:
+            print(f"  Status:       {check_mark(is_running)} {'running' if is_running else 'stopped'}")
         print(f"  Manager:      {snapshot.manager}")
         if snapshot.gateway_pids:
             print(f"  PID(s):       {_format_gateway_pids(snapshot.gateway_pids)}")
@@ -503,7 +510,7 @@ def show_status(args):
         elif _is_termux() and not snapshot.gateway_pids:
             print("  Start with:   hermes gateway")
             print("  Note:         Android may stop background jobs when Termux is suspended")
-        elif snapshot.service_installed and not snapshot.service_running:
+        elif multiplex is None and snapshot.service_installed and not snapshot.service_running:
             print("  Service:      installed but stopped")
     except Exception:
         if _is_termux():
@@ -540,6 +547,16 @@ def show_status(args):
             print("  Jobs:         (error reading jobs file)")
     else:
         print("  Jobs:         0")
+    try:
+        from cron.jobs import get_ticker_heartbeat_age, TICKER_INTERVAL_SECONDS
+        ticker_age = get_ticker_heartbeat_age()
+        ticker_ok = ticker_age is not None and ticker_age <= TICKER_INTERVAL_SECONDS * 3 + 20
+        print(
+            f"  Scheduler:    {check_mark(ticker_ok)} "
+            + (f"healthy ({int(ticker_age)}s heartbeat)" if ticker_ok else "no fresh profile scheduler heartbeat")
+        )
+    except Exception:
+        print("  Scheduler:    unknown")
 
     # =========================================================================
     # Sessions

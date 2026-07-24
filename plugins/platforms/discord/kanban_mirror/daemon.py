@@ -1646,14 +1646,19 @@ async def rebuild(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: 
     return log
 
 
-async def run_mirror_daemon(is_running: Callable[[], bool]) -> None:
+async def run_mirror_daemon(
+    is_running: Callable[[], bool], *, allow_process_token_fallback: bool = True
+) -> None:
     from plugins.platforms.discord.kanban_mirror.config import load_mirror_config
 
     cfg = load_mirror_config()
     if not cfg.valid():
         logger.info("kanban mirror: disabled or unconfigured")
         return
-    token = load_discord_token(cfg.token_env_path)
+    token = load_discord_token(
+        cfg.token_env_path,
+        allow_process_fallback=allow_process_token_fallback,
+    )
     if not token:
         logger.warning("kanban mirror: no DISCORD_BOT_TOKEN at %s; disabled", cfg.token_env_path)
         return

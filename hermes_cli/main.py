@@ -11683,9 +11683,14 @@ def cmd_profile(args):
                         f"Model:          {p.model}"
                         + (f" ({p.provider})" if p.provider else "")
                     )
-                print(
-                    f"Gateway:        {'running' if p.gateway_running else 'stopped'}"
+                gateway_label = (
+                    "running"
+                    if p.gateway_running
+                    else "served by multiplexer"
+                    if p.gateway_served_by_multiplexer
+                    else "stopped"
                 )
+                print(f"Gateway:        {gateway_label}")
                 print(f"Skills:         {p.skill_count} installed")
                 if p.alias_path:
                     alias_display = p.alias_name or p.name
@@ -11720,7 +11725,11 @@ def cmd_profile(args):
             )
             name = p.name
             model = (p.model or "—")[:26]
-            gw = "running" if p.gateway_running else "stopped"
+            gw = (
+                "running" if p.gateway_running
+                else "multiplexed" if p.gateway_served_by_multiplexer
+                else "stopped"
+            )
             alias = (p.alias_name or p.name) if p.alias_path else "—"
             if p.is_default:
                 alias = "—"

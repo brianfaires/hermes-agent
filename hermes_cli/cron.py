@@ -83,8 +83,10 @@ def _warn_if_gateway_not_running() -> None:
             return
 
         from hermes_cli.gateway import find_gateway_pids
+        from hermes_cli.profiles import get_active_profile_name, get_multiplex_gateway_coverage
 
-        if find_gateway_pids():
+        profile = get_active_profile_name() or "default"
+        if find_gateway_pids() or get_multiplex_gateway_coverage(profile):
             return
     except Exception:
         # If we can't determine gateway state, stay quiet rather than nag.
@@ -218,6 +220,7 @@ def cron_status():
     """Show cron execution status."""
     from cron.jobs import list_jobs
     from hermes_cli.gateway import find_gateway_pids
+    from hermes_cli.profiles import get_active_profile_name, get_multiplex_gateway_coverage
 
     print()
 
@@ -246,6 +249,14 @@ def cron_status():
         return
 
     pids = find_gateway_pids()
+    profile = get_active_profile_name() or "default"
+    multiplex = None if pids else get_multiplex_gateway_coverage(profile)
+    if multiplex is not None:
+        pids = [multiplex.pid]
+        print(color(
+            f"✓ Profile '{profile}' adapters are served by the default multiplexer.",
+            Colors.GREEN,
+        ))
     if pids:
         # The gateway PROCESS is alive — but the cron ticker THREAD inside it
         # can die silently, or stay alive while every tick fails. Check both
@@ -285,7 +296,14 @@ def cron_status():
             print(f"  PID: {', '.join(map(str, pids))}")
             print("  Check the gateway log for 'Cron tick error'.")
         else:
-            print(color("✓ Gateway is running — cron jobs will fire automatically", Colors.GREEN))
+            if multiplex is not None and hb_age is None:
+                print(color(
+                    "⚠ Adapter coverage is live, but this profile has no cron scheduler heartbeat — "
+                    "jobs may NOT be firing.",
+                    Colors.YELLOW,
+                ))
+            else:
+                print(color("✓ Profile cron scheduler is healthy — jobs will fire automatically", Colors.GREEN))
             print(f"  PID: {', '.join(map(str, pids))}")
             if hb_age is not None:
                 print(f"  Ticker heartbeat: {int(hb_age)}s ago")

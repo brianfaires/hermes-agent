@@ -23,6 +23,7 @@ Design rationale lives in ``docs/design/multiplexing-gateway.md`` (Workstream A)
 from __future__ import annotations
 
 import os
+import threading
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Dict, Mapping, Optional
@@ -55,6 +56,8 @@ def is_multiplex_active() -> bool:
 _SECRET_SCOPE: ContextVar[Optional[Mapping[str, str]]] = ContextVar(
     "_SECRET_SCOPE", default=None
 )
+_PROFILE_SECRET_NAMES: set[str] = set()
+_PROFILE_SECRET_NAMES_LOCK = threading.Lock()
 
 
 class UnscopedSecretError(RuntimeError):
@@ -84,6 +87,33 @@ def reset_secret_scope(token: Token) -> None:
 def current_secret_scope() -> Optional[Mapping[str, str]]:
     """Return the active secret mapping, or None when no scope is installed."""
     return _SECRET_SCOPE.get()
+
+
+def refresh_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
+    """Reload one profile's dotenv and external sources into this context."""
+    home = Path(hermes_home)
+    secrets = build_profile_secret_scope(home)
+    from hermes_cli.env_loader import resolve_external_secret_sources
+
+    resolve_external_secret_sources(home, environ=secrets)
+    with _PROFILE_SECRET_NAMES_LOCK:
+        _PROFILE_SECRET_NAMES.update(secrets)
+    _SECRET_SCOPE.set(secrets)
+    return secrets
+
+
+def scoped_subprocess_environment(base_env: Mapping[str, str]) -> Dict[str, str]:
+    """Apply the active profile's authoritative secrets to a child env."""
+    env = dict(base_env)
+    scope = current_secret_scope()
+    if scope is None:
+        return env
+    with _PROFILE_SECRET_NAMES_LOCK:
+        profile_names = tuple(_PROFILE_SECRET_NAMES)
+    for name in profile_names:
+        env.pop(name, None)
+    env.update({str(name): str(value) for name, value in scope.items()})
+    return env
 
 
 # ── genuinely-global env vars (NOT per-profile secrets) ──────────────────
@@ -201,5 +231,8 @@ def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
     global vars are intentionally NOT copied in — ``get_secret`` reads those
     from ``os.environ`` directly, so the scope holds only profile secrets.
     """
-    return load_env_file(Path(hermes_home) / ".env")
+    secrets = load_env_file(Path(hermes_home) / ".env")
+    with _PROFILE_SECRET_NAMES_LOCK:
+        _PROFILE_SECRET_NAMES.update(secrets)
+    return secrets
 
