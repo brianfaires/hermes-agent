@@ -155,12 +155,11 @@ def test_terminal_stages_digest_drift_partial_retention_and_resolution(tmp_path)
     partial = reconcile_mirror_state(conn, observed_threads={}, cards=[("board", "task")],
         expected_threads=expected, observed_digest=None, digest_observation_complete=False, now=20)
     assert codes <= {f.code for f in partial}
-    good_line = "<!-- terminal:thread -->\n- [2026-07-12](https://discord/thread) — shipped"
     clean_live = {"thread": ObservedThread("thread", "starter", None, title="Card",
         tags=("active", "done"), archived=True)}
     conn.execute("UPDATE mirror_terminal_lifecycles SET state='archived'"); conn.commit()
     assert reconcile_mirror_state(conn, observed_threads=clean_live, cards=[("board", "task")],
-        expected_threads=expected, observed_digest=ObservedDigest("digest", good_line, True), now=30) == []
+        expected_threads=expected, observed_digest=ObservedDigest("digest", "Board", True), now=30) == []
     assert all(f.resolved_at == 30 for f in list_reconciliation_findings(conn))
 
 

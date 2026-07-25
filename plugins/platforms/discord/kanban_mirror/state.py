@@ -591,6 +591,80 @@ def set_thread(
     conn.commit()
 
 
+def set_thread_with_binding(
+    conn: sqlite3.Connection,
+    initiative_id: str,
+    thread_id: str,
+    starter_message_id: str,
+    board_slug: str,
+    task_id: str,
+    starter_revision_hash: str,
+) -> BindingEpoch:
+    """Atomically publish a new thread mapping and its first represented-card epoch."""
+    initiative, thread = str(initiative_id).strip(), str(thread_id).strip()
+    starter, board, task, revision = (
+        str(starter_message_id).strip(), str(board_slug).strip(), str(task_id).strip(),
+        str(starter_revision_hash).strip(),
+    )
+    if not initiative or not thread or not starter or not board or not task or not revision:
+        raise ValueError(
+            "initiative_id, thread_id, starter_message_id, board_slug, task_id, and starter_revision_hash are required"
+        )
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT kind,thread_id,starter_message_id FROM mirror_initiatives WHERE id=?",
+            (initiative,),
+        ).fetchone()
+        if row is None or str(row["kind"]) != "post":
+            raise ValueError("thread binding requires an existing post initiative")
+        if conn.execute(
+            "SELECT 1 FROM mirror_members WHERE initiative_id=? AND task_id=?",
+            (initiative, task),
+        ).fetchone() is None:
+            raise ValueError("represented task is not an initiative member")
+        existing = conn.execute(
+            "SELECT * FROM mirror_binding_epochs WHERE thread_id=? ORDER BY sequence",
+            (thread,),
+        ).fetchall()
+        if existing:
+            active = [epoch for epoch in existing if epoch["state"] == "open"]
+            if (
+                len(active) == 1
+                and str(row["thread_id"] or "") == thread
+                and str(row["starter_message_id"] or "") == starter
+                and str(active[0]["board_slug"]) == board
+                and str(active[0]["task_id"]) == task
+                and str(active[0]["starter_revision_hash"] or "") == revision
+            ):
+                result = _binding_from_row(active[0])
+                conn.commit()
+                return result
+            raise ValueError("thread already has binding state")
+        if row["thread_id"] is not None or row["starter_message_id"] is not None:
+            raise ValueError("initiative already has a thread mapping")
+        now = _now()
+        conn.execute(
+            "UPDATE mirror_initiatives SET thread_id=?,starter_message_id=?,updated_at=? WHERE id=?",
+            (thread, starter, now, initiative),
+        )
+        binding_key = f"binding:{thread}:1"
+        conn.execute(
+            """INSERT INTO mirror_binding_epochs
+               (binding_key,thread_id,board_slug,task_id,sequence,started_at,starter_revision_hash,state)
+               VALUES (?,?,?,?,1,?,?,'open')""",
+            (binding_key, thread, board, task, now, revision),
+        )
+        result = active_thread_binding(conn, thread)
+        if result is None:
+            raise RuntimeError("new thread binding was not authoritative")
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def set_prose(
     conn: sqlite3.Connection,
     initiative_id: str,
@@ -703,6 +777,46 @@ def active_thread_binding(conn: sqlite3.Connection, thread_id: str) -> BindingEp
         (str(thread_id),),
     ).fetchall()
     return _binding_from_row(rows[0]) if len(rows) == 1 else None
+
+
+def record_authorized_starter_revision(
+    conn: sqlite3.Connection, thread_id: str, task_id: str, revision_hash: str,
+    *, manage_transaction: bool = True,
+) -> BindingEpoch:
+    """Record a verified cosmetic starter edit for the authoritative epoch."""
+    if not revision_hash:
+        raise ValueError("starter revision hash is required")
+    if manage_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        pending = conn.execute(
+            """SELECT 1 FROM mirror_binding_transitions
+               WHERE thread_id=? AND state!='starter_verified' LIMIT 1""",
+            (str(thread_id),),
+        ).fetchone()
+        if pending is not None:
+            raise ValueError("starter revision cannot change during a pending transition")
+        rows = conn.execute(
+            "SELECT * FROM mirror_binding_epochs WHERE thread_id=? AND state='open'",
+            (str(thread_id),),
+        ).fetchall()
+        if len(rows) != 1 or str(rows[0]["task_id"]) != str(task_id):
+            raise ValueError("starter revision does not match the authoritative binding")
+        conn.execute(
+            "UPDATE mirror_binding_epochs SET starter_revision_hash=? WHERE binding_key=?",
+            (str(revision_hash), str(rows[0]["binding_key"])),
+        )
+        updated = conn.execute(
+            "SELECT * FROM mirror_binding_epochs WHERE binding_key=?",
+            (str(rows[0]["binding_key"]),),
+        ).fetchone()
+        if manage_transaction:
+            conn.commit()
+        return _binding_from_row(updated)
+    except Exception:
+        if manage_transaction:
+            conn.rollback()
+        raise
 
 
 def is_thread_quarantined(conn: sqlite3.Connection, thread_id: str) -> bool:

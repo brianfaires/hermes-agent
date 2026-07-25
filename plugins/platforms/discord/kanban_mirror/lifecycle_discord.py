@@ -7,6 +7,40 @@ from .lifecycle import PublishReceipt, _hash
 from .state import get_digest
 
 
+_DISCORD_MESSAGE_LIMIT = 2000
+
+
+def _bounded_digest_content(old: str, marker: str, block: str) -> str:
+    """Keep the digest as a rolling index without exceeding Discord's limit."""
+    lines = str(old or "").splitlines()
+    base: list[str] = []
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("<!-- terminal:") and line.endswith(" -->"):
+            entry = "\n".join(lines[index:index + 2]).strip()
+            if line != marker:
+                blocks.append(entry)
+            index += 2
+            continue
+        base.append(line)
+        index += 1
+    blocks.append(block)
+
+    def render() -> str:
+        sections = ["\n".join(base).strip(), *blocks]
+        return "\n\n".join(section for section in sections if section).strip()
+
+    content = render()
+    while len(content) > _DISCORD_MESSAGE_LIMIT and len(blocks) > 1:
+        blocks.pop(0)
+        content = render()
+    if len(content) > _DISCORD_MESSAGE_LIMIT:
+        raise ValueError("terminal digest base content leaves no room for one entry")
+    return content
+
+
 class DiscordLifecyclePublisher:
     def __init__(self, client: DiscordClient, cfg, conn):
         self.client, self.cfg, self.conn = client, cfg, conn
@@ -37,9 +71,7 @@ class DiscordLifecyclePublisher:
         marker = f"<!-- terminal:{thread_id} -->"
         block = marker + "\n" + f"- [{dates.get('end') or dates.get('start') or '?'}]({payload.get('thread_link')}) — {payload.get('outcome') or 'completed'}"
         old = str(self.client.get_message(digest.thread_id, digest.starter_message_id).get("content") or "")
-        lines = old.splitlines()
-        start = next((i for i, line in enumerate(lines) if line == marker), None)
-        content = (old.rstrip() + "\n\n" + block).strip() if start is None else "\n".join(lines[:start] + block.splitlines() + lines[start + 2:])
+        content = _bounded_digest_content(old, marker, block)
         response = self.client.update_message(digest.thread_id, digest.starter_message_id, content=content)
         self.client.update_thread(digest.thread_id, pinned=True)
         live_message = self.client.get_message(digest.thread_id, digest.starter_message_id)
@@ -48,6 +80,35 @@ class DiscordLifecyclePublisher:
         if block not in str(live_message.get("content") or "") or not pinned:
             raise ValueError("digest content/pin not verified")
         return self._receipt(operation_key, thread_id, payload, response.get("id") or digest.starter_message_id)
+
+    def upsert_digest_batch(self, entries):
+        """Publish many terminal entries with one edit of the old digest message."""
+        digest = get_digest(self.conn)
+        if digest is None or not digest.thread_id or not digest.starter_message_id:
+            raise ValueError("terminal lifecycle requires an existing digest thread")
+        old = str(self.client.get_message(digest.thread_id, digest.starter_message_id).get("content") or "")
+        content = old
+        for thread_id, payload in entries:
+            dates = payload.get("date_range", {})
+            marker = f"<!-- terminal:{thread_id} -->"
+            block = marker + "\n" + f"- [{dates.get('end') or dates.get('start') or '?'}]({payload.get('thread_link')}) — {payload.get('outcome') or 'completed'}"
+            content = _bounded_digest_content(content, marker, block)
+        retained = {
+            str(thread_id) for thread_id, _ in entries
+            if f"<!-- terminal:{thread_id} -->" in content
+        }
+        if not retained:
+            raise ValueError("terminal digest batch retained no pending entries")
+        response = self.client.update_message(
+            digest.thread_id, digest.starter_message_id, content=content
+        )
+        self.client.update_thread(digest.thread_id, pinned=True)
+        live_message = self.client.get_message(digest.thread_id, digest.starter_message_id)
+        live_thread = self.client.get_channel(digest.thread_id)
+        pinned = bool(live_thread.get("pinned") or (int(live_thread.get("flags") or 0) & 2))
+        if str(live_message.get("content") or "") != content or not pinned:
+            raise ValueError("batched digest content/pin not verified")
+        return str(response.get("id") or digest.starter_message_id), retained
 
     def apply_done_tag(self, thread_id, payload, *, operation_key):
         forum = self.client.get_channel(self.cfg.forum_channel_id)

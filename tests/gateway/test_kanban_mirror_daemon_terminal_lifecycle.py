@@ -1,9 +1,9 @@
 import asyncio
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig, load_mirror_config
 from plugins.platforms.discord.kanban_mirror.daemon import _resume_terminal_lifecycles
-from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
+from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher, _bounded_digest_content
 from plugins.platforms.discord.kanban_mirror.state import (BoardSnapshot, Card, add_member, backfill_legacy_bindings,
-    connect_mirror, create_initiative, load_mirror_state, set_thread)
+    connect_mirror, create_initiative, load_mirror_state, set_archived, set_thread)
 
 
 class Discord:
@@ -59,6 +59,20 @@ def test_concrete_publisher_nonce_digest_pin_tag_and_archive(tmp_path):
     assert pub.read_thread_state("thread")["archived"]
 
 
+def test_terminal_digest_rolls_oldest_entries_under_discord_limit():
+    old = "Board\n\n" + "\n\n".join(
+        f"<!-- terminal:thread-{i} -->\n- [2026-07-25](https://discord/thread-{i}) — " + ("x" * 90)
+        for i in range(30)
+    )
+    marker = "<!-- terminal:new -->"
+    block = marker + "\n- [2026-07-25](https://discord/new) — shipped"
+    content = _bounded_digest_content(old, marker, block)
+    assert len(content) <= 2000 and block in content
+    assert "<!-- terminal:thread-0 -->" not in content
+    assert "<!-- terminal:thread-29 -->" in content
+    assert _bounded_digest_content(content, marker, block).count(marker) == 1
+
+
 def test_daemon_resume_orders_stages_and_reopen_cancels(tmp_path, monkeypatch):
     conn=seeded(tmp_path/"m.db"); client=Discord()
     cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
@@ -73,6 +87,47 @@ def test_daemon_resume_orders_stages_and_reopen_cancels(tmp_path, monkeypatch):
     assert "archive" not in client.events
     asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snapshot("running"),state,log))
     assert conn.execute("SELECT state FROM mirror_terminal_lifecycles").fetchone()[0]=="cancelled"
+
+
+def test_daemon_backfills_active_terminal_thread_marked_archived_in_legacy_state(tmp_path, monkeypatch):
+    conn=seeded(tmp_path/"m.db"); client=Discord(); set_archived(conn,"i",80)
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:100)
+    log=[]
+    asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snapshot(),load_mirror_state(conn),log))
+    assert "terminal_lifecycle: BACKFILLED active legacy thread i" in log
+    assert conn.execute("SELECT archived_at FROM mirror_initiatives WHERE id='i'").fetchone()[0] is None
+    assert conn.execute("SELECT state FROM mirror_terminal_lifecycles").fetchone()[0]=="tag_confirmed"
+
+
+def _seed_two_terminal_threads(conn, client):
+    create_initiative(conn,"i2","Work 2"); add_member(conn,"i2","card2"); set_thread(conn,"i2","thread2","thread2")
+    backfill_legacy_bindings(conn,"board")
+    client.channels["thread2"]={"id":"thread2","applied_tags":[],"last_message_id":"last2","pinned":False,"archived":False}
+    client.messages[("thread2","last2")]={"id":"last2","content":"work","timestamp":"1970-01-01T00:01:30Z"}
+    return BoardSnapshot({
+        "card":card(),
+        "card2":Card("card2","Second","body","done","high","Ops",None,None,None,"1","2",None,"shipped"),
+    },{}, {}, {}, {})
+
+
+def test_daemon_batches_many_terminal_digest_entries_into_one_edit(tmp_path, monkeypatch):
+    conn=seeded(tmp_path/"m.db"); client=Discord(); snap=_seed_two_terminal_threads(conn,client)
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:100)
+    asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snap,load_mirror_state(conn),[]))
+    assert client.events.count("digest")==1
+    assert conn.execute("SELECT COUNT(*) FROM mirror_terminal_lifecycles WHERE state='tag_confirmed'").fetchone()[0]==2
+
+
+def test_daemon_advances_only_entries_retained_by_bounded_digest(tmp_path, monkeypatch):
+    conn=seeded(tmp_path/"m.db"); client=Discord(); snap=_seed_two_terminal_threads(conn,client)
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:100)
+    monkeypatch.setattr(DiscordLifecyclePublisher,"upsert_digest_batch",lambda self,entries:("digest",{"thread2"}))
+    asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snap,load_mirror_state(conn),[]))
+    rows={row["thread_id"]:row["state"] for row in conn.execute("SELECT thread_id,state FROM mirror_terminal_lifecycles")}
+    assert rows=={"thread":"summary_confirmed","thread2":"tag_confirmed"}
 
 
 def test_feature_gate_disabled_by_default_preserves_legacy():

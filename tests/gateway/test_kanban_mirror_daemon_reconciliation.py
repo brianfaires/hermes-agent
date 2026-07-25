@@ -1,11 +1,13 @@
 import asyncio
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
-from plugins.platforms.discord.kanban_mirror.daemon import _observe_and_reconcile
+from plugins.platforms.discord.kanban_mirror.daemon import _do_create_thread, _observe_and_reconcile, tick
+from plugins.platforms.discord.kanban_mirror.planner import Op
 from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
 from plugins.platforms.discord.kanban_mirror.state import (
-    BoardSnapshot, Card, add_member, backfill_legacy_bindings, connect_mirror,
-    create_initiative, is_thread_quarantined, set_thread,
+    BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings,
+    connect_mirror, create_initiative, is_thread_quarantined, load_mirror_state, set_thread,
+    set_thread_with_binding,
 )
 
 
@@ -29,6 +31,9 @@ class FakeClient:
 
     def send_message(self, channel_id, *, content, nonce=None):
         return self.sent.setdefault(nonce, {"id": f"notice-{len(self.sent) + 1}", "content": content})
+
+    def create_forum_thread(self, channel_id, *, name, content, tag_ids, attachments=None):
+        return {"id": "new-thread", "message": {"id": "new-starter"}}
 
 
 def seed(path, thread="thread", task="task"):
@@ -89,3 +94,118 @@ def test_daemon_builds_live_metadata_expectations_without_false_quarantine(tmp_p
     assert "thread.tags_mismatch" in codes
     assert not is_thread_quarantined(conn, "thread")
     assert client.sent == {}
+
+
+def test_tick_backfills_bindings_before_startup_reconciliation(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "init-thread", "Card")
+    add_member(conn, "init-thread", "task")
+    set_thread(conn, "init-thread", "thread", "starter-thread")
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: snapshot,
+    )
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.plan", lambda *args: [])
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        binding_transitions_enabled=True, terminal_lifecycle_enabled=False,
+    )
+    client = FakeClient()
+
+    log = asyncio.run(tick(cfg, client, conn, allow_llm=False))
+
+    assert "binding_initialization: backfilled 1" in log
+    assert active_thread_binding(conn, "thread").task_id == "task"
+    assert "binding.open_count" not in {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert not is_thread_quarantined(conn, "thread")
+    assert client.sent == {}
+
+
+def test_new_thread_mapping_and_binding_are_created_atomically(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "init-task", "Card")
+    add_member(conn, "init-task", "task")
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+    state = load_mirror_state(conn)
+    op = Op("create_thread", {
+        "initiative_id": "init-task", "title": "Card", "body": "body", "tags": ["active"],
+    })
+    cfg = MirrorConfig(board="board", forum_channel_id="forum")
+
+    asyncio.run(_do_create_thread(cfg, FakeClient(), conn, snapshot, state, op, False, []))
+
+    initiative = load_mirror_state(conn)["init-task"]
+    binding = active_thread_binding(conn, "new-thread")
+    assert (initiative.thread_id, initiative.starter_message_id) == ("new-thread", "new-starter")
+    assert binding is not None and binding.task_id == "task" and binding.board_slug == "board"
+    assert binding.starter_revision_hash
+
+
+def test_grouped_thread_binding_reconciles_when_bound_card_is_a_member(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "group", "Grouped")
+    add_member(conn, "group", "done")
+    add_member(conn, "group", "active")
+    cards = {
+        "done": Card("done", "Done", "body", "done", "high", None, None, None, None,
+                     "1", "2", None, None),
+        "active": Card("active", "Card", "body", "running", "high", None, None, None, None,
+                       "1", None, None, None),
+    }
+    snapshot = BoardSnapshot(cards, {}, {}, {}, {})
+    state = load_mirror_state(conn)
+    op = Op("create_thread", {
+        "initiative_id": "group", "title": "Card", "body": "body", "tags": ["active"],
+    })
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    client = FakeClient()
+
+    asyncio.run(_do_create_thread(cfg, client, conn, snapshot, state, op, False, []))
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+
+    binding = active_thread_binding(conn, "new-thread")
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert binding is not None and binding.task_id == "active"
+    assert "binding.mapping_missing" not in codes
+    assert not is_thread_quarantined(conn, "new-thread")
+
+
+def test_atomic_thread_binding_rolls_back_mapping_when_membership_is_ambiguous(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "group", "Grouped")
+    add_member(conn, "group", "one")
+    add_member(conn, "group", "two")
+
+    try:
+        set_thread_with_binding(conn, "group", "thread", "starter", "board", "not-a-member", "hash")
+    except ValueError as exc:
+        assert "not an initiative member" in str(exc)
+    else:
+        raise AssertionError("ambiguous membership should fail closed")
+
+    initiative = load_mirror_state(conn)["group"]
+    assert initiative.thread_id is None and initiative.starter_message_id is None
+    assert conn.execute("SELECT COUNT(*) FROM mirror_binding_epochs").fetchone()[0] == 0
+
+
+def test_live_starter_must_match_intended_cosmetic_edit(tmp_path):
+    from plugins.platforms.discord.kanban_mirror.daemon import _verified_starter_payload
+
+    cfg = MirrorConfig(board="board", forum_channel_id="forum")
+    client = FakeClient()
+    client.get_message = lambda channel_id, message_id: {"id": message_id, "content": "altered"}
+
+    try:
+        asyncio.run(_verified_starter_payload(
+            client, cfg, "thread", "starter",
+            {"title": "Card", "body": "body", "tags": ["active"]},
+        ))
+    except ValueError as exc:
+        assert "does not match" in str(exc)
+    else:
+        raise AssertionError("altered live starter was accepted")

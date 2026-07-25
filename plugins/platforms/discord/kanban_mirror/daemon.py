@@ -58,15 +58,17 @@ from plugins.platforms.discord.kanban_mirror.state import (
     mark_brief_stale,
     mirror_db_path,
     record_note,
+    record_authorized_starter_revision,
     resumable_binding_transitions,
     set_archived,
     set_member_seen,
     set_prose,
     set_thread,
+    set_thread_with_binding,
 )
 from plugins.platforms.discord.kanban_mirror import writer
 from plugins.platforms.discord.kanban_mirror.transitions import TransitionReceipt, request_binding_transition, run_binding_transition
-from plugins.platforms.discord.kanban_mirror.lifecycle import run_terminal_lifecycle
+from plugins.platforms.discord.kanban_mirror.lifecycle import get_terminal_lifecycle, run_terminal_lifecycle
 from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
 from plugins.platforms.discord.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
                                                    reconcile_mirror_state)
@@ -78,6 +80,31 @@ logger = logging.getLogger(__name__)
 def _canonical_hash(payload: dict) -> str:
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+async def _verified_starter_payload(
+    client: DiscordClient, cfg: MirrorConfig, thread_id: str, starter_message_id: str,
+    expected: dict,
+) -> dict:
+    thread = await asyncio.to_thread(client.get_channel, thread_id)
+    message = await asyncio.to_thread(client.get_message, thread_id, starter_message_id)
+    forum = await asyncio.to_thread(client.get_channel, cfg.forum_channel_id)
+    names = {str(tag.get("id")): str(tag.get("name")) for tag in forum.get("available_tags", [])}
+    applied = [str(tag) for tag in thread.get("applied_tags", [])]
+    if any(tag not in names for tag in applied):
+        raise ValueError("live starter contains an unknown forum tag")
+    observed = {
+        "title": str(thread.get("name") or ""),
+        "body": str(message.get("content") or ""),
+        "tags": [names[tag] for tag in applied],
+    }
+    if (
+        observed["title"] != str(expected.get("title") or "")
+        or observed["body"] != str(expected.get("body") or "")
+        or set(observed["tags"]) != set(expected.get("tags") or [])
+    ):
+        raise ValueError("live starter does not match the intended payload")
+    return observed
 
 
 def _is_quarantined(conn: sqlite3.Connection, thread_id: str | None) -> bool:
@@ -242,13 +269,54 @@ class DiscordTransitionPublisher:
 def _starter_identity_authorized(conn: sqlite3.Connection, thread_id: str, represented_task_id: str | None) -> bool:
     """Fail closed unless a planner edit still represents the confirmed epoch."""
     binding = active_thread_binding(conn, thread_id)
-    return binding is not None and represented_task_id == binding.task_id
+    if binding is None or represented_task_id != binding.task_id:
+        return False
+    pending = conn.execute(
+        "SELECT 1 FROM mirror_binding_transitions WHERE thread_id=? AND state!='starter_verified' LIMIT 1",
+        (str(thread_id),),
+    ).fetchone()
+    return pending is None
+
+
+async def _publish_authorized_starter_edit(
+    client: DiscordClient, cfg: MirrorConfig, conn: sqlite3.Connection,
+    initiative: Initiative, represented_task_id: str | None,
+    title: str, body: str, tags: list[str],
+) -> bool:
+    """Serialize authority check, Discord mutation, verification, and revision write."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not initiative.thread_id or not initiative.starter_message_id or not represented_task_id:
+            raise PermissionError("starter edit lacks an authoritative binding identity")
+        thread_id = initiative.thread_id
+        starter_message_id = initiative.starter_message_id
+        if not _starter_identity_authorized(conn, thread_id, represented_task_id):
+            raise PermissionError("starter edit is not authorized by the current binding")
+        published = await _publish_edit(client, cfg, initiative, title, body, tags)
+        if not published:
+            conn.commit()
+            return False
+        live = await _verified_starter_payload(
+            client, cfg, thread_id, starter_message_id,
+            {"title": title, "body": body, "tags": tags},
+        )
+        record_authorized_starter_revision(
+            conn, thread_id, represented_task_id, _canonical_hash(live),
+            manage_transaction=False,
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
 
 async def _recover_binding_transitions(cfg: MirrorConfig, client: DiscordClient | None,
                                        conn: sqlite3.Connection, log: list[str]) -> None:
     if not cfg.binding_transitions_enabled:
         return
+    # Keep recovery safe as a standalone entry point; tick() also performs this
+    # before reconciliation so startup cannot quarantine unbackfilled mappings.
     await asyncio.to_thread(backfill_legacy_bindings, conn, cfg.board)
     if client is None:
         return
@@ -631,6 +699,10 @@ async def _do_create_thread(cfg: MirrorConfig, client: DiscordClient | None, con
     member_cards = [snapshot.cards[task_id] for task_id in initiative.members if task_id in snapshot.cards] if initiative is not None else []
     attachments = [path for path in review_artifact_paths(member_cards, snapshot) if Path(path).is_file()]
     log.append(f"create_thread: {initiative_id} {title!r} tags={tags}")
+    represented_task = pointed_card_id(initiative, snapshot) if initiative is not None else None
+    if represented_task is None:
+        log.append(f"create_thread: BLOCKED {initiative_id} (represented card is ambiguous)")
+        return
     if attachments:
         log.append(f"create_thread attachments: {attachments}")
     if dry_run or client is None:
@@ -657,9 +729,17 @@ async def _do_create_thread(cfg: MirrorConfig, client: DiscordClient | None, con
         else:
             logger.warning("kanban mirror: create_thread failed for %s: %s", initiative_id, exc)
             return
-    thread_id = str(resp.get("id") or "")
+    thread_id = str(resp["id"])
     starter_id = str((resp.get("message") or {}).get("id") or thread_id)
-    await asyncio.to_thread(set_thread, conn, initiative_id, thread_id, starter_id)
+    observed = await _verified_starter_payload(
+        client, cfg, thread_id, starter_id,
+        {"title": title, "body": body, "tags": tags},
+    )
+    await asyncio.to_thread(
+        set_thread_with_binding,
+        conn, initiative_id, thread_id, starter_id, cfg.board, represented_task,
+        _canonical_hash(observed),
+    )
     initiative = state.get(initiative_id)
     if initiative is not None:
         h = current_publish_hash(initiative, snapshot, cfg)
@@ -675,17 +755,20 @@ async def _do_edit_post(cfg: MirrorConfig, client: DiscordClient | None, conn: s
     log.append(f"edit_post: {initiative_id} {title!r} tags={tags}")
     if dry_run or client is None or initiative is None or not initiative.thread_id:
         return
-    if cfg.binding_transitions_enabled:
-        represented = pointed_card_id(initiative, snapshot)
-        authorized = await asyncio.to_thread(
-            _starter_identity_authorized, conn, initiative.thread_id, represented
-        )
-        if not authorized:
-            log.append(f"edit_post: BLOCKED identity replacement for {initiative_id}")
-            logger.error("kanban mirror: blocked direct starter identity replacement for %s", initiative_id)
-            return
+    represented = pointed_card_id(initiative, snapshot)
     try:
-        await _publish_edit(client, cfg, initiative, title, body, tags)
+        if cfg.binding_transitions_enabled:
+            published = await _publish_authorized_starter_edit(
+                client, cfg, conn, initiative, represented, title, body, tags,
+            )
+        else:
+            published = await _publish_edit(client, cfg, initiative, title, body, tags)
+        if not published:
+            return
+    except PermissionError:
+        log.append(f"edit_post: BLOCKED identity replacement for {initiative_id}")
+        logger.error("kanban mirror: blocked direct starter identity replacement for %s", initiative_id)
+        return
     except Exception as exc:
         if _is_discord_not_found(exc):
             logger.warning(
@@ -1107,16 +1190,19 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
         log.append(f"edit_post(prose): {initiative.id} {title!r}")
         if client is None:
             continue
-        if cfg.binding_transitions_enabled:
-            represented = pointed_card_id(refreshed, snapshot)
-            authorized = await asyncio.to_thread(
-                _starter_identity_authorized, conn, refreshed.thread_id, represented
-            )
-            if not authorized:
-                log.append(f"edit_post(prose): BLOCKED identity replacement for {initiative.id}")
-                continue
+        represented = pointed_card_id(refreshed, snapshot)
         try:
-            await _publish_edit(client, cfg, refreshed, title, body, tags)
+            if cfg.binding_transitions_enabled:
+                published = await _publish_authorized_starter_edit(
+                    client, cfg, conn, refreshed, represented, title, body, tags,
+                )
+            else:
+                published = await _publish_edit(client, cfg, refreshed, title, body, tags)
+            if not published:
+                continue
+        except PermissionError:
+            log.append(f"edit_post(prose): BLOCKED identity replacement for {initiative.id}")
+            continue
         except Exception as exc:
             if _is_discord_not_found(exc):
                 logger.warning(
@@ -1320,11 +1406,18 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                                       conn: sqlite3.Connection, snapshot: BoardSnapshot,
                                       state: dict[str, Initiative], log: list[str]) -> None:
     publisher = DiscordLifecyclePublisher(client, cfg, conn)
+    resumable: list[dict] = []
     for initiative in state.values():
         if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
             continue
-        if initiative.kind != "post" or not initiative.thread_id or initiative.archived_at is not None:
+        if initiative.kind != "post" or not initiative.thread_id:
             continue
+        if initiative.archived_at is not None:
+            discord_state, _ = await _thread_state(client, initiative.thread_id)
+            if discord_state != "active":
+                continue
+            await asyncio.to_thread(clear_archived, conn, initiative.id)
+            log.append(f"terminal_lifecycle: BACKFILLED active legacy thread {initiative.id}")
         binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
         if binding is None:
             continue
@@ -1344,8 +1437,7 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                         for cid in [x["task_id"] for x in chain] if cid in snapshot.cards]
             starts = [str(snapshot.cards[x["task_id"]].created_at) for x in chain if snapshot.cards[x["task_id"]].created_at]
             ends = [str(snapshot.cards[x["task_id"]].completed_at) for x in chain if snapshot.cards[x["task_id"]].completed_at]
-            life = await asyncio.to_thread(
-                run_terminal_lifecycle, conn, publisher,
+            lifecycle_args = dict(
                 lifecycle_key=f"terminal:{binding.binding_key}", thread_id=initiative.thread_id,
                 card_chain=chain, outcomes=outcomes,
                 owners=sorted({str(snapshot.cards[x["task_id"]].assignee) for x in chain if snapshot.cards[x["task_id"]].assignee}),
@@ -1354,6 +1446,10 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                 idle_seconds=max(0, int(cfg.done_thread_archive_idle_minutes * 60)),
                 observed_activity_at=int(activity), clock=lambda: int(time.time()),
             )
+            resumable.append({"initiative": initiative, "args": lifecycle_args})
+            life = await asyncio.to_thread(
+                run_terminal_lifecycle, conn, publisher, **lifecycle_args, defer_digest=True
+            )
             if life is not None:
                 log.append(f"terminal_lifecycle: {initiative.id} state={life.state}")
                 if life.state == "archived":
@@ -1361,6 +1457,68 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
         except Exception:
             logger.exception("kanban mirror: terminal lifecycle failed closed for %s", initiative.id)
             log.append(f"terminal_lifecycle: FAILED {initiative.id}")
+
+    pending = []
+    for item in resumable:
+        life = get_terminal_lifecycle(conn, item["args"]["lifecycle_key"])
+        if life is not None and life.state == "summary_confirmed":
+            pending.append((item, life))
+    if pending:
+        advanced = []
+        try:
+            # Serialize the external digest read-modify-write with lifecycle state
+            # changes. A concurrent daemon must acquire this SQLite writer lock
+            # before it can read and overwrite the digest.
+            conn.execute("BEGIN IMMEDIATE")
+            current = []
+            for item, life in pending:
+                row = conn.execute(
+                    "SELECT state FROM mirror_terminal_lifecycles WHERE lifecycle_key=?",
+                    (life.lifecycle_key,),
+                ).fetchone()
+                if row is not None and str(row["state"]) == "summary_confirmed":
+                    current.append((item, life))
+            if not current:
+                conn.commit()
+                return
+            digest_id, retained_threads = await asyncio.to_thread(
+                publisher.upsert_digest_batch,
+                [(life.thread_id, life.frozen_payload["digest"]) for _, life in current],
+            )
+            now = int(time.time())
+            for item, life in current:
+                if life.thread_id not in retained_threads:
+                    continue
+                changed = conn.execute(
+                    """UPDATE mirror_terminal_lifecycles
+                       SET state='digest_confirmed',digest_entry_id=?,digest_confirmed_at=?,
+                           last_error=NULL,updated_at=?
+                       WHERE lifecycle_key=? AND state='summary_confirmed'""",
+                    (digest_id, now, now, life.lifecycle_key),
+                ).rowcount
+                if changed != 1:
+                    raise RuntimeError("terminal lifecycle changed during digest batch")
+                advanced.append((item, life))
+            conn.commit()
+            log.append(f"terminal_lifecycle: BATCHED_DIGEST count={len(advanced)}")
+        except Exception:
+            conn.rollback()
+            logger.exception("kanban mirror: terminal lifecycle digest batch failed closed")
+            log.append("terminal_lifecycle: BATCHED_DIGEST_FAILED")
+            return
+        for item, _ in advanced:
+            initiative = item["initiative"]
+            try:
+                life = await asyncio.to_thread(
+                    run_terminal_lifecycle, conn, publisher, **item["args"], defer_digest=True
+                )
+                if life is not None:
+                    log.append(f"terminal_lifecycle: {initiative.id} state={life.state}")
+                    if life.state == "archived":
+                        await asyncio.to_thread(set_archived, conn, initiative.id, int(time.time()))
+            except Exception:
+                logger.exception("kanban mirror: terminal lifecycle failed closed for %s", initiative.id)
+                log.append(f"terminal_lifecycle: FAILED {initiative.id}")
 
 
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
@@ -1371,6 +1529,15 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
     except sqlite3.OperationalError as exc:
         logger.warning("kanban mirror: board snapshot unavailable (locked/busy?): %s", exc)
         return log
+    if not dry_run:
+        try:
+            inserted = await asyncio.to_thread(backfill_legacy_bindings, mirror_conn, cfg.board)
+            if inserted:
+                log.append(f"binding_initialization: backfilled {inserted}")
+        except Exception:
+            logger.exception("kanban mirror: binding initialization failed closed")
+            log.append("binding_initialization: FAILED")
+            return log
     if cfg.reconciliation_enabled and not dry_run and client is not None:
         try:
             await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)

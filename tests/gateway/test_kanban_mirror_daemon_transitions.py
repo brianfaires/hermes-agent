@@ -1,13 +1,16 @@
 import asyncio
+import threading
+import time
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.daemon import (
     DiscordTransitionPublisher, _initiate_automatic_successors, _recover_binding_transitions,
-    _starter_identity_authorized,
+    _publish_authorized_starter_edit, _starter_identity_authorized,
 )
 from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, get_binding_transition, load_mirror_state, prepare_binding_transition, set_thread,
+    record_authorized_starter_revision,
 )
 
 
@@ -81,9 +84,8 @@ def test_startup_backfill_and_pending_resume_without_duplicate_epoch(tmp_path):
         transition_payload={"content": "Old -> New"},
         starter_payload={"title": "New", "body": "next", "tags": ["active"]},
     )
-    # Cosmetic updates for the represented old card remain safe, while a
-    # direct successor rewrite is blocked until the transition is confirmed.
-    assert _starter_identity_authorized(conn, "thread", "old")
+    # All direct starter edits are blocked while the successor transition is pending.
+    assert not _starter_identity_authorized(conn, "thread", "old")
     assert not _starter_identity_authorized(conn, "thread", "new")
     asyncio.run(_recover_binding_transitions(cfg, client, conn, []))
     asyncio.run(_recover_binding_transitions(cfg, client, conn, []))
@@ -111,6 +113,56 @@ def test_automatic_successor_orders_transition_and_is_restart_idempotent(tmp_pat
     assert [event[0] for event in client.events] == ["publish", "starter", "thread"]
     assert len(client.by_nonce) == 1
     assert conn.execute("SELECT task_id FROM mirror_members").fetchone()[0] == "new"
+
+
+def test_authorized_cosmetic_starter_edit_updates_open_epoch_hash(tmp_path):
+    conn = seed(tmp_path / "cosmetic.db"); backfill_legacy_bindings(conn, "board")
+
+    binding = record_authorized_starter_revision(conn, "thread", "old", "new-hash")
+
+    assert binding.starter_revision_hash == "new-hash"
+    assert active_thread_binding(conn, "thread").starter_revision_hash == "new-hash"
+
+
+def test_authorized_edit_serializes_against_transition_preparation(tmp_path):
+    path = tmp_path / "serialized.db"
+    conn = seed(path); backfill_legacy_bindings(conn, "board")
+    started = threading.Event(); finished = threading.Event(); workers = []
+
+    class RacingClient(FakeDiscordClient):
+        def update_message(self, channel_id, message_id, *, content):
+            def prepare():
+                started.set()
+                other = connect_mirror(path)
+                try:
+                    prepare_binding_transition(
+                        other, transition_key="racing-move", thread_id="thread",
+                        old_card_metadata={"board_slug": "board", "task_id": "old"},
+                        new_card_metadata={"board_slug": "board", "task_id": "new"},
+                        transition_payload={"content": "Old -> New"},
+                        starter_payload={"title": "New", "body": "next", "tags": ["active"]},
+                    )
+                finally:
+                    other.close(); finished.set()
+            worker = threading.Thread(target=prepare)
+            workers.append(worker); worker.start()
+            assert started.wait(1)
+            time.sleep(0.05)
+            assert not finished.is_set()
+            return super().update_message(channel_id, message_id, content=content)
+
+    client = RacingClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", binding_transitions_enabled=True)
+    initiative = load_mirror_state(conn)["init"]
+
+    assert asyncio.run(_publish_authorized_starter_edit(
+        client, cfg, conn, initiative, "old", "Old", "updated", ["doing"],
+    ))
+    workers[0].join(2)
+
+    assert finished.is_set()
+    assert active_thread_binding(conn, "thread").starter_revision_hash
+    assert get_binding_transition(conn, "racing-move").state == "prepared"
 
 
 def test_automatic_successor_fanout_fails_closed_with_stable_finding(tmp_path):

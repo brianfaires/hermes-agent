@@ -43,7 +43,7 @@ def _receipt(r,key,thread,payload):
     if not isinstance(r,PublishReceipt) or (r.operation_key,r.thread_id,r.payload_hash)!=(key,thread,_hash(payload)) or not r.object_id.strip():
         raise ValueError("publisher receipt does not match frozen operation")
 
-def run_terminal_lifecycle(conn: sqlite3.Connection,publisher: LifecyclePublisher,*,lifecycle_key:str,thread_id:str,card_chain:list[dict],outcomes:list[dict],owners:list[str],date_range:dict,thread_link:str,idle_seconds:int,observed_activity_at:int,clock:Callable[[],int]):
+def run_terminal_lifecycle(conn: sqlite3.Connection,publisher: LifecyclePublisher,*,lifecycle_key:str,thread_id:str,card_chain:list[dict],outcomes:list[dict],owners:list[str],date_range:dict,thread_link:str,idle_seconds:int,observed_activity_at:int,clock:Callable[[],int],defer_digest:bool=False):
     """Resume strict summary -> digest -> tag -> idle -> archive boundaries."""
     now=int(clock());thread=str(thread_id);binding=active_thread_binding(conn,thread)
     terminal=bool(binding and card_chain and str(card_chain[-1].get("task_id"))==binding.task_id and all(is_terminal(str(c.get("status",""))) for c in card_chain))
@@ -66,6 +66,8 @@ def run_terminal_lifecycle(conn: sqlite3.Connection,publisher: LifecyclePublishe
         if life.state=="prepared":
             p=life.frozen_payload["summary"];key=lifecycle_key+":summary";r=publisher.publish_summary(thread,p,operation_key=key);_receipt(r,key,thread,p)
             conn.execute("UPDATE mirror_terminal_lifecycles SET state='summary_confirmed',summary_message_id=?,summary_confirmed_at=?,last_error=NULL,updated_at=? WHERE lifecycle_key=?",(r.object_id,now,now,lifecycle_key));conn.commit();life=get_terminal_lifecycle(conn,lifecycle_key)
+        if life.state=="summary_confirmed" and defer_digest:
+            return life
         if life.state=="summary_confirmed":
             p=life.frozen_payload["digest"];key=lifecycle_key+":digest";r=publisher.upsert_digest(thread,p,operation_key=key);_receipt(r,key,thread,p)
             conn.execute("UPDATE mirror_terminal_lifecycles SET state='digest_confirmed',digest_entry_id=?,digest_confirmed_at=?,last_error=NULL,updated_at=? WHERE lifecycle_key=?",(r.object_id,now,now,lifecycle_key));conn.commit();life=get_terminal_lifecycle(conn,lifecycle_key)

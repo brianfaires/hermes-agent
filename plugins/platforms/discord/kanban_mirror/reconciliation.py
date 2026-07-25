@@ -149,7 +149,7 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
             member_tasks = []
             if len(mappings) == 1:
                 member_tasks = [r[0] for r in conn.execute("SELECT task_id FROM mirror_members WHERE initiative_id=? ORDER BY task_id", (mappings[0]["id"],))]
-            if len(mappings) != 1 or member_tasks != [task]:
+            if len(mappings) != 1 or task not in member_tasks:
                 add("error", "binding.mapping_missing", thread, binding, task, registry_count=len(mappings), mapped_tasks=member_tasks)
         observed = observed_threads.get(thread)
         if observed is not None and (len(mappings) != 1 or mappings[0]["starter_message_id"] != observed.starter_message_id):
@@ -191,7 +191,9 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
             elif lifecycle is not None and lifecycle["state"] == "tag_confirmed" and stamp >= int(lifecycle["archive_due_at"] or stamp + 1) and not observed.archived:
                 add("warning", "thread.terminal_unarchived", thread, binding, task, archive_due_at=lifecycle["archive_due_at"])
 
-        if lifecycle is not None and lifecycle["state"] not in {"prepared", "summary_confirmed", "cancelled"}:
+        # The digest is a bounded rolling index.  Once a lifecycle is archived,
+        # its entry may be pruned to make room for newer completions.
+        if lifecycle is not None and lifecycle["state"] in {"digest_confirmed", "tag_confirmed"}:
             digest = json.loads(lifecycle["frozen_payload"])["digest"]
             marker = f"<!-- terminal:{thread} -->"
             date = digest["date_range"].get("end") or digest["date_range"].get("start") or "?"
