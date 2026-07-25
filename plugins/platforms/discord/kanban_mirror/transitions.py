@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -127,20 +128,51 @@ def request_binding_transition(
     An operator choice resolves only a prior automatic-selection ambiguity;
     unrelated quarantine remains latched and continues to fail closed.
     """
-    other = conn.execute(
-        "SELECT 1 FROM mirror_reconciliation_findings WHERE thread_id=? AND resolved_at IS NULL "
-        "AND code!='successor.selection_ambiguous' LIMIT 1", (thread_id,),
-    ).fetchone()
-    if other is None:
-        import time
-        now = int(time.time())
-        conn.execute("UPDATE mirror_reconciliation_findings SET resolved_at=? WHERE thread_id=? "
-                     "AND code='successor.selection_ambiguous' AND resolved_at IS NULL", (now, thread_id))
-        conn.execute("UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? "
-                     "WHERE thread_id=? AND resolved_at IS NULL", (now, now, thread_id))
-        conn.commit()
-    return run_binding_transition(
+    transition = run_binding_transition(
         conn, publisher, transition_key=transition_key, thread_id=thread_id,
         old_card_metadata=old_card_metadata, new_card_metadata=successor_card_metadata,
         transition_payload=transition_payload, starter_payload=frozen_starter_payload,
     )
+    if transition.state != "starter_verified":
+        return transition
+
+    quarantine_codes = {
+        "binding.open_count", "binding.card_missing", "binding.mapping_missing",
+        "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+        "starter.changed_without_transition_confirmation",
+        "transition.confirmation_missing", "thread.premature_archive",
+        "digest.thread_mismatch", "successor.selection_ambiguous",
+    }
+    now = int(time.time())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        quarantine = conn.execute(
+            """SELECT quarantined_at,updated_at FROM mirror_thread_quarantine
+               WHERE thread_id=? AND resolved_at IS NULL""",
+            (thread_id,),
+        ).fetchone()
+        causes: set[str] = set()
+        if quarantine is not None:
+            causes = {str(row[0]) for row in conn.execute(
+                """SELECT DISTINCT code FROM mirror_reconciliation_findings
+                   WHERE thread_id=? AND last_seen_at>=?""",
+                (thread_id, int(quarantine[0])),
+            )} & quarantine_codes
+        conn.execute(
+            """UPDATE mirror_reconciliation_findings SET resolved_at=?
+               WHERE thread_id=? AND code='successor.selection_ambiguous'
+                 AND resolved_at IS NULL""",
+            (now, thread_id),
+        )
+        if quarantine is not None and causes == {"successor.selection_ambiguous"}:
+            conn.execute(
+                """UPDATE mirror_thread_quarantine
+                   SET needs_repair=0,resolved_at=?,updated_at=?
+                   WHERE thread_id=? AND resolved_at IS NULL AND updated_at=?""",
+                (now, now, thread_id, int(quarantine[1])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return transition

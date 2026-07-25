@@ -155,18 +155,27 @@ def test_recovery_refuses_conflicting_receipt_and_existing_dispatch_correlation(
     import asyncio
     asyncio.run(ing.ingest_live(DiscordInbound('10','1','conflict',created_at=50)))
     asyncio.run(ing.ingest_live(DiscordInbound('11','2','already routed',created_at=50)))
-    bind(conn,'1'); bind(conn,'2')
+    asyncio.run(ing.ingest_live(DiscordInbound('12','3','wrong receipt identity',created_at=50)))
+    asyncio.run(ing.ingest_live(DiscordInbound('13','4','existing disposition',created_at=50)))
+    bind(conn,'1'); bind(conn,'2'); bind(conn,'3'); bind(conn,'4')
     conn.execute("""INSERT INTO mirror_inbox_receipts
         (discord_message_id,board_slug,forum_channel_id,thread_id,task_id,author_id,
          action,kanban_comment_id,created_at)
         VALUES ('10','x','forum','1','different-task','user','comment',680,60)""")
     conn.execute("UPDATE mirror_discord_inbound_state SET correlation_id='corr' WHERE discord_message_id='11'")
+    conn.execute("""INSERT INTO mirror_inbox_receipts
+        (discord_message_id,board_slug,forum_channel_id,thread_id,task_id,author_id,
+         action,kanban_comment_id,created_at)
+        VALUES ('12','other-board','forum','3','c-3','user','comment',681,60)""")
+    conn.execute("""INSERT INTO mirror_discord_inbound_dispositions
+        (discord_message_id,correlation_id,disposition,detail,created_at)
+        VALUES ('13',NULL,'quarantined_malformed','existing evidence',60)""")
     conn.commit()
 
     result=recover_pending_inbound_bindings(
-        conn,cards={'c-1':('running',None),'c-2':('running',None)},now=101,
+        conn,cards={f'c-{n}':('running',None) for n in range(1,5)},now=101,
     )
 
     assert result=={'rebound':0,'superseded':0,'deduplicated':0}
     rows=conn.execute("SELECT binding_key FROM mirror_conversation_events ORDER BY discord_message_id").fetchall()
-    assert [row[0] for row in rows]==[None,None]
+    assert [row[0] for row in rows]==[None,None,None,None]

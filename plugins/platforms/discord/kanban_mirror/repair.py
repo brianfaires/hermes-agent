@@ -176,7 +176,7 @@ def recover_pending_inbound_bindings(
             ).fetchone():
                 continue
             epochs = conn.execute(
-                """SELECT binding_key,task_id,started_at,ended_at
+                """SELECT binding_key,task_id,started_at,ended_at,board_slug
                    FROM mirror_binding_epochs
                    WHERE thread_id=? AND started_at<=?
                      AND (ended_at IS NULL OR ?<ended_at)""",
@@ -190,11 +190,21 @@ def recover_pending_inbound_bindings(
             status, completed_raw = card_state[task_id]
             completed_at = _timestamp(completed_raw)
             terminal = is_terminal(status)
+            if conn.execute(
+                "SELECT 1 FROM mirror_discord_inbound_dispositions WHERE discord_message_id=?",
+                (message_id,),
+            ).fetchone():
+                continue
             receipt = conn.execute(
-                "SELECT task_id FROM mirror_inbox_receipts WHERE discord_message_id=?",
+                """SELECT board_slug,thread_id,task_id FROM mirror_inbox_receipts
+                   WHERE discord_message_id=?""",
                 (message_id,),
             ).fetchone()
-            receipt_matches = receipt is not None and str(receipt[0]) == task_id
+            receipt_matches = receipt is not None and (
+                str(receipt[0]) == str(epochs[0][4])
+                and str(receipt[1]) == thread_id
+                and str(receipt[2]) == task_id
+            )
             if receipt is not None and not receipt_matches:
                 continue
             if terminal and completed_at is None and not receipt_matches:

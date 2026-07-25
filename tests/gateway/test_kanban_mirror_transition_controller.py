@@ -1,5 +1,6 @@
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
@@ -10,9 +11,12 @@ from plugins.platforms.discord.kanban_mirror.state import (
     connect_mirror,
     create_initiative,
     get_binding_transition,
+    is_thread_quarantined,
     set_thread,
 )
-from plugins.platforms.discord.kanban_mirror.transitions import TransitionReceipt, run_binding_transition
+from plugins.platforms.discord.kanban_mirror.transitions import (
+    TransitionReceipt, request_binding_transition, run_binding_transition,
+)
 
 
 def canonical_hash(payload):
@@ -146,3 +150,50 @@ def test_mismatched_receipt_and_live_revision_fail_closed(tmp_path):
     assert get_binding_transition(conn, "move-1").state == "message_confirmed"
     assert active_thread_binding(conn, "thread").task_id == "new"
     assert active_thread_binding(conn, "thread").starter_revision_hash is None
+
+
+def quarantine(conn, *, include_premature=False):
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('successor','error','successor.selection_ambiguous','thread','{}','s',10,10,NULL)""")
+    if include_premature:
+        conn.execute("""INSERT INTO mirror_reconciliation_findings
+            (finding_key,severity,code,thread_id,evidence,evidence_hash,
+             first_seen_at,last_seen_at,resolved_at)
+            VALUES ('premature','error','thread.premature_archive','thread','{}','p',10,10,20)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at)
+        VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+
+def request_kwargs() -> dict[str, Any]:
+    values = kwargs()
+    values["successor_card_metadata"] = values.pop("new_card_metadata")
+    values["frozen_starter_payload"] = values.pop("starter_payload")
+    return values
+
+
+def test_explicit_successor_failure_keeps_ambiguity_quarantine_latched(tmp_path):
+    conn = seed(tmp_path / "mirror.db"); quarantine(conn)
+    publisher = FakePublisher(); publisher.fail_send = True
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        request_binding_transition(conn, publisher, **request_kwargs())
+
+    assert is_thread_quarantined(conn, "thread")
+    assert conn.execute("SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='successor'").fetchone()[0] is None
+
+
+def test_explicit_successor_clears_only_successor_owned_quarantine_after_success(tmp_path):
+    conn = seed(tmp_path / "only.db"); quarantine(conn)
+    result = request_binding_transition(conn, FakePublisher(), **request_kwargs())
+    assert result.state == "starter_verified"
+    assert not is_thread_quarantined(conn, "thread")
+
+    conn = seed(tmp_path / "mixed.db"); quarantine(conn, include_premature=True)
+    result = request_binding_transition(conn, FakePublisher(), **request_kwargs())
+    assert result.state == "starter_verified"
+    assert is_thread_quarantined(conn, "thread")
+    assert conn.execute("SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='successor'").fetchone()[0] is not None

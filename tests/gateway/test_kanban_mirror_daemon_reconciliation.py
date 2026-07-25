@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.daemon import (
@@ -151,7 +152,7 @@ def test_tick_recovers_transitions_before_live_reconciliation(tmp_path, monkeypa
     async def recover(*args):
         order.append("recover")
 
-    async def observe(*args):
+    async def observe(*args, **kwargs):
         order.append("reconcile")
 
     monkeypatch.setattr(
@@ -176,6 +177,35 @@ def test_tick_recovers_transitions_before_live_reconciliation(tmp_path, monkeypa
     assert order == ["recover", "reconcile"]
 
 
+def test_tick_aborts_all_planning_when_post_observation_board_reload_fails(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    calls = [0]
+
+    def load(_board):
+        calls[0] += 1
+        if calls[0] == 1:
+            return empty_snapshot()
+        raise sqlite3.OperationalError("board changed during observation")
+
+    planned = []
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot", load,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.plan",
+        lambda *args: planned.append(True) or [],
+    )
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        automatic_successor_enabled=False, terminal_lifecycle_enabled=False,
+    )
+
+    log = asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False))
+
+    assert log[-1] == "reconciliation: FAILED"
+    assert planned == []
+
+
 def test_daemon_startup_recovers_transitions_before_live_reconciliation(tmp_path, monkeypatch):
     conn = connect_mirror(tmp_path / "mirror.db")
     order = []
@@ -187,7 +217,7 @@ def test_daemon_startup_recovers_transitions_before_live_reconciliation(tmp_path
     async def recover(*args):
         order.append("recover")
 
-    async def observe(*args):
+    async def observe(*args, **kwargs):
         order.append("reconcile")
 
     monkeypatch.setattr(

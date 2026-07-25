@@ -119,7 +119,7 @@ def _is_quarantined(conn: sqlite3.Connection, thread_id: str | None) -> bool:
 
 async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                                  conn: sqlite3.Connection, snapshot: BoardSnapshot,
-                                 log: list[str]) -> None:
+                                 log: list[str], *, reload_snapshot: bool = False) -> None:
     """Read live Discord state independently per mapped thread and reconcile it."""
     rows = conn.execute("SELECT thread_id,starter_message_id FROM mirror_initiatives "
                         "WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
@@ -164,6 +164,8 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         except Exception as exc:
             logger.warning("kanban mirror: reconciliation observation failed for %s: %s", thread_id, exc)
             log.append(f"reconciliation: PARTIAL thread={thread_id}")
+    if reload_snapshot:
+        snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
     state = load_mirror_state(conn)
     expected: dict[str, ExpectedThread] = {}
     for initiative in state.values():
@@ -197,17 +199,10 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
     )
     if resolved_quarantines:
         log.append(f"reconciliation: RECOVERED quarantine={len(resolved_quarantines)}")
-    recovery_snapshot = snapshot
-    if conn.execute(
-        """SELECT 1 FROM mirror_discord_inbound_state s
-           JOIN mirror_conversation_events e ON e.id=s.conversation_event_id
-           WHERE s.processing_status='pending' AND e.binding_key IS NULL LIMIT 1"""
-    ).fetchone():
-        recovery_snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
     inbound_recovery = await asyncio.to_thread(
         recover_pending_inbound_bindings, conn,
         cards={task_id: (str(card.status or ""), card.completed_at)
-               for task_id, card in recovery_snapshot.cards.items()},
+               for task_id, card in snapshot.cards.items()},
     )
     if any(inbound_recovery.values()):
         log.append(
@@ -1578,10 +1573,13 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             log.append("binding_transition: recovery failed")
     if cfg.reconciliation_enabled and not dry_run and client is not None:
         try:
-            await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)
+            await _observe_and_reconcile(
+                cfg, client, mirror_conn, snapshot, log, reload_snapshot=True,
+            )
         except Exception:
             logger.exception("kanban mirror: live reconciliation failed closed")
             log.append("reconciliation: FAILED")
+            return log
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     if not dry_run and client is not None and cfg.automatic_successor_enabled:
@@ -1868,7 +1866,9 @@ async def run_mirror_daemon(
             snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
             startup_log: list[str] = []
             await _recover_binding_transitions(cfg, client, conn, startup_log)
-            await _observe_and_reconcile(cfg, client, conn, snapshot, startup_log)
+            await _observe_and_reconcile(
+                cfg, client, conn, snapshot, startup_log, reload_snapshot=True,
+            )
         except Exception:
             logger.exception("kanban mirror: startup transition recovery/reconciliation failed closed")
     else:

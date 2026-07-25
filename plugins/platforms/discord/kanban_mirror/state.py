@@ -944,8 +944,14 @@ def authorize_starter_update(conn: sqlite3.Connection, transition_key: str) -> t
     transition = get_binding_transition(conn, transition_key)
     if transition is None or transition.state not in {"message_confirmed", "starter_verified"}:
         raise ValueError("starter update is not authorized")
-    active = active_thread_binding(conn, transition.thread_id)
-    if active is None or active.binding_key != transition.new_binding_key:
+    # This is an internal continuation of a confirmed transition, not a
+    # card-dependent routing lookup. A quarantine must keep routing closed
+    # without preventing the transition from reaching its verified boundary.
+    rows = conn.execute(
+        "SELECT binding_key FROM mirror_binding_epochs WHERE thread_id=? AND state='open'",
+        (transition.thread_id,),
+    ).fetchall()
+    if len(rows) != 1 or str(rows[0][0]) != transition.new_binding_key:
         raise ValueError("successor binding is not authoritative")
     return transition.starter_payload, hashlib.sha256(_canonical(transition.starter_payload).encode()).hexdigest()
 
