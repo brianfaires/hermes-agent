@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
 
@@ -2499,6 +2500,12 @@ class BasePlatformAdapter(ABC):
     # dispatch path branches on it; no platform checks at call sites.
     voice_reply_text_order: str = "after_tts"
 
+    # A multiplexed secondary adapter is bound to one profile's credentials.
+    # Set by GatewayRunner._configure_profile_adapter before the adapter starts
+    # receiving updates. This transport provenance must reach an event before
+    # batching, busy-session interception, or pending-message storage.
+    _inbound_profile: Optional[str] = None
+
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
@@ -4879,6 +4886,24 @@ class BasePlatformAdapter(ABC):
         if not self._message_handler:
             return
 
+        # The secondary profile wrapper stamps sources only when it invokes the
+        # runner, which is too late for this method's active-session guard and
+        # clarify lookup. Bind the receiving adapter's profile before deriving
+        # a key, or a secondary Telegram event is silently keyed as agent:main.
+        adapter_profile = (getattr(self, "_inbound_profile", None) or "").strip()
+        source_profile = (getattr(event.source, "profile", None) or "").strip()
+        if adapter_profile:
+            if source_profile and source_profile != adapter_profile:
+                logger.error(
+                    "[%s] Dropping inbound event with conflicting profile provenance: "
+                    "adapter=%s source=%s",
+                    self.name,
+                    adapter_profile,
+                    source_profile,
+                )
+                return
+            event.source.profile = adapter_profile
+
         coerce_plaintext_gateway_command(event)
 
         # Rewrite ``event.source.thread_id`` via the installed recovery hook
@@ -4891,6 +4916,7 @@ class BasePlatformAdapter(ABC):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            profile=event.source.profile,
         )
 
         # On-entry self-heal: if the adapter still has an _active_sessions
@@ -5883,12 +5909,17 @@ class BasePlatformAdapter(ABC):
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
 
-        # Resolve profile from configured routes (None when no match / no routes)
-        profile = None
+        # Resolve a configured route even for a credential-owned secondary
+        # adapter. A route that disagrees with the receiving adapter is an
+        # identity conflict; preserve the routed value on the source so
+        # handle_message() sees the mismatch and fails closed rather than
+        # silently delivering the event through the wrong profile's bot.
+        adapter_profile = (getattr(self, "_inbound_profile", None) or "").strip() or None
+        routed_profile = None
         runner = getattr(self, "gateway_runner", None)
         if runner is not None:
             try:
-                profile = runner._profile_name_for_source(
+                routed_profile = runner._profile_name_for_source(
                     SessionSource(
                         platform=self.platform,
                         chat_id=str(chat_id),
@@ -5912,7 +5943,9 @@ class BasePlatformAdapter(ABC):
                     self.platform, chat_id, exc_info=True,
                 )
 
-        return SessionSource(
+        profile = routed_profile or adapter_profile
+
+        source = SessionSource(
             platform=self.platform,
             chat_id=str(chat_id),
             chat_name=chat_name,
@@ -5933,6 +5966,11 @@ class BasePlatformAdapter(ABC):
             auto_thread_created=auto_thread_created,
             auto_thread_initial_name=auto_thread_initial_name,
         )
+        # In-process transport provenance is deliberately not serialized by
+        # SessionSource.to_dict(). The live receiving adapter is authoritative
+        # for this turn even when profile_routes selects a different runtime.
+        source._transport_adapter_ref = weakref.ref(self)
+        return source
     
     @abstractmethod
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:

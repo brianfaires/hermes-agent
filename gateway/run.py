@@ -9608,6 +9608,9 @@ class GatewayRunner(
             from hermes_cli.profiles import get_profile_dir
 
             adapter.set_runtime_profile_home(get_profile_dir(profile_name))
+        # Bind the profile at the transport edge. The adapter's busy and clarify
+        # routing executes before the message handler can stamp the source.
+        adapter._inbound_profile = profile_name
         adapter.set_message_handler(self._make_profile_message_handler(profile_name))
         adapter.set_fatal_error_handler(
             self._make_profile_fatal_error_handler(profile_name, platform)
