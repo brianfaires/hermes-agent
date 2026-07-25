@@ -511,6 +511,26 @@ def test_heartbeat_roundtrip_and_age(tmp_path, monkeypatch):
     assert ok is not None and 0.0 <= ok < 5.0
 
 
+def test_heartbeat_paths_follow_active_profile_home(tmp_path, monkeypatch):
+    """Heartbeat reads and writes resolve after profile context is selected."""
+    import cron.jobs as jobs
+
+    profile_home = tmp_path / "profiles" / "ops"
+    written = []
+    read = []
+    monkeypatch.setattr(jobs, "get_hermes_home", lambda: profile_home)
+    monkeypatch.setattr(jobs, "_atomic_write_epoch", written.append)
+    monkeypatch.setattr(jobs, "_epoch_file_age", lambda path: read.append(path) or 1.0)
+
+    jobs.record_ticker_heartbeat(success=True)
+    assert jobs.get_ticker_heartbeat_age() == 1.0
+    assert jobs.get_ticker_success_age() == 1.0
+
+    expected = profile_home / "cron"
+    assert written == [expected / "ticker_heartbeat", expected / "ticker_last_success"]
+    assert read == [expected / "ticker_heartbeat", expected / "ticker_last_success"]
+
+
 def test_heartbeat_age_detects_staleness(tmp_path, monkeypatch):
     """A heartbeat written far in the past reads back as a large age."""
     import cron.jobs as jobs

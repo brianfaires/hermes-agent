@@ -26,23 +26,31 @@ class LoopSupervisor:
         self._base, self._max = base_backoff, max_backoff
         self._tasks: dict[str, asyncio.Task] = {}
         self._states: dict[str, LoopState] = {}
-        self._closing = False
+        self._stopping_tasks: set[asyncio.Task] = set()
+        self._stop_signals: dict[asyncio.Task, asyncio.Event] = {}
 
     def start(self, name: str, runner: Callable[[], Awaitable[None]]) -> asyncio.Task:
         current = self._tasks.get(name)
-        if current is not None and not current.done():
+        if (current is not None and not current.done()
+                and current not in self._stopping_tasks):
             return current
-        self._closing = False
+        draining = tuple(self._stopping_tasks)
+        stop_signal = asyncio.Event()
         state = self._states.setdefault(name, LoopState())
 
         async def supervise() -> None:
             failures = 0
             try:
-                while not self._closing:
+                # A reconnect can race the prior disconnect's cancellation
+                # drain. Publish this replacement only after that generation
+                # has finished and set its final stopped state.
+                if draining:
+                    await asyncio.gather(*draining, return_exceptions=True)
+                while not stop_signal.is_set():
                     state.state = "running"
                     try:
                         await runner()
-                        if self._closing:
+                        if stop_signal.is_set():
                             break
                         raise RuntimeError("loop exited unexpectedly")
                     except asyncio.CancelledError:
@@ -59,16 +67,34 @@ class LoopSupervisor:
 
         task = asyncio.create_task(supervise(), name=f"kanban-mirror:{name}")
         self._tasks[name] = task
+        self._stop_signals[task] = stop_signal
+        task.add_done_callback(
+            lambda done, generation=name: self._forget_generation(generation, done)
+        )
         return task
 
+    def _forget_generation(self, name: str, task: asyncio.Task) -> None:
+        """Discard one finished generation without clobbering its replacement."""
+        self._stopping_tasks.discard(task)
+        self._stop_signals.pop(task, None)
+        if self._tasks.get(name) is task:
+            self._tasks.pop(name, None)
+
     async def stop(self) -> None:
-        self._closing = True
-        tasks = [task for task in self._tasks.values() if not task.done()]
-        for task in tasks:
+        tasks = dict(self._tasks)
+        active = [task for task in tasks.values() if not task.done()]
+        self._stopping_tasks.update(active)
+        for task in active:
+            signal = self._stop_signals.get(task)
+            if signal is not None:
+                signal.set()
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
+        try:
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
+        finally:
+            for name, task in tasks.items():
+                self._forget_generation(name, task)
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return {name: asdict(state) for name, state in sorted(self._states.items())}

@@ -81,6 +81,9 @@ TICKER_HEARTBEAT_FILE = CRON_DIR / "ticker_heartbeat"
 # Last tick that completed WITHOUT raising. Distinguishing this from the plain
 # heartbeat lets status detect a ticker that is alive but failing every tick.
 TICKER_SUCCESS_FILE = CRON_DIR / "ticker_last_success"
+# Preserve the public path constants as a monkeypatch compatibility surface,
+# while allowing the unchanged defaults to follow the active profile context.
+_IMPORT_TICKER_FILES = (TICKER_HEARTBEAT_FILE, TICKER_SUCCESS_FILE)
 # Default ticker loop interval (seconds). The single source of truth shared by
 # the in-process ticker (cron/scheduler_provider.py) and the staleness
 # threshold in `hermes cron status` (hermes_cli/cron.py), so the two never
@@ -814,6 +817,15 @@ def _atomic_write_epoch(path: Path) -> None:
         raise
 
 
+def _current_ticker_files() -> tuple[Path, Path]:
+    """Resolve ticker markers for the active store, honoring patched constants."""
+    live = (TICKER_HEARTBEAT_FILE, TICKER_SUCCESS_FILE)
+    if live != _IMPORT_TICKER_FILES:
+        return live
+    cron_dir = _current_cron_store().cron_dir
+    return cron_dir / "ticker_heartbeat", cron_dir / "ticker_last_success"
+
+
 def record_ticker_heartbeat(success: bool = False) -> None:
     """Record a ticker liveness signal, and optionally a successful-tick signal.
 
@@ -826,13 +838,14 @@ def record_ticker_heartbeat(success: bool = False) -> None:
 
     Best-effort: a write failure must never disrupt the tick loop.
     """
+    heartbeat_file, success_file = _current_ticker_files()
     try:
-        _atomic_write_epoch(TICKER_HEARTBEAT_FILE)
+        _atomic_write_epoch(heartbeat_file)
     except Exception:
         pass
     if success:
         try:
-            _atomic_write_epoch(TICKER_SUCCESS_FILE)
+            _atomic_write_epoch(success_file)
         except Exception:
             pass
 
@@ -851,12 +864,14 @@ def get_ticker_heartbeat_age() -> Optional[float]:
     None = heartbeat file missing/unreadable (older build, never ran, or a
     torn read). Callers treat None as "cannot determine", not "dead".
     """
-    return _epoch_file_age(TICKER_HEARTBEAT_FILE)
+    heartbeat_file, _ = _current_ticker_files()
+    return _epoch_file_age(heartbeat_file)
 
 
 def get_ticker_success_age() -> Optional[float]:
     """Seconds since the ticker last completed a tick WITHOUT raising, or None."""
-    return _epoch_file_age(TICKER_SUCCESS_FILE)
+    _, success_file = _current_ticker_files()
+    return _epoch_file_age(success_file)
 
 
 # =============================================================================

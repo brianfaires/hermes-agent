@@ -39,6 +39,91 @@ async def test_supervisor_deduplicates_restarts_and_awaits_shutdown():
     assert supervisor.snapshot()["inbound"]["state"] == "stopped"
 
 
+@pytest.mark.asyncio
+async def test_supervisor_restart_during_disconnect_drain_is_not_lost():
+    """A reconnect start racing disconnect drain must survive the old stop."""
+    cancelled = asyncio.Event()
+    release_cancel = asyncio.Event()
+    restarted = asyncio.Event()
+    calls = 0
+
+    async def runner():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release_cancel.wait()
+                raise
+        restarted.set()
+        await asyncio.Event().wait()
+
+    supervisor = LoopSupervisor()
+    first = supervisor.start("pending-inbound", runner)
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(supervisor.stop())
+    await cancelled.wait()
+
+    second = supervisor.start("pending-inbound", runner)
+    assert second is not first
+    release_cancel.set()
+    await stopping
+    await asyncio.wait_for(restarted.wait(), timeout=1)
+    assert supervisor.snapshot()["pending-inbound"]["state"] == "running"
+    assert supervisor._tasks["pending-inbound"] is second
+    assert first not in supervisor._stop_signals
+    assert first not in supervisor._stopping_tasks
+    assert second in supervisor._stop_signals
+    await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_forgets_an_externally_cancelled_generation():
+    async def runner():
+        await asyncio.Event().wait()
+
+    supervisor = LoopSupervisor()
+    task = supervisor.start("pending-inbound", runner)
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert "pending-inbound" not in supervisor._tasks
+    assert task not in supervisor._stop_signals
+    assert task not in supervisor._stopping_tasks
+
+
+@pytest.mark.asyncio
+async def test_supervisor_stop_cancellation_still_cleans_bookkeeping():
+    first_cancel = asyncio.Event()
+
+    async def runner():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancel.set()
+            await asyncio.Event().wait()
+
+    supervisor = LoopSupervisor()
+    task = supervisor.start("pending-inbound", runner)
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(supervisor.stop())
+    await first_cancel.wait()
+    stopping.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    await asyncio.sleep(0)
+
+    assert task.done()
+    assert "pending-inbound" not in supervisor._tasks
+    assert task not in supervisor._stop_signals
+    assert task not in supervisor._stopping_tasks
+
+
 def test_health_snapshot_is_bounded_content_free_and_disabled_is_silent(tmp_path):
     conn = connect_mirror(tmp_path / "mirror.db")
     initialize_mirror_schema(conn)
