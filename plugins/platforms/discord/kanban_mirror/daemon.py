@@ -1541,18 +1541,18 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             logger.exception("kanban mirror: binding initialization failed closed")
             log.append("binding_initialization: FAILED")
             return log
-    if cfg.reconciliation_enabled and not dry_run and client is not None:
-        try:
-            await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)
-        except Exception:
-            logger.exception("kanban mirror: live reconciliation failed closed")
-            log.append("reconciliation: FAILED")
     if not dry_run:
         try:
             await _recover_binding_transitions(cfg, client, mirror_conn, log)
         except Exception:
             logger.exception("kanban mirror: binding transition recovery failed closed")
             log.append("binding_transition: recovery failed")
+    if cfg.reconciliation_enabled and not dry_run and client is not None:
+        try:
+            await _observe_and_reconcile(cfg, client, mirror_conn, snapshot, log)
+        except Exception:
+            logger.exception("kanban mirror: live reconciliation failed closed")
+            log.append("reconciliation: FAILED")
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     if not dry_run and client is not None and cfg.automatic_successor_enabled:
@@ -1837,9 +1837,11 @@ async def run_mirror_daemon(
     if cfg.reconciliation_enabled:
         try:
             snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
-            await _observe_and_reconcile(cfg, client, conn, snapshot, [])
+            startup_log: list[str] = []
+            await _recover_binding_transitions(cfg, client, conn, startup_log)
+            await _observe_and_reconcile(cfg, client, conn, snapshot, startup_log)
         except Exception:
-            logger.exception("kanban mirror: startup live reconciliation failed closed")
+            logger.exception("kanban mirror: startup transition recovery/reconciliation failed closed")
     else:
         await reconcile(cfg, client, conn)
     while is_running():

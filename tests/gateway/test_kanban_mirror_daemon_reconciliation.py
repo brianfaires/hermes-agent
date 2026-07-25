@@ -1,7 +1,9 @@
 import asyncio
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
-from plugins.platforms.discord.kanban_mirror.daemon import _do_create_thread, _observe_and_reconcile, tick
+from plugins.platforms.discord.kanban_mirror.daemon import (
+    _do_create_thread, _observe_and_reconcile, run_mirror_daemon, tick,
+)
 from plugins.platforms.discord.kanban_mirror.planner import Op
 from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
 from plugins.platforms.discord.kanban_mirror.state import (
@@ -122,6 +124,80 @@ def test_tick_backfills_bindings_before_startup_reconciliation(tmp_path, monkeyp
     assert "binding.open_count" not in {f.code for f in list_reconciliation_findings(conn, open_only=True)}
     assert not is_thread_quarantined(conn, "thread")
     assert client.sent == {}
+
+
+def test_tick_recovers_transitions_before_live_reconciliation(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    order = []
+
+    async def recover(*args):
+        order.append("recover")
+
+    async def observe(*args):
+        order.append("reconcile")
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions", recover,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
+    )
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.plan", lambda *args: [])
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        binding_transitions_enabled=True, automatic_successor_enabled=False,
+        terminal_lifecycle_enabled=False,
+    )
+
+    asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False))
+
+    assert order == ["recover", "reconcile"]
+
+
+def test_daemon_startup_recovers_transitions_before_live_reconciliation(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    order = []
+    cfg = MirrorConfig(
+        enabled=True, board="board", forum_channel_id="forum", guild_id="guild",
+        reconciliation_enabled=True, binding_transitions_enabled=True,
+    )
+
+    async def recover(*args):
+        order.append("recover")
+
+    async def observe(*args):
+        order.append("reconcile")
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.config.load_mirror_config", lambda: cfg,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_discord_token", lambda *a, **k: "token",
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.DiscordClient", lambda token: FakeClient(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.connect_mirror", lambda path: conn,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions", recover,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
+    )
+
+    asyncio.run(run_mirror_daemon(lambda: False))
+
+    assert order == ["recover", "reconcile"]
 
 
 def test_new_thread_mapping_and_binding_are_created_atomically(tmp_path):
