@@ -75,6 +75,8 @@ from gateway.platforms.base import (
 from gateway.platforms.webhook_filters import (
     DEFAULT_SCRIPT_TIMEOUT_SECONDS,
     WebhookRouteProcessor,
+    _kill_script_process_group,
+    _script_process_group_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -1247,6 +1249,53 @@ class WebhookAdapter(BasePlatformAdapter):
             raise ValueError("script is not in script_trigger_allowlist")
         return resolved
 
+    async def _terminate_script_trigger_process(
+        self,
+        proc: Any,
+        *,
+        route_name: str,
+        script_name: str,
+        delivery_id: str,
+        reason: str,
+    ) -> None:
+        """Best-effort kill of a trigger tree followed by direct-child reaping."""
+        try:
+            pid = getattr(proc, "pid", None)
+            if pid is not None:
+                _kill_script_process_group(pid)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            logger.exception(
+                "[webhook] failed to kill %s script group route=%s script=%s delivery=%s",
+                reason,
+                route_name,
+                script_name,
+                delivery_id,
+            )
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            logger.exception(
+                "[webhook] failed to kill %s script route=%s script=%s delivery=%s",
+                reason,
+                route_name,
+                script_name,
+                delivery_id,
+            )
+        try:
+            await proc.wait()
+        except Exception:
+            logger.exception(
+                "[webhook] failed to reap %s script route=%s script=%s delivery=%s",
+                reason,
+                route_name,
+                script_name,
+                delivery_id,
+            )
+
     async def _run_script_trigger(
         self,
         *,
@@ -1264,39 +1313,41 @@ class WebhookAdapter(BasePlatformAdapter):
         else:
             cmd = [str(script_path)]
         proc = None
+        spawn_task = None
         try:
             from tools.environments.local import _sanitize_subprocess_env
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(script_path.parent),
-                env=_sanitize_subprocess_env(os.environ.copy()),
+            spawn_task = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(script_path.parent),
+                    env=_sanitize_subprocess_env(os.environ.copy()),
+                    **_script_process_group_kwargs(),
+                )
             )
+            proc = await asyncio.shield(spawn_task)
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.CancelledError:
+            if proc is None and spawn_task is not None:
+                try:
+                    proc = await spawn_task
+                except Exception:
+                    logger.exception(
+                        "[webhook] script spawn failed during cancellation route=%s script=%s delivery=%s",
+                        route_name,
+                        script_path.name,
+                        delivery_id,
+                    )
             if proc is not None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                except Exception:
-                    logger.exception(
-                        "[webhook] failed to kill cancelled script route=%s script=%s delivery=%s",
-                        route_name,
-                        script_path.name,
-                        delivery_id,
-                    )
-                try:
-                    await proc.wait()
-                except Exception:
-                    logger.exception(
-                        "[webhook] failed to reap cancelled script route=%s script=%s delivery=%s",
-                        route_name,
-                        script_path.name,
-                        delivery_id,
-                    )
+                await self._terminate_script_trigger_process(
+                    proc,
+                    route_name=route_name,
+                    script_name=script_path.name,
+                    delivery_id=delivery_id,
+                    reason="cancelled",
+                )
             raise
         except asyncio.TimeoutError:
             assert proc is not None
@@ -1307,35 +1358,29 @@ class WebhookAdapter(BasePlatformAdapter):
                 delivery_id,
                 timeout,
             )
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            except Exception:
-                logger.exception(
-                    "[webhook] failed to kill timed-out script route=%s script=%s delivery=%s",
-                    route_name,
-                    script_path.name,
-                    delivery_id,
-                )
-                return
-            try:
-                await proc.wait()
-            except Exception:
-                logger.exception(
-                    "[webhook] failed to reap timed-out script route=%s script=%s delivery=%s",
-                    route_name,
-                    script_path.name,
-                    delivery_id,
-                )
+            await self._terminate_script_trigger_process(
+                proc,
+                route_name=route_name,
+                script_name=script_path.name,
+                delivery_id=delivery_id,
+                reason="timed-out",
+            )
             return
         except Exception:
             logger.exception(
-                "[webhook] script failed to start route=%s script=%s delivery=%s",
+                "[webhook] script execution failed route=%s script=%s delivery=%s",
                 route_name,
                 script_path.name,
                 delivery_id,
             )
+            if proc is not None:
+                await self._terminate_script_trigger_process(
+                    proc,
+                    route_name=route_name,
+                    script_name=script_path.name,
+                    delivery_id=delivery_id,
+                    reason="failed",
+                )
             return
         if proc.returncode == 0:
             logger.info(
