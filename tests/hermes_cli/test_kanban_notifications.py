@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from hermes_cli.kanban_notifications import resolve_notify_target
+from hermes_cli.kanban_notifications import (
+    is_notify_target_allowed,
+    resolve_notify_target,
+)
 
 
 def _write_profile_config(home: Path, chat_id: str, thread_id: str) -> None:
@@ -37,3 +40,14 @@ def test_telegram_home_policy_resolves_notifier_profile(monkeypatch, tmp_path):
     assert target.chat_id == "ops-chat"
     assert target.thread_id == "ops-thread"
     assert target.notifier_profile == "ops"
+
+
+def test_unknown_policy_mode_fails_closed():
+    cfg = {"kanban": {"notification_policy": {"mode": "telegram_home_onyl"}}}
+
+    assert resolve_notify_target(
+        platform="discord",
+        chat_id="discord-channel",
+        cfg=cfg,
+    ) is None
+    assert is_notify_target_allowed("discord", cfg=cfg) is False

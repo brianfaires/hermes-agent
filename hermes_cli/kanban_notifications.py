@@ -47,6 +47,11 @@ def notification_policy(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     mode = str(raw.get("mode") or "origin").strip().lower()
     if mode in {"telegram-only", "telegram_home", "telegram-home-only"}:
         mode = "telegram_home_only"
+    elif mode not in {"origin", "default", "telegram_home_only"}:
+        # A typo in a restrictive policy must not silently restore origin
+        # delivery. Explicitly allowed platforms and TUI preservation still
+        # apply below; every other target fails closed.
+        mode = "deny"
     allowed = raw.get("allowed_platforms")
     if allowed is None:
         allowed_platforms: list[str] = []
@@ -129,7 +134,7 @@ def resolve_notify_target(
     if mode == "telegram_home_only":
         return telegram_home_target(user_id=user_id, notifier_profile=notifier_profile)
 
-    return requested
+    return None
 
 
 def is_notify_target_allowed(platform: str, *, cfg: Optional[dict[str, Any]] = None) -> bool:
@@ -144,7 +149,7 @@ def is_notify_target_allowed(platform: str, *, cfg: Optional[dict[str, Any]] = N
         return True
     if mode == "telegram_home_only":
         return p == "telegram"
-    return True
+    return False
 
 
 def audit_notify_subs(conn: Any, *, cfg: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
