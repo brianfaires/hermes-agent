@@ -1549,11 +1549,11 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
 # prompt-injection paths that do not validate are left visible instead of
 # silently dropped.
 MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
-    r'''[`"']?MEDIA:\s*'''
+    r'''^[ \t>*-]*(?:\[\[audio_as_voice\]\][ \t]*)?[`"']?MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])[^\s\n`"']+)'''
-    r'''[`"']?\s*''',
-    re.IGNORECASE,
+    r'''[`"']?[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

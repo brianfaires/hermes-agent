@@ -686,6 +686,21 @@ class TestExtensionlessMediaDelivery:
         assert media == []
         assert "MEDIA:/nonexistent/Caddyfile" in cleaned
 
+    def test_extensionless_media_mention_inside_prose_stays_visible(
+        self, tmp_path, monkeypatch,
+    ):
+        root = tmp_path / "output"
+        root.mkdir()
+        caddy = root / "Caddyfile"
+        caddy.write_text("localhost {}", encoding="utf-8")
+        self._patch_allow_root(monkeypatch, root)
+
+        content = f"See MEDIA:{caddy} before deploying."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+
+        assert media == []
+        assert cleaned == content
+
     def test_strip_media_directives_for_display_strips_validated_extensionless(
         self, tmp_path, monkeypatch,
     ):
