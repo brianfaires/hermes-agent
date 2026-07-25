@@ -127,3 +127,26 @@ def test_recovery_deduplicates_existing_legacy_receipt_without_dispatch(tmp_path
     assert row[0]=='processed'
     disposition=conn.execute("SELECT disposition FROM mirror_discord_inbound_dispositions WHERE discord_message_id='10'").fetchone()[0]
     assert disposition=='already_recorded_legacy'
+
+
+def test_recovery_refuses_conflicting_receipt_and_existing_dispatch_correlation(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:100)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','conflict',created_at=50)))
+    asyncio.run(ing.ingest_live(DiscordInbound('11','2','already routed',created_at=50)))
+    bind(conn,'1'); bind(conn,'2')
+    conn.execute("""INSERT INTO mirror_inbox_receipts
+        (discord_message_id,board_slug,forum_channel_id,thread_id,task_id,author_id,
+         action,kanban_comment_id,created_at)
+        VALUES ('10','x','forum','1','different-task','user','comment',680,60)""")
+    conn.execute("UPDATE mirror_discord_inbound_state SET correlation_id='corr' WHERE discord_message_id='11'")
+    conn.commit()
+
+    result=recover_pending_inbound_bindings(
+        conn,cards={'c-1':('running',None),'c-2':('running',None)},now=101,
+    )
+
+    assert result=={'rebound':0,'superseded':0,'deduplicated':0}
+    rows=conn.execute("SELECT binding_key FROM mirror_conversation_events ORDER BY discord_message_id").fetchall()
+    assert [row[0] for row in rows]==[None,None]

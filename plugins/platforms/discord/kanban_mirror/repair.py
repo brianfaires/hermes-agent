@@ -112,7 +112,8 @@ def recover_pending_inbound_bindings(
             """SELECT s.discord_message_id,s.thread_id,e.discord_created_at
                FROM mirror_discord_inbound_state s
                JOIN mirror_conversation_events e ON e.id=s.conversation_event_id
-               WHERE s.processing_status='pending' AND e.binding_key IS NULL
+               WHERE s.processing_status='pending' AND s.correlation_id IS NULL
+                 AND e.binding_key IS NULL
                  AND (s.lease_expires_at IS NULL OR s.lease_expires_at<=?)
                  AND NOT EXISTS (
                    SELECT 1 FROM mirror_thread_quarantine q
@@ -150,6 +151,8 @@ def recover_pending_inbound_bindings(
                 (message_id,),
             ).fetchone()
             receipt_matches = receipt is not None and str(receipt[0]) == task_id
+            if receipt is not None and not receipt_matches:
+                continue
             if terminal and completed_at is None and not receipt_matches:
                 continue
             interval = f"{epochs[0][2]}..{epochs[0][3] if epochs[0][3] is not None else 'open'}"
