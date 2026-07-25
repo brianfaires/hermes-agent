@@ -1,6 +1,6 @@
 name: gateway-restart-tool
-version: 1.0.0
-description: "Allow authorized agents to request a graceful Hermes gateway restart through the existing drain/restart path."
+version: 1.1.0
+description: "Allow authorized profiles to restart the shared Hermes gateway for all profiles."
 author: "Brian-local Ops"
 kind: standalone
 provides_tools:

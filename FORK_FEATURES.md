@@ -820,23 +820,21 @@ capture cases in `tests/run_agent/`.
 **Status:** deployment-gated.
 **Owners:** `334acf3f93a8`.
 
-- The standalone plugin exposes `request_gateway_restart`, using the live
-  gateway's drain-aware restart path for the invoking profile and detached
-  `hermes -p PROFILE gateway restart` children for explicitly allowed remote
-  profiles. Batch order schedules remote profiles before the invoking profile.
+- The standalone plugin exposes one process-wide `request_gateway_restart` tool.
+  It restarts the shared gateway for every served profile through the live
+  runner's drain-aware restart path. It has no profile targets, batches,
+  cross-profile routing, or allowlist configuration; authorization is handled
+  by enabling the plugin only for profiles allowed to restart the gateway.
 - Requests require a non-empty reason and exact confirmation text
   `restart gateway`; `dry_run: true` validates without restarting. Audit records
-  are appended under `<HERMES_HOME>/logs/gateway-restart-tool.jsonl`.
-- Config under `plugins.entries.gateway-restart-tool` includes `enabled: true`
-  after plugin enablement, plus:
-  `allowed_target_profiles: []` (the invoking profile is always included),
-  `cooldown_seconds: 300`, and `schedule_delay_seconds: 3.0` (minimum `0.5`).
-  Cooldowns are persisted per target and reserved atomically across processes;
-  failed scheduling releases only its own reservation.
-- Enable the plugin and expose its `gateway_restart` toolset through the normal
-  plugin/tool configuration, then restart the gateway. Local real restarts work
-  only inside a live `GatewayRunner`; remote targets require valid installed
-  profiles and a working profile-specific gateway supervisor/CLI path.
+  are appended under the gateway owner's
+  `<HERMES_HOME>/logs/gateway-restart-tool.jsonl`.
+- Config under `plugins.entries.gateway-restart-tool` is limited to
+  `enabled: true`, `cooldown_seconds: 300`, and
+  `schedule_delay_seconds: 3.0` (minimum `0.5`). Cooldown state is process-wide,
+  atomically reserved across processes, and released when scheduling fails.
+- Enable the plugin only for profiles authorized to restart the shared gateway.
+  Real restarts work only inside the live `GatewayRunner`.
 - Example call:
 
   ```json
@@ -844,8 +842,8 @@ capture cases in `tests/run_agent/`.
   ```
 
 - Tests: `tests/plugins/test_gateway_restart_tool.py`, including policy,
-  cross-process reservation, Windows byte-range locking, batch ordering,
-  cooldown isolation, and synchronous/asynchronous scheduling failures.
+  process-wide scope, cross-process reservation, Windows byte-range locking,
+  concurrent cooldown enforcement, and failed scheduling cleanup.
 
 ## 12. Compression and session continuity
 
@@ -1026,9 +1024,8 @@ missing key as the shown value.
 | `discord.kanban_backfill_max_pages` | `10` | Backfill page bound |
 | `discord.kanban_backfill_max_age_seconds` | `604800` | Backfill age bound |
 | `gateway.multiplex_profiles` | `false` | Required by conversation router/multi-bot voice |
-| `plugins.entries.gateway-restart-tool.enabled` | plugin disabled until enabled | Loads tool registration |
-| `plugins.entries.gateway-restart-tool.allowed_target_profiles` | `[]` plus invoking profile | Cross-profile restart allowlist |
-| `plugins.entries.gateway-restart-tool.cooldown_seconds` | `300` | Per-target restart cooldown |
+| `plugins.entries.gateway-restart-tool.enabled` | plugin disabled until enabled | Loads the process-wide restart tool for this profile |
+| `plugins.entries.gateway-restart-tool.cooldown_seconds` | `300` | Shared gateway restart cooldown |
 | `plugins.entries.gateway-restart-tool.schedule_delay_seconds` | `3.0` | Local graceful-restart delay, minimum `0.5` |
 
 Fork-relevant environment variables and profile files:

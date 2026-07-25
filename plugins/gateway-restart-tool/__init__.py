@@ -1,9 +1,9 @@
-"""Gateway restart tool plugin.
+"""Process-wide gateway restart tool.
 
-This is intentionally profile-local user-plugin code. It does not patch Hermes
-core. The tool exposes one narrow operation: schedule the live GatewayRunner's
-existing graceful restart path after a short delay so the agent can return its
-final acknowledgement before the gateway drains and exits.
+The gateway is the unit of restart. In a multiplex deployment one process serves
+all profiles, so this tool deliberately exposes no profile targeting or routing.
+Profile-level authorization is handled by deciding which profiles receive the
+tool.
 """
 
 from __future__ import annotations
@@ -12,8 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -33,18 +31,16 @@ _cooldown_lock = threading.Lock()
 
 REQUEST_GATEWAY_RESTART_SCHEMA = {
     "name": _TOOL_NAME,
-    "description": (
-        "Request a graceful restart of the live Hermes messaging gateway. "
-        "Use only when a gateway restart is operationally necessary, after "
-        "capturing a clear reason. The tool is audited, cooldown-limited, "
-        "and reuses the gateway's existing drain/restart path."
-    ),
+    "description": "Restart the shared Hermes gateway for all profiles.",
     "parameters": {
         "type": "object",
         "properties": {
             "reason": {
                 "type": "string",
-                "description": "Operational reason for the restart. Required and written to the audit log.",
+                "description": (
+                    "Operational reason for the restart. Required and written "
+                    "to the audit log."
+                ),
             },
             "confirm": {
                 "type": "string",
@@ -52,23 +48,11 @@ REQUEST_GATEWAY_RESTART_SCHEMA = {
             },
             "dry_run": {
                 "type": "boolean",
-                "description": "If true, validate policy and report what would happen without restarting.",
+                "description": (
+                    "If true, validate policy and report what would happen "
+                    "without restarting."
+                ),
                 "default": False,
-            },
-            "target_profile": {
-                "type": "string",
-                "description": (
-                    "Profile gateway to restart. Defaults to the invoking profile. "
-                    "A different profile must be listed in allowed_target_profiles."
-                ),
-            },
-            "target_profiles": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Profile gateways to restart as one validated batch. Mutually exclusive with "
-                    "target_profile. Every target must be listed in allowed_target_profiles."
-                ),
             },
         },
         "required": ["reason", "confirm"],
@@ -125,42 +109,33 @@ def _coerce_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
     return max(minimum, parsed)
 
 
-def _normalize_profile_name(value: str) -> str:
-    from hermes_cli import profiles as profiles_mod
+def _resolve_runner() -> Any | None:
+    try:
+        from gateway import run as gateway_run
 
-    normalized = profiles_mod.normalize_profile_name(value)
-    profiles_mod.validate_profile_name(normalized)
-    return normalized
+        ref = getattr(gateway_run, "_gateway_runner_ref", None)
+        return ref() if callable(ref) else None
+    except Exception:
+        return None
 
 
-def _allowed_target_profiles(cfg: dict[str, Any], source_profile: str) -> set[str]:
-    """Return explicitly configured cross-profile targets plus the source."""
-    configured = cfg.get("allowed_target_profiles", [])
-    if isinstance(configured, str):
-        configured = configured.split(",")
-    if not isinstance(configured, (list, tuple, set, frozenset)):
-        configured = []
-
-    targets = {source_profile}
-    for item in configured:
-        try:
-            targets.add(_normalize_profile_name(str(item).strip()))
-        except (TypeError, ValueError):
-            logger.warning("Ignoring invalid allowed_target_profiles entry")
-    return targets
+def _restart_storage_home() -> Path:
+    runner = _resolve_runner()
+    owner_home = getattr(runner, "_gateway_profile_home", None)
+    return Path(owner_home) if owner_home is not None else _hermes_home()
 
 
 def _audit_path() -> Path:
-    return _hermes_home() / "logs" / "gateway-restart-tool.jsonl"
+    return _restart_storage_home() / "logs" / "gateway-restart-tool.jsonl"
 
 
 def _state_path() -> Path:
-    return _hermes_home() / ".gateway_restart_tool_state.json"
+    return _restart_storage_home() / ".gateway_restart_tool_state.json"
 
 
 @contextmanager
 def _restart_state_lock():
-    """Serialize restart-state read/modify/write across threads and processes."""
+    """Serialize restart cooldown state across threads and processes."""
     with _cooldown_lock:
         state_path = _state_path()
         lock_path = state_path.with_suffix(state_path.suffix + ".lock")
@@ -220,99 +195,40 @@ def _append_audit(record: dict[str, Any]) -> None:
         logger.debug("gateway restart tool audit write failed: %s", exc)
 
 
-def _read_last_restart_times() -> tuple[dict[str, float], float]:
-    """Return target-profile cooldowns plus an unscoped legacy timestamp."""
+def _read_last_restart_time() -> float:
     try:
         data = json.loads(_state_path().read_text(encoding="utf-8"))
-        raw_times = data.get("last_requested_at_by_profile")
-        times = (
-            {str(profile): float(timestamp) for profile, timestamp in raw_times.items()}
-            if isinstance(raw_times, dict)
-            else {}
-        )
-        return times, float(data.get("last_requested_at") or 0.0)
+        if data.get("last_requested_at") is not None:
+            return float(data["last_requested_at"])
+        legacy = data.get("last_requested_at_by_profile")
+        if isinstance(legacy, dict) and legacy:
+            return max(float(value) for value in legacy.values())
     except Exception:
-        return {}, 0.0
+        pass
+    return 0.0
 
 
-def _read_last_restart_time(target_profile: str, source_profile: str) -> float:
-    times, legacy = _read_last_restart_times()
-    if target_profile in times:
-        return times[target_profile]
-    # Old state had no target identity, so retain its conservative global gate
-    # until the first scoped write replaces it.  This avoids an immediate
-    # duplicate restart of a formerly remote target during upgrade.
-    return legacy if not times else 0.0
-
-
-def _write_last_restart_time(target_profile: str, now: float) -> None:
+def _write_last_restart_time(now: float) -> None:
     path = _state_path()
-    times, _legacy = _read_last_restart_times()
-    times[target_profile] = now
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps({"last_requested_at_by_profile": times}, sort_keys=True), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps({"last_requested_at": now}), encoding="utf-8")
     tmp.replace(path)
 
 
-def _reserve_restart(
-    target_profile: str,
-    source_profile: str,
-    now: float,
-    cooldown_seconds: int,
-) -> int:
-    """Atomically check and reserve one target's cooldown across processes."""
+def _reserve_restart(now: float, cooldown_seconds: int) -> int:
     with _restart_state_lock():
-        last = _read_last_restart_time(target_profile, source_profile)
-        remaining = max(0, int(cooldown_seconds - (now - last)))
+        remaining = max(0, int(cooldown_seconds - (now - _read_last_restart_time())))
         if remaining:
             return remaining
-        _write_last_restart_time(target_profile, now)
+        _write_last_restart_time(now)
         return 0
 
 
-def _release_restart_reservation(target_profile: str, reserved_at: float) -> None:
-    """Release this request's reservation without removing a newer one."""
+def _release_restart_reservation(reserved_at: float) -> None:
     with _restart_state_lock():
-        times, _legacy = _read_last_restart_times()
-        if times.get(target_profile) != reserved_at:
+        if _read_last_restart_time() != reserved_at:
             return
-        del times[target_profile]
-        path = _state_path()
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps({"last_requested_at_by_profile": times}, sort_keys=True),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-
-
-def _target_profiles(args: dict[str, Any], source_profile: str) -> list[str]:
-    """Normalize one target or a deduplicated batch of targets."""
-    singular = args.get("target_profile")
-    plural = args.get("target_profiles")
-    if singular is not None and plural is not None:
-        raise ValueError("target_profile and target_profiles are mutually exclusive")
-    raw_targets = [singular or source_profile] if plural is None else plural
-    if not isinstance(raw_targets, list) or not raw_targets:
-        raise ValueError("target_profiles must be a non-empty array")
-    targets: list[str] = []
-    for raw_target in raw_targets:
-        target = _normalize_profile_name(str(raw_target).strip())
-        if target not in targets:
-            targets.append(target)
-    return targets
-
-
-def _resolve_runner() -> Any | None:
-    try:
-        from gateway import run as gateway_run
-
-        ref = getattr(gateway_run, "_gateway_runner_ref", None)
-        return ref() if callable(ref) else None
-    except Exception:
-        return None
+        _state_path().unlink(missing_ok=True)
 
 
 def _restart_modes() -> tuple[bool, bool]:
@@ -338,8 +254,6 @@ def _schedule_restart(runner: Any, delay_seconds: float) -> bool:
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
-        # Last-resort path. This should not normally be used from gateway tool
-        # execution, but preserves behavior in unusual embedded runtimes.
         runner.request_restart(detached=detached, via_service=via_service)
         return True
 
@@ -347,87 +261,36 @@ def _schedule_restart(runner: Any, delay_seconds: float) -> bool:
     return True
 
 
-def _spawn_profile_restart(target_profile: str) -> int:
-    """Run the normal per-profile gateway restart command in a detached child."""
-    command = [
-        sys.executable,
-        "-m",
-        "hermes_cli.main",
-        "-p",
-        target_profile,
-        "gateway",
-        "restart",
-    ]
-    environment = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
-    # This detached child controls a *different* profile. The CLI's gateway
-    # marker protects against self-restart loops, so it must not leak here.
-    environment.pop("_HERMES_GATEWAY", None)
-    kwargs: dict[str, Any] = {
-        "cwd": str(Path(__file__).resolve().parents[2]),
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "env": environment,
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        kwargs["start_new_session"] = True
-    return subprocess.Popen(command, stdin=subprocess.DEVNULL, **kwargs).pid
-
-
 def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     cfg = _plugin_config()
-    try:
-        profile = _normalize_profile_name(_active_profile_name())
-        target_profiles = _target_profiles(args, profile)
-    except (TypeError, ValueError):
-        error = "invalid_target_profiles" if args.get("target_profiles") is not None else "invalid_target_profile"
-        return _json({"ok": False, "error": error})
-    target_profile = target_profiles[0]
-    allowed_targets = _allowed_target_profiles(cfg, profile)
     cooldown_seconds = _coerce_int(
         cfg.get("cooldown_seconds"), _DEFAULT_COOLDOWN_SECONDS, minimum=0
     )
     delay_seconds = _coerce_float(
-        cfg.get("schedule_delay_seconds"), _DEFAULT_SCHEDULE_DELAY_SECONDS, minimum=0.5
+        cfg.get("schedule_delay_seconds"),
+        _DEFAULT_SCHEDULE_DELAY_SECONDS,
+        minimum=0.5,
     )
     reason = str(args.get("reason") or "").strip()
-    confirm = str(args.get("confirm") or "").strip().lower()
-    dry_run = bool(args.get("dry_run"))
+    confirm = str(args.get("confirm") or "")
+    dry_run = args.get("dry_run") is True
+    profile = _active_profile_name()
     now = time.time()
+    runner = _resolve_runner()
+    active_agents = None
+    if runner is not None:
+        try:
+            active_agents = int(runner._running_agent_count())
+        except Exception:
+            active_agents = None
 
     record = {
         "ts": now,
         "profile": profile,
-        "target_profiles": target_profiles,
         "reason": reason,
         "dry_run": dry_run,
+        "restart_scope": "all_profiles",
     }
-
-    forbidden_targets = sorted(set(target_profiles) - allowed_targets)
-    if forbidden_targets:
-        record.update({"decision": "deny", "error": "target_profile_not_allowed"})
-        _append_audit(record)
-        if len(target_profiles) == 1:
-            return _json(
-                {
-                    "ok": False,
-                    "error": "target_profile_not_allowed",
-                    "profile": profile,
-                    "target_profile": target_profile,
-                    "allowed_target_profiles": sorted(allowed_targets),
-                }
-            )
-        return _json(
-            {
-                "ok": False,
-                "error": "target_profile_not_allowed",
-                "profile": profile,
-                "target_profiles": target_profiles,
-                "forbidden_target_profiles": forbidden_targets,
-                "allowed_target_profiles": sorted(allowed_targets),
-            }
-        )
 
     if not reason:
         record.update({"decision": "deny", "error": "missing_reason"})
@@ -445,80 +308,17 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if len(target_profiles) > 1:
-        cooldowns = {
-            target: max(
-                0,
-                int(cooldown_seconds - (now - _read_last_restart_time(target, profile))),
-            )
-            for target in target_profiles
-        }
-        active_cooldowns = {target: remaining for target, remaining in cooldowns.items() if remaining}
-        if active_cooldowns and not dry_run:
-            record.update(
-                {
-                    "decision": "deny",
-                    "error": "cooldown_active",
-                    "cooldown_active_profiles": active_cooldowns,
-                }
-            )
-            _append_audit(record)
-            return _json(
-                {
-                    "ok": False,
-                    "error": "cooldown_active",
-                    "cooldown_active_profiles": active_cooldowns,
-                }
-            )
-        # Restart remote targets first. Scheduling this gateway drains the
-        # current agent, so it must be the last operation in a batch.
-        ordered_targets = [target for target in target_profiles if target != profile]
-        if profile in target_profiles:
-            ordered_targets.append(profile)
-        results = []
-        for target in ordered_targets:
-            per_target_args = {key: value for key, value in args.items() if key != "target_profiles"}
-            per_target_args["target_profile"] = target
-            results.append(json.loads(_handle_request_gateway_restart(per_target_args)))
-        return _json(
-            {
-                "ok": all(result.get("ok") for result in results),
-                "status": "restart_batch_scheduled",
-                "profile": profile,
-                "target_profiles": ordered_targets,
-                "restarts": results,
-            }
-        )
-
-    is_local_target = target_profile == profile
-    runner = _resolve_runner() if is_local_target else None
-    runner_available = runner is not None
-    active_agents = None
-    if runner_available:
-        try:
-            active_agents = int(runner._running_agent_count())
-        except Exception:
-            active_agents = None
-
     detached, via_service = _restart_modes()
-    dispatch = "in_process" if is_local_target else "profile_cli"
     if dry_run:
-        record.update(
-            {
-                "decision": "dry_run",
-                "runner_available": runner_available,
-                "dispatch": dispatch,
-            }
-        )
+        record.update({"decision": "dry_run", "runner_available": runner is not None})
         _append_audit(record)
         return _json(
             {
                 "ok": True,
                 "dry_run": True,
                 "profile": profile,
-                "target_profile": target_profile,
-                "dispatch": dispatch,
-                "runner_available": runner_available,
+                "restart_scope": "all_profiles",
+                "runner_available": runner is not None,
                 "active_agents": active_agents,
                 "would_schedule_after_seconds": delay_seconds,
                 "restart_mode": {"detached": detached, "via_service": via_service},
@@ -526,7 +326,7 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if is_local_target and runner is None:
+    if runner is None:
         record.update({"decision": "deny", "error": "gateway_runner_unavailable"})
         _append_audit(record)
         return _json(
@@ -537,14 +337,21 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if is_local_target and (
-        getattr(runner, "_restart_requested", False) or getattr(runner, "_draining", False)
+    if getattr(runner, "_restart_requested", False) or getattr(
+        runner, "_draining", False
     ):
         record.update({"decision": "already_in_progress", "active_agents": active_agents})
         _append_audit(record)
-        return _json({"ok": True, "status": "already_in_progress", "active_agents": active_agents})
+        return _json(
+            {
+                "ok": True,
+                "status": "already_in_progress",
+                "restart_scope": "all_profiles",
+                "active_agents": active_agents,
+            }
+        )
 
-    cooldown_remaining = _reserve_restart(target_profile, profile, now, cooldown_seconds)
+    cooldown_remaining = _reserve_restart(now, cooldown_seconds)
     if cooldown_remaining:
         record.update(
             {
@@ -562,37 +369,14 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if not is_local_target:
-        try:
-            child_pid = _spawn_profile_restart(target_profile)
-        except OSError as exc:
-            _release_restart_reservation(target_profile, now)
-            record.update({"decision": "failed", "error": "profile_restart_spawn_failed"})
-            _append_audit(record)
-            return _json(
-                {"ok": False, "error": "profile_restart_spawn_failed", "detail": str(exc)}
-            )
-        record.update({"decision": "scheduled", "dispatch": dispatch, "child_pid": child_pid})
-        _append_audit(record)
-        return _json(
-            {
-                "ok": True,
-                "status": "restart_scheduled",
-                "profile": profile,
-                "target_profile": target_profile,
-                "dispatch": dispatch,
-                "child_pid": child_pid,
-                "audit_log": str(_audit_path()),
-            }
-        )
-
     schedule_error = None
     try:
         scheduled = _schedule_restart(runner, delay_seconds)
     except Exception as exc:
-        logger.exception("gateway restart scheduling failed for %s", target_profile)
+        logger.exception("shared gateway restart scheduling failed")
         scheduled = False
         schedule_error = str(exc)
+
     record.update(
         {
             "decision": "scheduled" if scheduled else "failed",
@@ -605,19 +389,20 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     if schedule_error:
         record.update({"error": "schedule_failed", "detail": schedule_error})
     _append_audit(record)
+
     if not scheduled:
-        _release_restart_reservation(target_profile, now)
+        _release_restart_reservation(now)
         result = {"ok": False, "error": "schedule_failed"}
         if schedule_error:
             result["detail"] = schedule_error
         return _json(result)
+
     return _json(
         {
             "ok": True,
             "status": "restart_scheduled",
             "profile": profile,
-            "target_profile": target_profile,
-            "dispatch": dispatch,
+            "restart_scope": "all_profiles",
             "scheduled_after_seconds": delay_seconds,
             "active_agents": active_agents,
             "restart_mode": {"detached": detached, "via_service": via_service},

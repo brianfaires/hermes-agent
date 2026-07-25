@@ -13,8 +13,37 @@ from pathlib import Path
 import pytest
 
 
+def _plugin_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "gateway-restart-tool"
+        / "__init__.py"
+    )
+
+
+def _load_plugin_module():
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_plugin", _plugin_path()
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _runner(*, active_agents: int = 2):
+    return types.SimpleNamespace(
+        _restart_requested=False,
+        _draining=False,
+        _running_agent_count=lambda: active_agents,
+    )
+
+
 def _hold_restart_state_lock(plugin_path, state_path, acquired, release):
-    spec = importlib.util.spec_from_file_location("gateway_restart_tool_lock_holder", plugin_path)
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_lock_holder", plugin_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -25,7 +54,9 @@ def _hold_restart_state_lock(plugin_path, state_path, acquired, release):
 
 
 def _wait_for_restart_state_lock(plugin_path, state_path, acquired):
-    spec = importlib.util.spec_from_file_location("gateway_restart_tool_lock_waiter", plugin_path)
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_lock_waiter", plugin_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -34,47 +65,52 @@ def _wait_for_restart_state_lock(plugin_path, state_path, acquired):
         acquired.set()
 
 
-def _reserve_with_delayed_write(plugin_path, state_path, entered_write, release_write, results):
-    spec = importlib.util.spec_from_file_location("gateway_restart_tool_reserver_a", plugin_path)
+def _reserve_with_delayed_write(
+    plugin_path, state_path, entered_write, release_write, results
+):
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_reserver_a", plugin_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     setattr(module, "_state_path", lambda: Path(state_path))
     original_write = module._write_last_restart_time
 
-    def delayed_write(target_profile, now):
+    def delayed_write(now):
         entered_write.set()
         release_write.wait(5)
-        original_write(target_profile, now)
+        original_write(now)
 
     setattr(module, "_write_last_restart_time", delayed_write)
-    results.put(module._reserve_restart("research", "ops", 1000.0, 60))
+    results.put(module._reserve_restart(1000.0, 60))
 
 
 def _reserve_and_signal(plugin_path, state_path, ready, done, results):
-    spec = importlib.util.spec_from_file_location("gateway_restart_tool_reserver_b", plugin_path)
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_reserver_b", plugin_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     setattr(module, "_state_path", lambda: Path(state_path))
     ready.set()
-    results.put(module._reserve_restart("research", "ops", 1000.0, 60))
+    results.put(module._reserve_restart(1000.0, 60))
     done.set()
 
 
-def _load_plugin_module():
-    plugin_path = (
-        Path(__file__).resolve().parents[2]
-        / "plugins"
-        / "gateway-restart-tool"
-        / "__init__.py"
-    )
-    spec = importlib.util.spec_from_file_location("gateway_restart_tool_plugin", plugin_path)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+def test_schema_is_one_process_wide_tool():
+    module = _load_plugin_module()
+
+    schema = module.REQUEST_GATEWAY_RESTART_SCHEMA
+
+    assert schema["description"] == "Restart the shared Hermes gateway for all profiles."
+    assert set(schema["parameters"]["properties"]) == {
+        "reason",
+        "confirm",
+        "dry_run",
+    }
+    assert schema["parameters"]["additionalProperties"] is False
 
 
 def test_check_available_is_controlled_by_plugin_enablement_and_toolsets():
@@ -123,18 +159,24 @@ def test_restart_modes_use_detached_restart_without_supervisor_or_container(monk
     assert module._restart_modes() == (True, False)
 
 
-def test_dry_run_does_not_require_profile_allow_list(monkeypatch):
+def test_dry_run_reports_process_scope_without_restarting(monkeypatch, tmp_path):
     module = _load_plugin_module()
+    runner = _runner()
     monkeypatch.setattr(module, "_plugin_config", lambda: {})
-    monkeypatch.setattr(module, "_active_profile_name", lambda: "research")
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
     monkeypatch.setattr(module, "_append_audit", lambda record: None)
-    monkeypatch.setattr(module, "_audit_path", lambda: Path("/tmp/gateway-restart-tool.jsonl"))
-    monkeypatch.setattr(module, "_resolve_runner", lambda: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(
+        module,
+        "_schedule_restart",
+        lambda *_args: pytest.fail("dry run scheduled a restart"),
+    )
 
     result = json.loads(
         module._handle_request_gateway_restart(
             {
-                "reason": "config reload",
+                "reason": "reload configuration",
                 "confirm": "restart gateway",
                 "dry_run": True,
             }
@@ -142,94 +184,109 @@ def test_dry_run_does_not_require_profile_allow_list(monkeypatch):
     )
 
     assert result["ok"] is True
-    assert result["profile"] == "research"
-    assert "allowed_profiles" not in result
-    assert result["runner_available"] is False
+    assert result["dry_run"] is True
+    assert result["restart_scope"] == "all_profiles"
+    assert result["profile"] == "ops"
 
 
-def test_cross_profile_restart_requires_explicit_target_allow_list(monkeypatch):
+def test_real_restart_requires_live_runner(monkeypatch):
     module = _load_plugin_module()
     monkeypatch.setattr(module, "_plugin_config", lambda: {})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
     monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_resolve_runner", lambda: None)
 
     result = json.loads(
         module._handle_request_gateway_restart(
-            {
-                "reason": "reload target configuration",
-                "confirm": "restart gateway",
-                "target_profile": "research",
-            }
+            {"reason": "reload configuration", "confirm": "restart gateway"}
         )
     )
 
-    assert result == {
-        "ok": False,
-        "error": "target_profile_not_allowed",
-        "profile": "ops",
-        "target_profile": "research",
-        "allowed_target_profiles": ["ops"],
-    }
+    assert result["error"] == "gateway_runner_unavailable"
 
 
-def test_cross_profile_restart_uses_profile_scoped_cli(monkeypatch):
+@pytest.mark.parametrize(
+    ("args", "expected_error"),
+    [
+        ({"reason": "", "confirm": "restart gateway"}, "missing_reason"),
+        ({"reason": "reload configuration", "confirm": "yes"}, "confirmation_required"),
+        (
+            {"reason": "reload configuration", "confirm": "RESTART GATEWAY"},
+            "confirmation_required",
+        ),
+        (
+            {"reason": "reload configuration", "confirm": " restart gateway "},
+            "confirmation_required",
+        ),
+    ],
+)
+def test_restart_rejects_missing_reason_or_confirmation(
+    monkeypatch, args, expected_error
+):
     module = _load_plugin_module()
-    audits = []
+    scheduled = []
+    monkeypatch.setattr(module, "_plugin_config", lambda: {})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_resolve_runner", lambda: _runner())
     monkeypatch.setattr(
         module,
-        "_plugin_config",
-        lambda: {"allowed_target_profiles": ["research"]},
+        "_schedule_restart",
+        lambda *_args: scheduled.append(True) or True,
     )
+
+    result = json.loads(module._handle_request_gateway_restart(args))
+
+    assert result["error"] == expected_error
+    assert scheduled == []
+
+
+def test_restart_schedules_one_shared_gateway_restart(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    runner = _runner()
+    scheduled = []
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 0})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
-    monkeypatch.setattr(module, "_append_audit", audits.append)
-    monkeypatch.setattr(module, "_read_last_restart_time", lambda target, source: 0.0)
-    monkeypatch.setattr(module, "_write_last_restart_time", lambda target, now: None)
-    monkeypatch.setattr(module, "_audit_path", lambda: Path("/tmp/gateway-restart-tool.jsonl"))
-    monkeypatch.setattr(module, "_spawn_profile_restart", lambda profile: 4321)
+    monkeypatch.setattr(module, "_append_audit", lambda record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(
+        module,
+        "_schedule_restart",
+        lambda actual_runner, delay: scheduled.append((actual_runner, delay)) or True,
+    )
 
     result = json.loads(
         module._handle_request_gateway_restart(
-            {
-                "reason": "reload target configuration",
-                "confirm": "restart gateway",
-                "target_profile": "research",
-            }
+            {"reason": "reload configuration", "confirm": "restart gateway"}
         )
     )
 
     assert result["ok"] is True
-    assert result["target_profile"] == "research"
-    assert result["dispatch"] == "profile_cli"
-    assert result["child_pid"] == 4321
-    assert audits[-1]["decision"] == "scheduled"
-
-
-def test_cooldown_is_scoped_to_the_target_profile(monkeypatch, tmp_path):
-    module = _load_plugin_module()
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
-
-    module._write_last_restart_time("default", 100.0)
-
-    assert module._read_last_restart_time("default", "ops") == 100.0
-    assert module._read_last_restart_time("ops", "ops") == 0.0
+    assert result["status"] == "restart_scheduled"
+    assert result["restart_scope"] == "all_profiles"
+    assert result["profile"] == "ops"
+    assert len(scheduled) == 1
+    assert scheduled[0][0] is runner
 
 
 def test_restart_state_lock_serializes_processes(tmp_path):
     if "fork" not in multiprocessing.get_all_start_methods():
         pytest.skip("cross-process lock test requires fork")
     ctx = multiprocessing.get_context("fork")
-    plugin_path = Path(__file__).resolve().parents[2] / "plugins" / "gateway-restart-tool" / "__init__.py"
     state_path = tmp_path / "restart-state.json"
     holder_acquired = ctx.Event()
     release_holder = ctx.Event()
     waiter_acquired = ctx.Event()
-    holder = ctx.Process(
+    process_type = getattr(ctx, "Process")
+    holder = process_type(
         target=_hold_restart_state_lock,
-        args=(str(plugin_path), str(state_path), holder_acquired, release_holder),
+        args=(str(_plugin_path()), str(state_path), holder_acquired, release_holder),
     )
-    waiter = ctx.Process(
+    waiter = process_type(
         target=_wait_for_restart_state_lock,
-        args=(str(plugin_path), str(state_path), waiter_acquired),
+        args=(str(_plugin_path()), str(state_path), waiter_acquired),
     )
 
     holder.start()
@@ -248,7 +305,6 @@ def test_restart_state_lock_serializes_processes(tmp_path):
 def test_restart_reservation_is_atomic_across_processes(tmp_path):
     method = "spawn" if "spawn" in multiprocessing.get_all_start_methods() else "fork"
     ctx = multiprocessing.get_context(method)
-    plugin_path = Path(__file__).resolve().parents[2] / "plugins" / "gateway-restart-tool" / "__init__.py"
     state_path = tmp_path / "restart-state.json"
     entered_write = ctx.Event()
     release_write = ctx.Event()
@@ -258,11 +314,23 @@ def test_restart_reservation_is_atomic_across_processes(tmp_path):
     process_type = getattr(ctx, "Process")
     holder = process_type(
         target=_reserve_with_delayed_write,
-        args=(str(plugin_path), str(state_path), entered_write, release_write, results),
+        args=(
+            str(_plugin_path()),
+            str(state_path),
+            entered_write,
+            release_write,
+            results,
+        ),
     )
     contender = process_type(
         target=_reserve_and_signal,
-        args=(str(plugin_path), str(state_path), contender_ready, contender_done, results),
+        args=(
+            str(_plugin_path()),
+            str(state_path),
+            contender_ready,
+            contender_done,
+            results,
+        ),
     )
 
     holder.start()
@@ -304,34 +372,28 @@ def test_restart_state_lock_uses_windows_byte_range_lock(monkeypatch, tmp_path):
     assert calls == [(fake_msvcrt.LK_LOCK, 1), (fake_msvcrt.LK_UNLCK, 1)]
 
 
-def test_concurrent_restart_requests_reserve_cooldown_once(monkeypatch, tmp_path):
+def test_concurrent_requests_reserve_process_cooldown_once(monkeypatch, tmp_path):
     module = _load_plugin_module()
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
-    monkeypatch.setattr(
-        module,
-        "_plugin_config",
-        lambda: {"allowed_target_profiles": ["research"], "cooldown_seconds": 60},
-    )
+    runner = _runner()
+    scheduled = []
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
     monkeypatch.setattr(module, "_append_audit", lambda record: None)
     monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
-    spawns = []
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
 
-    def fake_spawn(profile):
-        spawns.append(profile)
+    def schedule(*_args):
+        scheduled.append(True)
         time.sleep(0.05)
-        return 4321
+        return True
 
-    monkeypatch.setattr(module, "_spawn_profile_restart", fake_spawn)
-    start = threading.Barrier(2)
-    args = {
-        "reason": "reload target configuration",
-        "confirm": "restart gateway",
-        "target_profile": "research",
-    }
+    monkeypatch.setattr(module, "_schedule_restart", schedule)
+    barrier = threading.Barrier(2)
+    args = {"reason": "reload configuration", "confirm": "restart gateway"}
 
     def request_restart():
-        start.wait()
+        barrier.wait()
         return json.loads(module._handle_request_gateway_restart(args))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -341,54 +403,20 @@ def test_concurrent_restart_requests_reserve_cooldown_once(monkeypatch, tmp_path
         "cooldown_active",
         "restart_scheduled",
     ]
-    assert spawns == ["research"]
+    assert scheduled == [True]
 
 
-def test_failed_remote_spawn_releases_its_cooldown_reservation(monkeypatch, tmp_path):
+def test_failed_schedule_releases_cooldown_reservation(monkeypatch, tmp_path):
     module = _load_plugin_module()
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
-    monkeypatch.setattr(
-        module,
-        "_plugin_config",
-        lambda: {"allowed_target_profiles": ["research"], "cooldown_seconds": 60},
-    )
-    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
-    monkeypatch.setattr(module, "_append_audit", lambda record: None)
-    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
-    attempts = []
-
-    def fake_spawn(profile):
-        attempts.append(profile)
-        if len(attempts) == 1:
-            raise OSError("transient spawn failure")
-        return 4321
-
-    monkeypatch.setattr(module, "_spawn_profile_restart", fake_spawn)
-    args = {
-        "reason": "reload target configuration",
-        "confirm": "restart gateway",
-        "target_profile": "research",
-    }
-
-    first = json.loads(module._handle_request_gateway_restart(args))
-    second = json.loads(module._handle_request_gateway_restart(args))
-
-    assert first["error"] == "profile_restart_spawn_failed"
-    assert second["status"] == "restart_scheduled"
-    assert attempts == ["research", "research"]
-
-
-def test_failed_local_schedule_releases_its_cooldown_reservation(monkeypatch, tmp_path):
-    module = _load_plugin_module()
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
+    runner = _runner()
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
     monkeypatch.setattr(module, "_append_audit", lambda record: None)
     monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
-    runner = type("Runner", (), {"_restart_requested": False, "_draining": False})()
     monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
     outcomes = iter([False, True])
-    monkeypatch.setattr(module, "_schedule_restart", lambda *args: next(outcomes))
+    monkeypatch.setattr(module, "_schedule_restart", lambda *_args: next(outcomes))
     args = {"reason": "reload configuration", "confirm": "restart gateway"}
 
     first = json.loads(module._handle_request_gateway_restart(args))
@@ -396,101 +424,3 @@ def test_failed_local_schedule_releases_its_cooldown_reservation(monkeypatch, tm
 
     assert first["error"] == "schedule_failed"
     assert second["status"] == "restart_scheduled"
-
-
-def test_local_schedule_exception_releases_its_cooldown_reservation(monkeypatch, tmp_path):
-    module = _load_plugin_module()
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
-    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
-    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
-    monkeypatch.setattr(module, "_append_audit", lambda record: None)
-    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
-    runner = type("Runner", (), {"_restart_requested": False, "_draining": False})()
-    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
-    attempts = 0
-
-    def schedule(*args):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise RuntimeError("event loop unavailable")
-        return True
-
-    monkeypatch.setattr(module, "_schedule_restart", schedule)
-    args = {"reason": "reload configuration", "confirm": "restart gateway"}
-
-    first = json.loads(module._handle_request_gateway_restart(args))
-    second = json.loads(module._handle_request_gateway_restart(args))
-
-    assert first == {
-        "ok": False,
-        "error": "schedule_failed",
-        "detail": "event loop unavailable",
-    }
-    assert second["status"] == "restart_scheduled"
-
-
-def test_legacy_cooldown_remains_conservative_until_scoped_state_exists(monkeypatch, tmp_path):
-    module = _load_plugin_module()
-    state_path = tmp_path / "restart-state.json"
-    state_path.write_text('{"last_requested_at": 100.0}', encoding="utf-8")
-    monkeypatch.setattr(module, "_state_path", lambda: state_path)
-
-    assert module._read_last_restart_time("default", "ops") == 100.0
-    assert module._read_last_restart_time("research", "ops") == 100.0
-
-
-def test_restart_batch_validates_and_schedules_each_allowed_target(monkeypatch, tmp_path):
-    module = _load_plugin_module()
-    writes = []
-    spawns = []
-    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "restart-state.json")
-    monkeypatch.setattr(
-        module,
-        "_plugin_config",
-        lambda: {"allowed_target_profiles": ["default", "research"]},
-    )
-    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
-    monkeypatch.setattr(module, "_append_audit", lambda record: None)
-    monkeypatch.setattr(module, "_read_last_restart_time", lambda target, source: 0.0)
-    monkeypatch.setattr(module, "_write_last_restart_time", lambda target, now: writes.append(target))
-    monkeypatch.setattr(module, "_spawn_profile_restart", lambda target: spawns.append(target) or 4321)
-
-    result = json.loads(
-        module._handle_request_gateway_restart(
-            {
-                "reason": "reload every authorized gateway",
-                "confirm": "restart gateway",
-                "target_profiles": ["ops", "default", "research"],
-            }
-        )
-    )
-
-    # The source profile is intentionally scheduled last; remote gateways get
-    # their commands before this agent begins draining its own gateway.
-    assert result["ok"] is False  # local runner is unavailable in this unit test
-    assert result["status"] == "restart_batch_scheduled"
-    assert result["target_profiles"] == ["default", "research", "ops"]
-    assert spawns == ["default", "research"]
-    assert writes == ["default", "research"]
-
-
-def test_profile_restart_child_does_not_inherit_gateway_marker(monkeypatch):
-    module = _load_plugin_module()
-    captured = {}
-
-    class FakeProcess:
-        pid = 4321
-
-    def fake_popen(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return FakeProcess()
-
-    monkeypatch.setenv("_HERMES_GATEWAY", "1")
-    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
-
-    assert module._spawn_profile_restart("research") == 4321
-    assert captured["command"][-4:] == ["-p", "research", "gateway", "restart"]
-    assert captured["kwargs"]["env"]["HERMES_NONINTERACTIVE"] == "1"
-    assert "_HERMES_GATEWAY" not in captured["kwargs"]["env"]
