@@ -93,6 +93,26 @@ def test_recovery_dispositions_terminal_history_instead_of_replaying_it(tmp_path
     assert disposition=='superseded_by_terminal_completion'
 
 
+def test_recovery_does_not_supersede_same_second_or_rebind_old_nonterminal_input(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:101)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','same second',created_at=50)))
+    asyncio.run(ing.ingest_live(DiscordInbound('11','2','too old',created_at=40)))
+    bind(conn,'1'); bind(conn,'2')
+
+    result=recover_pending_inbound_bindings(
+        conn,cards={
+            'c-1':('done','1970-01-01T00:00:50.500000+00:00'),
+            'c-2':('running',None),
+        },now=101,
+    )
+
+    assert result=={'rebound':0,'superseded':0,'deduplicated':0}
+    rows=conn.execute("SELECT discord_message_id,binding_key FROM mirror_conversation_events ORDER BY discord_message_id").fetchall()
+    assert [tuple(row) for row in rows]==[('10',None),('11',None)]
+
+
 def test_recovery_leaves_quarantined_or_temporally_ambiguous_events_pending(tmp_path):
     conn=connect_mirror(tmp_path/'m.db')
     ing=DiscordBackfillIngestor(conn,clock=lambda:100)

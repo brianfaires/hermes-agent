@@ -197,10 +197,17 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
     )
     if resolved_quarantines:
         log.append(f"reconciliation: RECOVERED quarantine={len(resolved_quarantines)}")
+    recovery_snapshot = snapshot
+    if conn.execute(
+        """SELECT 1 FROM mirror_discord_inbound_state s
+           JOIN mirror_conversation_events e ON e.id=s.conversation_event_id
+           WHERE s.processing_status='pending' AND e.binding_key IS NULL LIMIT 1"""
+    ).fetchone():
+        recovery_snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
     inbound_recovery = await asyncio.to_thread(
         recover_pending_inbound_bindings, conn,
         cards={task_id: (str(card.status or ""), card.completed_at)
-               for task_id, card in snapshot.cards.items()},
+               for task_id, card in recovery_snapshot.cards.items()},
     )
     if any(inbound_recovery.values()):
         log.append(

@@ -87,6 +87,23 @@ def test_clean_scan_does_not_resolve_quarantine_without_a_valid_observed_binding
     assert is_thread_quarantined(conn, "thread")
 
 
+def test_clean_scan_never_auto_resolves_successor_ambiguity_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('successor','error','successor.selection_ambiguous','thread','{}','h',10,10,20)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at)
+        VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_recoverable_quarantines(
+        conn,observed_thread_ids={'thread'},cards={'task'},now=21,
+    )==[]
+    assert is_thread_quarantined(conn,'thread')
+
+
 def test_pending_transition_and_changed_starter_are_visible_without_repair(tmp_path):
     conn = seed(tmp_path / "mirror.db")
     prepare_binding_transition(

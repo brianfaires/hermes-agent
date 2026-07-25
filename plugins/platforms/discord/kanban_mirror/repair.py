@@ -11,18 +11,17 @@ import time
 from datetime import datetime, timezone
 from typing import Mapping
 
-from .reconciliation import resolve_thread_quarantine
 from .state import is_terminal
 
 
-def _timestamp(value: object) -> int | None:
+def _timestamp(value: object) -> float | None:
     if value is None:
         return None
     raw = str(value).strip()
     if not raw:
         return None
     try:
-        return int(float(raw))
+        return float(raw)
     except ValueError:
         pass
     try:
@@ -31,7 +30,14 @@ def _timestamp(value: object) -> int | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return int(parsed.timestamp())
+    return parsed.timestamp()
+
+
+def _definitely_not_after(event_at: float, completed_at: float) -> bool:
+    """Fail closed when persisted Discord time has only whole-second precision."""
+    if event_at.is_integer():
+        return event_at + 1 <= completed_at
+    return event_at <= completed_at
 
 
 def resolve_recoverable_quarantines(
@@ -51,15 +57,35 @@ def resolve_recoverable_quarantines(
     stamp = int(time.time()) if now is None else int(now)
     observed = {str(thread_id) for thread_id in observed_thread_ids}
     known_cards = {str(task_id) for task_id in cards}
+    recoverable_causes = {
+        "binding.open_count", "binding.card_missing", "binding.mapping_missing",
+    }
+    quarantine_causes = recoverable_causes | {
+        "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+        "starter.changed_without_transition_confirmation",
+        "transition.confirmation_missing", "thread.premature_archive",
+        "digest.thread_mismatch", "successor.selection_ambiguous",
+    }
     resolved: list[str] = []
-    rows = conn.execute(
-        "SELECT thread_id FROM mirror_thread_quarantine WHERE resolved_at IS NULL ORDER BY thread_id"
-    ).fetchall()
-    for row in rows:
-        thread_id = str(row[0])
-        if thread_id not in observed:
-            continue
-        mappings = conn.execute(
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute(
+            """SELECT thread_id,quarantined_at,updated_at
+               FROM mirror_thread_quarantine
+               WHERE resolved_at IS NULL ORDER BY thread_id"""
+        ).fetchall()
+        for row in rows:
+            thread_id = str(row[0])
+            if thread_id not in observed:
+                continue
+            causes = {str(item[0]) for item in conn.execute(
+                """SELECT DISTINCT code FROM mirror_reconciliation_findings
+                   WHERE thread_id=? AND last_seen_at>=?""",
+                (thread_id, int(row[1])),
+            )} & quarantine_causes
+            if not causes or not causes <= recoverable_causes:
+                continue
+            mappings = conn.execute(
             """SELECT b.task_id
                FROM mirror_binding_epochs b
                JOIN mirror_initiatives i ON i.thread_id=b.thread_id AND i.kind='post'
@@ -67,21 +93,38 @@ def resolve_recoverable_quarantines(
                WHERE b.thread_id=? AND b.state='open'""",
             (thread_id,),
         ).fetchall()
-        if len(mappings) != 1 or str(mappings[0][0]) not in known_cards:
-            continue
-        initiative_count = conn.execute(
+            if len(mappings) != 1 or str(mappings[0][0]) not in known_cards:
+                continue
+            initiative_count = conn.execute(
             "SELECT COUNT(*) FROM mirror_initiatives WHERE kind='post' AND thread_id=?",
             (thread_id,),
-        ).fetchone()[0]
-        if int(initiative_count) != 1:
-            continue
-        if conn.execute(
+            ).fetchone()[0]
+            if int(initiative_count) != 1:
+                continue
+            if conn.execute(
             "SELECT 1 FROM mirror_binding_transitions WHERE thread_id=? AND state!='starter_verified' LIMIT 1",
             (thread_id,),
-        ).fetchone():
-            continue
-        if resolve_thread_quarantine(conn, thread_id, now=stamp):
-            resolved.append(thread_id)
+            ).fetchone():
+                continue
+            marks = ",".join("?" for _ in recoverable_causes)
+            if conn.execute(
+                f"""SELECT 1 FROM mirror_reconciliation_findings
+                    WHERE thread_id=? AND resolved_at IS NULL AND code IN ({marks}) LIMIT 1""",
+                (thread_id, *recoverable_causes),
+            ).fetchone():
+                continue
+            changed = conn.execute(
+                """UPDATE mirror_thread_quarantine
+                   SET needs_repair=0,resolved_at=?,updated_at=?
+                   WHERE thread_id=? AND resolved_at IS NULL AND updated_at=?""",
+                (stamp, stamp, thread_id, int(row[2])),
+            ).rowcount
+            if changed == 1:
+                resolved.append(thread_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return resolved
 
 
@@ -91,6 +134,7 @@ def recover_pending_inbound_bindings(
     cards: Mapping[str, tuple[str, object | None]],
     now: int | None = None,
     limit: int = 500,
+    max_rebind_age_seconds: int = 60,
 ) -> dict[str, int]:
     """Recover NULL event bindings from one exact historical epoch.
 
@@ -101,8 +145,8 @@ def recover_pending_inbound_bindings(
     completion timestamp all fail closed.
     """
     stamp = int(time.time()) if now is None else int(now)
-    if limit < 1:
-        raise ValueError("limit must be positive")
+    if limit < 1 or max_rebind_age_seconds < 0:
+        raise ValueError("limit must be positive and max rebind age non-negative")
     card_state = {str(task_id): (str(status), completed_at)
                   for task_id, (status, completed_at) in cards.items()}
     counts = {"rebound": 0, "superseded": 0, "deduplicated": 0}
@@ -155,6 +199,10 @@ def recover_pending_inbound_bindings(
                 continue
             if terminal and completed_at is None and not receipt_matches:
                 continue
+            if terminal and completed_at is not None and not receipt_matches and not _definitely_not_after(event_at, completed_at):
+                continue
+            if not terminal and not receipt_matches and stamp - event_at > max_rebind_age_seconds:
+                continue
             interval = f"{epochs[0][2]}..{epochs[0][3] if epochs[0][3] is not None else 'open'}"
             changed = conn.execute(
                 """UPDATE mirror_conversation_events
@@ -168,7 +216,7 @@ def recover_pending_inbound_bindings(
                 disposition = "already_recorded_legacy"
                 detail = "existing inbox receipt confirms prior Kanban write"
                 counts["deduplicated"] += 1
-            elif terminal and completed_at is not None and event_at <= completed_at:
+            elif terminal and completed_at is not None and _definitely_not_after(event_at, completed_at):
                 disposition = "superseded_by_terminal_completion"
                 detail = "historical input predates terminal completion"
                 counts["superseded"] += 1
