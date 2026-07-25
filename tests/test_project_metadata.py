@@ -11,6 +11,12 @@ def _load_optional_dependencies():
     return project["optional-dependencies"]
 
 
+def _load_project_dependencies():
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as handle:
+        return tomllib.load(handle)["project"]["dependencies"]
+
+
 def _load_package_data():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
@@ -184,6 +190,24 @@ def test_pyproject_pins_match_lazy_deps_pins():
         "package below the security-current lazy pin (see #31817). Drift: "
         f"{drift}"
     )
+
+
+def test_core_asgi_security_pins_are_not_optional():
+    """Base installs must not retain vulnerable ASGI parser dependencies.
+
+    The dashboard upload route is shipped from core; placing these floors only
+    in the web extra allows a base upgrade to preserve an older satisfying
+    transitive version. Keep the direct core pins aligned with the web extra.
+    """
+    core_pins = _exact_pins(_load_project_dependencies())
+    web_pins = _exact_pins(_load_optional_dependencies()["web"])
+
+    for package in ("starlette", "python-multipart"):
+        assert core_pins.get(package) == web_pins.get(package), (
+            f"core and [web] must pin {package} identically to keep base "
+            f"installs on the security-fixed ASGI stack: core={core_pins.get(package)!r}, "
+            f"web={web_pins.get(package)!r}"
+        )
 
 
 def test_dev_extra_excluded_from_all():
