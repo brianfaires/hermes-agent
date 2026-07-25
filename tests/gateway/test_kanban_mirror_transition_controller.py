@@ -154,9 +154,9 @@ def test_mismatched_receipt_and_live_revision_fail_closed(tmp_path):
 
 def quarantine(conn, *, include_premature=False):
     conn.execute("""INSERT INTO mirror_reconciliation_findings
-        (finding_key,severity,code,thread_id,evidence,evidence_hash,
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,
          first_seen_at,last_seen_at,resolved_at)
-        VALUES ('successor','error','successor.selection_ambiguous','thread','{}','s',10,10,NULL)""")
+        VALUES ('successor','error','successor.selection_ambiguous','thread','binding:thread:1','old','{}','s',10,10,NULL)""")
     if include_premature:
         conn.execute("""INSERT INTO mirror_reconciliation_findings
             (finding_key,severity,code,thread_id,evidence,evidence_hash,
@@ -197,3 +197,28 @@ def test_explicit_successor_clears_only_successor_owned_quarantine_after_success
     assert result.state == "starter_verified"
     assert is_thread_quarantined(conn, "thread")
     assert conn.execute("SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='successor'").fetchone()[0] is not None
+
+
+def test_stale_verified_transition_retry_cannot_clear_new_successor_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db"); quarantine(conn)
+    publisher = FakePublisher()
+    first = request_binding_transition(conn, publisher, **request_kwargs())
+    assert first.state == "starter_verified"
+    assert first.starter_verified_at is not None
+    assert not is_thread_quarantined(conn, "thread")
+    later = first.starter_verified_at + 1
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('successor-2','error','successor.selection_ambiguous','thread',?,
+                'new','{}','s2',?,?,NULL)""", (first.new_binding_key, later, later))
+    conn.execute("""UPDATE mirror_thread_quarantine
+        SET needs_repair=1,quarantined_at=?,updated_at=?,resolved_at=NULL
+        WHERE thread_id='thread'""", (later, later))
+    conn.commit()
+
+    retried = request_binding_transition(conn, publisher, **request_kwargs())
+
+    assert retried.state == "starter_verified"
+    assert is_thread_quarantined(conn, "thread")
+    assert conn.execute("SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='successor-2'").fetchone()[0] is None

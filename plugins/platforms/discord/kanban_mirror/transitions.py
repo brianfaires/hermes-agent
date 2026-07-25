@@ -158,13 +158,20 @@ def request_binding_transition(
                    WHERE thread_id=? AND last_seen_at>=?""",
                 (thread_id, int(quarantine[0])),
             )} & quarantine_codes
+        owned = conn.execute(
+            """SELECT 1 FROM mirror_reconciliation_findings
+               WHERE thread_id=? AND code='successor.selection_ambiguous'
+                 AND binding_key=? AND resolved_at IS NULL LIMIT 1""",
+            (thread_id, transition.old_binding_key),
+        ).fetchone()
         conn.execute(
             """UPDATE mirror_reconciliation_findings SET resolved_at=?
                WHERE thread_id=? AND code='successor.selection_ambiguous'
-                 AND resolved_at IS NULL""",
-            (now, thread_id),
+                 AND binding_key=? AND resolved_at IS NULL""",
+            (now, thread_id, transition.old_binding_key),
         )
-        if quarantine is not None and causes == {"successor.selection_ambiguous"}:
+        if (quarantine is not None and owned is not None
+                and causes == {"successor.selection_ambiguous"}):
             conn.execute(
                 """UPDATE mirror_thread_quarantine
                    SET needs_repair=0,resolved_at=?,updated_at=?
