@@ -1463,6 +1463,8 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["free_response_channels"] = platform_cfg["free_response_channels"]
                 if "allowed_channels" in platform_cfg:
                     bridged["allowed_channels"] = platform_cfg["allowed_channels"]
+                if "ignored_channels" in platform_cfg:
+                    bridged["ignored_channels"] = platform_cfg["ignored_channels"]
                 if "mention_patterns" in platform_cfg:
                     bridged["mention_patterns"] = platform_cfg["mention_patterns"]
                 if "exclusive_bot_mentions" in platform_cfg:

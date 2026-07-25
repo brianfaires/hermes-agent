@@ -379,6 +379,15 @@ async def test_ignored_channel_rejected(adapter, monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_profile_ignored_channels_override_process_environment(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "8888")
+    adapter.config.extra["ignored_channels"] = "9999"
+    interaction = _make_interaction("100200300", channel_id=9999)
+
+    assert await adapter._check_slash_authorization(interaction, "/help") is False
+
+
+@pytest.mark.asyncio
 async def test_ignored_channel_wildcard_blocks_all(adapter, monkeypatch):
     monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "*")
     interaction = _make_interaction("100200300", channel_id=9999)

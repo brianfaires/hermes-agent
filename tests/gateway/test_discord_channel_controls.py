@@ -118,6 +118,18 @@ async def test_ignored_channel_blocks_message(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_profile_ignored_channels_override_process_environment(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_IGNORED_CHANNELS", "600")
+    adapter.config.extra["ignored_channels"] = "500"
+
+    message = make_message(channel=FakeTextChannel(channel_id=500), content="hello")
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ignored_channel_blocks_even_with_mention(adapter, monkeypatch):
     """Ignored channels take priority — even @mentions are dropped."""
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
