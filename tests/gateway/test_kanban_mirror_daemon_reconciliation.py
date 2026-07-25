@@ -98,6 +98,24 @@ def test_daemon_builds_live_metadata_expectations_without_false_quarantine(tmp_p
     assert client.sent == {}
 
 
+def test_daemon_clean_live_scan_resolves_deterministic_stale_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    client = FakeClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+    assert is_thread_quarantined(conn, "thread")
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    log = []
+
+    asyncio.run(_observe_and_reconcile(
+        cfg, client, conn, BoardSnapshot({"task": card}, {}, {}, {}, {}), log,
+    ))
+
+    assert not is_thread_quarantined(conn, "thread")
+    assert "reconciliation: RECOVERED quarantine=1" in log
+
+
 def test_tick_backfills_bindings_before_startup_reconciliation(tmp_path, monkeypatch):
     conn = connect_mirror(tmp_path / "mirror.db")
     create_initiative(conn, "init-thread", "Card")

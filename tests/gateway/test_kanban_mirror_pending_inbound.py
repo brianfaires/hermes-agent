@@ -2,6 +2,7 @@ from __future__ import annotations
 import pytest
 from plugins.platforms.discord.kanban_mirror.backfill import DiscordBackfillIngestor, DiscordInbound
 from plugins.platforms.discord.kanban_mirror.inbound import PendingInboundRunner, ProcessResult
+from plugins.platforms.discord.kanban_mirror.repair import recover_pending_inbound_bindings
 from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue
 from plugins.platforms.discord.kanban_mirror.state import connect_mirror
 
@@ -54,3 +55,75 @@ async def test_malformed_payload_is_quarantined(tmp_path):
     runner=PendingInboundRunner(conn,lambda _: (_ for _ in ()).throw(AssertionError()),clock=lambda:2)
     await runner.run_once()
     assert conn.execute("SELECT disposition FROM mirror_discord_inbound_dispositions").fetchone()[0]=='quarantined_malformed'
+
+
+def test_recovery_binds_uniquely_attributed_pending_event(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:100)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','later work',created_at=50)))
+    bind(conn,'1')
+
+    result=recover_pending_inbound_bindings(
+        conn, cards={'c-1':('running',None)}, now=101,
+    )
+
+    assert result=={'rebound':1,'superseded':0,'deduplicated':0}
+    event=conn.execute("SELECT binding_key,binding_task_id,binding_interval FROM mirror_conversation_events WHERE discord_message_id='10'").fetchone()
+    assert tuple(event)==('b-1','c-1','1..open')
+    row=conn.execute("SELECT processing_status,next_attempt_at,last_error FROM mirror_discord_inbound_state WHERE discord_message_id='10'").fetchone()
+    assert tuple(row)==('pending',101,None)
+
+
+def test_recovery_dispositions_terminal_history_instead_of_replaying_it(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:100)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','approved',created_at=50)))
+    bind(conn,'1')
+
+    result=recover_pending_inbound_bindings(
+        conn, cards={'c-1':('done','1970-01-01T00:01:00+00:00')}, now=101,
+    )
+
+    assert result=={'rebound':0,'superseded':1,'deduplicated':0}
+    row=conn.execute("SELECT processing_status,processed_at FROM mirror_discord_inbound_state WHERE discord_message_id='10'").fetchone()
+    assert tuple(row)==('processed',101)
+    disposition=conn.execute("SELECT disposition FROM mirror_discord_inbound_dispositions WHERE discord_message_id='10'").fetchone()[0]
+    assert disposition=='superseded_by_terminal_completion'
+
+
+def test_recovery_leaves_quarantined_or_temporally_ambiguous_events_pending(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:100)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','x',created_at=50)))
+    bind(conn,'1')
+    conn.execute("INSERT INTO mirror_thread_quarantine(thread_id,needs_repair,quarantined_at,updated_at) VALUES('1',1,1,1)")
+    conn.commit()
+
+    assert recover_pending_inbound_bindings(conn,cards={'c-1':('running',None)},now=101)=={'rebound':0,'superseded':0,'deduplicated':0}
+    assert conn.execute("SELECT binding_key FROM mirror_conversation_events WHERE discord_message_id='10'").fetchone()[0] is None
+
+
+def test_recovery_deduplicates_existing_legacy_receipt_without_dispatch(tmp_path):
+    conn=connect_mirror(tmp_path/'m.db')
+    ing=DiscordBackfillIngestor(conn,clock=lambda:100)
+    import asyncio
+    asyncio.run(ing.ingest_live(DiscordInbound('10','1','already logged',created_at=50)))
+    bind(conn,'1')
+    conn.execute("""INSERT INTO mirror_inbox_receipts
+        (discord_message_id,board_slug,forum_channel_id,thread_id,task_id,author_id,
+         action,kanban_comment_id,created_at)
+        VALUES ('10','x','forum','1','c-1','user','comment',680,60)""")
+    conn.commit()
+
+    result=recover_pending_inbound_bindings(
+        conn,cards={'c-1':('blocked',None)},now=101,
+    )
+
+    assert result=={'rebound':0,'superseded':0,'deduplicated':1}
+    row=conn.execute("SELECT processing_status FROM mirror_discord_inbound_state WHERE discord_message_id='10'").fetchone()
+    assert row[0]=='processed'
+    disposition=conn.execute("SELECT disposition FROM mirror_discord_inbound_dispositions WHERE discord_message_id='10'").fetchone()[0]
+    assert disposition=='already_recorded_legacy'

@@ -72,6 +72,10 @@ from plugins.platforms.discord.kanban_mirror.lifecycle import get_terminal_lifec
 from plugins.platforms.discord.kanban_mirror.lifecycle_discord import DiscordLifecyclePublisher
 from plugins.platforms.discord.kanban_mirror.reconciliation import (ExpectedThread, ObservedDigest, ObservedThread,
                                                    reconcile_mirror_state)
+from plugins.platforms.discord.kanban_mirror.repair import (
+    recover_pending_inbound_bindings,
+    resolve_recoverable_quarantines,
+)
 from plugins.platforms.discord.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
@@ -187,6 +191,24 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                                        cards=((cfg.board, task_id) for task_id in snapshot.cards),
                                        expected_threads=expected, observed_digest=observed_digest,
                                        digest_observation_complete=digest_complete)
+    resolved_quarantines = await asyncio.to_thread(
+        resolve_recoverable_quarantines, conn,
+        observed_thread_ids=set(observed), cards=set(snapshot.cards),
+    )
+    if resolved_quarantines:
+        log.append(f"reconciliation: RECOVERED quarantine={len(resolved_quarantines)}")
+    inbound_recovery = await asyncio.to_thread(
+        recover_pending_inbound_bindings, conn,
+        cards={task_id: (str(card.status or ""), card.completed_at)
+               for task_id, card in snapshot.cards.items()},
+    )
+    if any(inbound_recovery.values()):
+        log.append(
+            "reconciliation: RECOVERED inbound "
+            f"rebound={inbound_recovery['rebound']} "
+            f"superseded={inbound_recovery['superseded']} "
+            f"deduplicated={inbound_recovery['deduplicated']}"
+        )
     quarantine_codes = {"binding.open_count", "binding.card_missing", "binding.mapping_missing",
                         "thread.starter_mapping_mismatch", "starter.revision_mismatch",
                         "starter.changed_without_transition_confirmation", "transition.confirmation_missing",

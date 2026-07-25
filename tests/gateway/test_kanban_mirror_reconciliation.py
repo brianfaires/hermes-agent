@@ -8,6 +8,7 @@ from plugins.platforms.discord.kanban_mirror.reconciliation import (
     ExpectedThread, ObservedDigest, ObservedThread, list_reconciliation_findings,
     reconcile_mirror_state, reconciliation_report, resolve_thread_quarantine,
 )
+from plugins.platforms.discord.kanban_mirror.repair import resolve_recoverable_quarantines
 from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, prepare_binding_transition,
@@ -59,6 +60,31 @@ def test_quarantine_fails_closed_without_destroying_discussion_or_state(tmp_path
     assert event.content == "preserved"
     assert [tuple(r) for r in conn.execute("SELECT * FROM mirror_binding_epochs")] == before
     assert conn.execute("SELECT count(*) FROM mirror_members").fetchone()[0] == 1
+
+
+def test_complete_clean_observation_resolves_only_deterministic_stale_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    reconcile_mirror_state(conn, observed_threads=observed(), cards=[], now=10)
+    assert is_thread_quarantined(conn, "thread")
+    assert reconcile_mirror_state(conn, observed_threads=observed(), cards=[("board", "task")], now=20) == []
+
+    resolved = resolve_recoverable_quarantines(
+        conn, observed_thread_ids={"thread"}, cards={"task"}, now=21,
+    )
+
+    assert resolved == ["thread"]
+    assert not is_thread_quarantined(conn, "thread")
+
+
+def test_clean_scan_does_not_resolve_quarantine_without_a_valid_observed_binding(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    reconcile_mirror_state(conn, observed_threads=observed(), cards=[], now=10)
+    reconcile_mirror_state(conn, observed_threads=observed(), cards=[("board", "task")], now=20)
+
+    assert resolve_recoverable_quarantines(
+        conn, observed_thread_ids=set(), cards={"task"}, now=21,
+    ) == []
+    assert is_thread_quarantined(conn, "thread")
 
 
 def test_pending_transition_and_changed_starter_are_visible_without_repair(tmp_path):
