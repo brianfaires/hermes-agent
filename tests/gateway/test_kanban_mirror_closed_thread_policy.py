@@ -215,9 +215,29 @@ def test_publish_edit_updates_starter_message_inside_thread_channel():
         ["running", "ops"],
     ))
 
-    assert ok is True
+    assert ok == "edited"
     assert client.message_updates == [("th1", "m1", "Updated body")]
     assert client.updated == [("th1", {"name": "Updated title", "tag_ids": ["tag-running", "tag-ops"]})]
+
+
+def test_publish_edit_reports_redirect_without_claiming_starter_mutation():
+    cfg = load_mirror_config({"kanban": {"discord_mirror": {
+        "enabled": True, "board": "operations", "forum_channel_id": "forum1",
+        "closed_thread_reply_policy": {"rules": [{
+            "match": {"thread_state": "archived", "source": "post_edit"},
+            "action": "redirect",
+            "destination": {"platform": "discord", "kind": "dm", "user_id": "42"},
+        }]},
+    }}})
+    client = FakeClient("archived")
+    outcome = asyncio.run(_publish_edit(
+        cast(DiscordClient, client), cfg, mk_initiative(),
+        "Updated title", "Updated body", ["running"],
+    ))
+    assert outcome == "redirected"
+    assert len(client.sent) == 1 and client.sent[0][0] == "dm1"
+    assert "Updated body" in client.sent[0][1]
+    assert client.message_updates == []
 
 
 def test_missing_starter_message_clears_mapping_instead_of_retrying_forever():

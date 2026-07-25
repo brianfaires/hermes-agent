@@ -292,8 +292,11 @@ async def _publish_authorized_starter_edit(
         starter_message_id = initiative.starter_message_id
         if not _starter_identity_authorized(conn, thread_id, represented_task_id):
             raise PermissionError("starter edit is not authorized by the current binding")
-        published = await _publish_edit(client, cfg, initiative, title, body, tags)
-        if not published:
+        outcome = await _publish_edit(client, cfg, initiative, title, body, tags)
+        if outcome == "redirected":
+            conn.commit()
+            return True
+        if outcome != "edited":
             conn.commit()
             return False
         live = await _verified_starter_payload(
@@ -545,9 +548,9 @@ async def _send_with_closed_thread_policy(
 
 
 async def _publish_edit(client: DiscordClient, cfg: MirrorConfig, initiative: Initiative,
-                         title: str, body: str, tags: list[str]) -> bool:
+                         title: str, body: str, tags: list[str]) -> str:
     if not initiative.thread_id:
-        return False
+        return "skipped"
     state, _ = await _thread_state(client, initiative.thread_id)
     if state != "active":
         action, destination = resolve_closed_thread_action(
@@ -564,7 +567,7 @@ async def _publish_edit(client: DiscordClient, cfg: MirrorConfig, initiative: In
         prefix = f"closed_thread_policy: {initiative.id} thread={initiative.thread_id} state={state} source=post_edit action={action}"
         if action == "discard":
             logger.info("kanban mirror: %s", prefix)
-            return False
+            return "skipped"
         if action == "redirect":
             try:
                 await _send_redirect(client, destination or {}, f"{_origin_header(cfg, initiative, source='post_edit')}\n\n{body}")
@@ -577,7 +580,7 @@ async def _publish_edit(client: DiscordClient, cfg: MirrorConfig, initiative: In
                 )
                 raise
             logger.info("kanban mirror: %s", prefix)
-            return True
+            return "redirected"
         if action == "reopen_thread":
             try:
                 await asyncio.to_thread(client.update_thread, initiative.thread_id, archive=False, locked=False)
@@ -593,7 +596,7 @@ async def _publish_edit(client: DiscordClient, cfg: MirrorConfig, initiative: In
                 )
                 raise
         else:
-            return False
+            return "skipped"
     active = initiative.archived_at is None
     tag_ids = await _resolve_tag_ids(client, cfg, tags)
     await _call_with_archive_retry(
@@ -604,7 +607,7 @@ async def _publish_edit(client: DiscordClient, cfg: MirrorConfig, initiative: In
         client, initiative.thread_id, active, client.update_thread,
         initiative.thread_id, name=title, tag_ids=tag_ids,
     )
-    return True
+    return "edited"
 
 
 def _read_legacy_rows(board: str) -> list[sqlite3.Row]:
@@ -762,7 +765,7 @@ async def _do_edit_post(cfg: MirrorConfig, client: DiscordClient | None, conn: s
                 client, cfg, conn, initiative, represented, title, body, tags,
             )
         else:
-            published = await _publish_edit(client, cfg, initiative, title, body, tags)
+            published = await _publish_edit(client, cfg, initiative, title, body, tags) != "skipped"
         if not published:
             return
     except PermissionError:
@@ -1197,7 +1200,7 @@ async def _prose_pass(cfg: MirrorConfig, client: DiscordClient | None, conn: sql
                     client, cfg, conn, refreshed, represented, title, body, tags,
                 )
             else:
-                published = await _publish_edit(client, cfg, refreshed, title, body, tags)
+                published = await _publish_edit(client, cfg, refreshed, title, body, tags) != "skipped"
             if not published:
                 continue
         except PermissionError:
