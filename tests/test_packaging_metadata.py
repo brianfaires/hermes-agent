@@ -433,6 +433,9 @@ _REQUIRED_SECURITY_PINS = {
         "platform.matrix",
         "platform.teams",
     },
+    # discord.py 2.7.1's voice extra caps PyNaCl below the first patched
+    # release. Hermes carries the tested fixed version directly instead.
+    "PyNaCl": {"platform.discord"},
 }
 
 
@@ -468,3 +471,16 @@ def test_security_pins_present_in_mirrored_lazy_features():
         "pyproject extras — the lazy install path would not enforce the "
         "CVE-patched floor:\n  " + "\n  ".join(problems)
     )
+
+
+def test_discord_voice_override_preserves_davey_dependency():
+    """Replacing discord.py[voice] must retain its non-PyNaCl voice backend."""
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        messaging = tomllib.load(handle)["project"]["optional-dependencies"]["messaging"]
+    lazy_discord = _lazy_deps_by_feature()["platform.discord"]
+
+    for surface, specs in (("messaging", messaging), ("platform.discord", lazy_discord)):
+        pins = _pins_from_specs(specs)
+        assert pins.get(_canonical("davey")) == {"0.1.6"}, (
+            f"{surface} must carry davey==0.1.6 when bypassing discord.py[voice]"
+        )

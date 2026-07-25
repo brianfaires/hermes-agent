@@ -159,7 +159,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # uploaded to the Discord gateway fails to decode at att.read() with
     # "Can not decode content-encoding: br" — see #12511 / #15744.
     "platform.discord": (
-        "discord.py[voice]==2.7.1",
+        "discord.py==2.7.1",
+        # discord.py 2.7.1's voice extra caps PyNaCl below the first patched
+        # release; Hermes verifies and carries the fixed version directly.
+        "PyNaCl==1.6.2",
+        "davey==0.1.6",
         "brotlicffi==1.2.0.1",
         # discord.py pulls aiohttp transitively (>=3.7.4,<4) as its HTTP
         # backbone. Pin the patched floor here too so the lazy Discord path
