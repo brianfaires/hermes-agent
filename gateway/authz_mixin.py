@@ -303,17 +303,20 @@ class GatewayAuthorizationMixin:
             return any(str(item).strip() for item in sender_allow)
         return False
 
-    def _pairing_store_for(self, source: "SessionSource"):
-        """Pick the per-profile PairingStore for a source, falling back to global.
+    def _pairing_store_for(
+        self,
+        source: "SessionSource",
+        *,
+        profile: Optional[str] = None,
+    ):
+        """Pick the transport profile's PairingStore, falling back to global.
 
         In a multiplexing gateway, each profile owns its own pairing whitelist
-        so isolation is preserved. When the source has no profile (single-
-        profile gateway, or a path that hasn't stamped profile yet) or the
-        profile isn't registered, fall back to ``self.pairing_store`` (the
-        global default) so existing behavior is preserved.
+        so isolation is preserved. ``source.profile`` may name only a routed
+        runtime, so callers pass the transport-owning profile derived from the
+        registered adapter. The active/default transport uses the global store.
         """
         per_profile = getattr(self, "pairing_stores", None) or {}
-        profile = getattr(source, "profile", None)
         if profile and profile in per_profile:
             return per_profile[profile]
         return getattr(self, "pairing_store", None)
@@ -510,7 +513,7 @@ class GatewayAuthorizationMixin:
         # profile's whitelist is isolated; falls back to the global store when
         # the source has no profile or the profile isn't registered.
         platform_name = source.platform.value if source.platform else ""
-        pairing_store = self._pairing_store_for(source)
+        pairing_store = self._pairing_store_for(source, profile=adapter_profile)
         if pairing_store is not None and pairing_store.is_approved(platform_name, user_id):
             return True
 

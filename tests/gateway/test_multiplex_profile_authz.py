@@ -147,6 +147,29 @@ def test_chat_routed_source_keeps_receiving_shared_adapter(monkeypatch):
     assert runner._is_user_authorized(source) is True
 
 
+def test_chat_route_cannot_borrow_routed_profile_pairing(monkeypatch):
+    """Pairing approval must follow the receiving transport, not runtime route."""
+    runner, default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
+    default_adapter._dm_policy = "open"
+    routed_pairing = MagicMock()
+    routed_pairing.is_approved.return_value = True
+    runner.pairing_stores = {"routed": routed_pairing}
+    runner.pairing_store.is_approved.return_value = False
+
+    source = SessionSource(
+        platform=Platform.WECOM,
+        user_id="routed-only-user",
+        chat_id="dm-chat",
+        chat_type="dm",
+        profile="routed",
+    )
+    source._transport_adapter_ref = lambda: default_adapter
+
+    assert runner._is_user_authorized(source) is False
+    runner.pairing_store.is_approved.assert_called_once_with("wecom", "routed-only-user")
+    routed_pairing.is_approved.assert_not_called()
+
+
 def test_named_active_profile_routes_default_to_secondary_registry(monkeypatch):
     """Built-in default is secondary when a named profile owns the primary map."""
     runner, _old_primary, _old_secondary = _make_multiplex_runner(monkeypatch)
