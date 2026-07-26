@@ -9378,6 +9378,12 @@ class GatewayRunner(
         """Resolve the connected adapter that owns a routed profile identity."""
         if source is None:
             return None
+        if not require_profile_adapter:
+            transport_adapter = self._registered_transport_adapter(source)
+            if transport_adapter is not None:
+                if getattr(transport_adapter, "_running", True) is False:
+                    return None
+                return transport_adapter
         candidate = self._authorization_adapter(
             getattr(source, "platform", None),
             getattr(source, "profile", None),
