@@ -144,6 +144,28 @@ def load_board_snapshot(board: str) -> BoardSnapshot:
                 parents.setdefault(e["child_id"], []).append(e["parent_id"])
         recent_comments = _recent(con, "task_comments", cards)
         recent_events = _recent(con, "task_events", cards)
+        # Decomposition provenance defines initiative ownership and must not
+        # disappear merely because a task accumulated more than ten later
+        # events. Keep the ordinary recent window for display noise, then add
+        # any older decomposition records needed by the renderer.
+        known_event_ids = {
+            int(event["id"])
+            for events in recent_events.values()
+            for event in events
+        }
+        for row in con.execute(
+            "SELECT id,task_id,kind,payload,created_at FROM task_events "
+            "WHERE kind='decomposed' ORDER BY task_id,id DESC"
+        ):
+            if row["task_id"] in cards and int(row["id"]) not in known_event_ids:
+                recent_events.setdefault(row["task_id"], []).append(
+                    {
+                        "id": row["id"],
+                        "kind": row["kind"],
+                        "payload": row["payload"],
+                        "created_at": row["created_at"],
+                    }
+                )
         owner_instructions: dict[str, list[dict]] = {}
         try:
             for row in con.execute("SELECT id,task_id,status FROM task_owner_instructions ORDER BY id"):
@@ -416,6 +438,7 @@ class Initiative:
     created_at: int
     updated_at: int
     members: dict[str, MemberState] = field(default_factory=dict)
+    continuation_task_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -507,6 +530,31 @@ def load_mirror_state(conn: sqlite3.Connection) -> dict[str, Initiative]:
             last_status=row["last_status"],
             last_sig=row["last_sig"],
         )
+    by_thread = {
+        initiative.thread_id: initiative
+        for initiative in initiatives.values()
+        if initiative.kind == "post" and initiative.thread_id
+    }
+    for row in conn.execute(
+        "SELECT thread_id,task_id FROM mirror_binding_epochs ORDER BY thread_id,sequence"
+    ):
+        initiative = by_thread.get(str(row["thread_id"]))
+        if initiative is not None:
+            initiative.continuation_task_ids.add(str(row["task_id"]))
+    for row in conn.execute(
+        "SELECT thread_id,new_card_metadata FROM mirror_binding_transitions "
+        "ORDER BY thread_id,prepared_at,transition_key"
+    ):
+        initiative = by_thread.get(str(row["thread_id"]))
+        if initiative is None:
+            continue
+        try:
+            metadata = json.loads(row["new_card_metadata"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        task_id = str(metadata.get("task_id") or "") if isinstance(metadata, dict) else ""
+        if task_id:
+            initiative.continuation_task_ids.add(task_id)
     return initiatives
 
 

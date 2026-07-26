@@ -170,8 +170,8 @@ def test_reaction_intent_mapping_and_normalization():
     assert pause.intent == "pause"
     assert pause.meaning == "Pause work; blocked on human input."
     assert close is not None
-    assert close.intent == "close_request"
-    assert close.meaning == "Close card or dismiss as noise."
+    assert close.intent == "cancel_thread_work"
+    assert close.meaning == "Cancel all remaining work listed on this thread."
     rerun = reaction_intent_for_emoji("🔁")
     review = reaction_intent_for_emoji("🧐")
     expand = reaction_intent_for_emoji("🤔")
@@ -185,11 +185,11 @@ def test_reaction_intent_mapping_and_normalization():
     ("text", "intent"),
     [
         ("approve", "approve"), (" APPROVED ", "approve"), ("Yes", "approve"),
-        ("pause", "pause"), ("stop", "pause"), ("close", "close_request"),
+        ("pause", "pause"), ("stop", "pause"), ("close", "cancel_thread_work"),
         ("watch", "watch"), ("rerun", "rerun_request"), ("redo", "rerun_request"),
         ("reject", "reject"), ("rejected", "reject"), ("no", "reject"),
         ("context", "needs_context"), ("review", "review_request"),
-        ("expand", "expand_idea"), ("close.", "close_request"),
+        ("expand", "expand_idea"), ("close.", "cancel_thread_work"),
         ("“YES!”", "approve"), ("...stop???", "pause"),
     ],
 )
@@ -375,7 +375,7 @@ async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, i
         assert kb.claim_task(conn, tid) is not None
     finally:
         conn.close()
-    payload = reaction_payload(emoji="🗑️")
+    payload = reaction_payload(emoji="🚫")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
     assert first.owner_instruction_id is not None
 
@@ -406,7 +406,7 @@ async def test_removed_reaction_creates_new_generation_after_prior_routing(kanba
     finally:
         conn.close()
 
-    payload = reaction_payload(emoji="🗑️")
+    payload = reaction_payload(emoji="🚫")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
     assert first.owner_instruction_status == "routed"
     await maybe_handle_discord_reaction_remove(payload, config=inbox_config)

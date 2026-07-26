@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -135,7 +136,9 @@ class KanbanReplyInboxResult:
 _REACTION_INTENTS: dict[str, ParsedKanbanReaction] = {
     "✅": ParsedKanbanReaction("✅", "approve", "Approve / done reviewing / LGTM."),
     "⏸": ParsedKanbanReaction("⏸️", "pause", "Pause work; blocked on human input."),
-    "🗑": ParsedKanbanReaction("🗑️", "close_request", "Close card or dismiss as noise."),
+    "🗑": ParsedKanbanReaction(
+        "🗑️", "cancel_thread_work", "Cancel all remaining work listed on this thread."
+    ),
     "👀": ParsedKanbanReaction("👀", "watch", "Watching; keep me updated."),
     "🔁": ParsedKanbanReaction("🔁", "rerun_request", "Rerun / try again / rework needed."),
     "🚫": ParsedKanbanReaction("🚫", "reject", "Reject / do not do this."),
@@ -542,6 +545,270 @@ def _find_reaction_comment_id(conn: sqlite3.Connection, task_id: str, reaction_k
     return int(row["id"]) if row is not None else None
 
 
+def _json_payload(raw: Any) -> dict | None:
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _thread_owned_seed_ids(
+    mirror_conn: sqlite3.Connection, *, thread_id: str, represented_task_id: str
+) -> list[str] | None:
+    initiatives = mirror_conn.execute(
+        "SELECT id FROM mirror_initiatives WHERE kind='post' AND thread_id=?",
+        (thread_id,),
+    ).fetchall()
+    if len(initiatives) != 1:
+        return None
+    initiative_id = str(initiatives[0]["id"])
+    members = [
+        str(row["task_id"])
+        for row in mirror_conn.execute(
+            "SELECT task_id FROM mirror_members WHERE initiative_id=? ORDER BY rowid",
+            (initiative_id,),
+        )
+    ]
+    if not members or represented_task_id not in members:
+        return None
+    seeds = list(members)
+    seeds.extend(
+        str(row["task_id"])
+        for row in mirror_conn.execute(
+            "SELECT task_id FROM mirror_binding_epochs WHERE thread_id=? ORDER BY sequence",
+            (thread_id,),
+        )
+    )
+    for row in mirror_conn.execute(
+        "SELECT new_card_metadata FROM mirror_binding_transitions "
+        "WHERE thread_id=? ORDER BY prepared_at,transition_key",
+        (thread_id,),
+    ):
+        metadata = _json_payload(row["new_card_metadata"])
+        task_id = str(metadata.get("task_id") or "") if metadata is not None else ""
+        if not task_id:
+            return None
+        seeds.append(task_id)
+    owned_seeds = list(dict.fromkeys(seeds))
+    placeholders = ",".join("?" for _ in owned_seeds)
+    conflict = mirror_conn.execute(
+        f"SELECT 1 FROM mirror_members WHERE task_id IN ({placeholders}) "
+        "AND initiative_id!=? LIMIT 1",
+        (*owned_seeds, initiative_id),
+    ).fetchone()
+    return None if conflict is not None else owned_seeds
+
+
+def _decomposition_children(
+    conn: sqlite3.Connection, root_id: str
+) -> tuple[list[str], str | None]:
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='decomposed' ORDER BY id",
+        (root_id,),
+    ).fetchall()
+    if not rows:
+        return [], None
+    if len(rows) != 1:
+        return [], "ambiguous_provenance"
+    payload = _json_payload(rows[0]["payload"])
+    child_ids = payload.get("child_ids") if payload is not None else None
+    if (
+        not isinstance(child_ids, list)
+        or not child_ids
+        or any(not isinstance(child_id, str) or not child_id for child_id in child_ids)
+        or len(child_ids) != len(set(child_ids))
+    ):
+        return [], "ambiguous_provenance"
+    for child_id in child_ids:
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id=?", (child_id,)
+        ).fetchone() is None or conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?",
+            (child_id, root_id),
+        ).fetchone() is None:
+            return [], "missing_provenance"
+        created = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id",
+            (child_id,),
+        ).fetchall()
+        if not any(
+            (_json_payload(row["payload"]) or {}).get("from_decompose_of") == root_id
+            for row in created
+        ):
+            return [], "missing_provenance"
+    return child_ids, None
+
+
+def _initiative_owned_work(
+    conn: sqlite3.Connection, member_ids: list[str]
+) -> tuple[set[str], str | None]:
+    if any(conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None
+           for task_id in member_ids):
+        return set(), "missing_provenance"
+    # Dependency links are scheduling edges, not ownership. Start only from
+    # durable mirror membership/binding-transition provenance; decomposition
+    # records below are the sole board-side ownership expansion.
+    owned = set(member_ids)
+    checked: set[str] = set()
+    while True:
+        pending = sorted(owned - checked)
+        if not pending:
+            break
+        for task_id in pending:
+            checked.add(task_id)
+            child_ids, error = _decomposition_children(conn, task_id)
+            if error is not None:
+                return set(), error
+            if child_ids:
+                # The decomposition payload is the ownership boundary. Walking
+                # forward from a generated prerequisite could absorb an
+                # unrelated dependent linked to that card later.
+                owned.update(child_ids)
+    return owned, None
+
+
+def _existing_cancel_comment_id(
+    conn: sqlite3.Connection, *, source_key: str, represented_task_id: str
+) -> int | None:
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE kind='cancel_thread_work' ORDER BY id"
+    ):
+        if (_json_payload(row["payload"]) or {}).get("source_key") == source_key:
+            marker = "[discord-cancel-thread-work:" + hashlib.sha256(
+                source_key.encode("utf-8")
+            ).hexdigest() + "]"
+            comment = conn.execute(
+                "SELECT id FROM task_comments WHERE task_id=? AND body LIKE ? ORDER BY id LIMIT 1",
+                (represented_task_id, f"%{marker}%"),
+            ).fetchone()
+            return int(comment["id"]) if comment is not None else 0
+    return None
+
+
+def _apply_cancel_thread_work(
+    conn: sqlite3.Connection,
+    mirror_conn: sqlite3.Connection,
+    *,
+    represented_task_id: str,
+    ctx: DiscordReactionContext | DiscordReplyContext,
+    source_key: str,
+    action_prefix: str,
+) -> KanbanReplyInboxResult:
+    action = f"{action_prefix}:cancel_thread_work"
+    marker = "[discord-cancel-thread-work:" + hashlib.sha256(
+        source_key.encode("utf-8")
+    ).hexdigest() + "]"
+    with kb.write_txn(conn):
+        existing_comment_id = _existing_cancel_comment_id(
+            conn, source_key=source_key, represented_task_id=represented_task_id
+        )
+        if existing_comment_id is not None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason="handled", task_id=represented_task_id,
+                action=action, kanban_comment_id=existing_comment_id or None,
+                ack="Thread work was already cancelled.",
+            )
+        member_ids = _thread_owned_seed_ids(
+            mirror_conn, thread_id=ctx.thread_id,
+            represented_task_id=represented_task_id,
+        )
+        if member_ids is None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason="missing_provenance",
+                task_id=represented_task_id, action=action,
+            )
+        owned, provenance_error = _initiative_owned_work(conn, member_ids)
+        if provenance_error is not None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason=provenance_error,
+                task_id=represented_task_id, action=action,
+            )
+        placeholders = ",".join("?" for _ in owned)
+        rows = conn.execute(
+            f"SELECT id,status,claim_lock,current_run_id,worker_pid "
+            f"FROM tasks WHERE id IN ({placeholders})",
+            tuple(sorted(owned)),
+        ).fetchall()
+        if len(rows) != len(owned):
+            return KanbanReplyInboxResult(
+                consumed=True, reason="missing_provenance",
+                task_id=represented_task_id, action=action,
+            )
+        if any(
+            str(row["status"]) in {"running", "scheduled"}
+            or row["claim_lock"] is not None
+            or row["current_run_id"] is not None
+            or row["worker_pid"] is not None
+            for row in rows
+        ) or conn.execute(
+            f"SELECT 1 FROM task_runs WHERE task_id IN ({placeholders}) "
+            "AND ended_at IS NULL LIMIT 1",
+            tuple(sorted(owned)),
+        ).fetchone() is not None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason="unsafe_active_work",
+                task_id=represented_task_id, action=action,
+            )
+        external = conn.execute(
+            f"SELECT l.parent_id,l.child_id FROM task_links l "
+            f"WHERE l.parent_id IN ({placeholders}) AND l.child_id NOT IN ({placeholders}) LIMIT 1",
+            (*sorted(owned), *sorted(owned)),
+        ).fetchone()
+        if external is not None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason="external_dependents",
+                task_id=represented_task_id, action=action,
+            )
+        targets = sorted(
+            str(row["id"]) for row in rows
+            if str(row["status"]) not in {"done", "archived"}
+        )
+        now = int(time.time())
+        audit_payload = {
+            "source_key": source_key,
+            "thread_id": ctx.thread_id,
+            "represented_task_id": represented_task_id,
+            "owned_task_ids": sorted(owned),
+            "cancelled_task_ids": targets,
+        }
+        for task_id in targets:
+            conn.execute(
+                "UPDATE tasks SET status='archived',claim_lock=NULL,claim_expires=NULL,"
+                "worker_pid=NULL WHERE id=?",
+                (task_id,),
+            )
+            kb._append_event(conn, task_id, "cancel_thread_work", audit_payload)
+        # The represented task may already be terminal.  Persist the operation
+        # marker there as well so a crash after the Kanban commit but before the
+        # mirror receipt remains idempotent even when there were no targets.
+        if represented_task_id not in targets:
+            kb._append_event(
+                conn, represented_task_id, "cancel_thread_work", audit_payload
+            )
+        comment = conn.execute(
+            "INSERT INTO task_comments(task_id,author,body,created_at) VALUES (?,?,?,?)",
+            (
+                represented_task_id,
+                _reaction_author(ctx) if isinstance(ctx, DiscordReactionContext) else _reply_author(ctx),
+                "\n".join([
+                    "[discord cancel thread work]",
+                    "Cancelled all remaining initiative-owned work listed on this thread.",
+                    f"Source key: {source_key}",
+                    f"Cancelled cards: {', '.join(targets) if targets else '(none)'}",
+                    marker,
+                ]),
+                now,
+            ),
+        )
+        comment_id = int(comment.lastrowid or 0)
+    return KanbanReplyInboxResult(
+        consumed=True, reason="handled", task_id=represented_task_id,
+        action=action, kanban_comment_id=comment_id,
+        ack=f"Cancelled {len(targets)} remaining Kanban card(s) on this thread.",
+    )
+
+
 def handle_reaction(
     ctx: DiscordReactionContext,
     *,
@@ -571,6 +838,34 @@ def handle_reaction(
         task = kb.get_task(conn, task_id)
         if task is None:
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+        if ctx.intent == "cancel_thread_work":
+            result = _apply_cancel_thread_work(
+                conn,
+                mirror_conn,
+                represented_task_id=task_id,
+                ctx=ctx,
+                source_key=ctx.reaction_key,
+                action_prefix="reaction",
+            )
+            if result.reason != "handled":
+                mirror_conn.rollback()
+                return result
+            replied_to_comment_id = find_receipt_comment_id(mirror_conn, ctx.message_id)
+            mark_reaction_active(mirror_conn, ctx.reaction_key)
+            record_receipt(
+                mirror_conn,
+                discord_message_id=ctx.reaction_key,
+                board_slug=resolved_board_slug,
+                forum_channel_id=ctx.forum_channel_id,
+                thread_id=ctx.thread_id,
+                task_id=task_id,
+                author_id=ctx.author_id,
+                action="reaction:cancel_thread_work",
+                replied_to_message_id=ctx.message_id,
+                replied_to_kanban_comment_id=replied_to_comment_id,
+                kanban_comment_id=result.kanban_comment_id,
+            )
+            return result
         target_assignee = task.assignee or "unassigned"
         if cfg.conversation_router_enabled:
             directive = ParsedKanbanReaction(ctx.emoji, ctx.intent, ctx.meaning)
@@ -715,6 +1010,34 @@ def _handle_text_action(
     if task is None:
         mirror_conn.rollback()
         return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+    if action.intent == "cancel_thread_work":
+        result = _apply_cancel_thread_work(
+            conn,
+            mirror_conn,
+            represented_task_id=task_id,
+            ctx=ctx,
+            source_key=source_key,
+            action_prefix=action_prefix,
+        )
+        if result.reason != "handled":
+            mirror_conn.rollback()
+            return result
+        record_receipt(
+            mirror_conn,
+            discord_message_id=ctx.message_id,
+            board_slug=board_slug,
+            forum_channel_id=ctx.forum_channel_id,
+            thread_id=ctx.thread_id,
+            task_id=task_id,
+            author_id=ctx.author_id,
+            action=f"{action_prefix}:cancel_thread_work",
+            replied_to_message_id=ctx.reply_to_message_id,
+            replied_to_kanban_comment_id=_find_replied_to_comment_id(
+                ctx.reply_to_message_id, mirror_conn=mirror_conn
+            ),
+            kanban_comment_id=result.kanban_comment_id,
+        )
+        return result
     reply_context = re.sub(r"\s+", " ", ctx.reply_to_text).strip()[:200] if ctx.reply_to_text else None
     body = "\n".join([
         "[discord text instruction]",
@@ -974,7 +1297,7 @@ def _routed_turn_result(*, ctx: DiscordReplyContext, task_id: str, board_slug: s
     ).hexdigest()
     extra = ""
     if directive:
-        owner_only = directive.intent in {"approve", "pause", "close_request", "rerun_request", "reject"}
+        owner_only = directive.intent in {"approve", "pause", "cancel_thread_work", "rerun_request", "reject"}
         extra = (f" This is a Discord Kanban directive ({directive.intent}: {directive.meaning})."
                  " You may accept, refuse, or ask for clarification."
                  + (" Card mutation is owner-authorized only; advisory targets must not mutate it."
@@ -1058,14 +1381,30 @@ def handle_reply(
         mirror_conn = connect_mirror(mirror_db_path(resolved_board_slug))
         try:
             directive = directive_for_text(ctx.content) if cfg.conversation_router_enabled else None
+            bare_text_action = text_action_for_command(ctx.content)
             text_action = (
                 directive
                 if directive is not None
-                else (None if cfg.conversation_router_enabled else text_action_for_command(ctx.content))
+                else (
+                    bare_text_action
+                    if not cfg.conversation_router_enabled
+                    or getattr(bare_text_action, "intent", None) == "cancel_thread_work"
+                    else None
+                )
             )
             words = (ctx.content or "").strip().split(None, 1)
             first_word = words[0].rstrip(":").lower() if words else ""
             explicit = log_command is not None or text_action is not None or first_word in _SUPPORTED_ACTIONS
+            if text_action is not None and text_action.intent == "cancel_thread_work":
+                return _handle_text_action(
+                    conn,
+                    mirror_conn,
+                    task_id=str(task_id),
+                    board_slug=resolved_board_slug,
+                    ctx=ctx,
+                    action=text_action,
+                    action_prefix="directive" if directive is not None else "text",
+                )
             if cfg.conversation_router_enabled and directive is not None:
                 event = record_conversation_event(
                     mirror_conn, discord_message_id=ctx.message_id,

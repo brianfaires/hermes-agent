@@ -12,6 +12,7 @@ across the rewrite.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -248,6 +249,40 @@ def _work_items(member_ids: list[str], snapshot: BoardSnapshot) -> list[WorkItem
     for root_id in member_ids:
         mark_reachable(root_id)
 
+    # Auto-decomposition reverses the intuitive edge direction: generated
+    # prerequisites point *into* the root continuation.  Recover only those
+    # parents named by the root's durable decomposition event; walking every
+    # parent would absorb unrelated shared prerequisites into the initiative.
+    provenance_roots: list[str] = []
+    checked: set[str] = set()
+    while True:
+        pending = [task_id for task_id in reachable if task_id not in checked]
+        if not pending:
+            break
+        for task_id in sorted(pending):
+            checked.add(task_id)
+            for event in snapshot.recent_events.get(task_id, []):
+                if event.get("kind") != "decomposed":
+                    continue
+                try:
+                    payload = json.loads(event.get("payload") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                child_ids = payload.get("child_ids")
+                if not isinstance(child_ids, list):
+                    continue
+                for child_id in child_ids:
+                    child_id = str(child_id)
+                    if (
+                        child_id in snapshot.cards
+                        and task_id in snapshot.children.get(child_id, [])
+                        and child_id not in provenance_roots
+                    ):
+                        provenance_roots.append(child_id)
+                        # Keep provenance-defined children first-class without
+                        # absorbing later external dependents of those cards.
+                        reachable.add(child_id)
+
     def emit(task_id: str, *, indented: bool) -> None:
         if task_id in emitted or task_id in visiting:
             return
@@ -271,6 +306,8 @@ def _work_items(member_ids: list[str], snapshot: BoardSnapshot) -> list[WorkItem
         visiting.discard(task_id)
 
     for root_id in member_ids:
+        emit(root_id, indented=False)
+    for root_id in provenance_roots:
         emit(root_id, indented=False)
 
     # Fan-in cards skipped on the first parent become eligible after a later
@@ -392,13 +429,20 @@ def _format_item(item: WorkItem, initiative: Initiative, snapshot: BoardSnapshot
     return line
 
 
+def _initiative_seed_ids(initiative: Initiative) -> list[str]:
+    return list(dict.fromkeys([
+        *initiative.members,
+        *sorted(initiative.continuation_task_ids),
+    ]))
+
+
 def work_item_ids(initiative: Initiative, snapshot: BoardSnapshot) -> list[str]:
-    return [item.card.id for item in _work_items(list(initiative.members), snapshot)]
+    return [item.card.id for item in _work_items(_initiative_seed_ids(initiative), snapshot)]
 
 
 def pointed_card_id(initiative: Initiative, snapshot: BoardSnapshot) -> str | None:
     """Return the first unfinished work item, falling back to the first item."""
-    items = _work_items(list(initiative.members), snapshot)
+    items = _work_items(_initiative_seed_ids(initiative), snapshot)
     for item in items:
         if not _finished_for_display(item.card.status):
             return item.card.id
@@ -451,7 +495,7 @@ def _truncate(body: str, max_chars: int) -> str:
 
 
 def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int, now: int) -> str:
-    member_ids = list(initiative.members.keys())
+    member_ids = _initiative_seed_ids(initiative)
     member_cards = [snapshot.cards[m] for m in member_ids if m in snapshot.cards]
 
     brief = "\n".join(
