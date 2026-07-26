@@ -3176,6 +3176,47 @@ def test_provider_boundary_capture_reports_native_provider_endpoints():
     )
 
 
+def test_provider_boundary_capture_formats_long_string_values_for_human_review(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    long_value = "first character" + ("x" * 190) + "\\nsecond line\nthird line"
+    request = {
+        "model": "gpt-5-codex",
+        "messages": [{"role": "user", "content": long_value}],
+        "metadata": {"short": "first\\nsecond"},
+    }
+
+    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+
+    for artifact in (with_tools, prompt_only):
+        text = artifact.read_text()
+        assert '"content": "\nfirst character' in text
+        assert ("x" * 190) + "\nsecond line\nthird line" in text
+        assert '"short": "first\\\\nsecond"' in text
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(text)
+
+
+def test_provider_boundary_capture_human_formatting_starts_above_200_chars():
+    from agent.agent_runtime_helpers import _format_request_capture_for_human
+
+    long_key = "k" * 201
+    rendered = _format_request_capture_for_human(
+        {
+            "exactly_200": "a" * 200,
+            "over_200": "b" * 201,
+            long_key: "value",
+        }
+    )
+
+    assert '"exactly_200": "' + ("a" * 200) + '"' in rendered
+    assert '"over_200": "\n' + ("b" * 201) + '"' in rendered
+    assert '"' + long_key + '": "value"' in rendered
+
+
 def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
@@ -3221,14 +3262,14 @@ def test_provider_boundary_capture_never_publishes_half_pair(monkeypatch, tmp_pa
 
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
-    real_atomic_json_write = helpers.atomic_json_write
+    real_capture_write = helpers._write_request_capture_artifact
 
     def fail_second_artifact(path, *args, **kwargs):
         if path.name == "prompt_only.json":
             raise OSError("simulated crash before second artifact")
-        return real_atomic_json_write(path, *args, **kwargs)
+        return real_capture_write(path, *args, **kwargs)
 
-    monkeypatch.setattr(helpers, "atomic_json_write", fail_second_artifact)
+    monkeypatch.setattr(helpers, "_write_request_capture_artifact", fail_second_artifact)
 
     pair = agent._capture_provider_boundary_request(
         {"model": "gpt-5-codex", "messages": []}

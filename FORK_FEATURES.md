@@ -408,7 +408,10 @@ Two related diagnostics share this owner but have different fidelity:
    boundary. `request_capture.retention` defaults to `20` and is clamped to
    `1..1000`. Each atomic pair is stored under
    `<HERMES_HOME>/sessions/request-captures/capture_ID/` as `with_tools.json`
-   and `prompt_only.json` after structural secret/URL-query redaction.
+   and `prompt_only.json` after structural secret/URL-query redaction. These
+   human-review artifacts intentionally permit invalid JSON: values longer
+   than 200 characters start on a new line and visible `\\n` text becomes real
+   line breaks.
 
 Example:
 

@@ -1947,6 +1947,73 @@ def _capture_payload(
     }
 
 
+def _format_request_capture_for_human(payload: Dict[str, Any]) -> str:
+    """Render capture JSON with long string values expanded for human review."""
+
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    rendered: List[str] = []
+    cursor = 0
+    length = len(serialized)
+
+    while cursor < length:
+        if serialized[cursor] != '"':
+            rendered.append(serialized[cursor])
+            cursor += 1
+            continue
+
+        end = cursor + 1
+        while end < length:
+            if serialized[end] == "\\":
+                end += 2
+                continue
+            if serialized[end] == '"':
+                end += 1
+                break
+            end += 1
+
+        token = serialized[cursor:end]
+        lookahead = end
+        while lookahead < length and serialized[lookahead].isspace():
+            lookahead += 1
+        is_key = lookahead < length and serialized[lookahead] == ":"
+
+        if not is_key:
+            value = json.loads(token)
+            if isinstance(value, str) and len(value) > 200:
+                normalized = value.replace("\\n", "\n")
+                escaped_lines = [
+                    json.dumps(line, ensure_ascii=False)[1:-1]
+                    for line in normalized.split("\n")
+                ]
+                token = '"\n' + "\n".join(escaped_lines) + '"'
+
+        rendered.append(token)
+        cursor = end
+
+    return "".join(rendered)
+
+
+def _write_request_capture_artifact(path: Path, payload: Dict[str, Any]) -> None:
+    """Durably write a human-review capture inside its hidden staging directory."""
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(_format_request_capture_for_human(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 @contextmanager
 def _request_capture_process_lock(directory: Path):
     """Serialize pair publication and pruning across OS processes."""
@@ -2113,18 +2180,8 @@ def capture_provider_boundary_request(
 
                 staged_with_tools = staging_dir / "with_tools.json"
                 staged_prompt_only = staging_dir / "prompt_only.json"
-                atomic_json_write(
-                    staged_with_tools,
-                    with_tools_payload,
-                    mode=0o600,
-                    default=str,
-                )
-                atomic_json_write(
-                    staged_prompt_only,
-                    prompt_only_payload,
-                    mode=0o600,
-                    default=str,
-                )
+                _write_request_capture_artifact(staged_with_tools, with_tools_payload)
+                _write_request_capture_artifact(staged_prompt_only, prompt_only_payload)
                 _fsync_capture_directory(staging_dir)
                 os.replace(staging_dir, final_dir)
                 staging_dir = None
