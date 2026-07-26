@@ -133,13 +133,22 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
     def add(severity: str, code: str, thread: str, binding: str | None, task: str | None, **evidence):
         detected[(thread, code, binding, task)] = (severity, {"thread_id": thread, **evidence})
 
-    registry = conn.execute("SELECT id,thread_id,starter_message_id FROM mirror_initiatives WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
+    registry = conn.execute("SELECT id,thread_id,starter_message_id,archived_at FROM mirror_initiatives WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
     threads = sorted({str(r["thread_id"]) for r in registry} | {str(t) for t in observed_threads})
     for thread in threads:
         mappings = [r for r in registry if str(r["thread_id"]) == thread]
         epochs = conn.execute("SELECT * FROM mirror_binding_epochs WHERE thread_id=? ORDER BY sequence", (thread,)).fetchall()
         opens = [r for r in epochs if r["state"] == "open"]
-        if len(opens) != 1:
+        legacy_archived_orphan = (
+            len(mappings) == 1
+            and mappings[0]["archived_at"] is not None
+            and not epochs
+            and conn.execute(
+                "SELECT 1 FROM mirror_members WHERE initiative_id=? LIMIT 1",
+                (mappings[0]["id"],),
+            ).fetchone() is None
+        )
+        if len(opens) != 1 and not legacy_archived_orphan:
             add("critical", "binding.open_count", thread, None, None, open_count=len(opens), binding_keys=[r["binding_key"] for r in opens])
         active = opens[0] if len(opens) == 1 else None
         if active is not None:

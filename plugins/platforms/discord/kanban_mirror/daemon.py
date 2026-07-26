@@ -174,7 +174,9 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         member_cards = [snapshot.cards[task_id] for task_id in initiative.members if task_id in snapshot.cards]
         if len(member_cards) != len(initiative.members):
             continue
-        terminal = bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        terminal = initiative.archived_at is not None or (
+            bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        )
         expected[initiative.thread_id] = ExpectedThread(
             post_title(initiative, snapshot), tuple(_tags_for(initiative, snapshot)), terminal,
         )
@@ -1435,9 +1437,76 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
     publisher = DiscordLifecyclePublisher(client, cfg, conn)
     resumable: list[dict] = []
     for initiative in state.values():
-        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
-            continue
         if initiative.kind != "post" or not initiative.thread_id:
+            continue
+        binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
+        open_binding_count = int(conn.execute(
+            "SELECT COUNT(*) FROM mirror_binding_epochs "
+            "WHERE thread_id=? AND state='open'",
+            (initiative.thread_id,),
+        ).fetchone()[0])
+        if (
+            initiative.archived_at is not None
+            and not initiative.members
+            and open_binding_count == 0
+        ):
+            quarantine = conn.execute(
+                "SELECT quarantined_at FROM mirror_thread_quarantine "
+                "WHERE thread_id=? AND resolved_at IS NULL",
+                (initiative.thread_id,),
+            ).fetchone()
+            owned_causes: set[str] = set()
+            if quarantine is not None:
+                owned_causes = {
+                    str(row[0]) for row in conn.execute(
+                        "SELECT DISTINCT code FROM mirror_reconciliation_findings "
+                        "WHERE thread_id=? AND last_seen_at>=?",
+                        (initiative.thread_id, int(quarantine["quarantined_at"])),
+                    )
+                } & {
+                    "binding.open_count", "binding.card_missing", "binding.mapping_missing",
+                    "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+                    "starter.changed_without_transition_confirmation",
+                    "transition.confirmation_missing", "thread.premature_archive",
+                    "digest.thread_mismatch", "successor.selection_ambiguous",
+                }
+                if not owned_causes or not owned_causes <= {
+                    "binding.open_count", "thread.premature_archive",
+                }:
+                    continue
+            discord_state, _ = await _thread_state(client, initiative.thread_id)
+            if discord_state != "active":
+                continue
+            idle_seconds = await _done_thread_idle_seconds(
+                client, initiative.thread_id, time.time(),
+            )
+            required = max(0.0, float(cfg.done_thread_archive_idle_minutes) * 60.0)
+            if idle_seconds is None or idle_seconds < required:
+                continue
+            await asyncio.to_thread(client.update_thread, initiative.thread_id, archive=True)
+            confirmed_state, _ = await _thread_state(client, initiative.thread_id)
+            if confirmed_state != "archived":
+                continue
+            stamp = int(time.time())
+            conn.execute(
+                "UPDATE mirror_reconciliation_findings SET resolved_at=?,last_seen_at=? "
+                "WHERE thread_id=? AND resolved_at IS NULL AND code IN "
+                "('binding.open_count','thread.premature_archive','thread.done_tag_unexpected',"
+                "'thread.unexpected_reopen','thread.terminal_unarchived')",
+                (stamp, stamp, initiative.thread_id),
+            )
+            if quarantine is not None:
+                conn.execute(
+                    "UPDATE mirror_thread_quarantine SET needs_repair=0,resolved_at=?,updated_at=? "
+                    "WHERE thread_id=? AND resolved_at IS NULL",
+                    (stamp, stamp, initiative.thread_id),
+                )
+            conn.commit()
+            log.append(
+                f"terminal_lifecycle: REARCHIVED orphaned legacy thread {initiative.id}"
+            )
+            continue
+        if cfg.reconciliation_enabled and _is_quarantined(conn, initiative.thread_id):
             continue
         if initiative.archived_at is not None:
             discord_state, _ = await _thread_state(client, initiative.thread_id)
@@ -1445,7 +1514,6 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
                 continue
             await asyncio.to_thread(clear_archived, conn, initiative.id)
             log.append(f"terminal_lifecycle: BACKFILLED active legacy thread {initiative.id}")
-        binding = await asyncio.to_thread(active_thread_binding, conn, initiative.thread_id)
         if binding is None:
             continue
         chain = _terminal_chain(snapshot, binding.task_id)

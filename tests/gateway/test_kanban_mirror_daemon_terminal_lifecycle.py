@@ -23,7 +23,10 @@ class Discord:
     def update_thread(self,c,*,tag_ids=None,pinned=None,archive=None,**kw):
         if pinned is not None: self.channels[c]["pinned"]=pinned
         if tag_ids is not None: self.events.append("tag"); self.channels[c]["applied_tags"]=tag_ids
-        if archive is not None: self.events.append("archive"); self.channels[c]["archived"]=archive
+        if archive is not None:
+            self.events.append("archive")
+            self.channels[c]["archived"]=archive
+            self.channels[c].setdefault("thread_metadata", {})["archived"]=archive
         return dict(self.channels[c])
 
 
@@ -98,6 +101,74 @@ def test_daemon_backfills_active_terminal_thread_marked_archived_in_legacy_state
     assert "terminal_lifecycle: BACKFILLED active legacy thread i" in log
     assert conn.execute("SELECT archived_at FROM mirror_initiatives WHERE id='i'").fetchone()[0] is None
     assert conn.execute("SELECT state FROM mirror_terminal_lifecycles").fetchone()[0]=="tag_confirmed"
+
+
+def test_daemon_rearchives_idle_orphaned_legacy_thread_without_a_card_mapping(
+    tmp_path, monkeypatch,
+):
+    conn=connect_mirror(tmp_path/"m.db"); client=Discord()
+    create_initiative(conn,"orphan","Old completed test")
+    set_thread(conn,"orphan","thread","thread")
+    set_archived(conn,"orphan",80)
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('open-count','critical','binding.open_count','thread','{}','h',90,90,NULL)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at,resolved_at)
+        VALUES ('thread',1,90,90,NULL)""")
+    conn.commit()
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",
+        reconciliation_enabled=True,terminal_lifecycle_enabled=True,
+        done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:200)
+    log=[]
+
+    asyncio.run(_resume_terminal_lifecycles(
+        cfg,client,conn,BoardSnapshot({}, {}, {}, {}, {}),load_mirror_state(conn),log,
+    ))
+
+    assert client.channels["thread"]["archived"] is True
+    assert conn.execute(
+        "SELECT archived_at FROM mirror_initiatives WHERE id='orphan'"
+    ).fetchone()[0] == 80
+    assert conn.execute(
+        "SELECT resolved_at FROM mirror_thread_quarantine WHERE thread_id='thread'"
+    ).fetchone()[0] is not None
+    assert "terminal_lifecycle: REARCHIVED orphaned legacy thread orphan" in log
+
+
+def test_daemon_does_not_treat_quarantine_hidden_open_binding_as_an_orphan(
+    tmp_path, monkeypatch,
+):
+    conn=connect_mirror(tmp_path/"m.db"); client=Discord()
+    create_initiative(conn,"mapped","Mapped legacy thread")
+    set_thread(conn,"mapped","thread","thread")
+    set_archived(conn,"mapped",80)
+    conn.execute("""INSERT INTO mirror_binding_epochs
+        (binding_key,thread_id,board_slug,task_id,sequence,started_at,state)
+        VALUES ('binding','thread','board','card',1,1,'open')""")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('open-count','critical','binding.open_count','thread','{}','h',90,90,NULL)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at,resolved_at)
+        VALUES ('thread',1,90,90,NULL)""")
+    conn.commit()
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",
+        reconciliation_enabled=True,terminal_lifecycle_enabled=True,
+        done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:200)
+
+    asyncio.run(_resume_terminal_lifecycles(
+        cfg,client,conn,BoardSnapshot({}, {}, {}, {}, {}),load_mirror_state(conn),[],
+    ))
+
+    assert client.channels["thread"]["archived"] is False
+    assert conn.execute(
+        "SELECT resolved_at FROM mirror_thread_quarantine WHERE thread_id='thread'"
+    ).fetchone()[0] is None
 
 
 def _seed_two_terminal_threads(conn, client):
