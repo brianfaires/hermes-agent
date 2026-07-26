@@ -16,6 +16,7 @@ from plugins.platforms.discord.kanban_mirror.state import (
     backfill_legacy_bindings,
     connect_mirror,
     create_initiative,
+    is_thread_quarantined,
     load_board_snapshot,
     mirror_db_path,
     prepare_binding_transition,
@@ -159,6 +160,56 @@ def test_trash_archives_all_idle_owned_work_but_not_shared_prerequisite(ghost_to
         assert ids["shared"] not in comments[0].body
     finally:
         conn.close()
+
+
+def test_trash_on_stale_quarantined_thread_cancels_and_closes_the_repair_latch(
+    ghost_topology,
+):
+    db_path, ids = ghost_topology
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        mirror_conn.execute(
+            """INSERT INTO mirror_reconciliation_findings
+               (finding_key,severity,code,thread_id,binding_key,task_id,evidence,
+                evidence_hash,first_seen_at,last_seen_at,resolved_at)
+               VALUES ('stale-successor','error','successor.selection_ambiguous',
+                       ?,?,?,'{}','hash',10,10,NULL)""",
+            (THREAD_ID, f"binding:{THREAD_ID}:1", ids["bound"]),
+        )
+        mirror_conn.execute(
+            """INSERT INTO mirror_thread_quarantine
+               (thread_id,needs_repair,quarantined_at,updated_at,resolved_at)
+               VALUES (?,1,10,10,NULL)""",
+            (THREAD_ID,),
+        )
+        mirror_conn.commit()
+    finally:
+        mirror_conn.close()
+
+    result = handle_reaction(_reaction(), config=_config())
+
+    assert result.reason == "handled"
+    assert _statuses(db_path, ids) == {
+        "bound": "done",
+        "root": "archived",
+        "shared": "blocked",
+        "generated_a": "archived",
+        "generated_b": "archived",
+    }
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        assert not is_thread_quarantined(mirror_conn, THREAD_ID)
+        assert mirror_conn.execute(
+            "SELECT resolved_at FROM mirror_reconciliation_findings "
+            "WHERE finding_key='stale-successor'"
+        ).fetchone()[0] is not None
+        assert mirror_conn.execute(
+            "SELECT COUNT(*) FROM mirror_binding_transitions "
+            "WHERE thread_id=? AND state='prepared'",
+            (THREAD_ID,),
+        ).fetchone()[0] == 0
+    finally:
+        mirror_conn.close()
 
 
 def test_trash_retry_is_idempotent(ghost_topology):

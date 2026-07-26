@@ -708,6 +708,7 @@ def _apply_cancel_thread_work(
             conn, source_key=source_key, represented_task_id=represented_task_id
         )
         if existing_comment_id is not None:
+            _finalize_cancel_mirror_state(mirror_conn, ctx.thread_id)
             return KanbanReplyInboxResult(
                 consumed=True, reason="handled", task_id=represented_task_id,
                 action=action, kanban_comment_id=existing_comment_id or None,
@@ -817,10 +818,58 @@ def _apply_cancel_thread_work(
             ),
         )
         comment_id = int(comment.lastrowid or 0)
+    _finalize_cancel_mirror_state(mirror_conn, ctx.thread_id)
     return KanbanReplyInboxResult(
         consumed=True, reason="handled", task_id=represented_task_id,
         action=action, kanban_comment_id=comment_id,
         ack=f"Cancelled {len(targets)} remaining Kanban card(s) on this thread.",
+    )
+
+
+def _finalize_cancel_mirror_state(
+    mirror_conn: sqlite3.Connection, thread_id: str,
+) -> None:
+    """Make an accepted thread cancellation terminal for mirror recovery."""
+    mirror_conn.execute(
+        "DELETE FROM mirror_binding_transitions "
+        "WHERE thread_id=? AND state='prepared'",
+        (thread_id,),
+    )
+    quarantine = mirror_conn.execute(
+        "SELECT quarantined_at,updated_at FROM mirror_thread_quarantine "
+        "WHERE thread_id=? AND resolved_at IS NULL",
+        (thread_id,),
+    ).fetchone()
+    if quarantine is None:
+        return
+    quarantine_causes = {
+        "binding.open_count", "binding.card_missing", "binding.mapping_missing",
+        "thread.starter_mapping_mismatch", "starter.revision_mismatch",
+        "starter.changed_without_transition_confirmation",
+        "transition.confirmation_missing", "thread.premature_archive",
+        "digest.thread_mismatch", "successor.selection_ambiguous",
+    }
+    causes = {
+        str(row[0]) for row in mirror_conn.execute(
+            "SELECT DISTINCT code FROM mirror_reconciliation_findings "
+            "WHERE thread_id=? AND last_seen_at>=?",
+            (thread_id, int(quarantine["quarantined_at"])),
+        )
+    } & quarantine_causes
+    if causes != {"successor.selection_ambiguous"}:
+        return
+    stamp = int(time.time())
+    mirror_conn.execute(
+        "UPDATE mirror_reconciliation_findings SET resolved_at=?,last_seen_at=? "
+        "WHERE thread_id=? AND code='successor.selection_ambiguous' "
+        "AND resolved_at IS NULL",
+        (stamp, stamp, thread_id),
+    )
+    mirror_conn.execute(
+        "UPDATE mirror_thread_quarantine "
+        "SET needs_repair=0,resolved_at=?,updated_at=? "
+        "WHERE thread_id=? AND resolved_at IS NULL AND updated_at=?",
+        (stamp, stamp, thread_id, int(quarantine["updated_at"])),
     )
 
 
@@ -834,7 +883,12 @@ def handle_reaction(
         return KanbanReplyInboxResult(consumed=False, reason="disabled")
 
     board_slug = cfg.board_slug or "default"
-    resolved = resolve_thread_task(mirror_db_path(board_slug), forum_channel_id=ctx.forum_channel_id, thread_id=ctx.thread_id)
+    resolved = resolve_thread_task(
+        mirror_db_path(board_slug),
+        forum_channel_id=ctx.forum_channel_id,
+        thread_id=ctx.thread_id,
+        allow_quarantined=ctx.intent == "cancel_thread_work",
+    )
     if resolved is None:
         return KanbanReplyInboxResult(consumed=False, reason="unmapped_thread")
 

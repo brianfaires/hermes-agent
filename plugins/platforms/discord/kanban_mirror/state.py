@@ -1054,7 +1054,8 @@ def backfill_legacy_bindings(conn: sqlite3.Connection, board_slug: str) -> int:
 
 
 def resolve_thread_task(
-    mirror_path: Path, forum_channel_id: str, thread_id: str
+    mirror_path: Path, forum_channel_id: str, thread_id: str, *,
+    allow_quarantined: bool = False,
 ) -> tuple[str, str] | None:
     """Resolve a Discord forum thread back to its primary task + board.
 
@@ -1082,7 +1083,7 @@ def resolve_thread_task(
                 quarantined = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_thread_quarantine'"
                 ).fetchone()
-                if quarantined and conn.execute(
+                if not allow_quarantined and quarantined and conn.execute(
                     "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id=? AND resolved_at IS NULL",
                     (thread_id,),
                 ).fetchone():
