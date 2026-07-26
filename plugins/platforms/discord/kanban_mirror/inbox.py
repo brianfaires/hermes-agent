@@ -554,7 +554,8 @@ def _json_payload(raw: Any) -> dict | None:
 
 
 def _thread_owned_seed_ids(
-    mirror_conn: sqlite3.Connection, *, thread_id: str, represented_task_id: str
+    mirror_conn: sqlite3.Connection, *, thread_id: str, represented_task_id: str,
+    board_slug: str,
 ) -> list[str] | None:
     initiatives = mirror_conn.execute(
         "SELECT id FROM mirror_initiatives WHERE kind='post' AND thread_id=?",
@@ -573,13 +574,14 @@ def _thread_owned_seed_ids(
     if not members or represented_task_id not in members:
         return None
     seeds = list(members)
-    seeds.extend(
-        str(row["task_id"])
-        for row in mirror_conn.execute(
-            "SELECT task_id FROM mirror_binding_epochs WHERE thread_id=? ORDER BY sequence",
-            (thread_id,),
-        )
-    )
+    for row in mirror_conn.execute(
+        "SELECT board_slug,task_id FROM mirror_binding_epochs "
+        "WHERE thread_id=? ORDER BY sequence",
+        (thread_id,),
+    ):
+        if str(row["board_slug"] or "") != board_slug:
+            return None
+        seeds.append(str(row["task_id"]))
     for row in mirror_conn.execute(
         "SELECT new_card_metadata FROM mirror_binding_transitions "
         "WHERE thread_id=? ORDER BY prepared_at,transition_key",
@@ -587,7 +589,8 @@ def _thread_owned_seed_ids(
     ):
         metadata = _json_payload(row["new_card_metadata"])
         task_id = str(metadata.get("task_id") or "") if metadata is not None else ""
-        if not task_id:
+        target_board = str(metadata.get("board_slug") or "") if metadata is not None else ""
+        if not task_id or target_board != board_slug:
             return None
         seeds.append(task_id)
     owned_seeds = list(dict.fromkeys(seeds))
@@ -691,6 +694,7 @@ def _apply_cancel_thread_work(
     mirror_conn: sqlite3.Connection,
     *,
     represented_task_id: str,
+    board_slug: str,
     ctx: DiscordReactionContext | DiscordReplyContext,
     source_key: str,
     action_prefix: str,
@@ -712,6 +716,7 @@ def _apply_cancel_thread_work(
         member_ids = _thread_owned_seed_ids(
             mirror_conn, thread_id=ctx.thread_id,
             represented_task_id=represented_task_id,
+            board_slug=board_slug,
         )
         if member_ids is None:
             return KanbanReplyInboxResult(
@@ -843,6 +848,7 @@ def handle_reaction(
                 conn,
                 mirror_conn,
                 represented_task_id=task_id,
+                board_slug=resolved_board_slug,
                 ctx=ctx,
                 source_key=ctx.reaction_key,
                 action_prefix="reaction",
@@ -1015,6 +1021,7 @@ def _handle_text_action(
             conn,
             mirror_conn,
             represented_task_id=task_id,
+            board_slug=board_slug,
             ctx=ctx,
             source_key=source_key,
             action_prefix=action_prefix,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -183,6 +185,7 @@ def test_crash_after_kanban_commit_before_receipt_is_idempotent(ghost_topology):
             conn,
             mirror_conn,
             represented_task_id=ids["bound"],
+            board_slug="default",
             ctx=ctx,
             source_key=ctx.reaction_key,
             action_prefix="reaction",
@@ -280,6 +283,33 @@ def test_member_dependency_edge_is_not_ownership_without_transition_provenance(
         task = kb.get_task(conn, unrelated)
         assert task is not None
         assert task.status == "triage"
+    finally:
+        conn.close()
+
+
+def test_cross_board_transition_same_task_id_fails_without_mutation(ghost_topology):
+    db_path, ids = ghost_topology
+    mirror_conn = connect_mirror(mirror_db_path("default"))
+    try:
+        mirror_conn.execute(
+            "UPDATE mirror_binding_transitions SET new_card_metadata=? "
+            "WHERE transition_key='test:bound-to-root'",
+            (json.dumps({"board_slug": "other", "task_id": ids["shared"]}),),
+        )
+        mirror_conn.commit()
+    finally:
+        mirror_conn.close()
+    before = _statuses(db_path, ids)
+
+    result = handle_reaction(_reaction(), config=_config())
+
+    assert result.reason == "missing_provenance"
+    assert _statuses(db_path, ids) == before
+    conn = kb.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE kind='cancel_thread_work'"
+        ).fetchone()[0] == 0
     finally:
         conn.close()
 
