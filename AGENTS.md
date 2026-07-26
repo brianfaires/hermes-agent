@@ -885,7 +885,7 @@ Every new or modernized skill — bundled, optional, or contributed —
 must meet these standards before merge. Reviewers reject PRs that
 violate them.
 
-1. **`description` ≤ 60 characters, one sentence, ends with a period.**
+1. **`description` ≤ 1024 characters, one sentence, ends with a period.**
    Long descriptions bloat skill listings and dilute the model's
    attention when many skills are loaded. State the capability, not
    the implementation. No marketing words ("powerful",
@@ -896,7 +896,7 @@ violate them.
    m = re.search(r'^description: (.*)$',
                  pathlib.Path('skills/<cat>/<name>/SKILL.md').read_text(),
                  re.MULTILINE)
-   assert len(m.group(1)) <= 60, len(m.group(1))
+   assert len(m.group(1)) <= 1024, len(m.group(1))
    ```
 
 2. **Tools referenced in SKILL.md prose must be native Hermes tools or

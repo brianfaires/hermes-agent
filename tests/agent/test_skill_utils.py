@@ -3,8 +3,10 @@
 from unittest.mock import patch
 
 from agent.skill_utils import (
+    SKILL_DESCRIPTION_SCHEMA_LIMIT,
     extract_skill_config_vars,
     extract_skill_conditions,
+    extract_skill_description,
     get_disabled_skill_names,
     get_external_skills_dirs,
     is_excluded_skill_path,
@@ -16,6 +18,29 @@ from agent.skill_utils import (
     skill_matches_platform,
     skill_matches_platform_list,
 )
+
+
+def test_skill_description_default_limit_matches_schema():
+    description = "x" * (SKILL_DESCRIPTION_SCHEMA_LIMIT + 1)
+
+    rendered = extract_skill_description({"description": description})
+
+    assert len(rendered) == SKILL_DESCRIPTION_SCHEMA_LIMIT
+    assert rendered == "x" * (SKILL_DESCRIPTION_SCHEMA_LIMIT - 3) + "..."
+
+
+def test_skill_description_preserves_schema_length_value():
+    description = "x" * SKILL_DESCRIPTION_SCHEMA_LIMIT
+
+    assert extract_skill_description({"description": description}) == description
+
+
+def test_skill_description_max_chars_remains_configurable():
+    description = "A description long enough to exercise the explicit limit."
+
+    assert extract_skill_description({"description": description}, max_chars=20) == (
+        "A description lon..."
+    )
 
 
 def test_metadata_as_dict_with_hermes():

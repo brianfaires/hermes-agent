@@ -12,7 +12,7 @@ that instructs the live agent to:
      current conversation for "what I just did", the user's text for pasted
      material).
   2. Author a single ``SKILL.md`` via ``skill_manage`` that follows the Hermes
-     skill-authoring standards (description <=60 chars, the modern section
+     skill-authoring standards (description <=1024 chars, the modern section
      order, Hermes-tool framing, no invented commands).
 
 There is no separate distillation engine and no model-tool footprint: the
@@ -33,15 +33,15 @@ HARDLINE rules a maintainer enforces in review:
 
 Frontmatter:
 - name: lowercase-hyphenated, <=64 chars, no spaces.
-- description: ONE sentence, **<=60 characters**, ends with a period. State the
+- description: ONE sentence, **<=1024 characters**, ends with a period. State the
   capability, not the implementation. No marketing words (powerful,
   comprehensive, seamless, advanced, robust). Do NOT repeat the skill name. If
   the description contains a colon, wrap the whole value in double quotes.
-  This is the most-violated rule and it is NOT cosmetic: the full description
-  is loaded into the system-prompt skill index every session, so excess prose
-  permanently consumes context. After you write the description, COUNT the
-  characters; if it is over 60, cut it down before saving.
-    Good (<=60): `Search arXiv papers by keyword, author, or ID.`
+  The full schema-valid description is loaded into the system-prompt skill
+  index every session, so keep it concise even though the schema permits 1024
+  characters. After you write the description, COUNT the characters; if it is
+  over 1024, cut it down before saving.
+    Good: `Search arXiv papers by keyword, author, or ID.`
     Bad (123):   `A comprehensive skill that lets the agent search arXiv for
                   academic papers using keywords, authors, and categories.`
 - version: 0.1.0

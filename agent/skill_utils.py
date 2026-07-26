@@ -779,13 +779,21 @@ def resolve_skill_config_values(
 
 # ── Description extraction ────────────────────────────────────────────────
 
+SKILL_DESCRIPTION_SCHEMA_LIMIT = 1024
 
-def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
-    """Extract the complete description from parsed frontmatter."""
+
+def extract_skill_description(
+    frontmatter: Dict[str, Any],
+    max_chars: int = SKILL_DESCRIPTION_SCHEMA_LIMIT,
+) -> str:
+    """Extract a normalized description, capped at the skill schema limit by default."""
     raw_desc = frontmatter.get("description", "")
     if not raw_desc:
         return ""
-    return str(raw_desc).strip().strip("'\"")
+    description = str(raw_desc).strip().strip("'\"")
+    if len(description) > max_chars:
+        return description[: max_chars - 3] + "..."
+    return description
 
 
 # ── File iteration ────────────────────────────────────────────────────────

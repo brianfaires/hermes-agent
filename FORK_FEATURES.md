@@ -326,9 +326,10 @@ by the Discord/STT prerequisites above.
 - Prompt-cache keys include a manifest signature for each directory in
   `skills.external_dirs`, so adding, removing, or editing an external skill
   invalidates the assembled skills prompt.
-- Skill index entries preserve the complete frontmatter description sent to the
-  model. Snapshot version `2` invalidates older cached entries that ended in an
-  ellipsis after 60 characters.
+- Skill index entries preserve frontmatter descriptions up to the schema's
+  1024-character limit. The `max_chars` extraction dial remains available for
+  explicit callers. Snapshot version `2` invalidates older cached entries that
+  ended in an ellipsis after 60 characters.
 - `skills.external_dirs` defaults to `[]`. Add shared directories explicitly:
 
   ```yaml
