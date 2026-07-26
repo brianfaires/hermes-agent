@@ -10175,12 +10175,15 @@ class GatewayRunner(
                 return None
         elif not self._is_user_authorized(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+            adapter_profile = self._adapter_profile_for_source(source)
+            pairing_store = self._pairing_store_for(source, profile=adapter_profile)
             # In DMs: offer pairing code. In groups: silently ignore.
             if (
                 source.chat_type == "dm"
+                and pairing_store is not None
                 and self._get_unauthorized_dm_behavior(
                     source.platform,
-                    profile=source.profile,
+                    profile=adapter_profile,
                 )
                 == "pair"
             ):
@@ -10188,9 +10191,9 @@ class GatewayRunner(
                 # Rate-limit ALL pairing responses (code or rejection) to
                 # prevent spamming the user with repeated messages when
                 # multiple DMs arrive in quick succession.
-                if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                if pairing_store._is_rate_limited(platform_name, source.user_id):
                     return None
-                code = self.pairing_store.generate_code(
+                code = pairing_store.generate_code(
                     platform_name, source.user_id, source.user_name or ""
                 )
                 if code:
@@ -10212,7 +10215,7 @@ class GatewayRunner(
                             "Please try again later!"
                         )
                     # Record rate limit so subsequent messages are silently ignored
-                    self.pairing_store._record_rate_limit(platform_name, source.user_id)
+                    pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
         
         # Intercept messages that are responses to a pending /update prompt.
