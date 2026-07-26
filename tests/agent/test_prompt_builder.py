@@ -2,6 +2,7 @@
 
 import builtins
 import importlib
+import json
 import logging
 import sys
 
@@ -322,13 +323,12 @@ class TestParseSkillFile:
         is_compat, frontmatter, desc = _parse_skill_file(skill_file)
         assert desc == ""
 
-    def test_long_description_truncated(self, tmp_path):
+    def test_long_description_is_preserved(self, tmp_path):
         skill_file = tmp_path / "SKILL.md"
         long_desc = "A" * 100
         skill_file.write_text(f"---\ndescription: {long_desc}\n---\n")
         _, _, desc = _parse_skill_file(skill_file)
-        assert len(desc) <= 60
-        assert desc.endswith("...")
+        assert desc == long_desc
 
     def test_nonexistent_file_returns_defaults(self, tmp_path):
         is_compat, frontmatter, desc = _parse_skill_file(tmp_path / "missing.md")
@@ -425,6 +425,60 @@ class TestBuildSkillsSystemPrompt:
         assert "python-debug" in result
         assert "Debug Python scripts" in result
         assert "available_skills" in result
+
+    def test_skill_index_sends_full_description_to_model(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "coding" / "full-description"
+        skills_dir.mkdir(parents=True)
+        description = (
+            "Use this skill for detailed request-capture diagnostics, provider-boundary "
+            "inspection, artifact verification, and preservation of every routing detail "
+            "the model needs to decide whether the workflow applies."
+        )
+        (skills_dir / "SKILL.md").write_text(
+            f"---\nname: full-description\ndescription: {description}\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert f"- full-description: {description}" in result
+        assert "full-description: Use this skill for detailed request..." not in result
+
+    def test_rebuilds_snapshot_with_truncated_skill_descriptions(
+        self, monkeypatch, tmp_path
+    ):
+        import agent.prompt_builder as prompt_builder
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "coding" / "snapshot-description"
+        skill_dir.mkdir(parents=True)
+        description = (
+            "Full snapshot description that must survive beyond the former truncation "
+            "boundary and remain complete when the skills index is sent to the model."
+        )
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: snapshot-description\ndescription: {description}\n---\n"
+        )
+        snapshot = {
+            "version": 1,
+            "manifest": prompt_builder._build_skills_manifest(tmp_path / "skills"),
+            "skills": [
+                {
+                    "skill_name": "snapshot-description",
+                    "category": "coding",
+                    "frontmatter_name": "snapshot-description",
+                    "description": description[:57] + "...",
+                    "platforms": [],
+                    "conditions": {},
+                }
+            ],
+            "category_descriptions": {},
+        }
+        prompt_builder._skills_prompt_snapshot_path().write_text(json.dumps(snapshot))
+
+        result = build_skills_system_prompt()
+
+        assert f"- snapshot-description: {description}" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

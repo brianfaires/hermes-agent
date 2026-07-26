@@ -326,6 +326,9 @@ by the Discord/STT prerequisites above.
 - Prompt-cache keys include a manifest signature for each directory in
   `skills.external_dirs`, so adding, removing, or editing an external skill
   invalidates the assembled skills prompt.
+- Skill index entries preserve the complete frontmatter description sent to the
+  model. Snapshot version `2` invalidates older cached entries that ended in an
+  ellipsis after 60 characters.
 - `skills.external_dirs` defaults to `[]`. Add shared directories explicitly:
 
   ```yaml
@@ -411,8 +414,8 @@ Two related diagnostics share this owner but have different fidelity:
    and `prompt_only.json` after structural secret/URL-query redaction. These
    human-review artifacts intentionally permit invalid JSON: values longer
    than 100 characters start on a new line, visible `\\n` text becomes real
-   line breaks, and long lines wrap at the first whitespace after 110
-   characters.
+   line breaks, and long lines repeatedly wrap at the first whitespace after
+   each 110-character span.
 
 Example:
 

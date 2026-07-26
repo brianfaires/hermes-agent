@@ -24,7 +24,7 @@ The pair is published as one capture directory:
   prompt_only.json
 ```
 
-`with_tools.json` contains the Hermes-visible provider request structure, including tool definitions. `prompt_only.json` is derived from the same request after removing tool-definition and tool-selection fields. These are human-review artifacts rather than machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines wrap at the first whitespace after 110 characters. This formatting intentionally permits invalid JSON.
+`with_tools.json` contains the Hermes-visible provider request structure, including tool definitions. `prompt_only.json` is derived from the same request after removing tool-definition and tool-selection fields. These are human-review artifacts rather than machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON.
 
 The root and pair directories are mode `0700`; artifacts are mode `0600`. Both files are written and synced in a hidden staging directory, then the directory is atomically renamed into view. A crash cannot expose a half-pair; the next writer removes any abandoned staging directory before publishing. Cross-process writers are serialized with a crash-released OS file lock. `retention` counts complete capture directories and is clamped to `1..1000`; older captures are removed after successful publication.
 

@@ -3253,6 +3253,23 @@ def test_provider_boundary_capture_wraps_long_values_after_110_chars():
     assert ("y" * 112) + "\nlast line\"" in rendered
 
 
+def test_provider_boundary_capture_artifact_wraps_long_values_repeatedly(
+    monkeypatch,
+    tmp_path,
+):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    long_value = ("a" * 111) + " " + ("b" * 112) + " " + ("c" * 113)
+
+    with_tools, prompt_only = agent._capture_provider_boundary_request(
+        {"model": "gpt-5-codex", "messages": [{"role": "user", "content": long_value}]}
+    )
+
+    expected = ("a" * 111) + "\n" + ("b" * 112) + "\n" + ("c" * 113)
+    for artifact in (with_tools, prompt_only):
+        assert expected in artifact.read_text()
+
+
 def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
