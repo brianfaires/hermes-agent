@@ -410,8 +410,9 @@ Two related diagnostics share this owner but have different fidelity:
    `<HERMES_HOME>/sessions/request-captures/capture_ID/` as `with_tools.json`
    and `prompt_only.json` after structural secret/URL-query redaction. These
    human-review artifacts intentionally permit invalid JSON: values longer
-   than 200 characters start on a new line and visible `\\n` text becomes real
-   line breaks.
+   than 100 characters start on a new line, visible `\\n` text becomes real
+   line breaks, and long lines wrap at the first whitespace after 110
+   characters.
 
 Example:
 

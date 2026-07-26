@@ -37,6 +37,31 @@ def _capture_request_in_subprocess(logs_dir, ready, result_queue):
     result_queue.put([str(path) for path in pair] if pair else None)
 
 
+def _parse_human_review_capture(text):
+    """Re-escape display newlines inside strings for structural assertions."""
+
+    escaped = []
+    in_string = False
+    backslash = False
+    for character in text:
+        if in_string and character == "\n":
+            escaped.append("\\n")
+            backslash = False
+            continue
+        escaped.append(character)
+        if not in_string:
+            if character == '"':
+                in_string = True
+            continue
+        if backslash:
+            backslash = False
+        elif character == "\\":
+            backslash = True
+        elif character == '"':
+            in_string = False
+    return json.loads("".join(escaped))
+
+
 @pytest.fixture(autouse=True)
 def _no_codex_backoff(monkeypatch):
     """Short-circuit retry backoff so Codex retry tests don't block on real
@@ -3046,8 +3071,8 @@ def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch,
     assert with_tools.parent == prompt_only.parent
     assert with_tools.parent.name.startswith("capture_")
     assert with_tools.parent.parent == tmp_path / "request-captures"
-    full_payload = json.loads(with_tools.read_text())
-    prompt_payload = json.loads(prompt_only.read_text())
+    full_payload = _parse_human_review_capture(with_tools.read_text())
+    prompt_payload = _parse_human_review_capture(prompt_only.read_text())
     assert full_payload["capture"]["boundary"] == "hermes_provider_dispatch"
     assert full_payload["capture"]["redaction_applied"] is True
     assert full_payload["capture"]["provider_sdk_wrappers_included"] is False
@@ -3200,21 +3225,32 @@ def test_provider_boundary_capture_formats_long_string_values_for_human_review(
             json.loads(text)
 
 
-def test_provider_boundary_capture_human_formatting_starts_above_200_chars():
+def test_provider_boundary_capture_human_formatting_starts_above_100_chars():
     from agent.agent_runtime_helpers import _format_request_capture_for_human
 
-    long_key = "k" * 201
+    long_key = "k" * 101
     rendered = _format_request_capture_for_human(
         {
-            "exactly_200": "a" * 200,
-            "over_200": "b" * 201,
+            "exactly_100": "a" * 100,
+            "over_100": "b" * 101,
             long_key: "value",
         }
     )
 
-    assert '"exactly_200": "' + ("a" * 200) + '"' in rendered
-    assert '"over_200": "\n' + ("b" * 201) + '"' in rendered
+    assert '"exactly_100": "' + ("a" * 100) + '"' in rendered
+    assert '"over_100": "\n' + ("b" * 101) + '"' in rendered
     assert '"' + long_key + '": "value"' in rendered
+
+
+def test_provider_boundary_capture_wraps_long_values_after_110_chars():
+    from agent.agent_runtime_helpers import _format_request_capture_for_human
+
+    rendered = _format_request_capture_for_human(
+        {"content": ("x" * 111) + " " + ("y" * 112) + "\tlast line"}
+    )
+
+    assert '"content": "\n' + ("x" * 111) + "\n" in rendered
+    assert ("y" * 112) + "\nlast line\"" in rendered
 
 
 def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):

@@ -1979,11 +1979,28 @@ def _format_request_capture_for_human(payload: Dict[str, Any]) -> str:
 
         if not is_key:
             value = json.loads(token)
-            if isinstance(value, str) and len(value) > 200:
+            if isinstance(value, str) and len(value) > 100:
                 normalized = value.replace("\\n", "\n")
+                wrapped_lines: List[str] = []
+                for line in normalized.split("\n"):
+                    remainder = line
+                    while len(remainder) > 110:
+                        break_at = next(
+                            (
+                                index
+                                for index in range(110, len(remainder))
+                                if remainder[index].isspace()
+                            ),
+                            None,
+                        )
+                        if break_at is None:
+                            break
+                        wrapped_lines.append(remainder[:break_at])
+                        remainder = remainder[break_at + 1 :]
+                    wrapped_lines.append(remainder)
                 escaped_lines = [
                     json.dumps(line, ensure_ascii=False)[1:-1]
-                    for line in normalized.split("\n")
+                    for line in wrapped_lines
                 ]
                 token = '"\n' + "\n".join(escaped_lines) + '"'
 
