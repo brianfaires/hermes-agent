@@ -227,6 +227,49 @@ def test_trash_fails_closed_on_active_work(ghost_topology, field, value):
     assert _statuses(db_path, ids) == before
 
 
+def test_trash_fails_closed_on_queued_owner_instruction(ghost_topology):
+    db_path, ids = ghost_topology
+    conn = kb.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?",
+            (ids["generated_a"],),
+        )
+        instruction = kb.create_owner_instruction(
+            conn,
+            task_id=ids["generated_a"],
+            assignee="ops",
+            source="test",
+            source_key="queued-before-thread-cancel",
+            actor="Brian",
+            body="Instruction: rerun_request",
+        )
+        assert kb.route_owner_instruction(conn, instruction.id) == "queued"
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=?",
+            (ids["generated_a"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _statuses(db_path, ids)
+
+    result = handle_reaction(_reaction(), config=_config())
+
+    assert result.reason == "pending_owner_instructions"
+    assert _statuses(db_path, ids) == before
+    conn = kb.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE kind='cancel_thread_work'"
+        ).fetchone()[0] == 0
+        queued = kb.get_owner_instruction(conn, instruction.id)
+        assert queued is not None
+        assert queued.status == "queued"
+    finally:
+        conn.close()
+
+
 def test_trash_fails_closed_on_external_dependent(ghost_topology):
     db_path, ids = ghost_topology
     conn = kb.connect(db_path)

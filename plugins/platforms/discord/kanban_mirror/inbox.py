@@ -755,6 +755,16 @@ def _apply_cancel_thread_work(
                 consumed=True, reason="unsafe_active_work",
                 task_id=represented_task_id, action=action,
             )
+        if conn.execute(
+            f"SELECT 1 FROM task_owner_instructions "
+            f"WHERE task_id IN ({placeholders}) "
+            "AND status IN ('pending','queued') LIMIT 1",
+            tuple(sorted(owned)),
+        ).fetchone() is not None:
+            return KanbanReplyInboxResult(
+                consumed=True, reason="pending_owner_instructions",
+                task_id=represented_task_id, action=action,
+            )
         external = conn.execute(
             f"SELECT l.parent_id,l.child_id FROM task_links l "
             f"WHERE l.parent_id IN ({placeholders}) AND l.child_id NOT IN ({placeholders}) LIMIT 1",
