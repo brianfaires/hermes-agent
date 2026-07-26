@@ -20,6 +20,7 @@ import pytest
 # importing the production module.
 from plugins.platforms.discord.adapter import (  # noqa: E402
     ClarifyChoiceView,
+    DiscordAdapter,
     ExecApprovalView,
     ModelPickerView,
     SlashConfirmView,
@@ -344,6 +345,34 @@ def test_component_check_pairing_approved_user_passes(monkeypatch):
         interaction = _interaction(11111)
         assert _component_check_auth(interaction, set(), set()) is True
     mock_store.is_approved.assert_called_once_with("discord", "11111")
+
+
+def test_component_check_pairing_uses_profile_store():
+    """Secondary-profile components must not consult the global pairing store."""
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = True
+    with patch("gateway.pairing.PairingStore", return_value=mock_store) as store_cls:
+        assert _component_check_auth(
+            _interaction(11111),
+            set(),
+            set(),
+            pairing_profile="coder",
+        ) is True
+    store_cls.assert_called_once_with(profile="coder")
+
+
+def test_adapter_pairing_check_uses_profile_store():
+    adapter = object.__new__(DiscordAdapter)
+    adapter._inbound_profile = "coder"
+    from unittest.mock import MagicMock, patch
+
+    mock_store = MagicMock()
+    mock_store.is_approved.return_value = True
+    with patch("gateway.pairing.PairingStore", return_value=mock_store) as store_cls:
+        assert adapter._is_pairing_approved_user("11111") is True
+    store_cls.assert_called_once_with(profile="coder")
 
 
 def test_component_check_pairing_not_approved_user_rejected(monkeypatch):

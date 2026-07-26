@@ -808,6 +808,7 @@ class TestSenderMayDesignateHome:
 
     def test_pairing_approved_sender_allowed(self):
         adapter = make_adapter()
+        adapter._inbound_profile = "coder"
         adapter._access_policy = AccessPolicy(
             dm_policy="pairing",
             dm_allow_from=[],
@@ -823,6 +824,7 @@ class TestSenderMayDesignateHome:
         with patch("gateway.pairing.PairingStore") as mock_store_cls:
             mock_store_cls.return_value.is_approved.return_value = True
             assert adapter._sender_may_designate_home(ctx) is True
+            mock_store_cls.assert_called_once_with(profile="coder")
 
     def test_allowlist_sender_allowed(self):
         adapter = make_adapter()

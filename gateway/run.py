@@ -9578,7 +9578,12 @@ class GatewayRunner(
                     continue
                 claimed[(platform, fp)] = profile_name
 
-            self._configure_profile_adapter(adapter, profile_name, platform)
+            self._configure_profile_adapter(
+                adapter,
+                profile_name,
+                platform,
+                unauthorized_dm_behavior=profile_cfg.get_unauthorized_dm_behavior(platform),
+            )
 
             try:
                 with _profile_runtime_scope(profile_home):
@@ -9608,8 +9613,11 @@ class GatewayRunner(
         adapter: BasePlatformAdapter,
         profile_name: str,
         platform: Platform,
+        *,
+        unauthorized_dm_behavior: Optional[str] = None,
     ) -> None:
         """Install the profile-scoped handlers shared by startup and reconnect."""
+        adapter._unauthorized_dm_behavior = unauthorized_dm_behavior
         if hasattr(adapter, "set_runtime_profile_home"):
             from hermes_cli.profiles import get_profile_dir
 
@@ -9644,7 +9652,8 @@ class GatewayRunner(
 
                     profile_home = get_profile_dir(profile_name)
                     with _profile_runtime_scope(profile_home):
-                        profile_config = load_gateway_config().platforms.get(platform)
+                        profile_gateway_config = load_gateway_config()
+                        profile_config = profile_gateway_config.platforms.get(platform)
                         if profile_config is None or not profile_config.enabled:
                             return
                         adapter = self._create_adapter(platform, profile_config)
@@ -9656,7 +9665,12 @@ class GatewayRunner(
                             )
                             return
                         self._configure_profile_adapter(
-                            adapter, profile_name, platform
+                            adapter,
+                            profile_name,
+                            platform,
+                            unauthorized_dm_behavior=(
+                                profile_gateway_config.get_unauthorized_dm_behavior(platform)
+                            ),
                         )
                         success = await self._connect_adapter_with_timeout(
                             adapter, platform, is_reconnect=True

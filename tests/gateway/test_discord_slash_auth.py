@@ -182,6 +182,9 @@ def _stub_pairing_store(monkeypatch, approved_ids):
     approved = {str(uid) for uid in approved_ids}
 
     class _FakePairingStore:
+        def __init__(self, profile=None):
+            self.profile = profile
+
         def is_approved(self, platform, user_id):
             return platform == "discord" and str(user_id) in approved
 

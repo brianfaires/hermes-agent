@@ -170,6 +170,25 @@ def test_chat_route_cannot_borrow_routed_profile_pairing(monkeypatch):
     routed_pairing.is_approved.assert_not_called()
 
 
+def test_secondary_transport_missing_pairing_store_fails_closed(monkeypatch):
+    """A missing secondary store must never fall back to global approvals."""
+    runner, _default_adapter, secondary_adapter = _make_multiplex_runner(monkeypatch)
+    runner.pairing_stores = {}
+    runner.pairing_store.is_approved.return_value = True
+
+    source = SessionSource(
+        platform=Platform.WECOM,
+        user_id="global-only-user",
+        chat_id="dm-chat",
+        chat_type="dm",
+        profile="coder",
+    )
+    source._transport_adapter_ref = lambda: secondary_adapter
+
+    assert runner._is_user_authorized(source) is False
+    runner.pairing_store.is_approved.assert_not_called()
+
+
 def test_named_active_profile_routes_default_to_secondary_registry(monkeypatch):
     """Built-in default is secondary when a named profile owns the primary map."""
     runner, _old_primary, _old_secondary = _make_multiplex_runner(monkeypatch)

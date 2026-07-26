@@ -5049,7 +5049,11 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             from gateway.pairing import PairingStore
 
-            return bool(PairingStore().is_approved("discord", user_id))
+            return bool(
+                PairingStore(
+                    profile=getattr(self, "_inbound_profile", None)
+                ).is_approved("discord", user_id)
+            )
         except Exception:
             return False
 
@@ -7532,6 +7536,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_profile=getattr(self, "_inbound_profile", None),
                 require_admin=require_admin,
                 admin_user_ids=admin_user_ids,
                 allow_permanent=allow_permanent,
@@ -7591,6 +7596,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 confirm_id=confirm_id,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_profile=getattr(self, "_inbound_profile", None),
             )
 
             msg = await channel.send(content=content, embed=embed, view=view)
@@ -7698,6 +7704,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    pairing_profile=getattr(self, "_inbound_profile", None),
                 )
             else:
                 embed.add_field(
@@ -7754,6 +7761,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_profile=getattr(self, "_inbound_profile", None),
             )
             # Mirror the prompt in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
@@ -7820,6 +7828,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_model_selected=on_model_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_profile=getattr(self, "_inbound_profile", None),
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -7868,6 +7877,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_choice_selected=on_choice_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_profile=getattr(self, "_inbound_profile", None),
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -9212,6 +9222,8 @@ def _component_check_auth(
     interaction,
     allowed_user_ids: Optional[set],
     allowed_role_ids: Optional[set],
+    *,
+    pairing_profile: Optional[str] = None,
 ) -> bool:
     """Shared user-or-role OR semantics for component view button clicks.
 
@@ -9282,7 +9294,7 @@ def _component_check_auth(
     if uid:
         try:
             from gateway.pairing import PairingStore
-            store = PairingStore()
+            store = PairingStore(profile=pairing_profile)
             if store.is_approved("discord", uid):
                 return True
         except Exception:
@@ -9358,11 +9370,13 @@ def _define_discord_view_classes() -> None:
             admin_user_ids: Optional[set] = None,
             allow_permanent: bool = True,
             smart_denied: bool = False,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             # Opt-in admin gate for exec approval (default off → user-scope,
             # the v0.16-restored behavior). When on, the clicker must be in
             # ``admin_user_ids`` on top of passing the base admission check.
@@ -9388,7 +9402,10 @@ def _define_discord_view_classes() -> None:
             can approve (logged once so the misconfiguration is visible).
             """
             if not _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             ):
                 return False
             if not self.require_admin:
@@ -9517,17 +9534,22 @@ def _define_discord_view_classes() -> None:
             confirm_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.confirm_id = confirm_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             )
 
         async def _resolve(
@@ -9622,16 +9644,21 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             )
 
         async def _respond(
@@ -9721,6 +9748,7 @@ def _define_discord_view_classes() -> None:
             on_model_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=120)
             self.providers = providers
@@ -9730,6 +9758,7 @@ def _define_discord_view_classes() -> None:
             self.on_model_selected = on_model_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             self.resolved = False
             self._selected_provider: str = ""
             self._pending_expensive_model: str = ""
@@ -9738,7 +9767,10 @@ def _define_discord_view_classes() -> None:
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             )
 
         def _build_provider_select(self):
@@ -10048,12 +10080,14 @@ def _define_discord_view_classes() -> None:
             on_choice_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=120)
             self.choices = list(choices)[:25]  # Discord select cap
             self.on_choice_selected = on_choice_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             self.resolved = False
             self._message = None
 
@@ -10078,7 +10112,10 @@ def _define_discord_view_classes() -> None:
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             )
 
         async def _on_select(self, interaction: discord.Interaction):
@@ -10146,12 +10183,14 @@ def _define_discord_view_classes() -> None:
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_profile: Optional[str] = None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self.pairing_profile = pairing_profile
             self.resolved = False
 
             for index, choice in enumerate(self.choices):
@@ -10215,7 +10254,10 @@ def _define_discord_view_classes() -> None:
 
         def _check_auth(self, interaction: "discord.Interaction") -> bool:
             return _component_check_auth(
-                interaction, self.allowed_user_ids, self.allowed_role_ids,
+                interaction,
+                self.allowed_user_ids,
+                self.allowed_role_ids,
+                pairing_profile=self.pairing_profile,
             )
 
         def _make_choice_callback(self, index: int, choice: str):

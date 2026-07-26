@@ -215,6 +215,27 @@ class GatewayAuthorizationMixin:
                 policy = extra.get("dm_policy")
         return str(policy or "").strip().lower()
 
+    def _adapter_unauthorized_dm_behavior(
+        self,
+        platform: Optional[Platform],
+        *,
+        profile: Optional[str] = None,
+    ) -> str:
+        """Read the transport profile's resolved unauthorized-DM behavior."""
+        if not platform:
+            return ""
+        adapter = self._authorization_adapter(platform, profile)
+        if adapter is None:
+            return ""
+        behavior = getattr(adapter, "_unauthorized_dm_behavior", None)
+        if behavior is None:
+            platform_config = getattr(adapter, "config", None)
+            extra = getattr(platform_config, "extra", None)
+            if isinstance(extra, dict):
+                behavior = extra.get("unauthorized_dm_behavior")
+        normalized = str(behavior or "").strip().lower()
+        return normalized if normalized in {"pair", "ignore"} else ""
+
     def _adapter_group_policy(
         self,
         platform: Optional[Platform],
@@ -317,8 +338,11 @@ class GatewayAuthorizationMixin:
         registered adapter. The active/default transport uses the global store.
         """
         per_profile = getattr(self, "pairing_stores", None) or {}
-        if profile and profile in per_profile:
-            return per_profile[profile]
+        if profile:
+            # A secondary transport must have its own store. Falling back to
+            # the active/global store would let one profile's approval grant
+            # access through another profile's bot.
+            return per_profile.get(profile)
         return getattr(self, "pairing_store", None)
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -691,6 +715,16 @@ class GatewayAuthorizationMixin:
         6. No allowlist and no explicit config → ``"pair"`` (open-gateway default).
         """
         config = getattr(self, "config", None)
+
+        # Secondary transports own their profile's resolved configuration.
+        # Never let the active profile's platform/global setting override it.
+        if profile:
+            adapter_behavior = self._adapter_unauthorized_dm_behavior(
+                platform,
+                profile=profile,
+            )
+            if adapter_behavior:
+                return adapter_behavior
 
         # Check for an explicit per-platform override first.
         if config and hasattr(config, "get_unauthorized_dm_behavior") and platform:

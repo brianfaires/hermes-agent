@@ -5,15 +5,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, SessionSource
 from gateway.run import GatewayRunner
 
 
-def _adapter(dm_policy: str):
+def _adapter(dm_policy: str, *, unauthorized_dm_behavior=None):
     return SimpleNamespace(
         _dm_policy=dm_policy,
         _running=True,
+        config=PlatformConfig(
+            enabled=True,
+            extra={"unauthorized_dm_behavior": unauthorized_dm_behavior}
+            if unauthorized_dm_behavior
+            else {},
+        ),
         send=AsyncMock(),
     )
 
@@ -91,3 +97,41 @@ async def test_secondary_transport_generates_code_in_its_own_pairing_store(runne
     global_store.generate_code.assert_not_called()
     secondary.send.assert_awaited_once()
     primary.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_secondary_transport_uses_its_unauthorized_dm_config(runner):
+    primary = _adapter("", unauthorized_dm_behavior="pair")
+    secondary = _adapter("", unauthorized_dm_behavior="ignore")
+    secondary_store = _store(code="CODER")
+    runner.config.platforms[Platform.TELEGRAM] = primary.config
+    runner.adapters = {Platform.TELEGRAM: primary}
+    runner._profile_adapters = {"coder": {Platform.TELEGRAM: secondary}}
+    runner.pairing_stores = {"coder": secondary_store}
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="unknown",
+        chat_id="dm-chat",
+        chat_type="dm",
+        profile="coder",
+    )
+    source._transport_adapter_ref = lambda: secondary
+
+    await runner._handle_message(MessageEvent(text="hello", source=source))
+
+    secondary_store.generate_code.assert_not_called()
+    secondary.send.assert_not_awaited()
+
+
+def test_profile_adapter_keeps_resolved_unauthorized_dm_behavior(runner):
+    adapter = MagicMock()
+
+    runner._configure_profile_adapter(
+        adapter,
+        "coder",
+        Platform.TELEGRAM,
+        unauthorized_dm_behavior="ignore",
+    )
+
+    assert adapter._unauthorized_dm_behavior == "ignore"
