@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from plugins.platforms.discord.kanban_mirror.render import (
     render_post, render_digest, post_title, stage_tag, needs_brian_tag, redact,
-    STATUS_EMOJI, review_artifact_paths,
+    STATUS_EMOJI, review_artifact_paths, work_item_ids,
 )
 from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
 
@@ -147,6 +147,32 @@ def test_child_with_external_parent_still_renders_with_waits_on_note():
 
     assert "🟢 Current root" in body
     assert "▫️ Shared child — waits on: Current root, External prerequisite" in body
+
+
+def test_ghost_fan_in_uses_decomposition_provenance_without_shared_parent():
+    bound = mk_card("t_bound", "Completed bound card", "done")
+    generated = mk_card("t_generated", "Generated prerequisite", "ready")
+    shared = mk_card("t_shared", "Unrelated shared prerequisite", "ready")
+    root = mk_card("t_root", "Root continuation", "todo")
+    s = snap(
+        [bound, generated, shared, root],
+        links=[
+            ("t_bound", "t_root"),
+            ("t_generated", "t_root"),
+            ("t_shared", "t_root"),
+        ],
+    )
+    s.recent_events["t_root"] = [{
+        "id": 1,
+        "kind": "decomposed",
+        "payload": '{"child_ids":["t_generated"]}',
+        "created_at": 1,
+    }]
+
+    displayed = work_item_ids(init_with(["t_bound"]), s)
+
+    assert displayed == ["t_bound", "t_generated", "t_root"]
+    assert "t_shared" not in displayed
 
 
 def test_status_emoji_includes_skipped_and_canceled_items():
