@@ -2852,6 +2852,16 @@ DEFAULT_CONFIG = {
         # wedges the job's dispatch guard forever. Also overridable via
         # HERMES_CRON_SESSION_DB_TIMEOUT env var. 0 = unlimited (skip the bound).
         "session_db_timeout_seconds": 10,
+        # Cross-profile cron lifecycle event publication. Disabled by default:
+        # each profile must explicitly opt in before it atomically publishes
+        # one redacted file per create/update/remove/complete event under
+        # <Hermes root>/events/cron/pending/<profile>/. Cron core is publisher-
+        # only; the bundled cron-event-subscriber plugin owns consumption,
+        # retries, acknowledgements, recovery, and retention.
+        "events": {
+            "enabled": False,
+            "directory": "",
+        },
     },
 
     # Kanban multi-agent coordination — controls the dispatcher loop that

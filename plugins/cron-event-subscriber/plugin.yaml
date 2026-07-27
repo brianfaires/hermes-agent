@@ -1,0 +1,7 @@
+name: cron-event-subscriber
+version: 1.0.0
+kind: standalone
+description: "Durable subscriber for atomic cross-profile cron lifecycle events. Adds /cron-events and performs recovery/retention maintenance at session start."
+author: brian
+hooks:
+  - on_session_start

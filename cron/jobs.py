@@ -356,11 +356,11 @@ def _jobs_lock():
         finally:
             _jobs_lock_state.depth = 0
 
-# Fields on a cron job that must never change after creation. ``id`` is used
-# as a filesystem path component under ``OUTPUT_DIR``; allowing it to be
-# updated lets an unsafe value (``../escape``, absolute path, nested) leak
-# into output writes/deletes.
-_IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+# Fields callers must never mutate directly. ``id`` is used as a filesystem
+# path component under OUTPUT_DIR; allowing it to change enables path escape.
+# ``name_is_explicit`` is an internal privacy-provenance marker updated only
+# when the public ``name`` field changes.
+_IMMUTABLE_JOB_FIELDS = frozenset({"id", "name_is_explicit"})
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -380,18 +380,32 @@ def _job_output_dir(job_id: str) -> Path:
 
 
 def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
-    """Normalize legacy/single-skill and multi-skill inputs into a unique ordered list."""
+    """Normalize legacy/single-skill and multi-skill inputs into a unique ordered list.
+
+    Only plain skill-name strings are accepted. Mappings and other objects are
+    rejected so nested payloads cannot be stringified into job storage or events.
+    """
     if skills is None:
         raw_items = [skill] if skill else []
     elif isinstance(skills, str):
         raw_items = [skills]
-    else:
+    elif isinstance(skills, list):
         raw_items = list(skills)
+    else:
+        raise ValueError("skills must be a string or list of skill name strings")
 
     normalized: List[str] = []
     for item in raw_items:
-        text = str(item or "").strip()
-        if text and text not in normalized:
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise ValueError("skill names must be plain strings")
+        text = item.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}", text) is None:
+            raise ValueError(f"invalid skill name: {text!r}")
+        if text not in normalized:
             normalized.append(text)
     return normalized
 
@@ -403,6 +417,37 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized["skills"] = skills
     normalized["skill"] = skills[0] if skills else None
     return normalized
+
+
+def _normalize_toolset_list(value: Optional[Any]) -> Optional[List[str]]:
+    """Accept only plain toolset identifier strings; never stringify objects."""
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("enabled_toolsets must be a list of toolset names")
+    normalized: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("toolset names must be plain strings")
+        text = item.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", text) is None:
+            raise ValueError(f"invalid toolset name: {text!r}")
+        if text not in normalized:
+            normalized.append(text)
+    return normalized or None
+
+
+def _normalize_explicit_name(value: Any) -> Optional[str]:
+    """Normalize an explicit display name without coercing nested objects."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("cron job name must be a string")
+    return value.strip() or None
 
 
 def _coerce_job_text(value: Any, fallback: str = "") -> str:
@@ -1230,8 +1275,8 @@ def create_job(
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
     normalized_prompt_path = _normalize_prompt_path(prompt_path)
-    normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
-    normalized_toolsets = normalized_toolsets or None
+    normalized_toolsets = _normalize_toolset_list(enabled_toolsets)
+    normalized_name = _normalize_explicit_name(name)
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
@@ -1316,7 +1361,10 @@ def create_job(
 
     job = {
         "id": job_id,
-        "name": name or label_source[:50].strip(),
+        "name": normalized_name or label_source[:50].strip(),
+        # Cross-profile observers may publish explicit display names, but must
+        # not mistake prompt/path/script-derived fallback labels for safe metadata.
+        "name_is_explicit": normalized_name is not None,
         "prompt": prompt_text,
         "prompt_path": normalized_prompt_path,
         "skills": normalized_skills,
@@ -1461,6 +1509,12 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             previous_inference_axes = _normalized_inference_axes(job)
             if "prompt_path" in updates:
                 updates["prompt_path"] = _normalize_prompt_path(updates["prompt_path"])
+            if "enabled_toolsets" in updates:
+                updates["enabled_toolsets"] = _normalize_toolset_list(
+                    updates["enabled_toolsets"]
+                )
+            if "name" in updates:
+                updates["name"] = _normalize_explicit_name(updates["name"])
 
             prompt_update = None
             prompt_present = False
@@ -1471,6 +1525,8 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             prompt_path_update = updates.get("prompt_path") if "prompt_path" in updates else None
 
             updated = _apply_skill_fields({**job, **updates})
+            if "name" in updates:
+                updated["name_is_explicit"] = updated.get("name") is not None
             effective_prompt_raw = _coerce_job_text(updated.get("prompt"))
             effective_prompt = effective_prompt_raw.strip()
             effective_prompt_path = _coerce_job_text(updated.get("prompt_path")).strip()
