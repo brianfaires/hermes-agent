@@ -2110,13 +2110,27 @@ def _format_request_capture_for_human(payload: Dict[str, Any]) -> str:
     return "".join(rendered)
 
 
-def _write_request_capture_artifact(path: Path, payload: Dict[str, Any]) -> None:
-    """Durably write a human-review capture inside its hidden staging directory."""
+def _write_request_capture_artifact(
+    path: Path,
+    payload: Dict[str, Any],
+    *,
+    human_format: bool = True,
+) -> None:
+    """Durably write a request capture inside its hidden staging directory."""
 
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(_format_request_capture_for_human(payload))
+            if human_format:
+                rendered = _format_request_capture_for_human(payload)
+            else:
+                rendered = json.dumps(
+                    payload,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                )
+            handle.write(rendered)
             handle.flush()
             os.fsync(handle.fileno())
     except BaseException:
@@ -2203,15 +2217,17 @@ def _prune_provider_boundary_captures(directory: Path, retention: int) -> None:
         if not capture.is_dir():
             stale.append(capture)
             continue
-        with_tools = capture / "with_tools.json"
-        prompt_only = capture / "prompt_only.json"
-        if not with_tools.is_file() or not prompt_only.is_file():
+        full_request = capture / "full_request.json"
+        no_tools = capture / "no_tools.json"
+        raw_request = capture / "raw_request.json"
+        if not all(path.is_file() for path in (full_request, no_tools, raw_request)):
             stale.append(capture)
             continue
         try:
             newest_mtime = max(
-                with_tools.stat().st_mtime_ns,
-                prompt_only.stat().st_mtime_ns,
+                full_request.stat().st_mtime_ns,
+                no_tools.stat().st_mtime_ns,
+                raw_request.stat().st_mtime_ns,
             )
         except FileNotFoundError:
             continue
@@ -2237,14 +2253,14 @@ def capture_provider_boundary_request(
     api_kwargs: Dict[str, Any],
     *,
     endpoint_kind: Optional[str] = None,
-) -> Optional[Tuple[Path, Path]]:
-    """Persist one redacted provider request as an atomically published pair."""
+) -> Optional[Tuple[Path, Path, Path]]:
+    """Persist one redacted provider request as an atomically published triplet."""
 
     staging_dir: Optional[Path] = None
-    published_pair: Optional[Tuple[Path, Path]] = None
+    published_artifacts: Optional[Tuple[Path, Path, Path]] = None
     try:
-        body_with_tools = _request_body_for_debug(api_kwargs)
-        body_prompt_only = copy.deepcopy(body_with_tools)
+        full_request_body = _request_body_for_debug(api_kwargs)
+        no_tools_body = copy.deepcopy(full_request_body)
         for key in (
             "tools",
             "tool_choice",
@@ -2252,32 +2268,34 @@ def capture_provider_boundary_request(
             "functions",
             "function_call",
         ):
-            body_prompt_only.pop(key, None)
+            no_tools_body.pop(key, None)
 
-        with_tools_payload = {
-            "context_summary": _request_context_summary(body_with_tools),
+        full_request_payload = {
+            "context_summary": _request_context_summary(full_request_body),
             **_redact_request_payload(
                 _capture_payload(
                     agent,
-                    body_with_tools,
-                    artifact="with_tools",
+                    full_request_body,
+                    artifact="full_request",
                     endpoint_kind=endpoint_kind,
                 ),
                 redact_structured_credentials=True,
             ),
         }
-        prompt_only_payload = {
-            "context_summary": _request_context_summary(body_prompt_only),
+        no_tools_payload = {
+            "context_summary": _request_context_summary(no_tools_body),
             **_redact_request_payload(
                 _capture_payload(
                     agent,
-                    body_prompt_only,
-                    artifact="prompt_only",
+                    no_tools_body,
+                    artifact="no_tools",
                     endpoint_kind=endpoint_kind,
                 ),
                 redact_structured_credentials=True,
             ),
         }
+        raw_request_payload = copy.deepcopy(full_request_payload)
+        raw_request_payload["capture"]["artifact"] = "raw_request"
 
         capture_dir = agent.logs_dir / "request-captures"
         with _REQUEST_CAPTURE_LOCK:
@@ -2301,29 +2319,41 @@ def capture_provider_boundary_request(
                 except OSError:
                     pass
 
-                staged_with_tools = staging_dir / "with_tools.json"
-                staged_prompt_only = staging_dir / "prompt_only.json"
-                _write_request_capture_artifact(staged_with_tools, with_tools_payload)
-                _write_request_capture_artifact(staged_prompt_only, prompt_only_payload)
+                staged_full_request = staging_dir / "full_request.json"
+                staged_no_tools = staging_dir / "no_tools.json"
+                staged_raw_request = staging_dir / "raw_request.json"
+                _write_request_capture_artifact(
+                    staged_full_request,
+                    full_request_payload,
+                )
+                _write_request_capture_artifact(staged_no_tools, no_tools_payload)
+                _write_request_capture_artifact(
+                    staged_raw_request,
+                    raw_request_payload,
+                    human_format=False,
+                )
                 _fsync_capture_directory(staging_dir)
                 os.replace(staging_dir, final_dir)
                 staging_dir = None
                 _fsync_capture_directory(capture_dir)
 
-                published_pair = (
-                    final_dir / "with_tools.json",
-                    final_dir / "prompt_only.json",
+                published_artifacts = (
+                    final_dir / "full_request.json",
+                    final_dir / "no_tools.json",
+                    final_dir / "raw_request.json",
                 )
                 _prune_provider_boundary_captures(
                     capture_dir,
                     getattr(agent, "_provider_boundary_capture_retention", 20),
                 )
-        return published_pair
+        return published_artifacts
     except Exception as capture_error:
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        if published_pair is not None and all(path.exists() for path in published_pair):
-            return published_pair
+        if published_artifacts is not None and all(
+            path.exists() for path in published_artifacts
+        ):
+            return published_artifacts
         if getattr(agent, "verbose_logging", False):
             logger.warning("Failed to capture provider-boundary request: %s", capture_error)
         return None

@@ -10,25 +10,26 @@ request_capture:
   retention: 20
 ```
 
-Restart the CLI or gateway process after changing the setting. Each newly constructed agent writes one pair under:
+Restart the CLI or gateway process after changing the setting. Each newly constructed agent writes one triplet under:
 
 ```text
 <HERMES_HOME>/sessions/request-captures/
 ```
 
-The pair is published as one capture directory:
+The triplet is published as one capture directory:
 
 ```text
 <HERMES_HOME>/sessions/request-captures/capture_<id>/
-  with_tools.json
-  prompt_only.json
+  full_request.json
+  no_tools.json
+  raw_request.json
 ```
 
-`with_tools.json` contains the Hermes-visible provider request structure, including tool definitions. `prompt_only.json` is derived from the same request after removing tool-definition and tool-selection fields. Each file starts with a `context_summary` object covering SOUL.md, the remaining Hermes system prompt, the complete `<available_skills>` section, and tools. Tool characters are counted from compact UTF-8 JSON; the prompt-only artifact reports zero tool characters. Every row reports raw characters, a provisional `characters / 3.2` token estimate, and its share of the four-section estimated total.
+`full_request.json` contains the Hermes-visible provider request structure, including tool definitions. `no_tools.json` is derived from the same request after removing tool-definition and tool-selection fields. Both are formatted for human review. `raw_request.json` contains the same full, redacted request as valid JSON before newline expansion or line wrapping. Each file starts with a `context_summary` object covering SOUL.md, the remaining Hermes system prompt, the complete `<available_skills>` section, and tools. Tool characters are counted from compact UTF-8 JSON; `no_tools.json` reports zero tool characters. Every row reports raw characters, a provisional `characters / 3.2` token estimate, and its share of the four-section estimated total.
 
-These are human-review artifacts rather than machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON.
+The two human-review artifacts are not necessarily machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON. `raw_request.json` does not receive those transformations.
 
-The root and pair directories are mode `0700`; artifacts are mode `0600`. Both files are written and synced in a hidden staging directory, then the directory is atomically renamed into view. A crash cannot expose a half-pair; the next writer removes any abandoned staging directory before publishing. Cross-process writers are serialized with a crash-released OS file lock. `retention` counts complete capture directories and is clamped to `1..1000`; older captures are removed after successful publication.
+The root and capture directories are mode `0700`; artifacts are mode `0600`. All three files are written and synced in a hidden staging directory, then the directory is atomically renamed into view. A crash cannot expose a partial triplet; the next writer removes any abandoned staging directory before publishing. Cross-process writers are serialized with a crash-released OS file lock. `retention` counts complete capture directories and is clamped to `1..1000`; older captures are removed after successful publication.
 
 ## Fidelity and privacy boundary
 

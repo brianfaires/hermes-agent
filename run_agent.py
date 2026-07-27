@@ -2656,7 +2656,7 @@ class AIAgent:
         api_kwargs: Dict[str, Any],
         *,
         endpoint_kind: Optional[str] = None,
-    ) -> Optional[Tuple[Path, Path]]:
+    ) -> Optional[Tuple[Path, Path, Path]]:
         """Forwarder for the opt-in first provider-request capture."""
         from agent.agent_runtime_helpers import capture_provider_boundary_request
 
@@ -2671,7 +2671,7 @@ class AIAgent:
         api_kwargs: Dict[str, Any],
         *,
         endpoint_kind: Optional[str] = None,
-    ) -> Optional[Tuple[Path, Path]]:
+    ) -> Optional[Tuple[Path, Path, Path]]:
         """Consume the opt-in one-shot capture at an actual provider boundary."""
         if not getattr(self, "_provider_boundary_capture_enabled", False):
             return None

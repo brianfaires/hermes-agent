@@ -410,13 +410,14 @@ Two related diagnostics share this owner but have different fidelity:
 2. Top-level `request_capture.enabled` (default `false`) captures the first
    Hermes-visible request for each newly constructed agent at the provider
    boundary. `request_capture.retention` defaults to `20` and is clamped to
-   `1..1000`. Each atomic pair is stored under
-   `<HERMES_HOME>/sessions/request-captures/capture_ID/` as `with_tools.json`
-   and `prompt_only.json` after structural secret/URL-query redaction. These
-   human-review artifacts intentionally permit invalid JSON: values longer
-   than 100 characters start on a new line, visible `\\n` text becomes real
-   line breaks, and long lines repeatedly wrap at the first whitespace after
-   each 110-character span.
+   `1..1000`. Each atomic triplet is stored under
+   `<HERMES_HOME>/sessions/request-captures/capture_ID/` as `full_request.json`,
+   `no_tools.json`, and `raw_request.json` after structural secret/URL-query
+   redaction. The first two are human-review artifacts that intentionally
+   permit invalid JSON: values longer than 100 characters start on a new line,
+   visible `\\n` text becomes real line breaks, and long lines repeatedly wrap
+   at the first whitespace after each 110-character span. `raw_request.json`
+   preserves the valid JSON serialization before those transformations.
 
 Example:
 
@@ -977,7 +978,7 @@ missing key as the shown value.
 | `discord.auto_thread` | `true` | Auto-thread eligible Discord messages |
 | `discord.no_thread_channels` | `""` | Explicit channel exclusions from auto-threading |
 | `request_capture.enabled` | `false` | Provider-boundary first-request capture |
-| `request_capture.retention` | `20` | Complete capture pairs, clamped `1..1000` |
+| `request_capture.retention` | `20` | Complete capture triplets, clamped `1..1000` |
 | `platforms.webhook.extra.script_triggers_enabled` | `false` | Global script-trigger gate |
 | `platforms.webhook.extra.script_trigger_allowlist` | `[]` | Resolved script allowlist |
 | `platforms.webhook.extra.script_timeout_seconds` | `30` | Global script ceiling |
@@ -1063,7 +1064,7 @@ Fork-relevant environment variables and profile files:
 | `<HERMES_HOME>/voice/commands.toml` | STT alias catalog, cached at adapter startup |
 | `<HERMES_HOME>/voice/acknowledgements.yaml` | Voice acknowledgement catalog, cached at adapter startup |
 | `<HERMES_HOME>/cron/calendar_sync.json` | Calendar plugin sidecar state |
-| `<HERMES_HOME>/sessions/request-captures/` | Sensitive provider-boundary diagnostic pairs |
+| `<HERMES_HOME>/sessions/request-captures/` | Sensitive provider-boundary diagnostic triplets |
 
 ## Commit coverage ledger
 

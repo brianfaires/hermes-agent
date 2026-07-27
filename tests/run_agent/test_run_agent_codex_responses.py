@@ -30,11 +30,11 @@ def _capture_request_in_subprocess(logs_dir, ready, result_queue):
         _provider_boundary_capture_retention=2,
         verbose_logging=False,
     )
-    pair = capture_provider_boundary_request(
+    artifacts = capture_provider_boundary_request(
         agent,
         {"model": "test-model", "messages": []},
     )
-    result_queue.put([str(path) for path in pair] if pair else None)
+    result_queue.put([str(path) for path in artifacts] if artifacts else None)
 
 
 def _parse_human_review_capture(text):
@@ -2982,7 +2982,7 @@ def test_dump_api_request_debug_redacts_request_and_error_secrets(monkeypatch, t
     assert "***" in dumped_text or "..." in dumped_text
 
 
-def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch, tmp_path):
+def test_provider_boundary_capture_writes_redacted_artifact_triplet(monkeypatch, tmp_path):
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
     agent._provider_boundary_capture_retention = 3
@@ -3064,15 +3064,19 @@ def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch,
         "timeout": object(),
     }
 
-    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+    full_request, no_tools, raw_request = agent._capture_provider_boundary_request(request)
 
-    assert with_tools.name == "with_tools.json"
-    assert prompt_only.name == "prompt_only.json"
-    assert with_tools.parent == prompt_only.parent
-    assert with_tools.parent.name.startswith("capture_")
-    assert with_tools.parent.parent == tmp_path / "request-captures"
-    full_payload = _parse_human_review_capture(with_tools.read_text())
-    prompt_payload = _parse_human_review_capture(prompt_only.read_text())
+    assert full_request.name == "full_request.json"
+    assert no_tools.name == "no_tools.json"
+    assert raw_request.name == "raw_request.json"
+    assert full_request.parent == no_tools.parent == raw_request.parent
+    assert full_request.parent.name.startswith("capture_")
+    assert full_request.parent.parent == tmp_path / "request-captures"
+    full_payload = _parse_human_review_capture(full_request.read_text())
+    prompt_payload = _parse_human_review_capture(no_tools.read_text())
+    raw_payload = json.loads(raw_request.read_text())
+    assert raw_payload["capture"]["artifact"] == "raw_request"
+    assert raw_payload["request"]["body"] == full_payload["request"]["body"]
     assert full_payload["capture"]["boundary"] == "hermes_provider_dispatch"
     assert full_payload["capture"]["redaction_applied"] is True
     assert full_payload["capture"]["provider_sdk_wrappers_included"] is False
@@ -3095,14 +3099,18 @@ def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch,
     assert full_payload["request"]["body"]["metadata"] is None
     assert full_payload["request"]["body"]["max_tokens"] == 123
     assert "timeout" not in full_payload["request"]["body"]
-    assert "private-value-for-test" not in with_tools.read_text()
-    assert "private-value-for-test" not in prompt_only.read_text()
+    assert all(
+        "private-value-for-test" not in artifact.read_text()
+        for artifact in (full_request, no_tools, raw_request)
+    )
     for sensitive_url_part in (
         "demo-pass",
         "opaque-value-for-test",
     ):
-        assert sensitive_url_part not in with_tools.read_text()
-        assert sensitive_url_part not in prompt_only.read_text()
+        assert all(
+            sensitive_url_part not in artifact.read_text()
+            for artifact in (full_request, no_tools, raw_request)
+        )
     for sensitive_header_part in (
         "opaque-bearer-value",
         "proxy-secret-value",
@@ -3111,8 +3119,10 @@ def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch,
         "signature-secret-value",
         "cookie-secret-value",
     ):
-        assert sensitive_header_part not in with_tools.read_text()
-        assert sensitive_header_part not in prompt_only.read_text()
+        assert all(
+            sensitive_header_part not in artifact.read_text()
+            for artifact in (full_request, no_tools, raw_request)
+        )
     assert full_payload["request"]["body"]["extra_headers"]["Content-Type"] == (
         "application/json"
     )
@@ -3138,11 +3148,15 @@ def test_provider_boundary_capture_writes_redacted_paired_artifacts(monkeypatch,
         "opaque-refresh-token-list-secret",
         "opaque-api-token-list-secret",
     ):
-        assert structured_secret not in with_tools.read_text()
-        assert structured_secret not in prompt_only.read_text()
-    assert stat.S_IMODE(with_tools.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(with_tools.stat().st_mode) == 0o600
-    assert stat.S_IMODE(prompt_only.stat().st_mode) == 0o600
+        assert all(
+            structured_secret not in artifact.read_text()
+            for artifact in (full_request, no_tools, raw_request)
+        )
+    assert stat.S_IMODE(full_request.parent.stat().st_mode) == 0o700
+    assert all(
+        stat.S_IMODE(artifact.stat().st_mode) == 0o600
+        for artifact in (full_request, no_tools, raw_request)
+    )
 
 
 def test_codex_stream_captures_final_provider_kwargs(monkeypatch):
@@ -3189,10 +3203,11 @@ def test_provider_boundary_capture_summarizes_context_sections(monkeypatch, tmp_
         "messages": [],
     }
 
-    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+    full_request, no_tools, raw_request = agent._capture_provider_boundary_request(request)
 
-    full_payload = _parse_human_review_capture(with_tools.read_text())
-    prompt_payload = _parse_human_review_capture(prompt_only.read_text())
+    full_payload = _parse_human_review_capture(full_request.read_text())
+    prompt_payload = _parse_human_review_capture(no_tools.read_text())
+    raw_payload = json.loads(raw_request.read_text())
     full_summary = full_payload["context_summary"]
     prompt_summary = prompt_payload["context_summary"]
     tools_chars = len(
@@ -3207,6 +3222,7 @@ def test_provider_boundary_capture_summarizes_context_sections(monkeypatch, tmp_
 
     assert list(full_payload)[0] == "context_summary"
     assert list(prompt_payload)[0] == "context_summary"
+    assert list(raw_payload)[0] == "context_summary"
     for name, num_chars in expected_chars.items():
         row = full_summary[name]
         assert row["num_chars"] == num_chars
@@ -3262,7 +3278,7 @@ def test_provider_boundary_capture_reports_native_provider_endpoints():
     anthropic_payload = _capture_payload(
         anthropic_agent,
         {"model": "claude-test"},
-        artifact="with_tools",
+        artifact="full_request",
     )
     assert anthropic_payload["request"]["url"] == (
         "https://api.anthropic.com/v1/messages"
@@ -3277,7 +3293,7 @@ def test_provider_boundary_capture_reports_native_provider_endpoints():
     bedrock_payload = _capture_payload(
         bedrock_agent,
         {"modelId": "anthropic.claude-test-v1:0"},
-        artifact="with_tools",
+        artifact="full_request",
         endpoint_kind="bedrock_converse_stream",
     )
     assert bedrock_payload["request"]["url"] == (
@@ -3299,15 +3315,17 @@ def test_provider_boundary_capture_formats_long_string_values_for_human_review(
         "metadata": {"short": "first\\nsecond"},
     }
 
-    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+    full_request, no_tools, raw_request = agent._capture_provider_boundary_request(request)
 
-    for artifact in (with_tools, prompt_only):
+    for artifact in (full_request, no_tools):
         text = artifact.read_text()
         assert '"content": "\nfirst character' in text
         assert ("x" * 190) + "\nsecond line\nthird line" in text
         assert '"short": "first\\\\nsecond"' in text
         with pytest.raises(json.JSONDecodeError):
             json.loads(text)
+    raw_payload = json.loads(raw_request.read_text())
+    assert raw_payload["request"]["body"]["messages"][0]["content"] == long_value
 
 
 def test_provider_boundary_capture_human_formatting_starts_above_100_chars():
@@ -3346,13 +3364,15 @@ def test_provider_boundary_capture_artifact_wraps_long_values_repeatedly(
     agent.logs_dir = tmp_path
     long_value = ("a" * 111) + " " + ("b" * 112) + " " + ("c" * 113)
 
-    with_tools, prompt_only = agent._capture_provider_boundary_request(
+    full_request, no_tools, raw_request = agent._capture_provider_boundary_request(
         {"model": "gpt-5-codex", "messages": [{"role": "user", "content": long_value}]}
     )
 
     expected = ("a" * 111) + "\n" + ("b" * 112) + "\n" + ("c" * 113)
-    for artifact in (with_tools, prompt_only):
+    for artifact in (full_request, no_tools):
         assert expected in artifact.read_text()
+    raw_payload = json.loads(raw_request.read_text())
+    assert raw_payload["request"]["body"]["messages"][0]["content"] == long_value
 
 
 def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):
@@ -3361,60 +3381,60 @@ def test_provider_boundary_capture_retention_is_bounded(monkeypatch, tmp_path):
     agent._provider_boundary_capture_retention = 1
     request = {"model": "gpt-5-codex", "messages": []}
 
-    first_pair = agent._capture_provider_boundary_request(request)
-    second_pair = agent._capture_provider_boundary_request(request)
+    first_artifacts = agent._capture_provider_boundary_request(request)
+    second_artifacts = agent._capture_provider_boundary_request(request)
 
-    assert all(not path.exists() for path in first_pair)
-    assert all(path.exists() for path in second_pair)
+    assert all(not path.exists() for path in first_artifacts)
+    assert all(path.exists() for path in second_artifacts)
     capture_dir = tmp_path / "request-captures"
     assert len(list(capture_dir.glob("capture_*"))) == 1
-    assert len(list(capture_dir.glob("capture_*/*.json"))) == 2
+    assert len(list(capture_dir.glob("capture_*/*.json"))) == 3
 
 
-def test_provider_boundary_capture_retention_keeps_complete_pairs(monkeypatch, tmp_path):
+def test_provider_boundary_capture_retention_keeps_complete_triplets(monkeypatch, tmp_path):
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
     agent._provider_boundary_capture_retention = 2
     request = {"model": "gpt-5-codex", "messages": []}
 
-    first_pair = agent._capture_provider_boundary_request(request)
+    first_artifacts = agent._capture_provider_boundary_request(request)
     capture_dir = tmp_path / "request-captures"
     orphan = capture_dir / "capture_interrupted"
     orphan.mkdir()
-    (orphan / "with_tools.json").write_text("{}")
+    (orphan / "full_request.json").write_text("{}")
     staged = capture_dir / ".capture_crashed.staging"
     staged.mkdir()
-    (staged / "with_tools.json").write_text("{}")
-    second_pair = agent._capture_provider_boundary_request(request)
+    (staged / "full_request.json").write_text("{}")
+    second_artifacts = agent._capture_provider_boundary_request(request)
 
-    assert all(path.exists() for path in first_pair)
-    assert all(path.exists() for path in second_pair)
+    assert all(path.exists() for path in first_artifacts)
+    assert all(path.exists() for path in second_artifacts)
     assert not orphan.exists()
     assert not staged.exists()
     assert len(list(capture_dir.glob("capture_*"))) == 2
-    assert len(list(capture_dir.glob("capture_*/*.json"))) == 4
+    assert len(list(capture_dir.glob("capture_*/*.json"))) == 6
 
 
-def test_provider_boundary_capture_never_publishes_half_pair(monkeypatch, tmp_path):
+def test_provider_boundary_capture_never_publishes_partial_triplet(monkeypatch, tmp_path):
     from agent import agent_runtime_helpers as helpers
 
     agent = _build_agent(monkeypatch)
     agent.logs_dir = tmp_path
     real_capture_write = helpers._write_request_capture_artifact
 
-    def fail_second_artifact(path, *args, **kwargs):
-        if path.name == "prompt_only.json":
-            raise OSError("simulated crash before second artifact")
+    def fail_third_artifact(path, *args, **kwargs):
+        if path.name == "raw_request.json":
+            raise OSError("simulated crash before third artifact")
         return real_capture_write(path, *args, **kwargs)
 
-    monkeypatch.setattr(helpers, "_write_request_capture_artifact", fail_second_artifact)
+    monkeypatch.setattr(helpers, "_write_request_capture_artifact", fail_third_artifact)
 
-    pair = agent._capture_provider_boundary_request(
+    artifacts = agent._capture_provider_boundary_request(
         {"model": "gpt-5-codex", "messages": []}
     )
 
     capture_dir = tmp_path / "request-captures"
-    assert pair is None
+    assert artifacts is None
     assert not list(capture_dir.glob("capture_*"))
     assert not list(capture_dir.glob(".capture_*.staging"))
 
