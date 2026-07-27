@@ -1914,6 +1914,106 @@ def _redact_request_payload(
     return _redact_request_values(structured)
 
 
+_HERMES_SYSTEM_PROMPT_MARKER = "You run on Hermes Agent (by Nous Research)"
+_AVAILABLE_SKILLS_OPEN = "<available_skills>"
+_AVAILABLE_SKILLS_CLOSE = "</available_skills>"
+
+
+def _request_context_summary(body: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Summarize the model-facing instruction and tool sections by character count."""
+
+    instructions = body.get("instructions", "")
+    if not isinstance(instructions, str):
+        instructions = ""
+
+    hermes_start = instructions.find(_HERMES_SYSTEM_PROMPT_MARKER)
+    skill_spans: List[Tuple[int, int]] = []
+    cursor = hermes_start if hermes_start >= 0 else len(instructions)
+    while True:
+        start = instructions.find(_AVAILABLE_SKILLS_OPEN, cursor)
+        if start < 0:
+            break
+        close = instructions.find(
+            _AVAILABLE_SKILLS_CLOSE,
+            start + len(_AVAILABLE_SKILLS_OPEN),
+        )
+        if close < 0:
+            break
+        end = close + len(_AVAILABLE_SKILLS_CLOSE)
+        skill_spans.append((start, end))
+        cursor = end
+
+    def _non_skill_chars(start: int, end: int) -> int:
+        overlap = sum(
+            max(0, min(span_end, end) - max(span_start, start))
+            for span_start, span_end in skill_spans
+        )
+        return max(0, end - start - overlap)
+
+    if hermes_start < 0:
+        soul_chars = _non_skill_chars(0, len(instructions))
+        hermes_chars = 0
+    else:
+        soul_chars = _non_skill_chars(0, hermes_start)
+        hermes_chars = _non_skill_chars(hermes_start, len(instructions))
+
+    skills_chars = sum(end - start for start, end in skill_spans)
+    tools_chars = 0
+    if "tools" in body:
+        tools_chars = len(
+            json.dumps(
+                body["tools"],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+        )
+
+    sections = {
+        "soul_md": (
+            "Comes first in request.body.instructions",
+            soul_chars,
+        ),
+        "hermes_system_prompt": (
+            f'Begins with "{_HERMES_SYSTEM_PROMPT_MARKER}"',
+            hermes_chars,
+        ),
+        "skills": (
+            "Everything within the <available_skills> section",
+            skills_chars,
+        ),
+        "tools": (
+            "Compact UTF-8 JSON serialization of request.body.tools",
+            tools_chars,
+        ),
+    }
+    estimates = {
+        name: num_chars / 3.2
+        for name, (_description, num_chars) in sections.items()
+    }
+    total_chars = sum(num_chars for _description, num_chars in sections.values())
+    total_est_tokens = sum(estimates.values())
+    summary: Dict[str, Dict[str, Any]] = {
+        "total_context_used": {
+            "description": "Sum of SOUL.md, Hermes system prompt, Skills, and Tools",
+            "num_chars": total_chars,
+            "est_tokens": total_est_tokens,
+            "perc_total": 1.0 if total_est_tokens else 0.0,
+        }
+    }
+    for name, (description, num_chars) in sections.items():
+        est_tokens = estimates[name]
+        summary[name] = {
+            "description": description,
+            "num_chars": num_chars,
+            "est_tokens": est_tokens,
+            "perc_total": (
+                est_tokens / total_est_tokens if total_est_tokens else 0.0
+            ),
+        }
+    return summary
+
+
 def _capture_payload(
     agent,
     body: Dict[str, Any],
@@ -2154,24 +2254,30 @@ def capture_provider_boundary_request(
         ):
             body_prompt_only.pop(key, None)
 
-        with_tools_payload = _redact_request_payload(
-            _capture_payload(
-                agent,
-                body_with_tools,
-                artifact="with_tools",
-                endpoint_kind=endpoint_kind,
+        with_tools_payload = {
+            "context_summary": _request_context_summary(body_with_tools),
+            **_redact_request_payload(
+                _capture_payload(
+                    agent,
+                    body_with_tools,
+                    artifact="with_tools",
+                    endpoint_kind=endpoint_kind,
+                ),
+                redact_structured_credentials=True,
             ),
-            redact_structured_credentials=True,
-        )
-        prompt_only_payload = _redact_request_payload(
-            _capture_payload(
-                agent,
-                body_prompt_only,
-                artifact="prompt_only",
-                endpoint_kind=endpoint_kind,
+        }
+        prompt_only_payload = {
+            "context_summary": _request_context_summary(body_prompt_only),
+            **_redact_request_payload(
+                _capture_payload(
+                    agent,
+                    body_prompt_only,
+                    artifact="prompt_only",
+                    endpoint_kind=endpoint_kind,
+                ),
+                redact_structured_credentials=True,
             ),
-            redact_structured_credentials=True,
-        )
+        }
 
         capture_dir = agent.logs_dir / "request-captures"
         with _REQUEST_CAPTURE_LOCK:

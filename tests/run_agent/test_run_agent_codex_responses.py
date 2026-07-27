@@ -3165,6 +3165,91 @@ def test_codex_stream_captures_final_provider_kwargs(monkeypatch):
     assert response.status == "completed"
 
 
+def test_provider_boundary_capture_summarizes_context_sections(monkeypatch, tmp_path):
+    agent = _build_agent(monkeypatch)
+    agent.logs_dir = tmp_path
+    soul = "SOUL.md content\n"
+    hermes_before_skills = (
+        "You run on Hermes Agent (by Nous Research). Hermes instructions.\n"
+    )
+    skills = "<available_skills>skill one; skill two</available_skills>"
+    hermes_after_skills = "\nHost and session context."
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "alpha", "description": "does café work"},
+        }
+    ]
+    request = {
+        "model": "gpt-5-codex",
+        "instructions": (
+            soul + hermes_before_skills + skills + hermes_after_skills
+        ),
+        "tools": tools,
+        "messages": [],
+    }
+
+    with_tools, prompt_only = agent._capture_provider_boundary_request(request)
+
+    full_payload = _parse_human_review_capture(with_tools.read_text())
+    prompt_payload = _parse_human_review_capture(prompt_only.read_text())
+    full_summary = full_payload["context_summary"]
+    prompt_summary = prompt_payload["context_summary"]
+    tools_chars = len(
+        json.dumps(tools, ensure_ascii=False, separators=(",", ":"), default=str)
+    )
+    expected_chars = {
+        "soul_md": len(soul),
+        "hermes_system_prompt": len(hermes_before_skills + hermes_after_skills),
+        "skills": len(skills),
+        "tools": tools_chars,
+    }
+
+    assert list(full_payload)[0] == "context_summary"
+    assert list(prompt_payload)[0] == "context_summary"
+    for name, num_chars in expected_chars.items():
+        row = full_summary[name]
+        assert row["num_chars"] == num_chars
+        assert row["est_tokens"] == num_chars / 3.2
+    expected_total_tokens = sum(expected_chars.values()) / 3.2
+    assert full_summary["total_context_used"]["num_chars"] == sum(
+        expected_chars.values()
+    )
+    assert full_summary["total_context_used"]["est_tokens"] == expected_total_tokens
+    assert full_summary["total_context_used"]["perc_total"] == 1.0
+    assert full_summary["total_context_used"]["num_chars"] == (
+        len(request["instructions"]) + tools_chars
+    )
+    for name in ("soul_md", "hermes_system_prompt", "skills", "tools"):
+        assert full_summary[name]["perc_total"] == (
+            full_summary[name]["est_tokens"] / expected_total_tokens
+        )
+
+    assert prompt_summary["tools"]["num_chars"] == 0
+    assert prompt_summary["tools"]["est_tokens"] == 0.0
+    assert prompt_summary["tools"]["perc_total"] == 0.0
+    prompt_chars = sum(expected_chars[name] for name in expected_chars if name != "tools")
+    assert prompt_summary["total_context_used"]["num_chars"] == prompt_chars
+    assert prompt_summary["total_context_used"]["est_tokens"] == prompt_chars / 3.2
+
+
+def test_request_context_summary_only_treats_post_marker_skills_as_skills():
+    from agent.agent_runtime_helpers import _request_context_summary
+
+    soul = "<available_skills>SOUL text, not the skills index</available_skills>\n"
+    hermes = "You run on Hermes Agent (by Nous Research).\n"
+    skills = "<available_skills>actual skills index</available_skills>"
+
+    summary = _request_context_summary(
+        {"instructions": soul + hermes + skills}
+    )
+
+    assert summary["soul_md"]["num_chars"] == len(soul)
+    assert summary["hermes_system_prompt"]["num_chars"] == len(hermes)
+    assert summary["skills"]["num_chars"] == len(skills)
+    assert summary["total_context_used"]["num_chars"] == len(soul + hermes + skills)
+
+
 def test_provider_boundary_capture_reports_native_provider_endpoints():
     from agent.agent_runtime_helpers import _capture_payload
 

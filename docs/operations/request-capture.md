@@ -24,7 +24,9 @@ The pair is published as one capture directory:
   prompt_only.json
 ```
 
-`with_tools.json` contains the Hermes-visible provider request structure, including tool definitions. `prompt_only.json` is derived from the same request after removing tool-definition and tool-selection fields. These are human-review artifacts rather than machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON.
+`with_tools.json` contains the Hermes-visible provider request structure, including tool definitions. `prompt_only.json` is derived from the same request after removing tool-definition and tool-selection fields. Each file starts with a `context_summary` object covering SOUL.md, the remaining Hermes system prompt, the complete `<available_skills>` section, and tools. Tool characters are counted from compact UTF-8 JSON; the prompt-only artifact reports zero tool characters. Every row reports raw characters, a provisional `characters / 3.2` token estimate, and its share of the four-section estimated total.
+
+These are human-review artifacts rather than machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON.
 
 The root and pair directories are mode `0700`; artifacts are mode `0600`. Both files are written and synced in a hidden staging directory, then the directory is atomically renamed into view. A crash cannot expose a half-pair; the next writer removes any abandoned staging directory before publishing. Cross-process writers are serialized with a crash-released OS file lock. `retention` counts complete capture directories and is clamped to `1..1000`; older captures are removed after successful publication.
 
@@ -33,6 +35,7 @@ The root and pair directories are mode `0700`; artifacts are mode `0600`. Both f
 These are provider-boundary diagnostics, not wire-level packet captures:
 
 - They capture the request kwargs Hermes assembled immediately before provider dispatch.
+- Context-summary counts are computed from those pre-redaction kwargs. Redaction can change persisted string lengths, so recounting the displayed request may differ from the summary.
 - Transport-only `timeout` is omitted.
 - Sensitive values are redacted before persistence. Credential-bearing fields and headers are structurally masked; URL userinfo and every URL query value are masked while preserving hosts, paths, parameter names, and separators. Persisted bytes therefore intentionally differ from the in-memory request.
 - Wrappers or transformations added later by a provider SDK or remote provider are not visible to Hermes and are not included.
