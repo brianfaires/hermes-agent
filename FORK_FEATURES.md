@@ -396,28 +396,23 @@ by the Discord/STT prerequisites above.
   `tests/agent/test_display.py`, `tests/gateway/test_stream_events.py`, and
   `test_run_progress_topics.py`.
 
-### Request-context estimate and provider-boundary capture
+### Provider-boundary request capture
 
 **Status:** deployment-gated.
 **Owners:** `c1cce48f703a`.
 
-Two related diagnostics share this owner but have different fidelity:
-
-1. Enabling the standalone `request-dump` plugin registers
-   `/dump-system-prompt`. It combines the newest persisted session prompt with
-   **current** tool configuration and writes a mode-`0600` text estimate under
-   `<HERMES_HOME>/dump-system-prompt/`. It is not a historical request capture.
-2. Top-level `request_capture.enabled` (default `false`) captures the first
-   Hermes-visible request for each newly constructed agent at the provider
-   boundary. `request_capture.retention` defaults to `20` and is clamped to
-   `1..1000`. Each atomic triplet is stored under
-   `<HERMES_HOME>/sessions/request-captures/capture_ID/` as `full_request.json`,
-   `no_tools.json`, and `raw_request.json` after structural secret/URL-query
-   redaction. The first two are human-review artifacts that intentionally
-   permit invalid JSON: values longer than 100 characters start on a new line,
-   visible `\\n` text becomes real line breaks, and long lines repeatedly wrap
-   at the first whitespace after each 110-character span. `raw_request.json`
-   preserves the valid JSON serialization before those transformations.
+Top-level `request_capture.enabled` (default `false`) captures the first
+Hermes-visible request for each newly constructed agent at the provider
+boundary. `request_capture.retention` defaults to `20` and is clamped to
+`1..1000`. Each atomic triplet is stored under
+`<HERMES_HOME>/sessions/request-captures/capture_ID/` as `full_request.json`,
+`no_tools.json`, and `raw_request.json` after structural secret/URL-query
+redaction. The first two are human-review artifacts that intentionally permit
+invalid JSON: values longer than 100 characters start on a new line, visible
+`\\n` text becomes real line breaks, and long lines repeatedly wrap at the
+first whitespace after each 110-character span. `raw_request.json` preserves
+the valid JSON serialization before those transformations and contains no
+calculated context metrics.
 
 Example:
 
@@ -427,11 +422,9 @@ request_capture:
   retention: 20
 ```
 
-Enable the estimate with `hermes plugins enable request-dump`. Restart the CLI
-or gateway after changing plugin or capture configuration. Captures contain
+Restart the CLI or gateway after changing capture configuration. Captures contain
 sensitive conversation context even after redaction; protect and delete them
-accordingly. Tests: `tests/plugins/test_request_dump_plugin.py` and the request
-capture cases in `tests/run_agent/`.
+accordingly. Tests: the request-capture cases in `tests/run_agent/`.
 
 ## 6. Optional observability and cleanup plugins
 

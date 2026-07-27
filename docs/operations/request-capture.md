@@ -42,5 +42,3 @@ These are provider-boundary diagnostics, not wire-level packet captures:
 - Transport-only `timeout` is omitted.
 - Sensitive values are redacted before persistence. Credential-bearing fields and headers are structurally masked; URL userinfo and every URL query value are masked while preserving hosts, paths, parameter names, and separators. Persisted bytes therefore intentionally differ from the in-memory request.
 - Wrappers or transformations added later by a provider SDK or remote provider are not visible to Hermes and are not included.
-
-The `/dump-system-prompt` plugin command remains a reconstructed estimate based on the newest persisted system prompt plus current tool configuration. It is not a historical provider-request capture.
