@@ -3222,7 +3222,7 @@ def test_provider_boundary_capture_summarizes_context_sections(monkeypatch, tmp_
 
     assert list(full_payload)[0] == "context_summary"
     assert list(prompt_payload)[0] == "context_summary"
-    assert list(raw_payload)[0] == "context_summary"
+    assert "context_summary" not in raw_payload
     for name, num_chars in expected_chars.items():
         row = full_summary[name]
         assert row["num_chars"] == num_chars

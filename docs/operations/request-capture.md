@@ -25,7 +25,9 @@ The triplet is published as one capture directory:
   raw_request.json
 ```
 
-`full_request.json` contains the Hermes-visible provider request structure, including tool definitions. `no_tools.json` is derived from the same request after removing tool-definition and tool-selection fields. Both are formatted for human review. `raw_request.json` contains the same full, redacted request as valid JSON before newline expansion or line wrapping. Each file starts with a `context_summary` object covering SOUL.md, the remaining Hermes system prompt, the complete `<available_skills>` section, and tools. Tool characters are counted from compact UTF-8 JSON; `no_tools.json` reports zero tool characters. Every row reports raw characters, a provisional `characters / 3.2` token estimate, and its share of the four-section estimated total.
+`full_request.json` contains the Hermes-visible provider request structure, including tool definitions. `no_tools.json` is derived from the same request after removing tool-definition and tool-selection fields. Both are formatted for human review and start with a `context_summary` object covering SOUL.md, the remaining Hermes system prompt, the complete `<available_skills>` section, and tools. Tool characters are counted from compact UTF-8 JSON; `no_tools.json` reports zero tool characters. Every summary row reports raw characters, a provisional `characters / 3.2` token estimate, and its share of the four-section estimated total.
+
+`raw_request.json` contains the full, redacted request as valid JSON before newline expansion or line wrapping. It does not contain `context_summary` or other calculated metrics.
 
 The two human-review artifacts are not necessarily machine-readable JSON: string values longer than 100 characters begin on the line after their opening quote, visible `\\n` text in those values is expanded into real line breaks, and long lines repeatedly wrap at the first whitespace after each 110-character span. This formatting intentionally permits invalid JSON. `raw_request.json` does not receive those transformations.
 

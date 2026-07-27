@@ -2295,6 +2295,7 @@ def capture_provider_boundary_request(
             ),
         }
         raw_request_payload = copy.deepcopy(full_request_payload)
+        raw_request_payload.pop("context_summary", None)
         raw_request_payload["capture"]["artifact"] = "raw_request"
 
         capture_dir = agent.logs_dir / "request-captures"
