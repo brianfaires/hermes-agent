@@ -117,6 +117,45 @@ def _is_quarantined(conn: sqlite3.Connection, thread_id: str | None) -> bool:
     ).fetchone())
 
 
+def _record_repair_diagnostic(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str,
+    quarantined_at: int,
+    finding_identity: str,
+    nonce: str,
+    published_at: int,
+) -> bool:
+    """Atomically claim one log emission for a quarantine conflict identity."""
+    try:
+        inserted = conn.execute(
+            "INSERT OR IGNORE INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
+            (thread_id, quarantined_at, finding_identity, nonce, "", published_at),
+        ).rowcount
+        if inserted:
+            conn.commit()
+            return True
+        changed = conn.execute(
+            "UPDATE mirror_repair_notices "
+            "SET finding_identity=?,nonce=?,message_id='',published_at=? "
+            "WHERE thread_id=? AND quarantined_at=? "
+            "AND (finding_identity!=? OR message_id!='')",
+            (
+                finding_identity,
+                nonce,
+                published_at,
+                thread_id,
+                quarantined_at,
+                finding_identity,
+            ),
+        ).rowcount
+        conn.commit()
+        return bool(changed)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                                  conn: sqlite3.Connection, snapshot: BoardSnapshot,
                                  log: list[str], *, reload_snapshot: bool = False) -> None:
@@ -228,23 +267,33 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         if row is None:
             continue
         quarantined_at = int(row[0])
-        if conn.execute("SELECT 1 FROM mirror_repair_notices WHERE thread_id=? AND quarantined_at=?",
-                        (thread_id, quarantined_at)).fetchone():
-            continue
         identity = hashlib.sha256("|".join(sorted(f.finding_key for f in conflicts)).encode()).hexdigest()
-        nonce = hashlib.sha256(f"mirror-repair:{thread_id}:{quarantined_at}".encode()).hexdigest()[:25]
-        details = "; ".join(f"{f.code}: {json.dumps(f.evidence, sort_keys=True)}" for f in conflicts)
-        content = ("[Mirror repair notice — non-conversational]\nConflict: " + details +
-                   "\nSafe action: repair Discord/Kanban state without remapping, archiving, or deleting this thread; "
-                   "run a complete scan, then call resolve_thread_quarantine().")
+        nonce = hashlib.sha256(
+            f"mirror-repair:{thread_id}:{quarantined_at}:{identity}".encode()
+        ).hexdigest()[:25]
+        details = "; ".join(
+            f"{f.code}: {json.dumps(f.evidence, sort_keys=True)}" for f in conflicts
+        )
+        published_at = int(time.time())
         try:
-            response = await asyncio.to_thread(client.send_message, thread_id, content=content, nonce=nonce)
-            conn.execute("INSERT OR IGNORE INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
-                         (thread_id, quarantined_at, identity, nonce, str(response.get("id") or ""), int(time.time())))
-            conn.commit()
+            if not _record_repair_diagnostic(
+                conn,
+                thread_id=thread_id,
+                quarantined_at=quarantined_at,
+                finding_identity=identity,
+                nonce=nonce,
+                published_at=published_at,
+            ):
+                continue
+            logger.warning(
+                "kanban mirror: repair required thread=%s conflict=%s; "
+                "repair Discord/Kanban state, run a complete scan, then resolve quarantine",
+                thread_id,
+                details,
+            )
             log.append(f"reconciliation: QUARANTINED thread={thread_id}")
         except Exception as exc:
-            logger.warning("kanban mirror: repair notice failed for %s: %s", thread_id, exc)
+            logger.warning("kanban mirror: repair diagnostic failed for %s: %s", thread_id, exc)
             log.append(f"reconciliation: NOTICE_FAILED thread={thread_id}")
 
 

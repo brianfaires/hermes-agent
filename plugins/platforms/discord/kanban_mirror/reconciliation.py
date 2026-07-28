@@ -193,7 +193,7 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
             if not expected.terminal and done:
                 add("warning", "thread.done_tag_unexpected", thread, binding, task)
             completed = expected.terminal and lifecycle is not None and lifecycle["state"] == "archived"
-            if observed.archived and not completed:
+            if observed.archived and not completed and not legacy_archived_orphan:
                 add("critical", "thread.premature_archive", thread, binding, task, lifecycle_state=lifecycle["state"] if lifecycle else None)
             if completed and not observed.archived:
                 add("error", "thread.unexpected_reopen", thread, binding, task)

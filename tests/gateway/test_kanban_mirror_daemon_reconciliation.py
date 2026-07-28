@@ -1,9 +1,11 @@
 import asyncio
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.daemon import (
-    _do_create_thread, _observe_and_reconcile, run_mirror_daemon, tick,
+    _do_create_thread, _observe_and_reconcile, _record_repair_diagnostic,
+    run_mirror_daemon, tick,
 )
 from plugins.platforms.discord.kanban_mirror.planner import Op
 from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
@@ -18,6 +20,7 @@ class FakeClient:
     def __init__(self):
         self.fail = set()
         self.sent = {}
+        self.archived = False
 
     def get_channel(self, channel_id):
         if channel_id == "forum":
@@ -25,7 +28,7 @@ class FakeClient:
         if channel_id in self.fail:
             raise RuntimeError("isolated read failure")
         return {"id": channel_id, "name": "Card", "applied_tags": ["tag"],
-                "thread_metadata": {"archived": False}}
+                "thread_metadata": {"archived": self.archived}}
 
     def get_message(self, channel_id, message_id):
         if channel_id in self.fail:
@@ -52,19 +55,107 @@ def empty_snapshot():
     return BoardSnapshot({}, {}, {}, {}, {})
 
 
-def test_live_malformed_state_quarantines_and_notice_is_deduplicated(tmp_path):
+def test_live_malformed_state_quarantines_and_notice_is_logged_without_posting(tmp_path, caplog):
     conn = seed(tmp_path / "mirror.db")
     client = FakeClient()
     cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
 
-    asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
-    asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+    with caplog.at_level("WARNING"):
+        asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+        asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
 
     assert is_thread_quarantined(conn, "thread")
-    assert len(client.sent) == 1
-    notice = next(iter(client.sent.values()))["content"]
-    assert "binding.card_missing" in notice and "without remapping, archiving, or deleting" in notice
+    assert client.sent == {}
+    notices = [record.message for record in caplog.records if "repair required" in record.message]
+    assert len(notices) == 1
+    assert "binding.card_missing" in notices[0]
+    assert conn.execute("SELECT message_id FROM mirror_repair_notices").fetchone()[0] == ""
     assert not resolve_thread_quarantine(conn, "thread")
+
+
+def test_changed_quarantine_conflict_emits_one_new_log_without_posting(tmp_path, caplog):
+    conn = seed(tmp_path / "mirror.db")
+    client = FakeClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+        client.archived = True
+        card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                    "1", None, None, None)
+        snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+        asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+        asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+
+    notices = [record.message for record in caplog.records if "repair required" in record.message]
+    assert len(notices) == 2
+    assert "binding.card_missing" in notices[0]
+    assert "thread.premature_archive" in notices[1]
+    assert client.sent == {}
+    assert conn.execute("SELECT count(*) FROM mirror_repair_notices").fetchone()[0] == 1
+
+
+def test_changed_repair_diagnostic_is_claimed_once_across_connections(tmp_path):
+    path = tmp_path / "mirror.db"
+    conn = connect_mirror(path)
+    conn.execute(
+        "INSERT INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
+        ("thread", 10, "old", "old-nonce", "", 10),
+    )
+    conn.commit()
+    conn.close()
+
+    def claim():
+        worker = connect_mirror(path)
+        try:
+            return _record_repair_diagnostic(
+                worker,
+                thread_id="thread",
+                quarantined_at=10,
+                finding_identity="new",
+                nonce="new-nonce",
+                published_at=20,
+            )
+        finally:
+            worker.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claimed = list(pool.map(lambda _: claim(), range(8)))
+
+    assert claimed.count(True) == 1
+    assert claimed.count(False) == 7
+
+
+def test_legacy_discord_repair_notice_is_claimed_once_for_local_logging(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    conn.execute(
+        "INSERT INTO mirror_repair_notices VALUES (?,?,?,?,?,?)",
+        ("thread", 10, "same", "old-nonce", "discord-message", 10),
+    )
+    conn.commit()
+
+    first = _record_repair_diagnostic(
+        conn,
+        thread_id="thread",
+        quarantined_at=10,
+        finding_identity="same",
+        nonce="new-nonce",
+        published_at=20,
+    )
+    second = _record_repair_diagnostic(
+        conn,
+        thread_id="thread",
+        quarantined_at=10,
+        finding_identity="same",
+        nonce="new-nonce",
+        published_at=21,
+    )
+
+    assert first is True
+    assert second is False
+    assert tuple(conn.execute(
+        "SELECT message_id,published_at FROM mirror_repair_notices"
+    ).fetchone()) == ("", 20)
 
 
 def test_partial_thread_snapshot_does_not_resolve_and_other_thread_continues(tmp_path):
@@ -76,13 +167,15 @@ def test_partial_thread_snapshot_does_not_resolve_and_other_thread_continues(tmp
     client = FakeClient()
     cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
     asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
-    assert len(client.sent) == 2
+    assert client.sent == {}
+    assert conn.execute("SELECT count(*) FROM mirror_repair_notices").fetchone()[0] == 2
 
     client.fail.add("broken")
     asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
     assert is_thread_quarantined(conn, "broken")
     assert is_thread_quarantined(conn, "good")
-    assert len(client.sent) == 2
+    assert client.sent == {}
+    assert conn.execute("SELECT count(*) FROM mirror_repair_notices").fetchone()[0] == 2
 
 
 def test_daemon_builds_live_metadata_expectations_without_false_quarantine(tmp_path):

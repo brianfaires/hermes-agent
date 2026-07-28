@@ -12,7 +12,7 @@ from plugins.platforms.discord.kanban_mirror.repair import resolve_recoverable_q
 from plugins.platforms.discord.kanban_mirror.state import (
     active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, prepare_binding_transition,
-    resolve_thread_task, set_thread,
+    resolve_thread_task, set_archived, set_thread,
 )
 
 
@@ -166,6 +166,31 @@ def add_lifecycle(conn, state="tag_confirmed", due=5):
          archive_due_at,prepared_at,updated_at) VALUES ('life','thread',?,?,?,?,0,?,1,1)""",
         (binding.binding_key, json.dumps(payload), "hash", state, due))
     conn.commit()
+
+
+def test_legacy_archived_orphan_is_not_quarantined_as_premature(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "legacy", "Retired test post")
+    set_thread(conn, "legacy", "thread", "starter")
+    set_archived(conn, "legacy", 5)
+
+    findings = reconcile_mirror_state(
+        conn,
+        observed_threads={
+            "thread": ObservedThread(
+                "thread", "starter", None, title="Retired test post", tags=("done",),
+                archived=True,
+            )
+        },
+        cards=[],
+        expected_threads={
+            "thread": ExpectedThread("Retired test post", ("done",), True)
+        },
+        now=10,
+    )
+
+    assert findings == []
+    assert not is_thread_quarantined(conn, "thread")
 
 
 def test_live_metadata_drift_is_stable_and_only_premature_archive_quarantines(tmp_path):
