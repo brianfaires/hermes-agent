@@ -759,7 +759,7 @@ def _apply_cancel_thread_work(
         if conn.execute(
             f"SELECT 1 FROM task_owner_instructions "
             f"WHERE task_id IN ({placeholders}) "
-            "AND status IN ('pending','queued') LIMIT 1",
+            "AND status IN ('pending','queued','unroutable') LIMIT 1",
             tuple(sorted(owned)),
         ).fetchone() is not None:
             return KanbanReplyInboxResult(

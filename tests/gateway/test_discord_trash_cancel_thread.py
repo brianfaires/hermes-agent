@@ -321,6 +321,44 @@ def test_trash_fails_closed_on_queued_owner_instruction(ghost_topology):
         conn.close()
 
 
+def test_trash_fails_closed_on_unroutable_owner_instruction(ghost_topology):
+    db_path, ids = ghost_topology
+    conn = kb.connect(db_path)
+    try:
+        instruction = kb.create_owner_instruction(
+            conn,
+            task_id=ids["generated_a"],
+            assignee="ops",
+            source="test",
+            source_key="unroutable-before-thread-cancel",
+            actor="Brian",
+            body="Instruction: rerun_request",
+        )
+        conn.execute(
+            "UPDATE task_owner_instructions SET status='unroutable' WHERE id=?",
+            (instruction.id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before = _statuses(db_path, ids)
+
+    result = handle_reaction(_reaction(), config=_config())
+
+    assert result.reason == "pending_owner_instructions"
+    assert _statuses(db_path, ids) == before
+    conn = kb.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE kind='cancel_thread_work'"
+        ).fetchone()[0] == 0
+        unresolved = kb.get_owner_instruction(conn, instruction.id)
+        assert unresolved is not None
+        assert unresolved.status == "unroutable"
+    finally:
+        conn.close()
+
+
 def test_trash_fails_closed_on_external_dependent(ghost_topology):
     db_path, ids = ghost_topology
     conn = kb.connect(db_path)
