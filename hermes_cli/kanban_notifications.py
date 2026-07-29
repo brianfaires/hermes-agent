@@ -39,11 +39,15 @@ def _load_cfg() -> dict[str, Any]:
 def notification_policy(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     cfg = cfg if cfg is not None else _load_cfg()
     kanban = cfg.get("kanban") if isinstance(cfg, dict) else {}
-    raw = (kanban or {}).get("notification_policy") or {}
-    if isinstance(raw, str):
-        raw = {"mode": raw}
-    if not isinstance(raw, dict):
+    raw = (kanban or {}).get("notification_policy")
+    if raw is None:
         raw = {}
+    if isinstance(raw, str):
+        raw = {"mode": raw or "deny"}
+    if not isinstance(raw, dict):
+        # A present but malformed policy must not silently restore the
+        # permissive origin default.
+        raw = {"mode": "deny"}
     mode = str(raw.get("mode") or "origin").strip().lower()
     if mode in {"telegram-only", "telegram_home", "telegram-home-only"}:
         mode = "telegram_home_only"
@@ -57,8 +61,12 @@ def notification_policy(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         allowed_platforms: list[str] = []
     elif isinstance(allowed, str):
         allowed_platforms = [p.strip().lower() for p in allowed.split(",") if p.strip()]
-    else:
+    elif isinstance(allowed, (list, tuple, set, frozenset)):
         allowed_platforms = [str(p).strip().lower() for p in allowed if str(p).strip()]
+    else:
+        # Invalid allow-list values grant nothing rather than raising during
+        # notification delivery or broadening policy.
+        allowed_platforms = []
     return {
         "mode": mode,
         "allowed_platforms": allowed_platforms,

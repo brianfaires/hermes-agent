@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from hermes_cli.kanban_notifications import (
     is_notify_target_allowed,
+    notification_policy,
     resolve_notify_target,
 )
 
@@ -51,3 +54,26 @@ def test_unknown_policy_mode_fails_closed():
         cfg=cfg,
     ) is None
     assert is_notify_target_allowed("discord", cfg=cfg) is False
+
+
+@pytest.mark.parametrize("malformed", [["origin"], [], 0, False, ""])
+def test_malformed_notification_policy_fails_closed(malformed):
+    cfg = {"kanban": {"notification_policy": malformed}}
+
+    assert notification_policy(cfg)["mode"] == "deny"
+    assert resolve_notify_target(platform="discord", chat_id="123", cfg=cfg) is None
+
+
+def test_malformed_allowed_platforms_grants_nothing():
+    cfg = {
+        "kanban": {
+            "notification_policy": {
+                "mode": "deny",
+                "allowed_platforms": 123,
+                "preserve_tui": False,
+            }
+        }
+    }
+
+    assert notification_policy(cfg)["allowed_platforms"] == []
+    assert resolve_notify_target(platform="discord", chat_id="123", cfg=cfg) is None
