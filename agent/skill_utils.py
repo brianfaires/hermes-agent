@@ -792,6 +792,10 @@ def extract_skill_description(
         return ""
     description = str(raw_desc).strip().strip("'\"")
     if len(description) > max_chars:
+        if max_chars <= 0:
+            return ""
+        if max_chars <= 3:
+            return description[:max_chars]
         return description[: max_chars - 3] + "..."
     return description
 

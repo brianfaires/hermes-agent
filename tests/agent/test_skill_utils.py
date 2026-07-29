@@ -43,6 +43,15 @@ def test_skill_description_max_chars_remains_configurable():
     )
 
 
+def test_skill_description_small_explicit_limits_never_overflow():
+    frontmatter = {"description": "long description"}
+
+    assert extract_skill_description(frontmatter, max_chars=0) == ""
+    assert extract_skill_description(frontmatter, max_chars=1) == "l"
+    assert extract_skill_description(frontmatter, max_chars=3) == "lon"
+    assert extract_skill_description(frontmatter, max_chars=4) == "l..."
+
+
 def test_metadata_as_dict_with_hermes():
     """Normal case: metadata is a dict containing hermes keys."""
     frontmatter = {
