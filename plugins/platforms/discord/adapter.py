@@ -8794,6 +8794,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 or self._derive_auto_thread_name(message.content or "")
             ) if auto_threaded_channel is not None else None,
         )
+        # A profile route describes shared-channel policy, but an explicit
+        # mention addresses the identity that received this Discord event. In
+        # multiplex mode a secondary bot must keep its own profile for this
+        # turn; otherwise a broad/default channel route steals the mention and
+        # sends the response through the wrong bot. Unmentioned and reply
+        # traffic retain the existing route/participation policy above.
+        inbound_profile = str(getattr(self, "_inbound_profile", "") or "").strip()
+        if mention_prefix and inbound_profile:
+            source.profile = inbound_profile
 
         # Build media URLs -- download image attachments to local cache so the
         # vision tool can access them reliably (Discord CDN URLs can expire).

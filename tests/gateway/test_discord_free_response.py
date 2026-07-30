@@ -1638,6 +1638,96 @@ async def test_non_kanban_event_stays_on_ingress_adapter(adapter):
 
 
 @pytest.mark.asyncio
+async def test_explicit_secondary_bot_mention_keeps_secondary_profile(adapter, monkeypatch):
+    """A profile route must not steal an explicit mention from its bot identity."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    adapter._client.user = SimpleNamespace(id=222)
+    adapter._inbound_profile = "ops"
+    adapter.gateway_runner = SimpleNamespace(_profile_name_for_source=lambda source: "default")
+
+    message = make_message(
+        channel=FakeTextChannel(channel_id=321),
+        content="<@222> investigate this",
+        mentions=[adapter._client.user],
+    )
+
+    await adapter._handle_message(message)
+
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.profile == "ops"
+
+
+def _multiplex_discord_adapters(adapter):
+    """Build primary/default and secondary/Ops Discord ingress doubles."""
+    primary = adapter
+    primary._client.user = SimpleNamespace(id=111, bot=True)
+    primary._inbound_profile = "default"
+
+    secondary = DiscordAdapter(PlatformConfig(enabled=True, token="ops-token"))
+    secondary._client = SimpleNamespace(user=SimpleNamespace(id=222, bot=True))
+    secondary._inbound_profile = "ops"
+    secondary._text_batch_delay_seconds = 0
+    secondary.handle_message = AsyncMock()
+
+    runner = SimpleNamespace(_profile_name_for_source=lambda source: "default")
+    for item in (primary, secondary):
+        item.gateway_runner = runner
+        item.config.extra["allowed_channels"] = ["321"]
+        item._ready_event.set()
+        item._observe_kanban_message = AsyncMock(return_value=(False, False))
+        item._maybe_handle_kanban_inbox = AsyncMock(
+            return_value=SimpleNamespace(consumed=False, ingress_bot_id=None)
+        )
+    return primary, secondary
+
+
+@pytest.mark.asyncio
+async def test_multiplex_bot_mentions_route_only_to_the_addressed_profile(adapter, monkeypatch):
+    """Distinct Discord bot identities must arbitrate one event exactly once."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    monkeypatch.setenv("DISCORD_ALLOW_ALL_USERS", "true")
+    primary, ops = _multiplex_discord_adapters(adapter)
+
+    ops_message = make_message(
+        channel=FakeTextChannel(channel_id=321),
+        content="<@222> investigate this",
+        mentions=[ops._client.user],
+    )
+    assert await primary._dispatch_discord_message(ops_message) is False
+    assert await ops._dispatch_discord_message(ops_message) is True
+    primary.handle_message.assert_not_awaited()
+    ops.handle_message.assert_awaited_once()
+    assert ops.handle_message.await_args.args[0].source.profile == "ops"
+
+    primary_message = make_message(
+        channel=FakeTextChannel(channel_id=321),
+        content="<@111> investigate this",
+        mentions=[primary._client.user],
+    )
+    primary_message.id = 124
+    assert await primary._dispatch_discord_message(primary_message) is True
+    assert await ops._dispatch_discord_message(primary_message) is False
+    assert primary.handle_message.await_args.args[0].source.profile == "default"
+    assert ops.handle_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_secondary_traffic_keeps_existing_profile_route_policy(adapter, monkeypatch):
+    """Only explicit mentions override a profile route in multiplex mode."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    adapter._client.user = SimpleNamespace(id=222)
+    adapter._inbound_profile = "ops"
+    adapter.gateway_runner = SimpleNamespace(_profile_name_for_source=lambda source: "default")
+    adapter.config.extra["require_mention"] = False
+
+    await adapter._handle_message(
+        make_message(channel=FakeTextChannel(channel_id=321), content="ordinary conversation")
+    )
+
+    assert adapter.handle_message.await_args.args[0].source.profile == "default"
+
+
+@pytest.mark.asyncio
 async def test_kanban_outbound_broker_fans_out_with_shared_correlation(adapter):
     targets = {profile: SimpleNamespace(handle_message=AsyncMock()) for profile in ("ops", "reviewer")}
     event = SimpleNamespace(
