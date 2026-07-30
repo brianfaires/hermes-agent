@@ -18,10 +18,22 @@ def main() -> None:
     ap.add_argument("--board", default=None)
     args = ap.parse_args()
     cfg = load_mirror_config()
+    configured_board = cfg.board
     if args.board:
         from dataclasses import replace
         cfg = replace(cfg, board=args.board)
     dry = args.dry_run or (args.rebuild and not args.live)
+    if not dry and not cfg.valid():
+        raise SystemExit(
+            "live mirror execution requires an enabled kanban.discord_mirror with a "
+            "configured forum_channel_id in the active Hermes profile; --board does "
+            "not supply the owning profile configuration"
+        )
+    if not dry and args.board and args.board != configured_board:
+        raise SystemExit(
+            f"live mirror board override {args.board!r} does not match the active "
+            f"profile's configured board {configured_board!r}"
+        )
     client = None
     if not dry:
         token = load_discord_token(cfg.token_env_path)
