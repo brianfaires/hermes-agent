@@ -8,6 +8,7 @@ from .state import get_digest
 
 
 _DISCORD_MESSAGE_LIMIT = 2000
+_WORKFLOW_TAG_NAMES = {"running", "review", "waiting", "done", "needs-brian"}
 
 
 def _bounded_digest_content(old: str, marker: str, block: str) -> str:
@@ -114,10 +115,16 @@ class DiscordLifecyclePublisher:
         forum = self.client.get_channel(self.cfg.forum_channel_id)
         lookup, _ = ensure_forum_tags(self.client, forum, ["done"])
         channel = self.client.get_channel(thread_id)
-        tags = list(channel.get("applied_tags", []))
-        done_id = lookup["done"]
-        if done_id not in tags:
-            tags.append(done_id)
+        workflow_ids = {
+            str(tag.get("id"))
+            for tag in forum.get("available_tags", [])
+            if str(tag.get("name", "")).strip().lower() in _WORKFLOW_TAG_NAMES
+        }
+        tags = [
+            str(tag_id) for tag_id in channel.get("applied_tags", [])
+            if str(tag_id) not in workflow_ids
+        ]
+        tags.append(lookup["done"])
         response = self.client.update_thread(thread_id, tag_ids=tags)
         return self._receipt(operation_key, thread_id, payload, response.get("id") or thread_id)
 

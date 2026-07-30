@@ -62,6 +62,25 @@ def test_concrete_publisher_nonce_digest_pin_tag_and_archive(tmp_path):
     assert pub.read_thread_state("thread")["archived"]
 
 
+def test_done_tag_replaces_stale_lifecycle_tags_but_preserves_owner(tmp_path):
+    conn = seeded(tmp_path / "m.db")
+    client = Discord()
+    client.forum["available_tags"] = [
+        {"id": "done-id", "name": "done"},
+        {"id": "waiting-id", "name": "waiting"},
+        {"id": "needs-brian-id", "name": "needs-brian"},
+        {"id": "ops-id", "name": "ops"},
+    ]
+    client.channels["thread"]["applied_tags"] = [
+        "waiting-id", "needs-brian-id", "ops-id",
+    ]
+    pub = DiscordLifecyclePublisher(client, MirrorConfig(forum_channel_id="forum"), conn)
+
+    pub.apply_done_tag("thread", {"done": True}, operation_key="tag")
+
+    assert client.channels["thread"]["applied_tags"] == ["ops-id", "done-id"]
+
+
 def test_terminal_digest_rolls_oldest_entries_under_discord_limit():
     old = "Board\n\n" + "\n\n".join(
         f"<!-- terminal:thread-{i} -->\n- [2026-07-25](https://discord/thread-{i}) — " + ("x" * 90)
