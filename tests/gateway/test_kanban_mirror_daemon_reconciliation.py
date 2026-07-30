@@ -270,6 +270,39 @@ def test_tick_recovers_transitions_before_live_reconciliation(tmp_path, monkeypa
     assert order == ["recover", "reconcile"]
 
 
+def test_tick_audits_active_threads_when_live_reconciliation_is_enabled(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    order = []
+
+    async def observe(*args, **kwargs):
+        order.append("reconcile")
+
+    async def audit(*args, **kwargs):
+        order.append("audit")
+        return False
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._audit_active_threads", audit,
+    )
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.plan", lambda *args: [])
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", guild_id="guild",
+        reconciliation_enabled=True, automatic_successor_enabled=False,
+        terminal_lifecycle_enabled=False,
+    )
+
+    asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False))
+
+    assert order == ["reconcile", "audit"]
+
+
 def test_tick_aborts_all_planning_when_post_observation_board_reload_fails(tmp_path, monkeypatch):
     conn = connect_mirror(tmp_path / "mirror.db")
     calls = [0]

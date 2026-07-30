@@ -1708,7 +1708,7 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
         state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     digest = await asyncio.to_thread(get_digest, mirror_conn)
     note_keys = await asyncio.to_thread(load_note_keys, mirror_conn)
-    if (not dry_run and not cfg.reconciliation_enabled
+    if (not dry_run and client is not None
             and await _audit_active_threads(cfg, client, mirror_conn, snapshot, state, log)):
         state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     now = int(time.time())
