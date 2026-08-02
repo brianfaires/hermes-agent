@@ -76,6 +76,24 @@ def test_complete_clean_observation_resolves_only_deterministic_stale_quarantine
     assert not is_thread_quarantined(conn, "thread")
 
 
+def test_resolved_nonrecoverable_revision_mismatch_does_not_hold_clean_quarantine(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at,resolved_at)
+        VALUES ('revision','error','starter.revision_mismatch','thread','binding:thread:1',
+                'task','{}','h',10,20,20)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at)
+        VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_recoverable_quarantines(
+        conn, observed_thread_ids={'thread'}, cards={'task'}, now=21,
+    ) == ['thread']
+    assert not is_thread_quarantined(conn, 'thread')
+
+
 def test_clean_scan_does_not_resolve_quarantine_without_a_valid_observed_binding(tmp_path):
     conn = seed(tmp_path / "mirror.db")
     reconcile_mirror_state(conn, observed_threads=observed(), cards=[], now=10)

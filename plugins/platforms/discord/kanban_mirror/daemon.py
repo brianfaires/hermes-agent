@@ -160,8 +160,13 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                                  conn: sqlite3.Connection, snapshot: BoardSnapshot,
                                  log: list[str], *, reload_snapshot: bool = False) -> None:
     """Read live Discord state independently per mapped thread and reconcile it."""
-    rows = conn.execute("SELECT thread_id,starter_message_id FROM mirror_initiatives "
-                        "WHERE kind='post' AND thread_id IS NOT NULL").fetchall()
+    rows = conn.execute(
+        """SELECT i.thread_id,i.starter_message_id FROM mirror_initiatives i
+           WHERE i.kind='post' AND i.thread_id IS NOT NULL
+             AND NOT (i.archived_at IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM mirror_members m WHERE m.initiative_id=i.id
+             ))"""
+    ).fetchall()
     try:
         forum = await asyncio.to_thread(client.get_channel, cfg.forum_channel_id)
         tag_names = {str(t.get("id")): str(t.get("name")) for t in forum.get("available_tags", [])}
@@ -1772,6 +1777,17 @@ async def reconcile(cfg: MirrorConfig, client: DiscordClient, conn: sqlite3.Conn
                 channel = await asyncio.to_thread(client.get_channel, initiative.thread_id)
             except DiscordAPIError as exc:
                 if exc.status == 404:
+                    if initiative.archived_at is not None:
+                        # A terminal initiative is historical evidence, not a
+                        # candidate for recreation.  Keep its last known
+                        # Discord binding so startup reconciliation does not
+                        # turn a deleted disposable thread into repeated
+                        # mapping churn.
+                        logger.info(
+                            "kanban mirror: archived thread %s for %s gone (404); preserving historical mapping",
+                            initiative.thread_id, initiative.id,
+                        )
+                        continue
                     logger.info(
                         "kanban mirror: thread %s for %s gone (404); clearing mapping for recreation",
                         initiative.thread_id, initiative.id,

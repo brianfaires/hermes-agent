@@ -80,10 +80,19 @@ def resolve_recoverable_quarantines(
                 continue
             causes = {str(item[0]) for item in conn.execute(
                 """SELECT DISTINCT code FROM mirror_reconciliation_findings
-                   WHERE thread_id=? AND last_seen_at>=?""",
+                   WHERE thread_id=? AND last_seen_at>=? AND resolved_at IS NULL""",
                 (thread_id, int(row[1])),
             )} & quarantine_causes
-            if not causes or not causes <= recoverable_causes:
+            # A resolved successor-selection finding remains operator-owned:
+            # its historical absence of a live conflict is not evidence that
+            # a future successor choice is safe to automate.
+            historical_successor = conn.execute(
+                """SELECT 1 FROM mirror_reconciliation_findings
+                   WHERE thread_id=? AND last_seen_at>=?
+                     AND code='successor.selection_ambiguous' LIMIT 1""",
+                (thread_id, int(row[1])),
+            ).fetchone()
+            if historical_successor or (causes and not causes <= recoverable_causes):
                 continue
             mappings = conn.execute(
             """SELECT b.task_id

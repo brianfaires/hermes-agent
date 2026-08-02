@@ -5,15 +5,15 @@ from concurrent.futures import ThreadPoolExecutor
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.daemon import (
     _do_create_thread, _observe_and_reconcile, _record_repair_diagnostic,
-    run_mirror_daemon, tick,
+    reconcile, run_mirror_daemon, tick,
 )
 from plugins.platforms.discord.kanban_mirror.planner import Op
 from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
 from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings,
     connect_mirror, create_initiative, is_thread_quarantined, load_mirror_state, set_thread,
-    set_thread_with_binding,
-)
+ set_archived, set_thread_with_binding,
+ )
 
 
 class FakeClient:
@@ -40,6 +40,15 @@ class FakeClient:
 
     def create_forum_thread(self, channel_id, *, name, content, tag_ids, attachments=None):
         return {"id": "new-thread", "message": {"id": "new-starter"}}
+
+
+class MissingThreadClient(FakeClient):
+    def get_channel(self, channel_id):
+        from plugins.platforms.discord.kanban_mirror.discord_client import DiscordAPIError
+
+        if channel_id == "forum":
+            return super().get_channel(channel_id)
+        raise DiscordAPIError("GET", f"/channels/{channel_id}", 404, "not found")
 
 
 def seed(path, thread="thread", task="task"):
@@ -208,6 +217,39 @@ def test_daemon_clean_live_scan_resolves_deterministic_stale_quarantine(tmp_path
 
     assert not is_thread_quarantined(conn, "thread")
     assert "reconciliation: RECOVERED quarantine=1" in log
+
+
+def test_startup_reconcile_preserves_archived_missing_thread_mapping(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init-thread", 123)
+
+    asyncio.run(reconcile(
+        MirrorConfig(board="board", forum_channel_id="forum"), MissingThreadClient(), conn,
+    ))
+
+    row = conn.execute(
+        "SELECT thread_id,starter_message_id FROM mirror_initiatives WHERE id='init-thread'"
+    ).fetchone()
+    assert tuple(row) == ("thread", "starter-thread")
+
+
+def test_observation_skips_archived_memberless_historical_mapping(tmp_path):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    create_initiative(conn, "historical", "Historical")
+    set_thread(conn, "historical", "missing", "starter-missing")
+    set_archived(conn, "historical", 123)
+    log = []
+
+    asyncio.run(_observe_and_reconcile(
+        MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True),
+        MissingThreadClient(), conn, empty_snapshot(), log,
+    ))
+
+    assert log == []
+    row = conn.execute(
+        "SELECT thread_id,starter_message_id FROM mirror_initiatives WHERE id='historical'"
+    ).fetchone()
+    assert tuple(row) == ("missing", "starter-missing")
 
 
 def test_tick_backfills_bindings_before_startup_reconciliation(tmp_path, monkeypatch):
