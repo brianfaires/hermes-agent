@@ -243,7 +243,7 @@ def test_restart_rejects_missing_reason_or_confirmation(
 
 def test_restart_schedules_one_shared_gateway_restart(monkeypatch, tmp_path):
     module = _load_plugin_module()
-    runner = _runner()
+    runner = _runner(active_agents=0)
     scheduled = []
     monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 0})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
@@ -269,6 +269,57 @@ def test_restart_schedules_one_shared_gateway_restart(monkeypatch, tmp_path):
     assert result["profile"] == "ops"
     assert len(scheduled) == 1
     assert scheduled[0][0] is runner
+
+
+@pytest.mark.parametrize("active_agents", [1, 3])
+def test_restart_denies_when_live_runner_has_active_agents(
+    monkeypatch, tmp_path, active_agents
+):
+    module = _load_plugin_module()
+    runner = _runner(active_agents=active_agents)
+    audit_records = []
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", audit_records.append)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(
+        module,
+        "_reserve_restart",
+        lambda *_args: pytest.fail("active-agent denial reserved cooldown"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_schedule_restart",
+        lambda *_args: pytest.fail("active-agent denial scheduled a restart"),
+    )
+
+    result = json.loads(
+        module._handle_request_gateway_restart(
+            {"reason": "reload configuration", "confirm": "restart gateway"}
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "active_agents_present"
+    assert result["active_agents"] == active_agents
+    assert (
+        result["retry"]
+        == "Retry only after active_agents reaches zero and no agents are running."
+    )
+    assert audit_records == [
+        {
+            "ts": audit_records[0]["ts"],
+            "profile": "ops",
+            "reason": "reload configuration",
+            "dry_run": False,
+            "restart_scope": "all_profiles",
+            "decision": "deny",
+            "error": "active_agents_present",
+            "active_agents": active_agents,
+        }
+    ]
 
 
 def test_restart_state_lock_serializes_processes(tmp_path):
@@ -374,7 +425,7 @@ def test_restart_state_lock_uses_windows_byte_range_lock(monkeypatch, tmp_path):
 
 def test_concurrent_requests_reserve_process_cooldown_once(monkeypatch, tmp_path):
     module = _load_plugin_module()
-    runner = _runner()
+    runner = _runner(active_agents=0)
     scheduled = []
     monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
@@ -408,7 +459,7 @@ def test_concurrent_requests_reserve_process_cooldown_once(monkeypatch, tmp_path
 
 def test_failed_schedule_releases_cooldown_reservation(monkeypatch, tmp_path):
     module = _load_plugin_module()
-    runner = _runner()
+    runner = _runner(active_agents=0)
     monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
     monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")

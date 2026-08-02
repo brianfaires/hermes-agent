@@ -337,6 +337,27 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
+    if active_agents is not None and active_agents > 0:
+        record.update(
+            {
+                "decision": "deny",
+                "error": "active_agents_present",
+                "active_agents": active_agents,
+            }
+        )
+        _append_audit(record)
+        return _json(
+            {
+                "ok": False,
+                "error": "active_agents_present",
+                "active_agents": active_agents,
+                "retry": (
+                    "Retry only after active_agents reaches zero and no agents "
+                    "are running."
+                ),
+            }
+        )
+
     if getattr(runner, "_restart_requested", False) or getattr(
         runner, "_draining", False
     ):
