@@ -1,240 +1,454 @@
-"""Tests for cron-calendar-sync schedules, lifecycle hooks, and duration learning."""
+"""Contract tests for the shared cron Calendar reconciliation path."""
 
-from copy import deepcopy
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
-from hermes_plugins.cron_calendar_sync import calendar_sync as cs
+from hermes_plugins.cron_calendar_sync import calendar_sync as bridge
+from hermes_plugins.cron_calendar_sync import reconciler
 
 
-class TestRruleMapping:
-    def test_interval_daily(self):
-        assert cs._rrule_for_schedule({"kind": "interval", "minutes": 1440}) == "RRULE:FREQ=DAILY;INTERVAL=1"
-
-    def test_interval_multi_day(self):
-        assert cs._rrule_for_schedule({"kind": "interval", "minutes": 2880}) == "RRULE:FREQ=DAILY;INTERVAL=2"
-
-    def test_interval_subdaily_has_no_single_rrule(self):
-        assert cs._rrule_for_schedule({"kind": "interval", "minutes": 30}) is None
-
-    def test_cron_daily(self):
-        assert cs._cron_rrule("0 9 * * *") == "RRULE:FREQ=DAILY"
-
-    def test_cron_weekly(self):
-        assert cs._cron_rrule("0 9 * * 1,3,5") == "RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"
-
-    def test_cron_monthly(self):
-        assert cs._cron_rrule("0 9 1 * *") == "RRULE:FREQ=MONTHLY;BYMONTHDAY=1"
-
-    def test_cron_yearly(self):
-        assert cs._cron_rrule("0 9 1 1 *") == "RRULE:FREQ=MONTHLY;BYMONTHDAY=1;BYMONTH=1"
-
-    def test_cron_multislot_rrules_are_parseable_even_when_planned_all_day(self):
-        assert cs._cron_rrule("*/15 * * * *") == "RRULE:FREQ=DAILY;BYMINUTE=0,15,30,45"
-        assert cs._cron_rrule("0 */2 * * *") == "RRULE:FREQ=DAILY;BYHOUR=0,2,4,6,8,10,12,14,16,18,20,22;BYMINUTE=0"
+class Gone(Exception):
+    class resp:
+        status = 410
 
 
-class TestPlanEvents:
-    def _job(self, schedule, anchor="2026-06-23T09:00:00-07:00"):
-        return {"id": "j", "name": "n", "next_run_at": anchor, "schedule": schedule}
-
-    def test_once_is_timed_single_event(self):
-        plan = cs._plan_events(self._job({"kind": "once"}))
-        assert len(plan) == 1
-        assert plan[0]["mode"] == "one-shot"
-        assert plan[0]["recurrence"] is None
-        assert plan[0]["start"]["dateTime"] == "2026-06-23T09:00:00-07:00"
-
-    def test_daily_is_one_timed_recurring_series(self):
-        plan = cs._plan_events(self._job({"kind": "cron", "expr": "0 7 * * *"}))
-        assert len(plan) == 1
-        assert plan[0]["recurrence"] == "RRULE:FREQ=DAILY"
-        assert plan[0]["mode"] == "recurring"
-
-    @pytest.mark.parametrize(
-        "schedule",
-        [
-            {"kind": "interval", "minutes": 360},
-            {"kind": "cron", "expr": "0 */2 * * *"},
-            {"kind": "cron", "expr": "*/15 * * * *"},
-            {"kind": "cron", "expr": "* * * * *"},
-        ],
-    )
-    def test_high_frequency_is_one_all_day_series(self, schedule):
-        plan = cs._plan_events(self._job(schedule))
-        assert len(plan) == 1
-        assert plan[0]["mode"] == "all-day-high-frequency"
-        assert plan[0]["recurrence"] == "RRULE:FREQ=DAILY;INTERVAL=1"
-        assert plan[0]["start"] == {"date": "2026-06-23"}
-
-    def test_over_six_hours_is_not_all_day(self):
-        plan = cs._plan_events(self._job({"kind": "interval", "minutes": 361}))
-        assert plan[0]["mode"] != "all-day-high-frequency"
-
-    def test_no_next_run_no_plan(self):
-        assert cs._plan_events({"id": "j", "schedule": {"kind": "once"}, "next_run_at": None}) == []
-
-
-class FakeClient:
-    def __init__(self):
-        self.events = {}
-        self.instances = {}
-        self.created = []
-        self.patched = []
-        self.next_id = 1
-
-    def create_event_body(self, calendar, body):
-        event_id = f"ev{self.next_id}"
-        self.next_id += 1
-        event = deepcopy(body)
-        event["id"] = event_id
-        self.events[event_id] = event
-        self.created.append((calendar, deepcopy(body)))
-        return event_id
-
-    def patch_event_body(self, calendar, event_id, body):
-        event = self.events.get(event_id)
-        if event is None:
-            return False
-        event.update(deepcopy(body))
-        self.patched.append((calendar, event_id, deepcopy(body)))
-        return True
-
-    def get_event(self, calendar, event_id):
-        event = self.events.get(event_id)
-        return deepcopy(event) if event else None
-
-    def list_events(self, calendar):
-        return [deepcopy(event) for event in self.events.values()]
-
-    def list_instances(self, calendar, event_id, time_min, time_max):
-        return deepcopy(self.instances.get(event_id, []))
-
-
-@pytest.fixture()
-def env(tmp_path, monkeypatch):
-    fake = FakeClient()
-    monkeypatch.setattr(cs, "CRON_DIR", tmp_path)
-    monkeypatch.setattr(cs, "_enabled", lambda: True)
-    monkeypatch.setattr(cs, "_calendar_id", lambda: "Hermes crons")
-    monkeypatch.setattr(cs, "_iana_timezone", lambda: "America/Los_Angeles")
-    monkeypatch.setattr(cs, "calendar_client", fake)
-    return fake
-
-
-def _job(**overrides):
+def job(**overrides):
     value = {
         "id": "job1",
         "name": "My Job",
-        "next_run_at": "2026-06-23T09:00:00-07:00",
-        "schedule": {"kind": "interval", "minutes": 1440},
-        "schedule_display": "every 1d",
+        "enabled": True,
+        "state": "scheduled",
+        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+        "__profile": "ops",
     }
     value.update(overrides)
     return value
 
 
-def test_on_create_makes_event_and_state(env):
-    cs.on_create(_job())
-    assert len(env.created) == 1
-    event = env.created[0][1]
-    assert event["recurrence"] == ["RRULE:FREQ=DAILY;INTERVAL=1"]
-    assert event["start"]["dateTime"] == "2026-06-23T09:00:00-07:00"
-    state = cs._load_state()
-    assert state["job1"]["events"][0]["event_id"] == "ev1"
-    assert state["job1"]["max_duration_seconds"] is None
+def context(state=None, *, events=None):
+    events = events if events is not None else {}
+    calls = {"created": [], "patched": [], "archived": [], "attached": [], "completion": []}
+
+    def get(event_id):
+        if event_id == "gone":
+            raise Gone()
+        return events[event_id]
+
+    def create(body):
+        event_id = f"event{len(calls['created']) + 1}"
+        events[event_id] = dict(body)
+        calls["created"].append(event_id)
+        return event_id
+
+    def patch(event_id, body):
+        calls["patched"].append((event_id, dict(body)))
+        events.setdefault(event_id, {}).update(body)
+
+    ctx = reconciler.ReconcileContext(
+        state=state if state is not None else {"events": {}},
+        dry_run=False,
+        calendar_id="calendar",
+        should_include=lambda item: bool(item.get("enabled")) and item.get("state") == "scheduled",
+        event_for_job=lambda item: {"summary": "editable", "description": item["name"], "start": {"dateTime": "2026-01-01T09:00:00Z"}, "end": {"dateTime": "2026-01-01T09:05:00Z"}},
+        signature=lambda body: body["description"],
+        get_event=get,
+        create_event=create,
+        patch_event=patch,
+        adopt_event_id=lambda job_id, tracked: next((event_id for event_id in events if event_id not in tracked), None),
+        archive_event=lambda event_id, reason: calls["archived"].append((event_id, reason)),
+        attach_output=lambda output, item: calls["attached"].append((output, item["id"])) or 1,
+        record_completion=lambda item, success, duration: calls["completion"].append((item["id"], success, duration)),
+        now=lambda: datetime(2026, 1, 1).isoformat(),
+    )
+    return ctx, calls
 
 
-def test_on_create_no_next_run_skips(env):
-    cs.on_create(_job(next_run_at=None))
-    assert env.created == []
-    assert cs._load_state() == {}
+def test_create_and_sweep_use_the_same_primitive(monkeypatch):
+    ctx, calls = context()
+    result = reconciler.reconcile_one(job(), "create", ctx)
+    assert result == {"created": 1, "adopted": 0}
+    assert ctx.state["events"]["job1"]["event_id"] == "event1"
+    assert reconciler.reconcile_orphans([], ctx) == {"archived": 1, "deleted": 0}
+    assert calls["archived"] == [("event1", "cron is no longer active")]
 
 
-def test_reconciliation_retains_failed_duplicate_archive_for_retry(env, monkeypatch):
-    cs.on_create(_job())
-    duplicate = deepcopy(env.events["ev1"])
-    duplicate["id"] = "ev2"
-    env.events["ev2"] = duplicate
+def test_engine_locks_loads_and_saves_the_same_state_transaction():
+    operations = []
+    stored = {"events": {}}
+    ctx, _ = context(state={"wrong": "state"})
 
-    archive_attempts = []
+    class Lock:
+        def __enter__(self):
+            operations.append("lock")
 
-    def fail_archive(calendar, event_id, reason):
-        archive_attempts.append(event_id)
-        return False
+        def __exit__(self, *_):
+            operations.append("unlock")
 
-    monkeypatch.setattr(cs, "_archive_event", fail_archive)
-    cs.on_update(_job())
+    ctx.lock = Lock
+    ctx.load_state = lambda: operations.append("load") or stored
+    ctx.save_state = lambda state: operations.append("save")
+    assert reconciler.reconcile_one(job(), "create", ctx) == {"created": 1, "adopted": 0}
+    assert operations == ["lock", "load", "save", "unlock"]
+    assert stored["events"]["job1"]["event_id"] == "event1"
 
-    assert archive_attempts == ["ev2"]
-    assert [event["event_id"] for event in cs._load_state()["job1"]["events"]] == [
-        "ev1",
-        "ev2",
+
+def test_transient_mutation_does_not_save_state():
+    stored = {"events": {"job1": {"event_id": "event1", "signature": "old"}}}
+    ctx, _ = context(state=stored, events={"event1": {}})
+    ctx.load_state = lambda: stored
+    saves = []
+    ctx.save_state = saves.append
+    ctx.patch_event = lambda *_: False
+    with pytest.raises(RuntimeError, match="Calendar patch"):
+        reconciler.reconcile_one(job(name="Changed"), "update", ctx)
+    assert saves == []
+    assert stored["events"]["job1"]["signature"] == "old"
+
+
+def test_adoption_and_manual_title_preservation():
+    live = {"legacy": {"summary": "Brian's title"}}
+    ctx, calls = context(events=live)
+    assert reconciler.reconcile_one(job(), "create", ctx) == {"created": 0, "adopted": 1}
+    assert calls["patched"][0][0] == "legacy"
+    assert "summary" not in calls["patched"][0][1]
+
+
+def test_adoption_archives_every_additional_live_series():
+    live = {
+        "legacy-A": {"summary": "Brian's title"},
+        "duplicate-B": {"summary": "Stale duplicate"},
+    }
+    ctx, calls = context(events=live)
+    ctx.untracked_event_ids = lambda job_id, tracked: [
+        event_id for event_id in live if event_id not in tracked
     ]
 
-    monkeypatch.setattr(cs, "_archive_event", lambda *args: True)
-    cs.on_update(_job())
-
-    assert [event["event_id"] for event in cs._load_state()["job1"]["events"]] == ["ev1"]
-
-
-def test_on_complete_first_run_sets_baseline_silently(env):
-    cs.on_create(_job())
-    notes = []
-    cs.on_complete(_job(), success=True, duration_seconds=420.0, notify=lambda m, warn=False: notes.append((m, warn)))
-    assert notes == []
-    assert cs._load_state()["job1"]["max_duration_seconds"] == 420.0
-    event = env.events["ev1"]
-    assert event["end"]["dateTime"] == "2026-06-23T09:07:00-07:00"
+    assert reconciler.reconcile_one(job(), "create", ctx) == {
+        "created": 0,
+        "adopted": 1,
+        "duplicates_archived": 1,
+    }
+    assert calls["patched"][0][0] == "legacy-A"
+    assert calls["archived"] == [("duplicate-B", "duplicate cron series")]
 
 
-def test_on_complete_tiny_duration_is_floored_only_in_event(env):
-    cs.on_create(_job())
-    cs.on_complete(_job(), success=True, duration_seconds=42.0)
-    assert cs._load_state()["job1"]["max_duration_seconds"] == 42.0
-    assert env.events["ev1"]["end"]["dateTime"] == "2026-06-23T09:01:00-07:00"
+@pytest.mark.parametrize(
+    ("signature", "expected_result"),
+    [
+        ("old", {"updated": 1, "duplicates_archived": 1}),
+        ("My Job", {"unchanged": 1, "duplicates_archived": 1}),
+    ],
+)
+def test_tracked_canonical_archives_untracked_live_duplicates(signature, expected_result):
+    state = {"events": {"job1": {"event_id": "canonical", "signature": signature}}}
+    live = {
+        "canonical": {"summary": "Brian's title"},
+        "duplicate-B": {"summary": "Stale duplicate"},
+    }
+    ctx, calls = context(state=state, events=live)
+    ctx.untracked_event_ids = lambda job_id, tracked: [
+        event_id for event_id in live if event_id not in tracked
+    ]
+
+    assert reconciler.reconcile_one(job(), "update", ctx) == expected_result
+    assert calls["archived"] == [("duplicate-B", "duplicate cron series")]
 
 
-def test_on_complete_increase_notifies_above_threshold(env):
-    cs.on_create(_job())
-    cs.on_complete(_job(), success=True, duration_seconds=50.0)
-    notes = []
-    cs.on_complete(_job(), success=True, duration_seconds=76.0, notify=lambda m, warn=False: notes.append((m, warn)))
-    assert len(notes) == 1
-    assert notes[0][1] is False
-    assert "50s -> 76s" in notes[0][0]
+def test_adoption_skips_stale_candidate_and_archives_stale_duplicate_with_save():
+    stored = {"events": {}}
+    live = {
+        "stale-A": {"summary": "Gone"},
+        "legacy-B": {"summary": "Brian's title"},
+        "stale-duplicate-C": {"summary": "Gone duplicate"},
+    }
+    ctx, calls = context(state={"wrong": "state"}, events=live)
+    ctx.load_state = lambda: stored
+    saves = []
+    ctx.save_state = saves.append
+    ctx.untracked_event_ids = lambda job_id, tracked: list(live)
+
+    def patch(event_id, body):
+        if event_id == "stale-A":
+            raise Gone()
+        calls["patched"].append((event_id, dict(body)))
+        live.setdefault(event_id, {}).update(body)
+
+    def archive(event_id, reason):
+        if event_id == "stale-duplicate-C":
+            raise Gone()
+        calls["archived"].append((event_id, reason))
+
+    ctx.patch_event = patch
+    ctx.archive_event = archive
+
+    assert reconciler.reconcile_one(job(), "create", ctx) == {"created": 0, "adopted": 1}
+    assert calls["created"] == []
+    assert calls["patched"][0][0] == "legacy-B"
+    assert calls["archived"] == []
+    assert stored["events"]["job1"]["event_id"] == "legacy-B"
+    assert saves == [stored]
 
 
-def test_on_complete_doubling_warns(env):
-    cs.on_create(_job())
-    cs.on_complete(_job(), success=True, duration_seconds=30.0)
-    notes = []
-    cs.on_complete(_job(), success=True, duration_seconds=80.0, notify=lambda m, warn=False: notes.append((m, warn)))
-    assert notes[0][1] is True
-    assert "cron took longer than expected" in notes[0][0]
+def test_adoption_creates_only_after_every_candidate_is_stale():
+    stored = {"events": {}}
+    live = {
+        "stale-A": {"summary": "Gone"},
+        "stale-B": {"summary": "Gone"},
+    }
+    ctx, calls = context(state={"wrong": "state"}, events=live)
+    ctx.load_state = lambda: stored
+    saves = []
+    ctx.save_state = saves.append
+    ctx.untracked_event_ids = lambda job_id, tracked: list(live)
+    ctx.patch_event = lambda event_id, body: (_ for _ in ()).throw(Gone())
+
+    assert reconciler.reconcile_one(job(), "create", ctx) == {"created": 1, "adopted": 0}
+    assert calls["created"] == ["event1"]
+    assert stored["events"]["job1"]["event_id"] == "event1"
+    assert saves == [stored]
 
 
-def test_on_complete_no_growth_is_noop(env):
-    cs.on_create(_job())
-    cs.on_complete(_job(), success=True, duration_seconds=50.0)
-    env.patched.clear()
-    cs.on_complete(_job(), success=True, duration_seconds=20.0)
-    assert env.patched == []
-    assert cs._load_state()["job1"]["max_duration_seconds"] == 50.0
+def test_transient_duplicate_archive_failure_does_not_save_state():
+    stored = {"events": {"job1": {"event_id": "canonical", "signature": "My Job"}}}
+    live = {
+        "canonical": {"summary": "Brian's title"},
+        "duplicate-B": {"summary": "Stale duplicate"},
+    }
+    ctx, _ = context(state={"wrong": "state"}, events=live)
+    ctx.load_state = lambda: stored
+    saves = []
+    ctx.save_state = saves.append
+    ctx.untracked_event_ids = lambda job_id, tracked: [
+        event_id for event_id in live if event_id not in tracked
+    ]
+    ctx.archive_event = lambda event_id, reason: (_ for _ in ()).throw(
+        RuntimeError("archive failed")
+    )
+
+    with pytest.raises(RuntimeError, match="archive failed"):
+        reconciler.reconcile_one(job(), "update", ctx)
+
+    assert saves == []
+    assert stored["events"]["job1"]["signature"] == "My Job"
 
 
-def test_on_complete_failure_does_not_update_duration(env):
-    cs.on_create(_job())
-    cs.on_complete(_job(), success=False, duration_seconds=999.0)
-    assert cs._load_state()["job1"]["max_duration_seconds"] is None
+def test_transition_to_nonrecurring_explicitly_clears_recurrence():
+    state = {"events": {"job1": {"event_id": "event1", "signature": "old"}}}
+    ctx, calls = context(
+        state,
+        events={"event1": {"recurrence": ["RRULE:FREQ=DAILY"]}},
+    )
+
+    reconciler.reconcile_one(job(schedule={"kind": "once"}), "update", ctx)
+
+    assert calls["patched"] == [
+        (
+            "event1",
+            {
+                "description": "My Job",
+                "start": {"dateTime": "2026-01-01T09:00:00Z"},
+                "end": {"dateTime": "2026-01-01T09:05:00Z"},
+                "recurrence": [],
+            },
+        )
+    ]
 
 
-def test_on_complete_untracked_job_noop(env):
-    cs.on_complete(_job(id="ghost"), success=True, duration_seconds=10.0)
-    assert cs._load_state() == {}
+def test_missing_event_is_recreated_and_remove_archives_not_deletes():
+    state = {"events": {"job1": {"event_id": "gone", "signature": "stale"}}}
+    ctx, calls = context(state)
+    assert reconciler.reconcile_one(job(), "update", ctx)["created"] == 1
+    result = reconciler.reconcile_one(job(), "remove", ctx)
+    assert result == {"archived": 1}
+    assert calls["archived"] == [("event1", "cron is no longer active")]
 
 
-def test_disabled_skips_everything(env, monkeypatch):
-    monkeypatch.setattr(cs, "_enabled", lambda: False)
-    cs.on_create(_job())
-    assert env.created == []
+def test_one_shot_completion_attaches_before_archive():
+    ctx, calls = context()
+    order = []
+    ctx.attach_output = lambda output, item: order.append(("attach", output, item["id"])) or 1
+    ctx.record_completion = lambda item, success, duration: order.append(("completion", success, duration))
+    ctx.archive_event = lambda event_id, reason: order.append(("archive", event_id, reason))
+    reconciler.reconcile_one(job(schedule={"kind": "once"}), "create", ctx)
+    result = reconciler.reconcile_one(job(schedule={"kind": "once"}), "complete", ctx, output_file="/managed/output.md", success=True, duration_seconds=1.0)
+    assert result == {"archived": 1}
+    assert order == [
+        ("completion", True, 1.0),
+        ("attach", "/managed/output.md", "job1"),
+        ("archive", "event1", "cron is no longer active"),
+    ]
+
+
+def test_one_shot_remove_defers_until_completion_attaches_output():
+    ctx, calls = context()
+    one_shot = job(schedule={"kind": "once"})
+    reconciler.reconcile_one(one_shot, "create", ctx)
+    assert reconciler.reconcile_one(one_shot, "remove", ctx) == {"deferred": 1}
+    assert calls["archived"] == []
+    assert reconciler.reconcile_one(one_shot, "complete", ctx, output_file="/managed/output.md") == {"archived": 1}
+    assert calls["attached"] == [("/managed/output.md", "job1")]
+    assert calls["archived"] == [("event1", "cron is no longer active")]
+
+
+def test_orphan_sweep_does_not_archive_pending_one_shot_completion():
+    ctx, calls = context()
+    one_shot = job(schedule={"kind": "once"})
+    reconciler.reconcile_one(one_shot, "create", ctx)
+    reconciler.reconcile_one(one_shot, "remove", ctx)
+    assert reconciler.reconcile_orphans([], ctx) == {"archived": 0, "deleted": 0}
+    assert calls["archived"] == []
+
+
+def test_second_orphan_sweep_archives_one_shot_when_completion_never_arrives():
+    ctx, calls = context()
+    one_shot = job(schedule={"kind": "once"})
+    reconciler.reconcile_one(one_shot, "create", ctx)
+    reconciler.reconcile_one(one_shot, "remove", ctx)
+
+    assert reconciler.reconcile_orphans([], ctx) == {"archived": 0, "deleted": 0}
+    assert reconciler.reconcile_orphans([], ctx) == {"archived": 1, "deleted": 0}
+    assert calls["archived"] == [("event1", "cron is no longer active")]
+    assert "job1" not in ctx.state.get("pending_one_shot_removals", {})
+
+
+def test_non_one_shot_completion_records_duration_and_attaches():
+    ctx, calls = context()
+    reconciler.reconcile_one(job(), "create", ctx)
+    assert reconciler.reconcile_one(job(), "complete", ctx, output_file="/managed/output.md", success=True, duration_seconds=2.0) == {"output_attached": 1}
+    assert calls["completion"] == [("job1", True, 2.0)]
+
+
+def test_recurring_completion_attaches_output_before_failed_duration_update():
+    ctx, calls = context()
+    reconciler.reconcile_one(job(), "create", ctx)
+    ctx.record_completion = lambda *_: (_ for _ in ()).throw(
+        RuntimeError("duration patch failed")
+    )
+
+    with pytest.raises(RuntimeError, match="duration patch failed"):
+        reconciler.reconcile_one(
+            job(),
+            "complete",
+            ctx,
+            output_file="/managed/output.md",
+            success=True,
+            duration_seconds=2.0,
+        )
+
+    assert calls["attached"] == [("/managed/output.md", "job1")]
+
+
+def test_bridge_passes_deleted_remove_snapshot_and_rejects_unmanaged_output(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "OPS_RUNNER", tmp_path / "runner.py")
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    bridge.OPS_RUNNER.write_text("# runner")
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.update(kwargs)
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+    bridge.on_remove(job())
+    assert __import__("json").loads(captured["input"])["operation"] == "remove"
+    assert __import__("json").loads(captured["input"])["job"]["id"] == "job1"
+    assert __import__("json").loads(captured["input"])["job"]["__profile"] == "ops"
+    assert bridge._safe_output_file("/tmp/not-managed.md", job()) is None
+
+
+@pytest.mark.parametrize(
+    ("handler", "operation"),
+    [(bridge.on_create, "create"), (bridge.on_update, "update")],
+)
+def test_bridge_create_and_update_forward_complete_managed_snapshots(
+    monkeypatch, tmp_path, handler, operation
+):
+    captured = []
+    snapshot = job(marker="preserved", __profile_home="/untrusted/source")
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "OPS_RUNNER", tmp_path / "runner.py")
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    bridge.OPS_RUNNER.write_text("# runner")
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.append(__import__("json").loads(kwargs["input"]))
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    handler(snapshot)
+
+    expected_snapshot = {key: value for key, value in snapshot.items() if key != "__profile_home"}
+    expected_snapshot["__profile"] = "ops"
+    assert captured == [{
+        "operation": operation,
+        "job": expected_snapshot,
+    }]
+    assert "__profile_home" not in captured[0]["job"]
+
+
+def test_bridge_complete_forwards_managed_output_and_duration(monkeypatch, tmp_path):
+    captured = {}
+    output = tmp_path / "cron" / "output" / "job1" / "2026-01-01_00-00-00.md"
+    output.parent.mkdir(parents=True)
+    output.write_text("## Response\ncomplete")
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "OPS_RUNNER", tmp_path / "runner.py")
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    bridge.OPS_RUNNER.write_text("# runner")
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.update(kwargs)
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    bridge.on_complete(job(), output_file=str(output), duration_seconds=2.5, success=True)
+
+    payload = __import__("json").loads(captured["input"])
+    assert payload["operation"] == "complete"
+    assert payload["output_file"] == str(output)
+    assert payload["duration_seconds"] == 2.5
+    assert payload["success"] is True
+
+
+def test_bridge_rejects_absolute_job_id_output_escape(monkeypatch, tmp_path):
+    output = tmp_path / "escaped.md"
+    output.write_text("## Response\nnot managed")
+    malicious_job = job(id=str(tmp_path))
+
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path / "managed"})
+
+    assert bridge._safe_output_file(str(output), malicious_job) is None
+
+
+def test_bridge_logs_failed_runner_status_without_stderr(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "OPS_RUNNER", tmp_path / "runner.py")
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    bridge.OPS_RUNNER.write_text("# runner")
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: bridge.subprocess.CompletedProcess(
+            args, 3, stderr="Authorization: sensitive diagnostic"
+        ),
+    )
+
+    bridge.on_remove(job())
+
+    assert "exited with status 3" in caplog.text
+    assert "sensitive diagnostic" not in caplog.text
