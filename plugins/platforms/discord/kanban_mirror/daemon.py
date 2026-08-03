@@ -11,6 +11,7 @@ inside must never block on I/O.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -32,6 +33,7 @@ from plugins.platforms.discord.kanban_mirror.discord_client import (
 )
 from plugins.platforms.discord.kanban_mirror.planner import Op, _digest_hash, _tags_for, current_publish_hash, plan
 from plugins.platforms.discord.kanban_mirror.render import (
+    all_work_items_terminal,
     post_title,
     pointed_card_id,
     redact,
@@ -75,10 +77,19 @@ from plugins.platforms.discord.kanban_mirror.reconciliation import (ExpectedThre
 from plugins.platforms.discord.kanban_mirror.repair import (
     recover_pending_inbound_bindings,
     resolve_recoverable_quarantines,
+    resolve_verified_historical_quarantines,
 )
 from plugins.platforms.discord.kanban_mirror.writer import WriterError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ReconciliationCoverage:
+    observed_thread_ids: frozenset[str]
+    observed_archived_thread_ids: frozenset[str]
+    complete: bool
+    failures: tuple[str, ...] = ()
 
 
 def _canonical_hash(payload: dict) -> str:
@@ -158,7 +169,7 @@ def _record_repair_diagnostic(
 
 async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                                  conn: sqlite3.Connection, snapshot: BoardSnapshot,
-                                 log: list[str], *, reload_snapshot: bool = False) -> None:
+                                 log: list[str], *, reload_snapshot: bool = False) -> ReconciliationCoverage:
     """Read live Discord state independently per mapped thread and reconcile it."""
     rows = conn.execute(
         """SELECT i.thread_id,i.starter_message_id FROM mirror_initiatives i
@@ -167,12 +178,14 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
                  SELECT 1 FROM mirror_members m WHERE m.initiative_id=i.id
              ))"""
     ).fetchall()
+    failures: list[str] = []
     try:
         forum = await asyncio.to_thread(client.get_channel, cfg.forum_channel_id)
         tag_names = {str(t.get("id")): str(t.get("name")) for t in forum.get("available_tags", [])}
     except Exception as exc:
         logger.warning("kanban mirror: reconciliation forum snapshot unavailable: %s", exc)
         log.append("reconciliation: PARTIAL forum")
+        failures.append("forum")
         tag_names = {}
         forum_complete = False
     else:
@@ -182,6 +195,7 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         thread_id, starter_id = str(row["thread_id"]), str(row["starter_message_id"] or "")
         if not forum_complete:
             log.append(f"reconciliation: PARTIAL thread={thread_id}")
+            failures.append(f"thread:{thread_id}")
             continue
         try:
             channel = await asyncio.to_thread(client.get_channel, thread_id)
@@ -203,11 +217,12 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
             metadata = channel.get("thread_metadata") or {}
             observed[thread_id] = ObservedThread(
                 thread_id, starter_id, _canonical_hash(payload), frozenset(existing), payload["title"], tags,
-                bool(metadata.get("archived", channel.get("archived", False))),
+                bool(metadata.get("archived", channel.get("archived", False))), payload["body"],
             )
         except Exception as exc:
             logger.warning("kanban mirror: reconciliation observation failed for %s: %s", thread_id, exc)
             log.append(f"reconciliation: PARTIAL thread={thread_id}")
+            failures.append(f"thread:{thread_id}")
     if reload_snapshot:
         snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
     state = load_mirror_state(conn)
@@ -215,14 +230,13 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
     for initiative in state.values():
         if initiative.kind != "post" or not initiative.thread_id:
             continue
-        member_cards = [snapshot.cards[task_id] for task_id in initiative.members if task_id in snapshot.cards]
-        if len(member_cards) != len(initiative.members):
-            continue
-        terminal = initiative.archived_at is not None or (
-            bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
-        )
+        contained_ids = work_item_ids(initiative, snapshot)
+        terminal = all_work_items_terminal(initiative, snapshot)
         expected[initiative.thread_id] = ExpectedThread(
-            post_title(initiative, snapshot), tuple(_tags_for(initiative, snapshot)), terminal,
+            post_title(initiative, snapshot),
+            tuple(_tags_for(initiative, snapshot)),
+            terminal,
+            render_post(initiative, snapshot, cfg.max_post_chars, initiative.brief_updated_at or 0),
         )
     observed_digest = None; digest_complete = True
     digest = get_digest(conn)
@@ -235,10 +249,21 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         except Exception as exc:
             logger.warning("kanban mirror: reconciliation digest snapshot unavailable: %s", exc)
             log.append("reconciliation: PARTIAL digest"); digest_complete = False
+            failures.append("digest")
     findings = await asyncio.to_thread(reconcile_mirror_state, conn, observed_threads=observed,
                                        cards=((cfg.board, task_id) for task_id in snapshot.cards),
                                        expected_threads=expected, observed_digest=observed_digest,
                                        digest_observation_complete=digest_complete)
+    repairable_drift_threads = {
+        finding.thread_id
+        for finding in findings
+        if finding.code in {
+            "thread.title_mismatch", "thread.body_mismatch", "thread.tags_mismatch",
+            "thread.done_tag_missing", "thread.done_tag_unexpected",
+        }
+    }
+    if repairable_drift_threads:
+        await asyncio.to_thread(_invalidate_published_hashes, conn, repairable_drift_threads)
     resolved_quarantines = await asyncio.to_thread(
         resolve_recoverable_quarantines, conn,
         observed_thread_ids=set(observed), cards=set(snapshot.cards),
@@ -300,6 +325,14 @@ async def _observe_and_reconcile(cfg: MirrorConfig, client: DiscordClient,
         except Exception as exc:
             logger.warning("kanban mirror: repair diagnostic failed for %s: %s", thread_id, exc)
             log.append(f"reconciliation: NOTICE_FAILED thread={thread_id}")
+    return ReconciliationCoverage(
+        observed_thread_ids=frozenset(observed),
+        observed_archived_thread_ids=frozenset(
+            thread_id for thread_id, item in observed.items() if item.archived
+        ),
+        complete=forum_complete and digest_complete and not failures,
+        failures=tuple(failures),
+    )
 
 
 class DiscordTransitionPublisher:
@@ -432,6 +465,18 @@ def _store_published_hash(conn: sqlite3.Connection, initiative_id: str, h: str) 
     conn.execute(
         "UPDATE mirror_initiatives SET published_hash = ?, updated_at = ? WHERE id = ?",
         (h, int(time.time()), initiative_id),
+    )
+    conn.commit()
+
+
+def _invalidate_published_hashes(conn: sqlite3.Connection, thread_ids: set[str]) -> None:
+    if not thread_ids:
+        return
+    marks = ",".join("?" for _ in thread_ids)
+    conn.execute(
+        f"UPDATE mirror_initiatives SET published_hash=NULL,updated_at=? "
+        f"WHERE kind='post' AND thread_id IN ({marks})",
+        (int(time.time()), *sorted(thread_ids)),
     )
     conn.commit()
 
@@ -1142,8 +1187,7 @@ async def _audit_active_threads(cfg: MirrorConfig, client: DiscordClient | None,
             log.append(f"active_thread_audit: UNMAPPED {thread_id}")
             continue
 
-        member_cards = [snapshot.cards[tid] for tid in initiative.members if tid in snapshot.cards]
-        all_terminal = bool(member_cards) and all(is_terminal(str(card.status or "")) for card in member_cards)
+        all_terminal = all_work_items_terminal(initiative, snapshot)
         if all_terminal and initiative.archived_at is not None:
             logger.info(
                 "kanban mirror: active Discord thread %s maps to archived terminal initiative %s; reopening local mirror state for repair",
@@ -1378,6 +1422,27 @@ def _terminal_chain(snapshot: BoardSnapshot, task_id: str) -> list[dict]:
              "status": snapshot.cards[cid].status} for cid in ordered if cid in snapshot.cards]
 
 
+def _terminal_chain_for_initiative(
+    snapshot: BoardSnapshot, initiative: Initiative, binding_task_id: str
+) -> list[dict]:
+    """Return all contained work items with the authoritative binding last."""
+    ids = list(dict.fromkeys(work_item_ids(initiative, snapshot)))
+    if binding_task_id not in ids:
+        return []
+    ordered = [task_id for task_id in ids if task_id != binding_task_id]
+    ordered.append(binding_task_id)
+    if any(task_id not in snapshot.cards for task_id in ordered):
+        return []
+    return [
+        {
+            "task_id": task_id,
+            "title": snapshot.cards[task_id].title,
+            "status": snapshot.cards[task_id].status,
+        }
+        for task_id in ordered
+    ]
+
+
 def _record_successor_finding(conn: sqlite3.Connection, thread: str, binding: str,
                               task: str, evidence: dict) -> None:
     code = "successor.selection_ambiguous"; stamp = int(time.time())
@@ -1570,12 +1635,9 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
             log.append(f"terminal_lifecycle: BACKFILLED active legacy thread {initiative.id}")
         if binding is None:
             continue
-        chain = _terminal_chain(snapshot, binding.task_id)
+        chain = _terminal_chain_for_initiative(snapshot, initiative, binding.task_id)
         # An absent card is ambiguity, not completion.
         if not chain or chain[-1]["task_id"] != binding.task_id:
-            continue
-        # Dependency descendants are continuations, not containment.
-        if any(not is_terminal(str(item["status"] or "")) for item in chain[:-1]):
             continue
         try:
             activity = await _latest_thread_activity_ts(client, initiative.thread_id)
@@ -1671,7 +1733,8 @@ async def _resume_terminal_lifecycles(cfg: MirrorConfig, client: DiscordClient,
 
 
 async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sqlite3.Connection, *,
-               dry_run: bool = False, allow_llm: bool = True) -> list[str]:
+               dry_run: bool = False, allow_llm: bool = True,
+               gateway_owned: bool = False) -> list[str]:
     log: list[str] = []
     try:
         snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
@@ -1695,13 +1758,36 @@ async def tick(cfg: MirrorConfig, client: DiscordClient | None, mirror_conn: sql
             log.append("binding_transition: recovery failed")
     if cfg.reconciliation_enabled and not dry_run and client is not None:
         try:
-            await _observe_and_reconcile(
+            coverage = await _observe_and_reconcile(
                 cfg, client, mirror_conn, snapshot, log, reload_snapshot=True,
             )
         except Exception:
             logger.exception("kanban mirror: live reconciliation failed closed")
             log.append("reconciliation: FAILED")
             return log
+    else:
+        coverage = None
+    if gateway_owned and cfg.reconciliation_enabled and not dry_run and client is not None:
+        if coverage is None or not coverage.complete:
+            logger.warning(
+                "kanban mirror: historical quarantine migration skipped; incomplete live coverage failures=%s",
+                ",".join(coverage.failures if coverage is not None else ("unavailable",)),
+            )
+            log.append("historical_migration: SKIPPED incomplete live coverage")
+        else:
+            try:
+                snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
+                migrated = await asyncio.to_thread(
+                    resolve_verified_historical_quarantines,
+                    mirror_conn,
+                    snapshot,
+                    fresh_archived_thread_ids=set(coverage.observed_archived_thread_ids),
+                )
+                if migrated:
+                    log.append(f"historical_migration: resolved {len(migrated)}")
+            except Exception:
+                logger.exception("kanban mirror: historical quarantine migration failed closed")
+                log.append("historical_migration: FAILED")
 
     state = await asyncio.to_thread(load_mirror_state, mirror_conn)
     if not dry_run and client is not None and cfg.automatic_successor_enabled:
@@ -1999,16 +2085,32 @@ async def run_mirror_daemon(
             snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
             startup_log: list[str] = []
             await _recover_binding_transitions(cfg, client, conn, startup_log)
-            await _observe_and_reconcile(
+            coverage = await _observe_and_reconcile(
                 cfg, client, conn, snapshot, startup_log, reload_snapshot=True,
             )
+            if not coverage.complete:
+                logger.warning(
+                    "kanban mirror: startup historical quarantine migration skipped; incomplete live coverage failures=%s",
+                    ",".join(coverage.failures),
+                )
+                startup_log.append("historical_migration: SKIPPED incomplete live coverage")
+            else:
+                snapshot = await asyncio.to_thread(load_board_snapshot, cfg.board)
+                migrated = await asyncio.to_thread(
+                    resolve_verified_historical_quarantines,
+                    conn,
+                    snapshot,
+                    fresh_archived_thread_ids=set(coverage.observed_archived_thread_ids),
+                )
+                if migrated:
+                    startup_log.append(f"historical_migration: resolved {len(migrated)}")
         except Exception:
             logger.exception("kanban mirror: startup transition recovery/reconciliation failed closed")
     else:
         await reconcile(cfg, client, conn)
     while is_running():
         try:
-            await tick(cfg, client, conn)
+            await tick(cfg, client, conn, gateway_owned=True)
         except Exception:
             logger.exception("kanban mirror: tick failed")
         await asyncio.sleep(cfg.poll_seconds)

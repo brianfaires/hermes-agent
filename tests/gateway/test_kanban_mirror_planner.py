@@ -73,6 +73,50 @@ def test_all_members_done_updates_done_tag_then_archives_without_closure_note():
     assert "done" in edit.data["tags"]
 
 
+def test_active_continuation_keeps_terminal_root_thread_open():
+    s = snap([
+        mk_card("t_r", "Root", "done"),
+        mk_card("t_next", "Continuation", "running"),
+    ])
+    i = init_with(["t_r"])
+    i.continuation_task_ids.add("t_next")
+
+    ops = plan(s, {i.id: i}, None, set(), CFG, now=100)
+
+    ks = kinds(ops)
+    assert "archive_thread" not in ks
+    edit = next(o for o in ops if o.kind == "edit_post")
+    assert "done" not in edit.data["tags"]
+    assert "running" in edit.data["tags"]
+
+
+def test_missing_continuation_fails_closed_instead_of_archiving():
+    s = snap([mk_card("t_r", "Root", "done")])
+    i = init_with(["t_r"])
+    i.continuation_task_ids.add("t_missing")
+
+    ops = plan(s, {i.id: i}, None, set(), CFG, now=100)
+
+    assert "archive_thread" not in kinds(ops)
+    edit = next(o for o in ops if o.kind == "edit_post")
+    assert "done" not in edit.data["tags"]
+
+
+def test_dependency_descendant_is_in_summary_metadata_and_blocks_archive():
+    s = snap([
+        mk_card("t_r", "Root", "done"),
+        mk_card("t_child", "Blocked follow-up", "blocked"),
+    ], links=(("t_r", "t_child"),))
+    i = init_with(["t_r"])
+
+    ops = plan(s, {i.id: i}, None, set(), CFG, now=100)
+
+    assert "archive_thread" not in kinds(ops)
+    edit = next(o for o in ops if o.kind == "edit_post")
+    assert "done" not in edit.data["tags"]
+    assert "t_r,t_child" in edit.data["body"].splitlines()[-1]
+
+
 def test_note_dedup_by_key():
     s = snap([mk_card("t_r", "Root", "done")])
     i = init_with(["t_r"])

@@ -22,6 +22,7 @@ class ObservedThread:
     title: str | None = None
     tags: tuple[str, ...] = ()
     archived: bool | None = None
+    body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ExpectedThread:
     title: str
     tags: tuple[str, ...]
     terminal: bool = False
+    body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,7 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
     # Serialize the state snapshot and finding update.  Otherwise an older scan
     # can commit after a newer scan and re-open stale quarantine evidence.
     conn.execute("BEGIN IMMEDIATE")
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
     def add(severity: str, code: str, thread: str, binding: str | None, task: str | None, **evidence):
         detected[(thread, code, binding, task)] = (severity, {"thread_id": thread, **evidence})
@@ -148,7 +151,20 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
                 (mappings[0]["id"],),
             ).fetchone() is None
         )
-        if len(opens) != 1 and not legacy_archived_orphan:
+        migrated_historical = (
+            "mirror_historical_quarantine_migrations" in tables
+            and len(mappings) == 1
+            and mappings[0]["archived_at"] is not None
+            and expected_threads.get(thread) is not None
+            and expected_threads[thread].terminal
+            and observed_threads.get(thread) is not None
+            and observed_threads[thread].archived is True
+            and conn.execute(
+                "SELECT 1 FROM mirror_historical_quarantine_migrations WHERE thread_id=?",
+                (thread,),
+            ).fetchone() is not None
+        )
+        if len(opens) != 1 and not legacy_archived_orphan and not migrated_historical:
             add("critical", "binding.open_count", thread, None, None, open_count=len(opens), binding_keys=[r["binding_key"] for r in opens])
         active = opens[0] if len(opens) == 1 else None
         if active is not None:
@@ -176,7 +192,21 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
                 add("error", "transition.confirmation_missing", thread, transition["new_binding_key"], None, transition_key=key, transition_message_id=message_id)
             if state == "prepared" and observed is not None and active is not None and observed.starter_revision_hash != active["starter_revision_hash"]:
                 add("critical", "starter.changed_without_transition_confirmation", thread, active["binding_key"], active["task_id"], transition_key=key, expected_hash=active["starter_revision_hash"], observed_hash=observed.starter_revision_hash)
-        if active is not None and observed is not None and active["starter_revision_hash"] is not None and observed.starter_revision_hash != active["starter_revision_hash"]:
+        expected_for_revision = expected_threads.get(thread)
+        repairable_metadata_drift = False
+        if expected_for_revision is not None and observed is not None:
+            repairable_metadata_drift = (
+                observed.title != expected_for_revision.title
+                or set(observed.tags) != set(expected_for_revision.tags)
+                or (
+                    expected_for_revision.body is not None
+                    and observed.body != expected_for_revision.body
+                )
+            )
+        if (active is not None and observed is not None
+                and active["starter_revision_hash"] is not None
+                and observed.starter_revision_hash != active["starter_revision_hash"]
+                and not repairable_metadata_drift):
             add("error", "starter.revision_mismatch", thread, active["binding_key"], active["task_id"], expected_hash=active["starter_revision_hash"], observed_hash=observed.starter_revision_hash)
 
         expected = expected_threads.get(thread)
@@ -185,6 +215,8 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
             binding = active["binding_key"] if active else None; task = active["task_id"] if active else None
             if observed.title != expected.title:
                 add("warning", "thread.title_mismatch", thread, binding, task, expected=expected.title, observed=observed.title)
+            if expected.body is not None and observed.body != expected.body:
+                add("warning", "thread.body_mismatch", thread, binding, task)
             if set(observed.tags) != set(expected.tags):
                 add("warning", "thread.tags_mismatch", thread, binding, task, expected=sorted(expected.tags), observed=sorted(observed.tags))
             done = "done" in {tag.lower() for tag in observed.tags}
@@ -193,7 +225,7 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
             if not expected.terminal and done:
                 add("warning", "thread.done_tag_unexpected", thread, binding, task)
             completed = expected.terminal and lifecycle is not None and lifecycle["state"] == "archived"
-            if observed.archived and not completed and not legacy_archived_orphan:
+            if observed.archived and not completed and not legacy_archived_orphan and not migrated_historical:
                 add("critical", "thread.premature_archive", thread, binding, task, lifecycle_state=lifecycle["state"] if lifecycle else None)
             if completed and not observed.archived:
                 add("error", "thread.unexpected_reopen", thread, binding, task)
@@ -226,7 +258,6 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
                 if not observed_digest.pinned: add("warning", "digest.unpinned", thread, binding, task)
 
     # Optional additive delivery tables may be initialized by their owners.
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "mirror_discord_outbox" in tables:
         for r in conn.execute("SELECT operation_id,thread_id,status,attempt_count,last_error FROM mirror_discord_outbox WHERE status!='delivered'"):
             add("warning" if r["status"] in {"pending", "sending"} else "error", "delivery.outbound_" + ("failed" if r["last_error"] else "pending"), r["thread_id"], None, None, operation_id=r["operation_id"], status=r["status"], attempts=r["attempt_count"], error=r["last_error"])
@@ -238,7 +269,7 @@ def reconcile_mirror_state(conn: sqlite3.Connection, *, observed_threads: Mappin
     observed_codes = {
         "thread.starter_mapping_mismatch", "starter.revision_mismatch",
         "starter.changed_without_transition_confirmation", "transition.confirmation_missing",
-        "thread.title_mismatch", "thread.tags_mismatch", "thread.done_tag_missing",
+        "thread.title_mismatch", "thread.body_mismatch", "thread.tags_mismatch", "thread.done_tag_missing",
         "thread.done_tag_unexpected", "thread.premature_archive", "thread.unexpected_reopen",
         "thread.terminal_unarchived",
     }

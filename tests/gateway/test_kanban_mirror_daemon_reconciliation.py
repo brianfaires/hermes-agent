@@ -4,16 +4,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.daemon import (
-    _do_create_thread, _observe_and_reconcile, _record_repair_diagnostic,
+    ReconciliationCoverage, _do_create_thread, _observe_and_reconcile, _record_repair_diagnostic,
     reconcile, run_mirror_daemon, tick,
 )
 from plugins.platforms.discord.kanban_mirror.planner import Op
+from plugins.platforms.discord.kanban_mirror.planner import current_publish_hash
 from plugins.platforms.discord.kanban_mirror.reconciliation import list_reconciliation_findings, resolve_thread_quarantine
 from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings,
     connect_mirror, create_initiative, is_thread_quarantined, load_mirror_state, set_thread,
- set_archived, set_thread_with_binding,
- )
+    set_archived, set_thread_with_binding,
+)
 
 
 class FakeClient:
@@ -40,6 +41,60 @@ class FakeClient:
 
     def create_forum_thread(self, channel_id, *, name, content, tag_ids, attachments=None):
         return {"id": "new-thread", "message": {"id": "new-starter"}}
+
+
+class EditableClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.forum = {
+            "available_tags": [
+                {"id": "active-id", "name": "active"},
+                {"id": "running-id", "name": "running"},
+            ]
+        }
+        self.channel = {
+            "id": "thread", "name": "Card", "applied_tags": ["active-id", "running-id"],
+            "thread_metadata": {"archived": False},
+        }
+        self.message = {"id": "starter-thread", "content": "drifted starter"}
+        self.edits = []
+
+    def get_channel(self, channel_id):
+        if channel_id == "forum":
+            return self.forum
+        return dict(self.channel)
+
+    def get_message(self, channel_id, message_id):
+        return dict(self.message)
+
+    def update_message(self, channel_id, message_id, *, content):
+        self.edits.append(("message", content))
+        self.message["content"] = content
+
+    def update_thread(self, channel_id, *, name=None, tag_ids=None, **kwargs):
+        if name is not None:
+            self.edits.append(("title", name))
+            self.channel["name"] = name
+        if tag_ids is not None:
+            self.edits.append(("tags", tuple(tag_ids)))
+            self.channel["applied_tags"] = list(tag_ids)
+
+
+class DoneArchivedClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.forum = {
+            "available_tags": [
+                {"id": "done-id", "name": "done"},
+                {"id": "waiting-id", "name": "waiting"},
+            ]
+        }
+
+    def get_channel(self, channel_id):
+        if channel_id == "forum":
+            return self.forum
+        return {"id": channel_id, "name": "Card", "applied_tags": ["done-id"],
+                "thread_metadata": {"archived": True}}
 
 
 class MissingThreadClient(FakeClient):
@@ -180,7 +235,10 @@ def test_partial_thread_snapshot_does_not_resolve_and_other_thread_continues(tmp
     assert conn.execute("SELECT count(*) FROM mirror_repair_notices").fetchone()[0] == 2
 
     client.fail.add("broken")
-    asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+    coverage = asyncio.run(_observe_and_reconcile(cfg, client, conn, empty_snapshot(), []))
+    assert coverage.complete is False
+    assert "thread:broken" in coverage.failures
+    assert coverage.observed_thread_ids == frozenset({"good"})
     assert is_thread_quarantined(conn, "broken")
     assert is_thread_quarantined(conn, "good")
     assert client.sent == {}
@@ -199,6 +257,282 @@ def test_daemon_builds_live_metadata_expectations_without_false_quarantine(tmp_p
     assert "thread.tags_mismatch" in codes
     assert not is_thread_quarantined(conn, "thread")
     assert client.sent == {}
+
+
+def test_daemon_expected_terminal_includes_continuation_bindings(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    conn.execute(
+        """INSERT INTO mirror_binding_epochs
+           (binding_key,thread_id,board_slug,task_id,sequence,started_at,ended_at,state)
+           VALUES ('binding:thread:0','thread','board','next',2,1,2,'closed')"""
+    )
+    conn.commit()
+    client = FakeClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    snapshot = BoardSnapshot({
+        "task": Card("task", "Card", "body", "done", "high", None, None, None, None,
+                     "1", "2", None, None),
+        "next": Card("next", "Continuation", "body", "running", "high", None, None, None,
+                     None, "1", None, None, None),
+    }, {}, {}, {}, {})
+
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert "thread.done_tag_missing" not in codes
+    assert "thread.premature_archive" not in codes
+    assert not is_thread_quarantined(conn, "thread")
+
+
+def test_archived_local_flag_does_not_override_nonterminal_continuation(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    conn.execute(
+        """INSERT INTO mirror_binding_epochs
+           (binding_key,thread_id,board_slug,task_id,sequence,started_at,ended_at,state)
+           VALUES ('binding:thread:0','thread','board','next',2,1,2,'closed')"""
+    )
+    set_archived(conn, "init-thread", 10)
+    client = FakeClient()
+    client.archived = True
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    snapshot = BoardSnapshot({
+        "task": Card("task", "Card", "body", "done", "high", None, None, None, None,
+                     "1", "2", None, None),
+        "next": Card("next", "Continuation", "body", "running", "high", None, None, None,
+                     None, "1", None, None, None),
+    }, {}, {}, {}, {})
+
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert "thread.premature_archive" in codes
+    assert "thread.done_tag_missing" not in codes
+    assert is_thread_quarantined(conn, "thread")
+
+
+def test_missing_continuation_keeps_expected_metadata_and_quarantines_archived_done_thread(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    conn.execute(
+        """INSERT INTO mirror_binding_epochs
+           (binding_key,thread_id,board_slug,task_id,sequence,started_at,ended_at,state)
+           VALUES ('binding:thread:0','thread','board','missing-continuation',2,1,2,'closed')"""
+    )
+    conn.commit()
+    client = DoneArchivedClient()
+    cfg = MirrorConfig(board="board", forum_channel_id="forum", reconciliation_enabled=True)
+    snapshot = BoardSnapshot({
+        "task": Card("task", "Card", "body", "done", "high", None, None, None, None,
+                     "1", "2", None, None),
+    }, {}, {}, {}, {})
+
+    asyncio.run(_observe_and_reconcile(cfg, client, conn, snapshot, []))
+
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert {"thread.tags_mismatch", "thread.done_tag_unexpected", "thread.premature_archive"} <= codes
+    assert "thread.done_tag_missing" not in codes
+    assert is_thread_quarantined(conn, "thread")
+
+
+def test_tick_repairs_live_starter_body_drift_through_planner(tmp_path, monkeypatch):
+    conn = seed(tmp_path / "mirror.db")
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+    state = load_mirror_state(conn)
+    conn.execute(
+        "UPDATE mirror_binding_epochs SET starter_revision_hash=? WHERE thread_id='thread'",
+        ("stale-live-hash",),
+    )
+    conn.execute(
+        "UPDATE mirror_initiatives SET published_hash=? WHERE id='init-thread'",
+        (current_publish_hash(state["init-thread"], snapshot, MirrorConfig(board="board", forum_channel_id="forum")),),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: snapshot,
+    )
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        binding_transitions_enabled=True, terminal_lifecycle_enabled=False,
+    )
+    client = EditableClient()
+
+    log = asyncio.run(tick(cfg, client, conn, allow_llm=False))
+
+    assert any(item[0] == "message" and "card_ID: task" in item[1] for item in client.edits)
+    assert any(line.startswith("edit_post: init-thread 'Card'") for line in log)
+    codes = {f.code for f in list_reconciliation_findings(conn, open_only=True)}
+    assert "starter.revision_mismatch" not in codes
+    assert not is_thread_quarantined(conn, "thread")
+
+
+def test_tick_metadata_repair_converges_after_second_scan(tmp_path, monkeypatch):
+    conn = seed(tmp_path / "mirror.db")
+    card = Card("task", "Card", "body", "running", "high", None, None, None, None,
+                "1", None, None, None)
+    snapshot = BoardSnapshot({"task": card}, {}, {}, {}, {})
+    state = load_mirror_state(conn)
+    conn.execute(
+        "UPDATE mirror_initiatives SET published_hash=? WHERE id='init-thread'",
+        (current_publish_hash(state["init-thread"], snapshot, MirrorConfig(board="board", forum_channel_id="forum")),),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: snapshot,
+    )
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        binding_transitions_enabled=True, terminal_lifecycle_enabled=False,
+    )
+    client = EditableClient()
+
+    first_log = asyncio.run(tick(cfg, client, conn, allow_llm=False))
+    first_edit_count = len(client.edits)
+    second_log = asyncio.run(tick(cfg, client, conn, allow_llm=False))
+
+    assert any(line.startswith("edit_post: init-thread 'Card'") for line in first_log)
+    assert first_edit_count == 3
+    assert len(client.edits) == first_edit_count
+    assert not any(line.startswith("edit_post:") for line in second_log)
+    assert list_reconciliation_findings(conn, open_only=True) == []
+    refreshed = load_mirror_state(conn)["init-thread"]
+    assert refreshed.published_hash == current_publish_hash(refreshed, snapshot, cfg)
+
+
+def test_historical_migration_runs_only_for_gateway_owned_ticks(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        automatic_successor_enabled=False, terminal_lifecycle_enabled=False,
+    )
+    calls = []
+    order = []
+
+    async def no_recovery(*args, **kwargs):
+        order.append("recover")
+        return None
+
+    async def no_reconciliation(*args, **kwargs):
+        order.append("reconcile")
+        return ReconciliationCoverage(
+            observed_thread_ids=frozenset({"thread"}),
+            observed_archived_thread_ids=frozenset({"thread"}),
+            complete=True,
+        )
+
+    async def no_audit(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions",
+        no_recovery,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile",
+        no_reconciliation,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._audit_active_threads",
+        no_audit,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        lambda mirror_conn, snapshot, **kwargs: calls.append((mirror_conn, snapshot, kwargs)) or [],
+    )
+
+    asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False))
+    assert calls == []
+    assert order == ["recover", "reconcile"]
+
+    order.clear()
+    asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False, gateway_owned=True))
+    assert calls == [(conn, empty_snapshot(), {"fresh_archived_thread_ids": {"thread"}})]
+    assert order == ["recover", "reconcile"]
+
+
+def test_gateway_owned_tick_skips_historical_migration_when_reconciliation_fails(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    calls = []
+
+    async def no_recovery(*args, **kwargs):
+        return None
+
+    async def fail_reconciliation(*args, **kwargs):
+        raise RuntimeError("live observation failed")
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions",
+        no_recovery,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile",
+        fail_reconciliation,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        lambda mirror_conn, snapshot, **kwargs: calls.append((mirror_conn, snapshot, kwargs)) or [],
+    )
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        automatic_successor_enabled=False, terminal_lifecycle_enabled=False,
+    )
+
+    log = asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False, gateway_owned=True))
+
+    assert log[-1] == "reconciliation: FAILED"
+    assert calls == []
+
+
+def test_gateway_owned_tick_skips_historical_migration_when_coverage_incomplete(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    calls = []
+
+    async def no_recovery(*args, **kwargs):
+        return None
+
+    async def partial_reconciliation(*args, **kwargs):
+        return ReconciliationCoverage(
+            observed_thread_ids=frozenset({"good"}),
+            observed_archived_thread_ids=frozenset({"good"}),
+            complete=False,
+            failures=("thread:broken",),
+        )
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions",
+        no_recovery,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile",
+        partial_reconciliation,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        lambda mirror_conn, snapshot, **kwargs: calls.append((mirror_conn, snapshot, kwargs)) or [],
+    )
+    cfg = MirrorConfig(
+        board="board", forum_channel_id="forum", reconciliation_enabled=True,
+        automatic_successor_enabled=False, terminal_lifecycle_enabled=False,
+    )
+
+    log = asyncio.run(tick(cfg, FakeClient(), conn, allow_llm=False, gateway_owned=True))
+
+    assert "historical_migration: SKIPPED incomplete live coverage" in log
+    assert calls == []
 
 
 def test_daemon_clean_live_scan_resolves_deterministic_stale_quarantine(tmp_path):
@@ -387,6 +721,15 @@ def test_daemon_startup_recovers_transitions_before_live_reconciliation(tmp_path
 
     async def observe(*args, **kwargs):
         order.append("reconcile")
+        return ReconciliationCoverage(
+            observed_thread_ids=frozenset({"thread"}),
+            observed_archived_thread_ids=frozenset({"thread"}),
+            complete=True,
+        )
+
+    def migrate(*args, **kwargs):
+        order.append("migration")
+        return []
 
     monkeypatch.setattr(
         "plugins.platforms.discord.kanban_mirror.config.load_mirror_config", lambda: cfg,
@@ -410,10 +753,123 @@ def test_daemon_startup_recovers_transitions_before_live_reconciliation(tmp_path
     monkeypatch.setattr(
         "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
     )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        migrate,
+    )
+
+    asyncio.run(run_mirror_daemon(lambda: False))
+
+    assert order == ["recover", "reconcile", "migration"]
+
+
+def test_daemon_startup_skips_historical_migration_when_reconciliation_fails(tmp_path, monkeypatch):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    order = []
+    cfg = MirrorConfig(
+        enabled=True, board="board", forum_channel_id="forum", guild_id="guild",
+        reconciliation_enabled=True, binding_transitions_enabled=True,
+    )
+
+    async def recover(*args):
+        order.append("recover")
+
+    async def observe(*args, **kwargs):
+        order.append("reconcile")
+        raise RuntimeError("live observation failed")
+
+    def migrate(*args, **kwargs):
+        order.append("migration")
+        return []
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.config.load_mirror_config", lambda: cfg,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_discord_token", lambda *a, **k: "token",
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.DiscordClient", lambda token: FakeClient(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.connect_mirror", lambda path: conn,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions", recover,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        migrate,
+    )
 
     asyncio.run(run_mirror_daemon(lambda: False))
 
     assert order == ["recover", "reconcile"]
+
+
+def test_daemon_startup_skips_historical_migration_when_coverage_incomplete(tmp_path, monkeypatch, caplog):
+    conn = connect_mirror(tmp_path / "mirror.db")
+    order = []
+    cfg = MirrorConfig(
+        enabled=True, board="board", forum_channel_id="forum", guild_id="guild",
+        reconciliation_enabled=True, binding_transitions_enabled=True,
+    )
+
+    async def recover(*args):
+        order.append("recover")
+
+    async def observe(*args, **kwargs):
+        order.append("reconcile")
+        return ReconciliationCoverage(
+            observed_thread_ids=frozenset({"good"}),
+            observed_archived_thread_ids=frozenset({"good"}),
+            complete=False,
+            failures=("thread:broken",),
+        )
+
+    def migrate(*args, **kwargs):
+        order.append("migration")
+        return []
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.config.load_mirror_config", lambda: cfg,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_discord_token", lambda *a, **k: "token",
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.DiscordClient", lambda token: FakeClient(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.connect_mirror", lambda path: conn,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.load_board_snapshot",
+        lambda board: empty_snapshot(),
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._recover_binding_transitions", recover,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon._observe_and_reconcile", observe,
+    )
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.daemon.resolve_verified_historical_quarantines",
+        migrate,
+    )
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(run_mirror_daemon(lambda: False))
+
+    assert order == ["recover", "reconcile"]
+    assert any("startup historical quarantine migration skipped" in r.message for r in caplog.records)
 
 
 def test_new_thread_mapping_and_binding_are_created_atomically(tmp_path):

@@ -141,6 +141,7 @@ def validate_mirror_schema(conn: sqlite3.Connection) -> int:
         "mirror_conversation_delivery_items", "mirror_conversation_delivery_chunks", "mirror_binding_epochs",
         "mirror_binding_transitions", "mirror_discord_outbox", "mirror_transition_recovery",
         "mirror_reconciliation_findings", "mirror_thread_quarantine", "mirror_terminal_lifecycles",
+        "mirror_historical_quarantine_migrations", "mirror_historical_quarantine_migration_runs",
     }
     present = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     missing = sorted(required - present)

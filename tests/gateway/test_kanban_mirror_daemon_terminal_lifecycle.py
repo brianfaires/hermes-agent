@@ -111,6 +111,23 @@ def test_daemon_resume_orders_stages_and_reopen_cancels(tmp_path, monkeypatch):
     assert conn.execute("SELECT state FROM mirror_terminal_lifecycles").fetchone()[0]=="cancelled"
 
 
+def test_active_continuation_blocks_terminal_lifecycle_for_done_binding(tmp_path, monkeypatch):
+    conn=seeded(tmp_path/"m.db"); client=Discord()
+    state=load_mirror_state(conn)
+    state["i"].continuation_task_ids.add("next")
+    snap=BoardSnapshot({
+        "card": card("done"),
+        "next": Card("next","Continuation","body","running","high","Ops",None,None,None,"1",None,None,None),
+    },{}, {}, {}, {})
+    cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.daemon.time.time",lambda:100)
+
+    asyncio.run(_resume_terminal_lifecycles(cfg,client,conn,snap,state,[]))
+
+    assert client.events == []
+    assert conn.execute("SELECT COUNT(*) FROM mirror_terminal_lifecycles").fetchone()[0] == 0
+
+
 def test_daemon_backfills_active_terminal_thread_marked_archived_in_legacy_state(tmp_path, monkeypatch):
     conn=seeded(tmp_path/"m.db"); client=Discord(); set_archived(conn,"i",80)
     cfg=MirrorConfig(board="board",forum_channel_id="forum",guild_id="guild",terminal_lifecycle_enabled=True,done_thread_archive_idle_minutes=1)

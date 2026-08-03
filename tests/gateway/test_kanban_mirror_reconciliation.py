@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
+from plugins.platforms.discord.kanban_mirror import repair as repair_module
 from plugins.platforms.discord.kanban_mirror.conversation_log import record_conversation_event
 from plugins.platforms.discord.kanban_mirror.outbox import OutboundEnvelope, enqueue
 from plugins.platforms.discord.kanban_mirror.reconciliation import (
     ExpectedThread, ObservedDigest, ObservedThread, list_reconciliation_findings,
     reconcile_mirror_state, reconciliation_report, resolve_thread_quarantine,
 )
-from plugins.platforms.discord.kanban_mirror.repair import resolve_recoverable_quarantines
+from plugins.platforms.discord.kanban_mirror.repair import (
+    resolve_recoverable_quarantines,
+    resolve_verified_historical_quarantines,
+)
 from plugins.platforms.discord.kanban_mirror.state import (
-    active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
+    BoardSnapshot, Card, active_thread_binding, add_member, backfill_legacy_bindings, connect_mirror,
     create_initiative, is_thread_quarantined, prepare_binding_transition,
     resolve_thread_task, set_archived, set_thread,
 )
@@ -27,6 +33,18 @@ def seed(path):
 
 def observed(revision=None, messages=frozenset()):
     return {"thread": ObservedThread("thread", "starter", revision, messages)}
+
+
+def migration_snapshot(status="done"):
+    card = Card(
+        id="task", title="Card", body="", status=status, priority=0,
+        assignee="", branch_name="", workspace_kind="", created_by="",
+        created_at=1, completed_at=2 if status in {"done", "archived"} else None,
+        last_failure_error="", result="",
+    )
+    return BoardSnapshot(
+        cards={"task": card}, children={}, parents={}, recent_comments={}, recent_events={},
+    )
 
 
 def test_findings_are_idempotent_update_evidence_and_preserve_resolved_history(tmp_path):
@@ -92,6 +110,331 @@ def test_resolved_nonrecoverable_revision_mismatch_does_not_hold_clean_quarantin
         conn, observed_thread_ids={'thread'}, cards={'task'}, now=21,
     ) == ['thread']
     assert not is_thread_quarantined(conn, 'thread')
+
+
+def test_verified_historical_resolver_keeps_live_or_ambiguous_records_quarantined(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','warning','thread.premature_archive','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    create_initiative(conn, "live", "Live")
+    set_thread(conn, "live", "live-thread", "starter")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('live-thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == ["thread"]
+    assert not is_thread_quarantined(conn, "thread")
+    assert is_thread_quarantined(conn, "live-thread")
+    assert conn.execute("SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='old'").fetchone()[0] == 20
+
+
+def test_verified_historical_migration_rejects_archived_revision_history(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='archived' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old-revision','error','starter.revision_mismatch','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == []
+    assert is_thread_quarantined(conn, "thread")
+
+
+def test_verified_historical_migration_rejects_without_fresh_archived_proof(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids=set(), now=20,
+    ) == []
+    assert is_thread_quarantined(conn, "thread")
+    assert tuple(conn.execute(
+        "SELECT state,ended_at FROM mirror_binding_epochs WHERE thread_id='thread'"
+    ).fetchone()) == ("open", None)
+
+
+def test_verified_historical_migration_backs_up_closes_epochs_and_is_idempotent(tmp_path):
+    path = tmp_path / "mirror.db"
+    conn = seed(path)
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,binding_key,task_id,evidence,evidence_hash,
+         first_seen_at,last_seen_at)
+        VALUES ('old-open','critical','binding.open_count','thread',NULL,NULL,'{}','h',10,10),
+               ('old-archive','critical','thread.premature_archive','thread','binding:thread:1','task','{}','h2',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == ["thread"]
+
+    epoch = conn.execute(
+        "SELECT state,ended_at FROM mirror_binding_epochs WHERE thread_id='thread'"
+    ).fetchone()
+    assert tuple(epoch) == ("historical_closed", 10)
+    backup = conn.execute(
+        "SELECT backup_path FROM mirror_historical_quarantine_migrations WHERE thread_id='thread'"
+    ).fetchone()[0]
+    assert backup and Path(backup).is_file()
+    restored = sqlite3.connect(backup)
+    try:
+        assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert restored.execute(
+            "SELECT state,ended_at FROM mirror_binding_epochs WHERE thread_id='thread'"
+        ).fetchone() == ("open", None)
+        assert restored.execute(
+            "SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='old-archive'"
+        ).fetchone()[0] is None
+        assert restored.execute(
+            "SELECT resolved_at FROM mirror_thread_quarantine WHERE thread_id='thread'"
+        ).fetchone()[0] is None
+        assert restored.execute(
+            "SELECT COUNT(*) FROM mirror_historical_quarantine_migration_runs"
+        ).fetchone()[0] == 0
+    finally:
+        restored.close()
+    run = conn.execute(
+        "SELECT migrated_count,backup_path FROM mirror_historical_quarantine_migration_runs"
+    ).fetchone()
+    assert tuple(run) == (1, backup)
+    assert not is_thread_quarantined(conn, "thread")
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=30,
+    ) == []
+
+
+def test_verified_historical_migration_holds_write_lock_before_backup(tmp_path, monkeypatch):
+    path = tmp_path / "mirror.db"
+    conn = seed(path)
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+    original_backup = repair_module._create_verified_backup
+    locked = []
+
+    def backup_probe(locked_conn, db_path, stamp):
+        writer = sqlite3.connect(str(path), timeout=0.0)
+        try:
+            try:
+                writer.execute(
+                    "INSERT INTO mirror_thread_quarantine(thread_id,needs_repair,quarantined_at,updated_at) "
+                    "VALUES ('concurrent',1,1,1)"
+                )
+            except sqlite3.OperationalError as exc:
+                locked.append("locked" in str(exc).lower())
+            else:
+                writer.commit()
+                locked.append(False)
+        finally:
+            writer.close()
+        return original_backup(locked_conn, db_path, stamp)
+
+    monkeypatch.setattr(repair_module, "_create_verified_backup", backup_probe)
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == ["thread"]
+    assert locked == [True]
+    assert conn.execute(
+        "SELECT 1 FROM mirror_thread_quarantine WHERE thread_id='concurrent'"
+    ).fetchone() is None
+
+
+def test_verified_historical_migration_rolls_back_when_backup_fails(tmp_path, monkeypatch):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    def fail_backup(*args, **kwargs):
+        raise RuntimeError("backup failed")
+
+    monkeypatch.setattr(repair_module, "_create_verified_backup", fail_backup)
+
+    try:
+        resolve_verified_historical_quarantines(
+            conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+        )
+    except RuntimeError as exc:
+        assert "backup failed" in str(exc)
+    else:
+        raise AssertionError("migration should fail closed when backup fails")
+
+    assert tuple(conn.execute(
+        "SELECT state,ended_at FROM mirror_binding_epochs WHERE thread_id='thread'"
+    ).fetchone()) == ("open", None)
+    assert conn.execute(
+        "SELECT resolved_at FROM mirror_reconciliation_findings WHERE finding_key='old'"
+    ).fetchone()[0] is None
+    assert is_thread_quarantined(conn, "thread")
+    assert conn.execute("SELECT COUNT(*) FROM mirror_historical_quarantine_migration_runs").fetchone()[0] == 0
+
+
+def test_verified_historical_migration_revalidation_failure_rolls_back_batch(tmp_path, monkeypatch):
+    path = tmp_path / "mirror.db"
+    conn = seed(path)
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old-one','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    create_initiative(conn, "init2", "Card 2")
+    add_member(conn, "init2", "task2")
+    set_thread(conn, "init2", "thread2", "starter2")
+    backfill_legacy_bindings(conn, "board")
+    set_archived(conn, "init2", 11)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init2'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old-two','critical','binding.open_count','thread2','{}','h2',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread2',1,10,10)""")
+    conn.commit()
+    snapshot = BoardSnapshot(
+        cards={
+            "task": migration_snapshot().cards["task"],
+            "task2": Card(
+                id="task2", title="Card 2", body="", status="done", priority=0,
+                assignee="", branch_name="", workspace_kind="", created_by="",
+                created_at=1, completed_at=2, last_failure_error="", result="",
+            ),
+        },
+        children={}, parents={}, recent_comments={}, recent_events={},
+    )
+    calls = []
+
+    def terminal_until_second_revalidation(initiative, board_snapshot):
+        calls.append(initiative.id)
+        return calls != ["init", "init2", "init", "init2"]
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.repair.all_work_items_terminal",
+        terminal_until_second_revalidation,
+    )
+
+    try:
+        resolve_verified_historical_quarantines(
+            conn, snapshot, fresh_archived_thread_ids={"thread", "thread2"}, now=20,
+        )
+    except RuntimeError as exc:
+        assert "eligibility changed" in str(exc)
+    else:
+        raise AssertionError("expected historical migration to fail closed")
+
+    assert conn.execute("SELECT count(*) FROM mirror_historical_quarantine_migration_runs").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM mirror_historical_quarantine_migrations").fetchone()[0] == 0
+    assert {
+        tuple(row) for row in conn.execute(
+            "SELECT thread_id,state FROM mirror_binding_epochs ORDER BY thread_id"
+        )
+    } == {("thread", "open"), ("thread2", "open")}
+    assert is_thread_quarantined(conn, "thread")
+    assert is_thread_quarantined(conn, "thread2")
+
+
+def test_verified_historical_migration_rejects_member_without_terminal_status(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    add_member(conn, "init", "unknown-status")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == []
+    assert is_thread_quarantined(conn, "thread")
+
+
+def test_verified_historical_migration_rejects_stale_terminal_member_state(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot("running"), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == []
+    assert is_thread_quarantined(conn, "thread")
+
+
+def test_migrated_historical_thread_does_not_reopen_binding_or_archive_warnings(tmp_path):
+    conn = seed(tmp_path / "mirror.db")
+    set_archived(conn, "init", 10)
+    conn.execute("UPDATE mirror_members SET last_status='done' WHERE initiative_id='init'")
+    conn.execute("""INSERT INTO mirror_reconciliation_findings
+        (finding_key,severity,code,thread_id,evidence,evidence_hash,first_seen_at,last_seen_at)
+        VALUES ('old','critical','binding.open_count','thread','{}','h',10,10)""")
+    conn.execute("""INSERT INTO mirror_thread_quarantine
+        (thread_id,needs_repair,quarantined_at,updated_at) VALUES ('thread',1,10,10)""")
+    conn.commit()
+    assert resolve_verified_historical_quarantines(
+        conn, migration_snapshot(), fresh_archived_thread_ids={"thread"}, now=20,
+    ) == ["thread"]
+
+    findings = reconcile_mirror_state(
+        conn,
+        observed_threads={"thread": ObservedThread("thread", "starter", None, title="Card", tags=("done",), archived=True)},
+        cards=[("board", "task")],
+        expected_threads={"thread": ExpectedThread("Card", ("done",), True)},
+        now=30,
+    )
+
+    assert {f.code for f in findings} == set()
+    assert not is_thread_quarantined(conn, "thread")
+
+    findings = reconcile_mirror_state(
+        conn,
+        observed_threads={"thread": ObservedThread("thread", "starter", None, title="Card", tags=("running",), archived=False)},
+        cards=[("board", "task")],
+        expected_threads={"thread": ExpectedThread("Card", ("running",), False)},
+        now=40,
+    )
+    assert {f.code for f in findings} == {"binding.open_count"}
+    assert is_thread_quarantined(conn, "thread")
 
 
 def test_clean_scan_does_not_resolve_quarantine_without_a_valid_observed_binding(tmp_path):

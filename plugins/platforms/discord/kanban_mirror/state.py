@@ -139,9 +139,8 @@ def load_board_snapshot(board: str) -> BoardSnapshot:
         children: dict[str, list[str]] = {}
         parents: dict[str, list[str]] = {}
         for e in con.execute("SELECT parent_id, child_id FROM task_links"):
-            if e["parent_id"] in cards and e["child_id"] in cards:
-                children.setdefault(e["parent_id"], []).append(e["child_id"])
-                parents.setdefault(e["child_id"], []).append(e["parent_id"])
+            children.setdefault(e["parent_id"], []).append(e["child_id"])
+            parents.setdefault(e["child_id"], []).append(e["parent_id"])
         recent_comments = _recent(con, "task_comments", cards)
         recent_events = _recent(con, "task_events", cards)
         # Decomposition provenance defines initiative ownership and must not
@@ -301,6 +300,18 @@ CREATE TABLE IF NOT EXISTS mirror_terminal_lifecycles (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mirror_terminal_lifecycles_current
 ON mirror_terminal_lifecycles(thread_id) WHERE state NOT IN ('archived','cancelled');
+CREATE TABLE IF NOT EXISTS mirror_historical_quarantine_migrations (
+  thread_id TEXT PRIMARY KEY,
+  initiative_id TEXT NOT NULL,
+  backup_path TEXT NOT NULL,
+  migrated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mirror_historical_quarantine_migration_runs (
+  migration_key TEXT PRIMARY KEY,
+  backup_path TEXT NOT NULL,
+  migrated_at INTEGER NOT NULL,
+  migrated_count INTEGER NOT NULL
+);
 """
 
 RECEIPTS_SCHEMA_SQL = """

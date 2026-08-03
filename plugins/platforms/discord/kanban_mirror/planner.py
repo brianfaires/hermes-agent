@@ -17,12 +17,14 @@ from dataclasses import dataclass, replace
 
 from plugins.platforms.discord.kanban_mirror.config import MirrorConfig
 from plugins.platforms.discord.kanban_mirror.render import (
+    all_work_items_terminal,
     needs_brian_tag,
     post_title,
     primary_assignee,
     render_digest,
     render_post,
     stage_tag,
+    work_item_ids,
 )
 from plugins.platforms.discord.kanban_mirror.state import (
     BoardSnapshot,
@@ -50,12 +52,23 @@ def _member_cards(initiative: Initiative, snapshot: BoardSnapshot) -> list[Card]
     return [snapshot.cards[m] for m in initiative.members if m in snapshot.cards]
 
 
+def _contained_cards(initiative: Initiative, snapshot: BoardSnapshot) -> list[Card]:
+    return [
+        snapshot.cards[task_id]
+        for task_id in work_item_ids(initiative, snapshot)
+        if task_id in snapshot.cards
+    ]
+
+
 def _tags_for(initiative: Initiative, snapshot: BoardSnapshot) -> list[str]:
-    member_cards = _member_cards(initiative, snapshot)
+    member_cards = _contained_cards(initiative, snapshot)
     tags: list[str] = []
     if needs_brian_tag(member_cards, snapshot):
         tags.append("needs-brian")
-    tags.append(stage_tag(member_cards, snapshot))
+    stage = stage_tag(member_cards, snapshot)
+    if stage == "done" and not all_work_items_terminal(initiative, snapshot):
+        stage = "waiting"
+    tags.append(stage)
     assignee = primary_assignee(member_cards)
     if assignee:
         tags.append(assignee)
@@ -65,15 +78,10 @@ def _tags_for(initiative: Initiative, snapshot: BoardSnapshot) -> list[str]:
 def current_publish_hash(initiative: Initiative, snapshot: BoardSnapshot, cfg: MirrorConfig) -> str:
     """sha256 over rendered title + body + tags, for change detection.
 
-    Rendered with the initiative's ``brief_updated_at`` (or 0) as the
-    "now" passed to ``render_post`` — NOT wall-clock now. ``render_post``'s
-    footer includes a relative "updated Xm ago" string that drifts with
-    wall-clock time; if we hashed against real "now" the hash would change
-    on every planner tick even when nothing material changed, forcing a
-    spurious ``edit_post`` every poll. The daemon calls this same function
-    right after publishing to compute the ``published_hash`` it stores, so
-    using a stable "now" here is what keeps the comparison meaningful across
-    ticks.
+    ``render_post`` includes source update metadata derived from
+    ``brief_updated_at`` instead of wall-clock-relative text, so the hash only
+    changes when the rendered Discord payload changes materially. The daemon
+    calls this same function after publishing to store ``published_hash``.
     """
     stable_now = initiative.brief_updated_at or 0
     title = post_title(initiative, snapshot)
@@ -92,7 +100,9 @@ def _digest_hash(title: str, body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _all_member_ids(state: dict[str, Initiative], digest: Initiative | None) -> set[str]:
+def _all_member_ids(
+    state: dict[str, Initiative], digest: Initiative | None, snapshot: BoardSnapshot
+) -> set[str]:
     """Task ids already curated into a live (non-archived) initiative.
 
     Archived initiatives are deliberately excluded: once an initiative is
@@ -106,6 +116,8 @@ def _all_member_ids(state: dict[str, Initiative], digest: Initiative | None) -> 
         if initiative.archived_at is not None:
             continue
         seen.update(initiative.members.keys())
+        seen.update(initiative.continuation_task_ids)
+        seen.update(work_item_ids(initiative, snapshot))
     if digest is not None:
         seen.update(digest.members.keys())
     return seen
@@ -113,7 +125,7 @@ def _all_member_ids(state: dict[str, Initiative], digest: Initiative | None) -> 
 
 def _unassigned_curate_op(snapshot: BoardSnapshot, state: dict[str, Initiative],
                             digest: Initiative | None) -> Op | None:
-    assigned = _all_member_ids(state, digest)
+    assigned = _all_member_ids(state, digest, snapshot)
     unassigned = sorted(
         card.id for card in snapshot.active_roots() if card.id not in assigned
     )
@@ -218,7 +230,7 @@ def _plan_initiative(initiative: Initiative, snapshot: BoardSnapshot,
     #    last_status catches up). Suppress these once the whole initiative is
     #    terminal: the closure mechanism is now done-tag + idle archive, not an
     #    in-thread closure acknowledgement.
-    all_terminal = bool(member_cards) and all(is_terminal(str(c.status or "")) for c in member_cards)
+    all_terminal = all_work_items_terminal(initiative, snapshot)
     if not all_terminal:
         for card in member_cards:
             if is_terminal(str(card.status or "")):

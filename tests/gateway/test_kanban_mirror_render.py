@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 
 from plugins.platforms.discord.kanban_mirror.render import (
     render_post, render_digest, post_title, stage_tag, needs_brian_tag, redact,
-    STATUS_EMOJI, review_artifact_paths, work_item_ids,
+    STATUS_EMOJI, review_artifact_paths, work_item_ids, all_work_items_terminal,
 )
-from plugins.platforms.discord.kanban_mirror.state import BoardSnapshot, Card, Initiative, MemberState
+from plugins.platforms.discord.kanban_mirror.state import (
+    BoardSnapshot, Card, Initiative, MemberState, load_board_snapshot,
+)
 
 
 def mk_card(id, title, status, priority=0, body="", assignee=None,
@@ -173,6 +176,56 @@ def test_ghost_fan_in_uses_decomposition_provenance_without_shared_parent():
 
     assert displayed == ["t_bound", "t_generated", "t_root"]
     assert "t_shared" not in displayed
+
+
+def test_work_item_ids_preserve_missing_descendant_and_fail_closed():
+    root = mk_card("t_root", "Root", "done")
+    s = BoardSnapshot({"t_root": root}, {"t_root": ["t_missing"]}, {"t_missing": ["t_root"]}, {}, {})
+
+    displayed = work_item_ids(init_with(["t_root"]), s)
+    body = render_post(init_with(["t_root"]), s, 3800, now=200)
+
+    assert displayed == ["t_root", "t_missing"]
+    assert not all_work_items_terminal(init_with(["t_root"]), s)
+    assert "✅ Root" in body
+    assert "card_ID: t_root" in body
+
+
+def test_load_board_snapshot_retains_links_to_missing_cards(tmp_path, monkeypatch):
+    db = tmp_path / "board.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, title TEXT, body TEXT, status TEXT, priority INTEGER,
+            assignee TEXT, branch_name TEXT, workspace_kind TEXT, created_by TEXT,
+            created_at INTEGER, completed_at INTEGER, last_failure_error TEXT, result TEXT
+        )"""
+    )
+    conn.execute("CREATE TABLE task_links (parent_id TEXT, child_id TEXT)")
+    conn.execute("CREATE TABLE task_comments (id INTEGER, task_id TEXT, author TEXT, body TEXT, created_at INTEGER)")
+    conn.execute("CREATE TABLE task_events (id INTEGER, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER)")
+    conn.execute(
+        "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("t_root", "Root", "", "done", 0, "", "", "", "", 1, 2, "", ""),
+    )
+    conn.execute("INSERT INTO task_links VALUES (?,?)", ("t_root", "t_missing"))
+    conn.commit()
+    conn.close()
+
+    def connect(_board):
+        readonly = sqlite3.connect(db)
+        readonly.row_factory = sqlite3.Row
+        return readonly
+
+    monkeypatch.setattr(
+        "plugins.platforms.discord.kanban_mirror.state._connect_board_readonly",
+        connect,
+    )
+
+    snapshot = load_board_snapshot("board")
+
+    assert snapshot.children == {"t_root": ["t_missing"]}
+    assert snapshot.parents == {"t_missing": ["t_root"]}
 
 
 def test_status_emoji_includes_skipped_and_canceled_items():

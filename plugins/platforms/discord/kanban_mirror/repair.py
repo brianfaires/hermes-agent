@@ -9,9 +9,14 @@ from __future__ import annotations
 import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Mapping
 
-from .state import is_terminal
+from .render import all_work_items_terminal
+from .state import BoardSnapshot, Initiative, is_terminal, load_mirror_state
+
+
+_HISTORICAL_QUARANTINE_MIGRATION_KEY = "terminal-archive-binding-closure-v1"
 
 
 def _timestamp(value: object) -> float | None:
@@ -135,6 +140,200 @@ def resolve_recoverable_quarantines(
         conn.rollback()
         raise
     return resolved
+
+
+def resolve_verified_historical_quarantines(
+    conn: sqlite3.Connection,
+    snapshot: BoardSnapshot,
+    *,
+    fresh_archived_thread_ids: set[str],
+    now: int | None = None,
+) -> list[str]:
+    """One-time migration for verified legacy archived terminal threads."""
+    stamp = int(time.time()) if now is None else int(now)
+    fresh_archived = {str(thread_id) for thread_id in fresh_archived_thread_ids}
+    resolved: list[str] = []
+    db_path = _database_path(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute(
+            "SELECT 1 FROM mirror_historical_quarantine_migration_runs WHERE migration_key=?",
+            (_HISTORICAL_QUARANTINE_MIGRATION_KEY,),
+        ).fetchone():
+            conn.commit()
+            return []
+        mirror_state = load_mirror_state(conn)
+        pending = _eligible_historical_thread_ids(
+            conn, snapshot, mirror_state, fresh_archived_thread_ids=fresh_archived,
+        )
+        if not pending:
+            conn.commit()
+            return []
+        backup_path = _create_verified_backup(conn, db_path, stamp)
+        for thread_id in pending:
+            if thread_id not in fresh_archived:
+                raise RuntimeError("historical migration eligibility changed during lock")
+            if conn.execute(
+                "SELECT 1 FROM mirror_historical_quarantine_migrations WHERE thread_id=?",
+                (thread_id,),
+            ).fetchone():
+                raise RuntimeError("historical migration eligibility changed during lock")
+            initiative = conn.execute(
+                """SELECT i.id,i.archived_at
+                   FROM mirror_initiatives i
+                   WHERE i.kind='post' AND i.thread_id=?""",
+                (thread_id,),
+            ).fetchall()
+            initiative_ids = {str(item[0]) for item in initiative}
+            archived = [item[1] for item in initiative]
+            if len(initiative_ids) != 1 or not archived or any(value is None for value in archived):
+                raise RuntimeError("historical migration eligibility changed during lock")
+            initiative_id = next(iter(initiative_ids))
+            archived_at = int(next(value for value in archived if value is not None))
+            initiative_state = mirror_state.get(initiative_id)
+            if (
+                initiative_state is None
+                or not all_work_items_terminal(initiative_state, snapshot)
+            ):
+                raise RuntimeError("historical migration eligibility changed during lock")
+            causes = {str(item[0]) for item in conn.execute(
+                "SELECT DISTINCT code FROM mirror_reconciliation_findings WHERE thread_id=? AND resolved_at IS NULL",
+                (thread_id,),
+            )}
+            if not causes or not causes <= {"thread.premature_archive", "binding.open_count"}:
+                raise RuntimeError("historical migration eligibility changed during lock")
+            open_epochs = conn.execute(
+                "SELECT binding_key FROM mirror_binding_epochs WHERE thread_id=? AND state='open'",
+                (thread_id,),
+            ).fetchall()
+            if len(open_epochs) != 1:
+                raise RuntimeError("historical migration eligibility changed during lock")
+            conn.execute(
+                """UPDATE mirror_binding_epochs
+                   SET state='historical_closed',ended_at=?
+                   WHERE thread_id=? AND state='open'""",
+                (archived_at, thread_id),
+            )
+            conn.execute(
+                """UPDATE mirror_reconciliation_findings SET resolved_at=?
+                   WHERE thread_id=? AND resolved_at IS NULL
+                     AND code IN ('thread.premature_archive','binding.open_count')""",
+                (stamp, thread_id),
+            )
+            conn.execute(
+                """INSERT INTO mirror_historical_quarantine_migrations
+                   (thread_id,initiative_id,backup_path,migrated_at)
+                   VALUES (?,?,?,?)""",
+                (thread_id, initiative_id, str(backup_path), stamp),
+            )
+            changed = conn.execute(
+                """UPDATE mirror_thread_quarantine
+                   SET needs_repair=0,resolved_at=?,updated_at=?
+                   WHERE thread_id=? AND resolved_at IS NULL""",
+                (stamp, stamp, thread_id),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("historical migration quarantine changed during lock")
+            resolved.append(thread_id)
+        conn.execute(
+            """INSERT INTO mirror_historical_quarantine_migration_runs
+               (migration_key,backup_path,migrated_at,migrated_count)
+               VALUES (?,?,?,?)""",
+            (
+                _HISTORICAL_QUARANTINE_MIGRATION_KEY,
+                str(backup_path),
+                stamp,
+                len(resolved),
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return resolved
+
+
+def _eligible_historical_thread_ids(
+    conn: sqlite3.Connection,
+    snapshot: BoardSnapshot,
+    mirror_state: Mapping[str, Initiative],
+    *,
+    fresh_archived_thread_ids: set[str],
+) -> list[str]:
+    fresh_archived = {str(thread_id) for thread_id in fresh_archived_thread_ids}
+    rows = conn.execute(
+        """SELECT q.thread_id
+           FROM mirror_thread_quarantine q
+           LEFT JOIN mirror_historical_quarantine_migrations m
+             ON m.thread_id=q.thread_id
+           WHERE q.resolved_at IS NULL AND m.thread_id IS NULL
+           ORDER BY q.thread_id"""
+    ).fetchall()
+    eligible: list[str] = []
+    for row in rows:
+        thread_id = str(row[0])
+        if thread_id not in fresh_archived:
+            continue
+        initiative = conn.execute(
+            """SELECT i.id,i.archived_at
+               FROM mirror_initiatives i
+               WHERE i.kind='post' AND i.thread_id=?""",
+            (thread_id,),
+        ).fetchall()
+        initiative_ids = {str(item[0]) for item in initiative}
+        archived = [item[1] for item in initiative]
+        if len(initiative_ids) != 1 or not archived or any(value is None for value in archived):
+            continue
+        initiative_state = mirror_state.get(next(iter(initiative_ids)))
+        if (
+            initiative_state is None
+            or not all_work_items_terminal(initiative_state, snapshot)
+        ):
+            continue
+        causes = {str(item[0]) for item in conn.execute(
+            "SELECT DISTINCT code FROM mirror_reconciliation_findings WHERE thread_id=? AND resolved_at IS NULL",
+            (thread_id,),
+        )}
+        if not causes or not causes <= {"thread.premature_archive", "binding.open_count"}:
+            continue
+        open_epochs = conn.execute(
+            "SELECT binding_key FROM mirror_binding_epochs WHERE thread_id=? AND state='open'",
+            (thread_id,),
+        ).fetchall()
+        if len(open_epochs) == 1:
+            eligible.append(thread_id)
+    return eligible
+
+
+def _database_path(conn: sqlite3.Connection) -> Path:
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    main = next((str(row[2]) for row in rows if str(row[1]) == "main"), "")
+    path = Path(main)
+    if not main or not path.is_file():
+        raise RuntimeError("historical migration requires a file-backed mirror database")
+    return path
+
+
+def _create_verified_backup(conn: sqlite3.Connection, path: Path, stamp: int) -> Path:
+    backup = path.with_name(f"{path.name}.historical-migration-{stamp}.bak")
+    if backup.exists():
+        raise RuntimeError("historical migration backup path already exists")
+    try:
+        dest = sqlite3.connect(str(backup))
+        try:
+            dest.executescript("\n".join(conn.iterdump()))
+            ok = dest.execute("PRAGMA integrity_check").fetchone()
+            if ok is None or str(ok[0]).lower() != "ok":
+                raise RuntimeError("historical migration backup integrity check failed")
+        finally:
+            dest.close()
+    except Exception:
+        try:
+            backup.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return backup
 
 
 def recover_pending_inbound_bindings(

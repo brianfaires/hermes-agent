@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -437,7 +438,35 @@ def _initiative_seed_ids(initiative: Initiative) -> list[str]:
 
 
 def work_item_ids(initiative: Initiative, snapshot: BoardSnapshot) -> list[str]:
-    return [item.card.id for item in _work_items(_initiative_seed_ids(initiative), snapshot)]
+    seed_ids = _initiative_seed_ids(initiative)
+    raw_descendant_ids: list[str] = []
+    seen_descendants: set[str] = set(seed_ids)
+
+    def walk_raw_children(task_id: str) -> None:
+        for child_id in snapshot.children.get(task_id, []):
+            if child_id in seen_descendants:
+                continue
+            seen_descendants.add(child_id)
+            raw_descendant_ids.append(child_id)
+            walk_raw_children(child_id)
+
+    for seed_id in seed_ids:
+        walk_raw_children(seed_id)
+
+    rendered_ids = [item.card.id for item in _work_items(seed_ids, snapshot)]
+    # Preserve missing durable members/continuations/descendants so lifecycle
+    # checks fail closed instead of silently evaluating only cards still present.
+    return list(dict.fromkeys([*seed_ids, *rendered_ids, *raw_descendant_ids]))
+
+
+def all_work_items_terminal(initiative: Initiative, snapshot: BoardSnapshot) -> bool:
+    """One fail-closed terminal boundary for a thread's full work-item set."""
+    task_ids = work_item_ids(initiative, snapshot)
+    return bool(task_ids) and all(
+        task_id in snapshot.cards
+        and is_terminal(_s(snapshot.cards[task_id].status))
+        for task_id in task_ids
+    )
 
 
 def pointed_card_id(initiative: Initiative, snapshot: BoardSnapshot) -> str | None:
@@ -449,17 +478,10 @@ def pointed_card_id(initiative: Initiative, snapshot: BoardSnapshot) -> str | No
     return items[0].card.id if items else None
 
 
-def _relative_time(now: int, ts: int | None) -> str:
+def _updated_timestamp(ts: int | None) -> str:
     if ts is None:
-        return "just now"
-    delta = max(0, (now or 0) - ts)
-    if delta < 60:
-        return "just now"
-    if delta < 3600:
-        return f"{delta // 60}m ago"
-    if delta < 86400:
-        return f"{delta // 3600}h ago"
-    return f"{delta // 86400}d ago"
+        return "unknown"
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _footer(initiative: Initiative, member_cards: list[Card], member_ids: list[str], now: int) -> str:
@@ -471,12 +493,12 @@ def _footer(initiative: Initiative, member_cards: list[Card], member_ids: list[s
         # The whole footer is one code span; inner backticks (from
         # branch_display's own fencing) would close it early in Discord.
         branch = branch.replace("`", "")
-    rel = _relative_time(now, initiative.brief_updated_at)
+    updated = _updated_timestamp(initiative.brief_updated_at)
 
     segments = [assignee, f"P{priority}", ",".join(member_ids)]
     if branch:
         segments.append(f"branch {branch}")
-    segments.append(f"updated {rel}")
+    segments.append(f"updated {updated}")
     return "`" + " · ".join(segments) + "`"
 
 
@@ -496,7 +518,8 @@ def _truncate(body: str, max_chars: int) -> str:
 
 def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int, now: int) -> str:
     member_ids = _initiative_seed_ids(initiative)
-    member_cards = [snapshot.cards[m] for m in member_ids if m in snapshot.cards]
+    summary_ids = work_item_ids(initiative, snapshot)
+    summary_cards = [snapshot.cards[m] for m in summary_ids if m in snapshot.cards]
 
     brief = "\n".join(
         line for line in (initiative.brief or "").splitlines()
@@ -522,9 +545,9 @@ def render_post(initiative: Initiative, snapshot: BoardSnapshot, max_chars: int,
 
     card_id = pointed_card_id(initiative, snapshot)
     pointer_line = f"card_ID: {card_id}" if card_id else None
-    footer = _footer(initiative, member_cards, member_ids, now)
+    footer = _footer(initiative, summary_cards, summary_ids, now)
 
-    review_block = review_artifacts_block(member_cards, snapshot)
+    review_block = review_artifacts_block(summary_cards, snapshot)
 
     parts = [first_para]
     if review_block:
