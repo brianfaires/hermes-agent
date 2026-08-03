@@ -60,6 +60,7 @@ class KanbanReplyInboxConfig:
     conversation_router_enabled: bool = False
     conversation_router_ingress_bot_id: str | None = None
     profile_bot_user_ids: tuple[tuple[str, str], ...] = ()
+    reaction_authorities: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ class DiscordReactionContext:
     emoji: str
     intent: str
     meaning: str
+    author_is_bot: bool = False
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,7 @@ def context_from_discord_reaction(
     forum_channel_id = str(getattr(channel, "parent_id", "") or "").strip()
     author_id = str(getattr(payload, "user_id", "") or "").strip() or None
     reaction_key = f"reaction:{thread_id}:{message_id}:{author_id or 'unknown'}:{_normalize_emoji(emoji_raw)}"
+    member = getattr(payload, "member", None)
     return DiscordReactionContext(
         reaction_key=reaction_key,
         message_id=message_id,
@@ -248,6 +251,7 @@ def context_from_discord_reaction(
         emoji=reaction.emoji,
         intent=reaction.intent,
         meaning=reaction.meaning,
+        author_is_bot=getattr(member, "bot", None) is not False,
     )
 
 
@@ -285,6 +289,25 @@ def _as_profile_bot_pairs(value: Any) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(pairs))
 
 
+def _as_reaction_authorities(value: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Parse explicit, numeric Discord identity-to-authority bindings."""
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ValueError("reaction_authorities must map Discord user IDs")
+    bindings: list[tuple[str, tuple[str, ...]]] = []
+    for raw_user_id, raw_authorities in value.items():
+        user_id = str(raw_user_id or "").strip()
+        if not user_id.isdigit():
+            raise ValueError("reaction authority user IDs must be numeric")
+        values = raw_authorities if isinstance(raw_authorities, (list, tuple, set)) else (raw_authorities,)
+        authorities = tuple(sorted({str(item or "").strip() for item in values if str(item or "").strip()}))
+        if not authorities:
+            raise ValueError("reaction authority bindings must name an authority")
+        bindings.append((user_id, authorities))
+    return tuple(sorted(bindings))
+
+
 def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxConfig:
     """Load ``discord.kanban_reply_inbox`` from config.yaml-shaped data."""
     if raw_config is None:
@@ -314,6 +337,7 @@ def load_config(raw_config: dict[str, Any] | None = None) -> KanbanReplyInboxCon
             str(inbox_cfg.get("conversation_router_ingress_bot_id") or "").strip() or None
         ),
         profile_bot_user_ids=_as_profile_bot_pairs(inbox_cfg.get("profile_bot_user_ids")),
+        reaction_authorities=_as_reaction_authorities(inbox_cfg.get("reaction_authorities")),
     )
 
 
@@ -519,6 +543,30 @@ def _reaction_comment_body(
     if replied_to_comment_id is not None:
         lines.append(f"Reacted Kanban comment: #{replied_to_comment_id}")
     return "\n".join(lines).strip()
+
+
+def _required_reaction_authority(task: Any) -> str | None:
+    """Read the explicit card gate: ``[discord-reaction-authority: NAME]``."""
+    match = re.search(
+        r"(?mi)^\s*\[discord-reaction-authority:\s*([^\]\r\n]+)\s*\]\s*$",
+        str(getattr(task, "body", "") or ""),
+    )
+    return match.group(1).strip() if match else None
+
+
+def _reaction_decision_authorized(
+    cfg: KanbanReplyInboxConfig, ctx: DiscordReactionContext, task: Any
+) -> tuple[bool, str | None]:
+    """Authorize decision emoji only through an explicit user-ID binding."""
+    if ctx.author_is_bot or not ctx.author_id or not ctx.author_id.isdigit():
+        return False, None
+    authorities = dict(cfg.reaction_authorities).get(ctx.author_id, ())
+    required = _required_reaction_authority(task)
+    if required is None or not authorities:
+        return False, required
+    if required not in authorities:
+        return False, required
+    return True, required
 
 
 def _reaction_followup_body(ctx: DiscordReactionContext, original_task_id: str) -> str:
@@ -907,6 +955,54 @@ def handle_reaction(
         task = kb.get_task(conn, task_id)
         if task is None:
             return KanbanReplyInboxResult(consumed=False, reason="missing_task", task_id=task_id)
+        if ctx.intent in {"approve", "reject"}:
+            authorized, authority = _reaction_decision_authorized(cfg, ctx, task)
+            if not authorized:
+                comment_id = kb.add_comment(
+                    conn, task_id, author=_reaction_author(ctx), body="\n".join([
+                        "[discord reaction decision rejected]",
+                        f"Emoji: {ctx.emoji}", f"Decision: {ctx.intent}",
+                        "Reason: Discord identity is not authorized for this card.",
+                        f"Reaction key: {ctx.reaction_key}",
+                    ]),
+                )
+                mark_reaction_active(mirror_conn, ctx.reaction_key)
+                record_receipt(
+                    mirror_conn, discord_message_id=ctx.reaction_key,
+                    board_slug=resolved_board_slug, forum_channel_id=ctx.forum_channel_id,
+                    thread_id=ctx.thread_id, task_id=task_id, author_id=ctx.author_id,
+                    action=f"reaction:{ctx.intent}:rejected", replied_to_message_id=ctx.message_id,
+                    replied_to_kanban_comment_id=find_receipt_comment_id(mirror_conn, ctx.message_id),
+                    kanban_comment_id=comment_id,
+                )
+                return KanbanReplyInboxResult(
+                    consumed=True, reason="unauthorized_reaction", task_id=task_id,
+                    action=f"reaction:{ctx.intent}:rejected", kanban_comment_id=comment_id,
+                    ack=f"Rejected {ctx.intent} reaction for Kanban card {task_id}: not authorized.",
+                )
+            if ctx.intent == "reject":
+                comment_id = kb.add_comment(
+                    conn, task_id, author=_reaction_author(ctx), body="\n".join([
+                        "[discord reaction decision accepted]", f"Emoji: {ctx.emoji}",
+                        "Decision: reject", f"Authority: {authority}",
+                        "Lifecycle action: none (approval gate remains unsatisfied).",
+                        f"Reaction key: {ctx.reaction_key}",
+                    ]),
+                )
+                mark_reaction_active(mirror_conn, ctx.reaction_key)
+                record_receipt(
+                    mirror_conn, discord_message_id=ctx.reaction_key,
+                    board_slug=resolved_board_slug, forum_channel_id=ctx.forum_channel_id,
+                    thread_id=ctx.thread_id, task_id=task_id, author_id=ctx.author_id,
+                    action="reaction:reject:accepted", replied_to_message_id=ctx.message_id,
+                    replied_to_kanban_comment_id=find_receipt_comment_id(mirror_conn, ctx.message_id),
+                    kanban_comment_id=comment_id,
+                )
+                return KanbanReplyInboxResult(
+                    consumed=True, reason="rejected", task_id=task_id,
+                    action="reaction:reject:accepted", kanban_comment_id=comment_id,
+                    ack=f"Recorded rejection for Kanban card {task_id}; no lifecycle action was taken.",
+                )
         if ctx.intent == "cancel_thread_work":
             result = _apply_cancel_thread_work(
                 conn,

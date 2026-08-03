@@ -48,6 +48,7 @@ def inbox_config() -> KanbanReplyInboxConfig:
         forum_channel_ids=frozenset({FORUM_ID}),
         allow_commands=frozenset({"comment", "block", "unblock"}),
         ack=True,
+        reaction_authorities=(("42", ("owner",)),),
     )
 
 
@@ -109,6 +110,7 @@ def reaction_payload(
         channel=SimpleNamespace(id=channel_id, parent_id=FORUM_ID),
         emoji=SimpleNamespace(name=emoji),
         member=SimpleNamespace(
+            bot=False,
             display_name=author_label,
             nick=author_label,
             global_name=author_label,
@@ -292,7 +294,7 @@ async def test_supported_reaction_creates_comment_receipt_and_owner_instruction(
         tid = kb.create_task(
             conn,
             title="Reaction inbox target",
-            body="body",
+            body="[discord-reaction-authority: owner]\nbody",
             assignee="ops",
             created_by="test",
             initial_status="blocked",
@@ -369,7 +371,8 @@ async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, i
     conn = kb.connect()
     try:
         conn.execute(
-            "UPDATE tasks SET status='ready',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+            "UPDATE tasks SET status='ready',body='[discord-reaction-authority: owner]\nbody',"
+            "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
             (tid,),
         )
         assert kb.claim_task(conn, tid) is not None
@@ -377,19 +380,21 @@ async def test_removed_reaction_reuses_unresolved_owner_instruction(kanban_db, i
         conn.close()
     payload = reaction_payload(emoji="🚫")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
-    assert first.owner_instruction_id is not None
+    assert first.action == "reaction:reject:accepted"
 
     removed = await maybe_handle_discord_reaction_remove(payload, config=inbox_config)
     assert removed.reason == "reaction_removed"
 
     second = await maybe_handle_discord_reaction(payload, config=inbox_config)
-    assert second.owner_instruction_id == first.owner_instruction_id
+    assert second.action == "reaction:reject:accepted"
 
     conn = kb.connect()
     try:
         instructions = kb.list_owner_instructions(conn, task_id=tid)
-        assert len(instructions) == 1
-        assert len(kb.list_comments(conn, tid)) == 1
+        assert instructions == []
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "running"
     finally:
         conn.close()
 
@@ -400,7 +405,8 @@ async def test_removed_reaction_creates_new_generation_after_prior_routing(kanba
     conn = kb.connect()
     try:
         conn.execute(
-            "UPDATE tasks SET status='ready',claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
+            "UPDATE tasks SET status='ready',body='[discord-reaction-authority: owner]\nbody',"
+            "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL WHERE id=?",
             (tid,),
         )
     finally:
@@ -408,14 +414,17 @@ async def test_removed_reaction_creates_new_generation_after_prior_routing(kanba
 
     payload = reaction_payload(emoji="🚫")
     first = await maybe_handle_discord_reaction(payload, config=inbox_config)
-    assert first.owner_instruction_status == "routed"
+    assert first.action == "reaction:reject:accepted"
     await maybe_handle_discord_reaction_remove(payload, config=inbox_config)
     second = await maybe_handle_discord_reaction(payload, config=inbox_config)
-    assert second.owner_instruction_id != first.owner_instruction_id
+    assert second.action == "reaction:reject:accepted"
 
     conn = kb.connect()
     try:
-        assert len(kb.list_owner_instructions(conn, task_id=tid)) == 2
+        assert kb.list_owner_instructions(conn, task_id=tid) == []
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
         assert len(kb.list_comments(conn, tid)) == 2
     finally:
         conn.close()
@@ -460,6 +469,10 @@ async def test_reaction_retry_after_comment_before_receipt_does_not_duplicate_co
     reaction_key = f"reaction:{THREAD_ID}:4004:42:✅"
     conn = kb.connect()
     try:
+        conn.execute(
+            "UPDATE tasks SET body='[discord-reaction-authority: owner]\nbody' WHERE id=?",
+            (tid,),
+        )
         kb.add_comment(
             conn,
             tid,
@@ -478,6 +491,60 @@ async def test_reaction_retry_after_comment_before_receipt_does_not_duplicate_co
         assert len(kb.list_comments(conn, tid)) == 1
         assert conn.execute("SELECT COUNT(*) FROM tasks WHERE id != ?", (tid,)).fetchone()[0] == 0
         assert len(kb.list_owner_instructions(conn, task_id=tid)) == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_or_bot_decision_reactions_fail_closed(kanban_db, inbox_config):
+    _db_path, tid = kanban_db
+    denied = await maybe_handle_discord_reaction(
+        reaction_payload(message_id="unauthorized", user_id="99"), config=inbox_config
+    )
+    bot_payload = reaction_payload(message_id="bot", user_id="42")
+    bot_payload.member.bot = True
+    bot = await maybe_handle_discord_reaction(bot_payload, config=inbox_config)
+    assert denied.reason == bot.reason == "unauthorized_reaction"
+    conn = kb.connect()
+    try:
+        assert kb.list_owner_instructions(conn, task_id=tid) == []
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        assert len(kb.list_comments(conn, tid)) == 2
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("emoji", "intent"), [("✅", "approve"), ("🚫", "reject")])
+async def test_configured_authority_cannot_decide_card_without_reaction_gate(
+    kanban_db, inbox_config, emoji, intent
+):
+    db_path, tid = kanban_db
+    conn = kb.connect(db_path)
+    try:
+        before_status = kb.get_task(conn, tid).status
+    finally:
+        conn.close()
+
+    result = await maybe_handle_discord_reaction(
+        reaction_payload(message_id=f"ungated-{intent}", emoji=emoji),
+        config=inbox_config,
+    )
+
+    assert result.consumed is True
+    assert result.reason == "unauthorized_reaction"
+    assert result.action == f"reaction:{intent}:rejected"
+    assert result.owner_instruction_id is None
+    conn = kb.connect(db_path)
+    try:
+        assert kb.get_task(conn, tid).status == before_status
+        assert kb.list_owner_instructions(conn, task_id=tid) == []
+        comments = kb.list_comments(conn, tid)
+        assert len(comments) == 1
+        assert "[discord reaction decision rejected]" in comments[0].body
+        assert f"Decision: {intent}" in comments[0].body
     finally:
         conn.close()
 
@@ -619,10 +686,52 @@ async def test_adapter_consumes_mapped_reaction_without_normal_dispatch(monkeypa
     adapter._is_allowed_user = lambda *args, **kwargs: True
 
     consumed = await adapter._handle_raw_reaction_add(
-        SimpleNamespace(user_id="42", message_id="4004", channel_id="2002")
+        SimpleNamespace(
+            user_id="42",
+            message_id="4004",
+            channel_id="2002",
+            member=SimpleNamespace(bot=False, display_name="Brian", guild=SimpleNamespace(id=1001)),
+        )
     )
 
     assert consumed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload_kwargs",
+    [
+        pytest.param({}, id="missing-member"),
+        pytest.param({"member": None}, id="null-member"),
+        pytest.param({"member": SimpleNamespace()}, id="missing-bot-status"),
+        pytest.param({"member": SimpleNamespace(bot=None)}, id="unknown-bot-status"),
+    ],
+)
+async def test_adapter_rejects_allowed_user_reaction_without_human_member_before_kanban_routing(
+    monkeypatch, payload_kwargs
+):
+    from plugins.platforms.discord.kanban_mirror.inbox import KanbanReplyInboxResult
+    from plugins.platforms.discord.adapter import DiscordAdapter
+
+    called = False
+
+    async def track_call(payload, **_kwargs):
+        nonlocal called
+        called = True
+        return KanbanReplyInboxResult(consumed=True, reason="handled")
+
+    monkeypatch.setattr("plugins.platforms.discord.kanban_mirror.inbox.maybe_handle_discord_reaction", track_call)
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake-token"))
+    adapter._client = SimpleNamespace(user=SimpleNamespace(id="999"))
+    adapter._allowed_user_ids = {"42"}
+    adapter._allowed_role_ids = set()
+
+    consumed = await adapter._handle_raw_reaction_add(
+        SimpleNamespace(user_id="42", message_id="4004", channel_id="2002", **payload_kwargs)
+    )
+
+    assert consumed is False
+    assert called is False
 
 
 @pytest.mark.asyncio
@@ -643,7 +752,7 @@ async def test_adapter_rejects_unauthorized_reaction_before_kanban_routing(monke
     adapter._allowed_role_ids = set()
 
     consumed = await adapter._handle_raw_reaction_add(
-        SimpleNamespace(user_id="7", message_id="4004", channel_id="2002", member=SimpleNamespace())
+        SimpleNamespace(user_id="7", message_id="4004", channel_id="2002", member=SimpleNamespace(bot=False))
     )
 
     assert consumed is False
@@ -1537,7 +1646,10 @@ async def test_ingress_reaction_routes_to_validated_owner_without_status_mutatio
     conn = kb.connect(db_path)
     try:
         with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+            conn.execute(
+                "UPDATE tasks SET status='blocked',body='[discord-reaction-authority: owner]\nbody' WHERE id=?",
+                (tid,),
+            )
         before_status = kb.get_task(conn, tid).status
     finally:
         conn.close()

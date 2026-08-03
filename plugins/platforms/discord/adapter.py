@@ -8426,14 +8426,19 @@ class DiscordAdapter(BasePlatformAdapter):
         if not user_id:
             return False
         member = getattr(payload, "member", None)
-        if bool(getattr(member, "bot", False)):
+        if member is None:
+            return False
+        bot_status = getattr(member, "bot", None)
+        if bot_status is True:
             if os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip() != "all":
                 return False
-        else:
-            guild = getattr(member, "guild", None) if member is not None else None
+        elif bot_status is False:
+            guild = getattr(member, "guild", None)
             if not self._is_allowed_user(user_id, author=member, guild=guild):
                 logger.warning("[%s] Ignoring unauthorized Discord Kanban reaction from user_id=%s", self.name, user_id)
                 return False
+        else:
+            return False
         if self._client and self._client.user is not None:
             if user_id == str(getattr(self._client.user, "id", "") or ""):
                 return False
