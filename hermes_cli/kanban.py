@@ -59,7 +59,7 @@ def _fmt_task_line(t: kb.Task) -> str:
 
 
 def _task_to_dict(t: kb.Task) -> dict[str, Any]:
-    return {
+    payload = {
         "id": t.id,
         "title": t.title,
         "body": t.body,
@@ -81,7 +81,17 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
+        "task_kind": t.task_kind,
     }
+    if t.task_kind == kb.HUMAN_ACTION_KIND:
+        try:
+            with kb.connect_closing() as conn:
+                action = kb.get_human_action(conn, t.id)
+            if action:
+                payload["human_action"] = action
+        except Exception:
+            pass
+    return payload
 
 
 def _run_state_kwargs(args: argparse.Namespace) -> Optional[dict[str, str]]:
@@ -308,6 +318,12 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("title", help="Task title")
     p_create.add_argument("--body", default=None, help="Optional opening post")
     p_create.add_argument("--assignee", default=None, help="Profile name to assign")
+    p_create.add_argument(
+        "--kind",
+        choices=sorted(kb.VALID_TASK_KINDS - {kb.HUMAN_ACTION_KIND}),
+        default="Routine",
+        help="Task kind for ordinary agent-run cards",
+    )
     p_create.add_argument("--parent", action="append", default=[],
                           help="Parent task id (repeatable)")
     p_create.add_argument("--workspace", default="scratch",
@@ -396,6 +412,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_list.add_argument("--assignee", default=None)
     p_list.add_argument("--status", default=None,
                         choices=sorted(kb.VALID_STATUSES))
+    p_list.add_argument("--kind", default=None, choices=sorted(kb.VALID_TASK_KINDS))
     p_list.add_argument("--tenant", default=None)
     p_list.add_argument("--session", default=None,
                         help="Filter by originating chat/agent session id "
@@ -422,6 +439,53 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         metavar="KEY",
         help="Restrict to tasks with this current_step_key",
     )
+
+    p_brian = sub.add_parser(
+        "brian-queue",
+        help="List board-local Human Action cards owned by Brian",
+    )
+    p_brian.add_argument("--archived", action="store_true", help="Include archived cards")
+    p_brian.add_argument("--json", action="store_true")
+
+    p_human = sub.add_parser(
+        "human-action",
+        help="Create and resolve Brian-owned Human Action cards",
+    )
+    human_sub = p_human.add_subparsers(dest="human_action")
+    h_create = human_sub.add_parser("create", help="Create a Human Action card")
+    h_create.add_argument("title")
+    h_create.add_argument("--linked-task", default=None)
+    h_create.add_argument("--repo", required=True)
+    h_create.add_argument("--sha", default=None)
+    h_create.add_argument("--build", default=None)
+    h_create.add_argument("--environment", default=None)
+    h_create.add_argument("--instruction", action="append", default=[], required=True)
+    h_create.add_argument("--expected", required=True)
+    h_create.add_argument("--expires-at", type=int, default=None)
+    h_create.add_argument("--tenant", default=None)
+    h_create.add_argument("--priority", type=int, default=0)
+    h_create.add_argument("--json", action="store_true")
+
+    h_resolve = human_sub.add_parser("resolve", help="Record a Human Action outcome")
+    h_resolve.add_argument("task_id")
+    h_resolve.add_argument("--repo", required=True)
+    h_resolve.add_argument("--sha", default=None)
+    h_resolve.add_argument("--build", default=None)
+    h_resolve.add_argument("--environment", default=None)
+    h_resolve.add_argument("--outcome", required=True, choices=sorted(kb.VALID_HUMAN_ACTION_OUTCOMES))
+    h_resolve.add_argument("--evidence", required=True)
+    h_resolve.add_argument("--notes", default=None)
+    h_resolve.add_argument("--expires-at", type=int, default=None)
+
+    h_sup = human_sub.add_parser("supersede", help="Replace the candidate on a Human Action card")
+    h_sup.add_argument("task_id")
+    h_sup.add_argument("--repo", required=True)
+    h_sup.add_argument("--sha", default=None)
+    h_sup.add_argument("--build", default=None)
+    h_sup.add_argument("--environment", default=None)
+    h_sup.add_argument("--instruction", action="append", default=None)
+    h_sup.add_argument("--expected", default=None)
+    h_sup.add_argument("--expires-at", type=int, default=None)
 
     # --- show ---
     p_show = sub.add_parser("show", help="Show a task with comments + events")
@@ -972,6 +1036,8 @@ def kanban_command(args: argparse.Namespace) -> int:
             "swarm":    _cmd_swarm,
             "list":     _cmd_list,
             "ls":       _cmd_list,
+            "brian-queue": _cmd_brian_queue,
+            "human-action": _dispatch_human_action,
             "show":     _cmd_show,
             "assign":   _cmd_assign,
             "reclaim":  _cmd_reclaim,
@@ -1387,6 +1453,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             title=args.title,
             body=args.body,
             assignee=args.assignee,
+            task_kind=getattr(args, "kind", "Routine"),
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind,
             workspace_path=ws_path,
@@ -1467,6 +1534,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             conn,
             assignee=assignee,
             status=args.status,
+            task_kind=getattr(args, "kind", None),
             tenant=args.tenant,
             session_id=args.session,
             include_archived=args.archived,
@@ -1500,6 +1568,112 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _queue_item_to_dict(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task": _task_to_dict(item["task"]),
+        "human_action": item["human_action"],
+    }
+
+
+def _cmd_brian_queue(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        items = kb.list_brian_queue(
+            conn,
+            include_archived=bool(getattr(args, "archived", False)),
+        )
+    if getattr(args, "json", False):
+        print(json.dumps([_queue_item_to_dict(item) for item in items], indent=2, ensure_ascii=False))
+        return 0
+    if not items:
+        print("(Brian Queue empty)")
+        return 0
+    for item in items:
+        print(_fmt_task_line(item["task"]))
+    return 0
+
+
+def _dispatch_human_action(args: argparse.Namespace) -> int:
+    sub = getattr(args, "human_action", None)
+    if sub == "create":
+        return _cmd_human_action_create(args)
+    if sub == "resolve":
+        return _cmd_human_action_resolve(args)
+    if sub == "supersede":
+        return _cmd_human_action_supersede(args)
+    print("kanban human-action: expected create, resolve, or supersede", file=sys.stderr)
+    return 2
+
+
+def _cmd_human_action_create(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        task_id = kb.create_human_action(
+            conn,
+            title=args.title,
+            linked_task_id=getattr(args, "linked_task", None),
+            candidate_repo=args.repo,
+            candidate_sha=getattr(args, "sha", None),
+            candidate_build=getattr(args, "build", None),
+            candidate_environment=getattr(args, "environment", None),
+            instructions=getattr(args, "instruction", None) or [],
+            expected_result=args.expected,
+            expires_at=getattr(args, "expires_at", None),
+            tenant=getattr(args, "tenant", None),
+            priority=getattr(args, "priority", 0),
+            created_by=_profile_author(),
+        )
+        task = kb.get_task(conn, task_id)
+        action = kb.get_human_action(conn, task_id)
+    if getattr(args, "json", False):
+        payload = _task_to_dict(task)
+        if action:
+            payload["human_action"] = action
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Created Human Action {task_id}  (Brian Queue)")
+    return 0
+
+
+def _cmd_human_action_resolve(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        ok = kb.resolve_human_action(
+            conn,
+            args.task_id,
+            candidate_repo=args.repo,
+            candidate_sha=getattr(args, "sha", None),
+            candidate_build=getattr(args, "build", None),
+            candidate_environment=getattr(args, "environment", None),
+            outcome=args.outcome,
+            evidence=args.evidence,
+            notes=getattr(args, "notes", None),
+            expires_at=getattr(args, "expires_at", None),
+        )
+    if not ok:
+        print(f"no such Human Action: {args.task_id}", file=sys.stderr)
+        return 1
+    print(f"Resolved {args.task_id}: {args.outcome}")
+    return 0
+
+
+def _cmd_human_action_supersede(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        ok = kb.supersede_human_action(
+            conn,
+            args.task_id,
+            candidate_repo=args.repo,
+            candidate_sha=getattr(args, "sha", None),
+            candidate_build=getattr(args, "build", None),
+            candidate_environment=getattr(args, "environment", None),
+            instructions=getattr(args, "instruction", None),
+            expected_result=getattr(args, "expected", None),
+            expires_at=getattr(args, "expires_at", None),
+        )
+    if not ok:
+        print(f"no such Human Action: {args.task_id}", file=sys.stderr)
+        return 1
+    print(f"Superseded {args.task_id}")
+    return 0
+
+
 def _cmd_show(args: argparse.Namespace) -> int:
     rsk = _run_state_kwargs(args)
     if rsk is None:
@@ -1518,6 +1692,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
+        human_action = (
+            kb.get_human_action(conn, args.task_id)
+            if task.task_kind == kb.HUMAN_ACTION_KIND
+            else None
+        )
         # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
         # looking like a no-op when the worker actually did real work.
@@ -1559,12 +1738,15 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 for r in runs
             ],
         }
+        if human_action:
+            payload["human_action"] = human_action
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
     print(f"Task {task.id}: {task.title}")
     print(f"  status:    {task.status}")
     print(f"  assignee:  {task.assignee or '-'}")
+    print(f"  kind:      {task.task_kind}")
     if task.tenant:
         print(f"  tenant:    {task.tenant}")
     print(f"  workspace: {task.workspace_kind}" +
@@ -1626,6 +1808,28 @@ def _cmd_show(args: argparse.Namespace) -> int:
         print(f"  parents:   {', '.join(parents)}")
     if children:
         print(f"  children:  {', '.join(children)}")
+    if human_action:
+        print()
+        print("Human Action:")
+        print(f"  linked task: {human_action.get('linked_task_id') or '-'}")
+        print(f"  candidate:   {human_action.get('candidate_repo')}")
+        if human_action.get("candidate_sha"):
+            print(f"  sha:         {human_action.get('candidate_sha')}")
+        if human_action.get("candidate_build"):
+            print(f"  build:       {human_action.get('candidate_build')}")
+        if human_action.get("candidate_environment"):
+            print(f"  environment: {human_action.get('candidate_environment')}")
+        print(f"  outcome:     {human_action.get('outcome') or '-'}")
+        if human_action.get("expires_at"):
+            print(f"  expires:     {_fmt_ts(human_action.get('expires_at'))}")
+        print("  instructions:")
+        for idx, step in enumerate(human_action.get("instructions") or [], 1):
+            print(f"    {idx}. {step}")
+        print(f"  expected:    {human_action.get('expected_result')}")
+        if human_action.get("evidence"):
+            print(f"  evidence:    {human_action.get('evidence')}")
+        if human_action.get("notes"):
+            print(f"  notes:       {human_action.get('notes')}")
     if task.body:
         print()
         print("Body:")

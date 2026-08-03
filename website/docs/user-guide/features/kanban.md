@@ -60,7 +60,7 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
   below. Single-project users stay on the `default` board and never see the
   word "board" outside this docs section.
 - **Task** — a row with title, optional body, one assignee (a profile name), status (`triage | todo | ready | running | blocked | done | archived`), optional tenant namespace, optional idempotency key (dedup for retried automation).
-- **Link** — `task_links` row recording a parent → child dependency. The dispatcher promotes `todo → ready` when all parents are `done`.
+- **Link** — `task_links` row recording a parent → child dependency. The dispatcher promotes `todo → ready` when all parents satisfy their dependency contract: ordinary parents are `done`/`archived`; Human Action parents require a fresh, non-superseded **Passed** outcome.
 - **Comment** — the inter-agent protocol. Agents and humans append comments; when a worker is (re-)spawned it reads the full comment thread as part of its context.
 - **Workspace** — the directory a worker operates in. Three kinds:
   - `scratch` (default) — fresh tmp dir under `~/.hermes/kanban/workspaces/<id>/` (or `~/.hermes/kanban/boards/<slug>/workspaces/<id>/` on non-default boards). **Deleted when the task completes** — scratch is ephemeral by design. Files explicitly declared through `kanban_complete(artifacts=[...])` are copied into durable per-task attachment storage before cleanup; existing deliverable paths in legacy completion summaries receive the same treatment. Other scratch files are removed. A missing declared scratch artifact keeps the task in-flight so the worker can correct the path and retry. Use `worktree:` or `dir:<path>` when the whole workspace should remain available. The first time a scratch workspace is created on an install, the dispatcher logs a warning and emits a `tip_scratch_workspace` event on the task (visible via `hermes kanban show <id>`).
@@ -68,6 +68,58 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
   - `worktree` — a git worktree under `.worktrees/<id>/` for coding tasks. Use `worktree:<path>` to pin the exact target path. Worker-side `git worktree add` creates it, using `--branch` when provided. **Preserved on completion.**
 - **Dispatcher** — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), promotes ready tasks, atomically claims, spawns assigned profiles. Runs **inside the gateway** by default (`kanban.dispatch_in_gateway: true`). One dispatcher sweeps all boards per tick; workers are spawned with `HERMES_KANBAN_BOARD` pinned so they can't see other boards. After `kanban.failure_limit` consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.
 - **Tenant** — optional string namespace *within* a board. One specialist fleet can serve multiple businesses (`--tenant business-a`) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.
+
+### Task kinds and Brian Queue
+
+Kanban has four task kinds:
+
+- **Routine** — the default task kind for ordinary agent work.
+- **Significant** — operator-visible work that deserves more attention or review.
+- **Critical** — urgent or high-impact work.
+- **Human Action** — a Brian-owned card for a manual verification, approval, or clarification step.
+
+Routine, Significant, and Critical cards are agent-run work items. Human Action cards are different: they are never claimed or dispatched to agents, their owner is fixed to **Brian**, and their machine-readable state lives beside the task row in the same board database. Create them through the Human Action path so the required candidate, instructions, expected result, and owner metadata are present.
+
+**Brian Queue** means the board-local list of open Human Action cards. It is a view of the same source cards, not a separate queue or second database. Editing priority, comments, attachments, or archive state edits the original card on that board.
+
+Human Action outcomes are specialized:
+
+- **Passed** closes the card only when it exactly matches the recorded candidate and has not expired or been superseded.
+- **Failed**, **Blocked**, and **Needs clarification** stay open in Brian Queue.
+- Expired, superseded, or stale `Passed` evidence fails closed: the card remains visibly open/unresolved, dependent children stay blocked or are demoted, and the candidate must be superseded or resolved again.
+
+Candidate matching is exact across the recorded repository plus optional SHA, build, and environment. A result for a different candidate is refused; use `supersede` first to replace the candidate and reopen dependent work. Dependencies are still board-local: a Human Action can block tasks only on the same board. Cross-board approvals must be tracked as text references or duplicated as a Human Action on each board.
+
+```bash
+# Create ordinary agent-run cards.
+hermes kanban create "refresh docs" --kind Routine --assignee writer
+hermes kanban create "review payment migration" --kind Significant --assignee reviewer
+hermes kanban create "restore production webhook" --kind Critical --assignee ops
+
+# Create a Brian-owned Human Action that blocks another task.
+hermes kanban human-action create "Verify staging login" \
+    --linked-task t_child \
+    --repo nous/hermes-agent \
+    --sha abc123 \
+    --instruction "Open staging" \
+    --instruction "Confirm login succeeds" \
+    --expected "Login succeeds"
+
+# See open Human Action cards for the current board.
+hermes kanban brian-queue
+
+# Resolve or supersede the exact candidate.
+hermes kanban human-action resolve t_action \
+    --repo nous/hermes-agent \
+    --sha abc123 \
+    --outcome Passed \
+    --evidence "Staging login succeeded at 2026-08-02T09:30Z"
+
+hermes kanban human-action supersede t_action \
+    --repo nous/hermes-agent \
+    --sha def456 \
+    --instruction "Retest the replacement build"
+```
 
 ## Boards (multi-project)
 
@@ -266,7 +318,7 @@ hermes kanban block    t_abc "need input" --ids t_def t_hij
 ```
 
 :::note Where an unblocked task lands
-`unblock` itself only ever moves a task to **`ready`** (all parents `done`) or
+`unblock` itself only ever moves a task to **`ready`** (all parents satisfy their dependency contract) or
 **`todo`** (a parent is still open — the task is dependency-gated and the
 dispatcher auto-promotes it once the parent finishes). It never routes to
 `triage`.
@@ -298,7 +350,7 @@ parent, missing input, unmet capability) before unblocking, or raise
 | `kanban_comment` | Append a durable note to the task thread. | `task_id`, `body` |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, etc. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id → child_id` dependency edge after the fact. | `parent_id`, `child_id` |
-| `kanban_unblock` | (Orchestrators) move a blocked task to `ready` when all parents are done, or `todo` while any parent remains open. | `task_id` |
+| `kanban_unblock` | (Orchestrators) move a blocked task to `ready` when all parents satisfy their dependency contract, or `todo` while any parent remains open. | `task_id` |
 
 A typical worker turn looks like:
 
@@ -937,7 +989,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | Kind | Payload | When |
 |---|---|---|
 | `created` | `{assignee, status, parents, tenant}` | Task inserted. `run_id` is `NULL`. |
-| `promoted` | — | `todo → ready` because all parents hit `done`. `run_id` is `NULL`. |
+| `promoted` | — | `todo → ready` because all parents satisfied their dependency contract. `run_id` is `NULL`. |
 | `claimed` | `{lock, expires, run_id}` | Dispatcher atomically claimed a `ready` task for spawn. |
 | `completed` | `{result_len, summary?}` | Worker wrote `--result` / `--summary` and task hit `done`. `summary` is the first-line handoff (400-char cap); full version lives on the run row. If `complete_task` is called on a never-claimed task with handoff fields, a zero-duration run is synthesized so `run_id` still points at something. |
 | `blocked` | `{reason, kind, recurrences}` | Worker or human flipped the task to `blocked`. `kind` is the typed block reason (`needs_input`, `capability`, `transient`, or `null` for a generic block); `recurrences` is the unblock-loop counter. Synthesizes a zero-duration run when called on a never-claimed task with `--reason`. |

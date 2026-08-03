@@ -42,7 +42,7 @@ import sqlite3
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
@@ -393,6 +393,7 @@ def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
 @router.get("/board")
 def get_board(
     tenant: Optional[str] = Query(None, description="Filter to a single tenant"),
+    task_kind: Optional[str] = Query(None, description="Filter to a task kind"),
     include_archived: bool = Query(False),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
     workflow_template_id: Optional[str] = Query(
@@ -414,13 +415,17 @@ def get_board(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        tasks = kanban_db.list_tasks(
-            conn,
-            tenant=tenant,
-            include_archived=include_archived,
-            workflow_template_id=workflow_template_id,
-            current_step_key=current_step_key,
-        )
+        try:
+            tasks = kanban_db.list_tasks(
+                conn,
+                tenant=tenant,
+                task_kind=task_kind,
+                include_archived=include_archived,
+                workflow_template_id=workflow_template_id,
+                current_step_key=current_step_key,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         # Pre-fetch link counts per task (cheap: one query).
         link_counts: dict[str, dict[str, int]] = {}
         for row in conn.execute(
@@ -480,6 +485,10 @@ def get_board(
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
             d = _task_dict(t, latest_summary=preview)
+            if t.task_kind == kanban_db.HUMAN_ACTION_KIND:
+                action = kanban_db.get_human_action(conn, t.id)
+                if action:
+                    d["human_action"] = action
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -561,6 +570,10 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        if task.task_kind == kanban_db.HUMAN_ACTION_KIND:
+            action = kanban_db.get_human_action(conn, task_id)
+            if action:
+                task_d["human_action"] = action
         links = _links_for(conn, task_id)
         child_ids = links["children"]
         child_summaries = kanban_db.latest_summaries(conn, child_ids)
@@ -612,6 +625,7 @@ class CreateTaskBody(BaseModel):
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
+    task_kind: str = "Routine"
     tenant: Optional[str] = None
     priority: int = 0
     workspace_kind: str = "scratch"
@@ -626,6 +640,43 @@ class CreateTaskBody(BaseModel):
     goal_max_turns: Optional[int] = None
 
 
+class CreateHumanActionBody(BaseModel):
+    title: str
+    linked_task_id: Optional[str] = None
+    candidate_repo: str
+    candidate_sha: Optional[str] = None
+    candidate_build: Optional[str] = None
+    candidate_environment: Optional[str] = None
+    instructions: list[str]
+    expected_result: str
+    expires_at: Optional[int] = None
+    evidence: Optional[str] = None
+    notes: Optional[str] = None
+    tenant: Optional[str] = None
+    priority: int = 0
+
+
+class ResolveHumanActionBody(BaseModel):
+    candidate_repo: str
+    candidate_sha: Optional[str] = None
+    candidate_build: Optional[str] = None
+    candidate_environment: Optional[str] = None
+    outcome: Literal["Passed", "Failed", "Blocked", "Needs clarification"]
+    evidence: str
+    notes: Optional[str] = None
+    expires_at: Optional[int] = None
+
+
+class SupersedeHumanActionBody(BaseModel):
+    candidate_repo: str
+    candidate_sha: Optional[str] = None
+    candidate_build: Optional[str] = None
+    candidate_environment: Optional[str] = None
+    instructions: Optional[list[str]] = None
+    expected_result: Optional[str] = None
+    expires_at: Optional[int] = None
+
+
 @router.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
@@ -636,6 +687,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             title=payload.title,
             body=payload.body,
             assignee=payload.assignee,
+            task_kind=payload.task_kind,
             created_by="dashboard",
             workspace_kind=payload.workspace_kind,
             workspace_path=payload.workspace_path,
@@ -667,6 +719,120 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
                 # Probe failure must never block the create itself.
                 pass
         return body
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/human-actions")
+def create_human_action(payload: CreateHumanActionBody, board: Optional[str] = Query(None)):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        task_id = kanban_db.create_human_action(
+            conn,
+            title=payload.title,
+            linked_task_id=payload.linked_task_id,
+            candidate_repo=payload.candidate_repo,
+            candidate_sha=payload.candidate_sha,
+            candidate_build=payload.candidate_build,
+            candidate_environment=payload.candidate_environment,
+            instructions=payload.instructions,
+            expected_result=payload.expected_result,
+            expires_at=payload.expires_at,
+            evidence=payload.evidence,
+            notes=payload.notes,
+            tenant=payload.tenant,
+            priority=payload.priority,
+            created_by="dashboard",
+        )
+        task = kanban_db.get_task(conn, task_id)
+        action = kanban_db.get_human_action(conn, task_id)
+        return {"task": _task_dict(task) if task else None, "human_action": action}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.get("/brian-queue")
+def get_brian_queue(
+    include_archived: bool = Query(False),
+    board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        items = kanban_db.list_brian_queue(conn, include_archived=include_archived)
+        return {
+            "items": [
+                {"task": _task_dict(item["task"]), "human_action": item["human_action"]}
+                for item in items
+            ],
+            "now": int(time.time()),
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/human-actions/{task_id}/resolve")
+def resolve_human_action(
+    task_id: str,
+    payload: ResolveHumanActionBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        ok = kanban_db.resolve_human_action(
+            conn,
+            task_id,
+            candidate_repo=payload.candidate_repo,
+            candidate_sha=payload.candidate_sha,
+            candidate_build=payload.candidate_build,
+            candidate_environment=payload.candidate_environment,
+            outcome=payload.outcome,
+            evidence=payload.evidence,
+            notes=payload.notes,
+            expires_at=payload.expires_at,
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Human Action {task_id} not found")
+        task = kanban_db.get_task(conn, task_id)
+        action = kanban_db.get_human_action(conn, task_id)
+        return {"task": _task_dict(task) if task else None, "human_action": action}
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    finally:
+        conn.close()
+
+
+@router.post("/human-actions/{task_id}/supersede")
+def supersede_human_action(
+    task_id: str,
+    payload: SupersedeHumanActionBody,
+    board: Optional[str] = Query(None),
+):
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        ok = kanban_db.supersede_human_action(
+            conn,
+            task_id,
+            candidate_repo=payload.candidate_repo,
+            candidate_sha=payload.candidate_sha,
+            candidate_build=payload.candidate_build,
+            candidate_environment=payload.candidate_environment,
+            instructions=payload.instructions,
+            expected_result=payload.expected_result,
+            expires_at=payload.expires_at,
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Human Action {task_id} not found")
+        task = kanban_db.get_task(conn, task_id)
+        action = kanban_db.get_human_action(conn, task_id)
+        return {"task": _task_dict(task) if task else None, "human_action": action}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -846,6 +1012,11 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
+            if task.task_kind == kanban_db.HUMAN_ACTION_KIND:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Human Action owner is fixed to Brian",
+                )
             try:
                 ok = kanban_db.assign_task(
                     conn, task_id, payload.assignee or None,
@@ -857,6 +1028,17 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         # --- status -------------------------------------------------------
         if payload.status is not None:
+            if (
+                task.task_kind == kanban_db.HUMAN_ACTION_KIND
+                and payload.status != "archived"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Human Action status is resolved through "
+                        "/human-actions/{task_id}/resolve"
+                    ),
+                )
             s = payload.status
             ok = True
             if s == "done":
@@ -991,23 +1173,28 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
 def _parents_blocking_ready(
     conn: sqlite3.Connection, task_id: str,
 ) -> list:
-    """Return parent rows (``id``, ``title``, ``status``) that aren't ``done``
-    and therefore prevent ``task_id`` from being promoted to ``ready``.
+    """Return parent rows that prevent ``task_id`` from becoming ready.
 
     Used to enrich the 409 response from :func:`update_task` so the
     dashboard can show an actionable toast (#26744) instead of a silent
     no-op.  Returns ``[]`` when nothing blocks the transition (e.g. no
-    parents, or all parents already done).
+    parents, or all parents already satisfy their dependency contract).
     """
     rows = conn.execute(
-        "SELECT t.id, t.title, t.status FROM tasks t "
+        "SELECT t.id, t.title, t.status, t.task_kind FROM tasks t "
         "JOIN task_links l ON l.parent_id = t.id "
-        "WHERE l.child_id = ? AND t.status != 'done'",
+        "WHERE l.child_id = ?",
         (task_id,),
     ).fetchall()
     return [
-        {"id": r["id"], "title": r["title"], "status": r["status"]}
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "status": r["status"],
+            "task_kind": r["task_kind"],
+        }
         for r in rows
+        if not kanban_db._parent_satisfies_dependency(conn, r["id"])
     ]
 
 
@@ -1027,24 +1214,30 @@ def _set_status_direct(
     with kanban_db.write_txn(conn):
         # Snapshot current state so we know whether to close a run.
         prev = conn.execute(
-            "SELECT status, current_run_id FROM tasks WHERE id = ?",
+            "SELECT status, current_run_id, task_kind FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if prev is None:
             return False
+        if prev["task_kind"] == kanban_db.HUMAN_ACTION_KIND:
+            return False
 
-        # Guard: don't allow promoting to 'ready' unless all parents are done.
+        # Guard: don't allow promoting to 'ready' unless all parents satisfy
+        # their dependency contract. Human Action parents require a fresh
+        # Passed outcome; other parents keep the historical done/archived rule.
         # Prevents the dispatcher from spawning a child whose upstream work
         # hasn't completed (e.g. T4 dispatched while T3 is still blocked).
         if new_status == "ready":
-            parent_statuses = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if parent_statuses and not all(
-                p["status"] == "done" for p in parent_statuses
+            parent_ids = [
+                r["parent_id"]
+                for r in conn.execute(
+                    "SELECT parent_id FROM task_links WHERE child_id = ?",
+                    (task_id,),
+                ).fetchall()
+            ]
+            if parent_ids and not kanban_db._parents_satisfy_dependencies(
+                conn,
+                parent_ids,
             ):
                 return False
 
@@ -1218,6 +1411,16 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                     if not kanban_db.archive_task(conn, tid):
                         entry.update(ok=False, error="archive refused")
                 if payload.status is not None and not payload.archive:
+                    if task.task_kind == kanban_db.HUMAN_ACTION_KIND:
+                        entry.update(
+                            ok=False,
+                            error=(
+                                "Human Action status is resolved through "
+                                "/human-actions/{task_id}/resolve"
+                            ),
+                        )
+                        results.append(entry)
+                        continue
                     s = payload.status
                     if s == "done":
                         ok = kanban_db.complete_task(
@@ -1255,6 +1458,10 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                     if not ok:
                         entry.update(ok=False, error=f"transition to {s!r} refused")
                 if payload.assignee is not None:
+                    if task.task_kind == kanban_db.HUMAN_ACTION_KIND:
+                        entry.update(ok=False, error="Human Action owner is fixed to Brian")
+                        results.append(entry)
+                        continue
                     try:
                         if payload.reclaim_first:
                             ok = kanban_db.reassign_task(

@@ -101,6 +101,10 @@ _log = logging.getLogger(__name__)
 
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_TASK_KINDS = {"Routine", "Significant", "Critical", "Human Action"}
+HUMAN_ACTION_KIND = "Human Action"
+HUMAN_ACTION_OWNER = "Brian"
+VALID_HUMAN_ACTION_OUTCOMES = {"Passed", "Failed", "Blocked", "Needs clarification"}
 
 # Typed block reasons. Distinguishes the two fundamentally different things a
 # worker (or human) means by "blocked", so each can be routed differently
@@ -935,6 +939,10 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Human-facing task kind. Existing boards migrate to Routine. Human Action
+    # cards carry machine-readable state in ``human_actions`` and are never
+    # dispatchable.
+    task_kind: str = "Routine"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1018,6 +1026,11 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            task_kind=(
+                row["task_kind"]
+                if "task_kind" in keys and row["task_kind"]
+                else "Routine"
             ),
         )
 
@@ -1216,6 +1229,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
     block_recurrences    INTEGER NOT NULL DEFAULT 0
+    ,
+    -- Human-facing task kind. Existing tasks are Routine. Human Action cards
+    -- carry their machine-readable metadata in human_actions and are excluded
+    -- from all claim/dispatch paths.
+    task_kind            TEXT NOT NULL DEFAULT 'Routine'
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1300,6 +1318,25 @@ CREATE TABLE IF NOT EXISTS task_attachments (
     created_at   INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS human_actions (
+    task_id                 TEXT PRIMARY KEY,
+    linked_task_id          TEXT,
+    candidate_repo          TEXT NOT NULL,
+    candidate_sha           TEXT,
+    candidate_build         TEXT,
+    candidate_environment   TEXT,
+    instructions            TEXT NOT NULL,
+    expected_result         TEXT NOT NULL,
+    owner                   TEXT NOT NULL DEFAULT 'Brian',
+    outcome                 TEXT,
+    evidence                TEXT,
+    notes                   TEXT,
+    expires_at              INTEGER,
+    superseded_at           INTEGER,
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER NOT NULL
+);
+
 -- Subscription from a gateway source (platform + chat + thread) to a
 -- task. The gateway's kanban-notifier watcher tails task_events and
 -- pushes ``completed`` / ``blocked`` / ``spawn_auto_blocked`` events to
@@ -1327,6 +1364,7 @@ CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, cre
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_human_actions_owner   ON human_actions(owner, outcome, expires_at, superseded_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
 
@@ -2041,6 +2079,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    if "task_kind" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "task_kind",
+            "task_kind TEXT NOT NULL DEFAULT 'Routine'",
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -2054,6 +2100,41 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
+    )
+    migrated_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(tasks)")
+    }
+    if {"task_kind", "status"}.issubset(migrated_cols):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_kind_status "
+            "ON tasks(task_kind, status)"
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS human_actions (
+            task_id                 TEXT PRIMARY KEY,
+            linked_task_id          TEXT,
+            candidate_repo          TEXT NOT NULL,
+            candidate_sha           TEXT,
+            candidate_build         TEXT,
+            candidate_environment   TEXT,
+            instructions            TEXT NOT NULL,
+            expected_result         TEXT NOT NULL,
+            owner                   TEXT NOT NULL DEFAULT 'Brian',
+            outcome                 TEXT,
+            evidence                TEXT,
+            notes                   TEXT,
+            expires_at              INTEGER,
+            superseded_at           INTEGER,
+            created_at              INTEGER NOT NULL,
+            updated_at              INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_human_actions_owner "
+        "ON human_actions(owner, outcome, expires_at, superseded_at)"
     )
 
     # task_events gained a run_id column; back-fill it as NULL for
@@ -2522,6 +2603,7 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
+    task_kind: str = "Routine",
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2547,6 +2629,8 @@ def create_task(
     translation skill regardless of the profile's default config).
     """
     assignee = _canonical_assignee(assignee)
+    task_kind = _normalize_task_kind(task_kind)
+    _reject_generic_human_action_kind(task_kind)
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -2715,11 +2799,13 @@ def create_task(
                             raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                         # If any parent is not yet done, we're todo.
                         rows = conn.execute(
-                            "SELECT status FROM tasks WHERE id IN "
+                            "SELECT id FROM tasks WHERE id IN "
                             "(" + ",".join("?" * len(parents)) + ")",
                             parents,
                         ).fetchall()
-                        if any(r["status"] != "done" for r in rows):
+                        if not _parents_satisfy_dependencies(
+                            conn, [r["id"] for r in rows]
+                        ):
                             task_status = "todo"
                 # Even in triage mode we still need to validate parent ids
                 # so the eventual link rows don't dangle.
@@ -2756,8 +2842,9 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, goal_mode, goal_max_turns, session_id,
+                        task_kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2780,6 +2867,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        task_kind,
                     ),
                 )
                 for pid in parents:
@@ -2823,6 +2911,508 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
     return [p for p in parents if p not in present]
 
 
+def _normalize_task_kind(kind: Optional[str]) -> str:
+    if kind is None:
+        return "Routine"
+    text = str(kind).strip()
+    if not text:
+        return "Routine"
+    lowered = text.casefold().replace("_", " ").replace("-", " ")
+    for candidate in VALID_TASK_KINDS:
+        if candidate.casefold() == lowered:
+            return candidate
+    raise ValueError(f"task_kind must be one of {sorted(VALID_TASK_KINDS)}")
+
+
+def _reject_generic_human_action_kind(task_kind: str) -> None:
+    if task_kind == HUMAN_ACTION_KIND:
+        raise ValueError(
+            "Human Action cards must be created with create_human_action so "
+            "required Brian Queue metadata is present"
+        )
+
+
+def _clean_human_instructions(instructions: Iterable[str]) -> list[str]:
+    cleaned = [str(item).strip() for item in instructions if str(item).strip()]
+    if not cleaned:
+        raise ValueError("Human Action instructions are required")
+    return cleaned
+
+
+def _human_candidate_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Optional[str]]:
+    return {
+        "candidate_repo": row["candidate_repo"],
+        "candidate_sha": row["candidate_sha"],
+        "candidate_build": row["candidate_build"],
+        "candidate_environment": row["candidate_environment"],
+    }
+
+
+def _candidate_matches(
+    action: sqlite3.Row | dict[str, Any],
+    *,
+    candidate_repo: str,
+    candidate_sha: Optional[str] = None,
+    candidate_build: Optional[str] = None,
+    candidate_environment: Optional[str] = None,
+) -> bool:
+    expected = _human_candidate_from_row(action)
+    actual = {
+        "candidate_repo": str(candidate_repo).strip(),
+        "candidate_sha": str(candidate_sha).strip() if candidate_sha else None,
+        "candidate_build": str(candidate_build).strip() if candidate_build else None,
+        "candidate_environment": (
+            str(candidate_environment).strip() if candidate_environment else None
+        ),
+    }
+    return all((expected[key] or None) == (actual[key] or None) for key in expected)
+
+
+def _human_action_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = {key: row[key] for key in row.keys()}
+    try:
+        parsed = json.loads(data.get("instructions") or "[]")
+    except Exception:
+        parsed = []
+    data["instructions"] = parsed if isinstance(parsed, list) else []
+    return data
+
+
+def get_human_action(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM human_actions WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return _human_action_row_to_dict(row) if row else None
+
+
+def human_action_satisfies_dependency(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: Optional[int] = None,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT t.status, t.task_kind, h.*
+          FROM tasks t
+          LEFT JOIN human_actions h ON h.task_id = t.id
+         WHERE t.id = ?
+        """,
+        (task_id,),
+    ).fetchone()
+    if not row or row["task_kind"] != HUMAN_ACTION_KIND:
+        return False
+    if row["status"] != "done":
+        return False
+    if row["outcome"] != "Passed":
+        return False
+    if row["superseded_at"] is not None:
+        return False
+    expires_at = row["expires_at"]
+    if expires_at is not None and int(expires_at) <= int(now or time.time()):
+        return False
+    return True
+
+
+def human_action_is_open(
+    action: sqlite3.Row | dict[str, Any],
+    *,
+    status: Optional[str] = None,
+    now: Optional[int] = None,
+) -> bool:
+    """Whether a Human Action belongs in Brian Queue by default."""
+    if status == "archived":
+        return False
+    outcome = action["outcome"]
+    if outcome != "Passed":
+        return True
+    if action["superseded_at"] is not None:
+        return True
+    expires_at = action["expires_at"]
+    if expires_at is not None and int(expires_at) <= int(now or time.time()):
+        return True
+    return False
+
+
+def _parent_satisfies_dependency(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute(
+        "SELECT id, status, task_kind FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return False
+    if row["task_kind"] == HUMAN_ACTION_KIND:
+        return human_action_satisfies_dependency(conn, task_id)
+    return row["status"] in ("done", "archived")
+
+
+def _parents_satisfy_dependencies(conn: sqlite3.Connection, parents: Iterable[str]) -> bool:
+    return all(_parent_satisfies_dependency(conn, parent_id) for parent_id in parents)
+
+
+def _reopen_stale_human_actions_locked(conn: sqlite3.Connection, now: int) -> int:
+    rows = conn.execute(
+        """
+        SELECT t.id
+          FROM tasks t
+          JOIN human_actions h ON h.task_id = t.id
+         WHERE t.task_kind = ?
+           AND t.status = 'done'
+           AND h.outcome = 'Passed'
+           AND (
+                h.superseded_at IS NOT NULL
+                OR (h.expires_at IS NOT NULL AND h.expires_at <= ?)
+           )
+        """,
+        (HUMAN_ACTION_KIND, int(now)),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        task_id = row["id"]
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'blocked', completed_at = NULL
+             WHERE id = ? AND status = 'done' AND task_kind = ?
+            """,
+            (task_id, HUMAN_ACTION_KIND),
+        )
+        if cur.rowcount != 1:
+            continue
+        _append_event(
+            conn,
+            task_id,
+            "human_action_reopened",
+            {"reason": "stale_passed_evidence"},
+        )
+        for child in conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ?",
+            (task_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (child["child_id"],),
+            )
+        reopened += 1
+    return reopened
+
+
+def create_human_action(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    linked_task_id: Optional[str],
+    candidate_repo: str,
+    candidate_sha: Optional[str] = None,
+    candidate_build: Optional[str] = None,
+    candidate_environment: Optional[str] = None,
+    instructions: Iterable[str],
+    expected_result: str,
+    expires_at: Optional[int] = None,
+    evidence: Optional[str] = None,
+    notes: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    created_by: Optional[str] = None,
+) -> str:
+    repo = str(candidate_repo).strip()
+    if not repo:
+        raise ValueError("candidate repository is required")
+    expected = str(expected_result).strip()
+    if not expected:
+        raise ValueError("Human Action expected result is required")
+    cleaned_instructions = _clean_human_instructions(instructions)
+    if linked_task_id and get_task(conn, linked_task_id) is None:
+        raise ValueError(f"unknown linked task: {linked_task_id}")
+    task_id = create_task(
+        conn,
+        title=title,
+        body="\n".join(f"{idx}. {text}" for idx, text in enumerate(cleaned_instructions, 1)),
+        assignee=HUMAN_ACTION_OWNER,
+        created_by=created_by,
+        tenant=tenant,
+        priority=priority,
+        initial_status="blocked",
+    )
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET task_kind = ?, assignee = ?, status = 'ready' WHERE id = ?",
+            (HUMAN_ACTION_KIND, HUMAN_ACTION_OWNER, task_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO human_actions (
+                task_id, linked_task_id, candidate_repo, candidate_sha,
+                candidate_build, candidate_environment, instructions,
+                expected_result, owner, outcome, evidence, notes, expires_at,
+                superseded_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                task_id,
+                linked_task_id,
+                repo,
+                str(candidate_sha).strip() if candidate_sha else None,
+                str(candidate_build).strip() if candidate_build else None,
+                str(candidate_environment).strip() if candidate_environment else None,
+                json.dumps(cleaned_instructions),
+                expected,
+                HUMAN_ACTION_OWNER,
+                evidence,
+                notes,
+                int(expires_at) if expires_at is not None else None,
+                now,
+                now,
+            ),
+        )
+        if linked_task_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (task_id, linked_task_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (linked_task_id,),
+            )
+        _append_event(
+            conn,
+            task_id,
+            "human_action_created",
+            {
+                "linked_task_id": linked_task_id,
+                "candidate_repo": repo,
+                "candidate_sha": candidate_sha,
+                "candidate_build": candidate_build,
+                "candidate_environment": candidate_environment,
+                "owner": HUMAN_ACTION_OWNER,
+            },
+        )
+    return task_id
+
+
+def list_brian_queue(
+    conn: sqlite3.Connection,
+    *,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    with write_txn(conn):
+        _reopen_stale_human_actions_locked(conn, int(time.time()))
+    query = """
+        SELECT t.*
+          FROM tasks t
+          JOIN human_actions h ON h.task_id = t.id
+         WHERE t.task_kind = ?
+           AND h.owner = ?
+    """
+    params: list[Any] = [HUMAN_ACTION_KIND, HUMAN_ACTION_OWNER]
+    query += " ORDER BY t.priority DESC, t.created_at ASC"
+    tasks = [Task.from_row(row) for row in conn.execute(query, params).fetchall()]
+    for task in tasks:
+        action = get_human_action(conn, task.id)
+        effective_status = None if include_archived else task.status
+        if action and human_action_is_open(action, status=effective_status):
+            out.append({"task": task, "human_action": action})
+    return out
+
+
+def resolve_human_action(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    candidate_repo: str,
+    candidate_sha: Optional[str] = None,
+    candidate_build: Optional[str] = None,
+    candidate_environment: Optional[str] = None,
+    outcome: str,
+    evidence: str,
+    notes: Optional[str] = None,
+    expires_at: Optional[int] = None,
+) -> bool:
+    if outcome not in VALID_HUMAN_ACTION_OUTCOMES:
+        raise ValueError(
+            f"outcome must be one of {sorted(VALID_HUMAN_ACTION_OUTCOMES)}"
+        )
+    if not str(evidence or "").strip():
+        raise ValueError("Human Action evidence is required")
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute(
+            """
+            SELECT h.*, t.status AS task_status
+              FROM human_actions h
+              JOIN tasks t ON t.id = h.task_id
+             WHERE h.task_id = ? AND t.task_kind = ?
+            """,
+            (task_id, HUMAN_ACTION_KIND),
+        ).fetchone()
+        if not row or row["task_status"] == "archived":
+            return False
+        if not _candidate_matches(
+            row,
+            candidate_repo=candidate_repo,
+            candidate_sha=candidate_sha,
+            candidate_build=candidate_build,
+            candidate_environment=candidate_environment,
+        ):
+            raise ValueError(
+                "candidate mismatch; supersede the Human Action before recording new evidence"
+            )
+        effective_expires_at = (
+            int(expires_at) if expires_at is not None else row["expires_at"]
+        )
+        status = (
+            "done"
+            if (
+                outcome == "Passed"
+                and (
+                    effective_expires_at is None
+                    or int(effective_expires_at) > now
+                )
+            )
+            else "blocked"
+        )
+        task_update = conn.execute(
+            """
+            UPDATE tasks
+               SET status = ?,
+                   completed_at = CASE WHEN ? = 'done' THEN ? ELSE NULL END
+             WHERE id = ? AND task_kind = ? AND status != 'archived'
+            """,
+            (status, status, now, task_id, HUMAN_ACTION_KIND),
+        )
+        if task_update.rowcount != 1:
+            return False
+        conn.execute(
+            """
+            UPDATE human_actions
+               SET outcome = ?, evidence = ?, notes = ?, expires_at = COALESCE(?, expires_at),
+                   superseded_at = NULL, updated_at = ?
+             WHERE task_id = ?
+            """,
+            (
+                outcome,
+                evidence,
+                notes,
+                int(expires_at) if expires_at is not None else None,
+                now,
+                task_id,
+            ),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "human_action_resolved",
+            {"outcome": outcome, "evidence": evidence, "notes": notes},
+        )
+    if human_action_satisfies_dependency(conn, task_id):
+        recompute_ready(conn)
+    else:
+        _demote_children_for_unsatisfied_parent(conn, task_id)
+    return True
+
+
+def supersede_human_action(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    candidate_repo: str,
+    candidate_sha: Optional[str] = None,
+    candidate_build: Optional[str] = None,
+    candidate_environment: Optional[str] = None,
+    instructions: Optional[Iterable[str]] = None,
+    expected_result: Optional[str] = None,
+    expires_at: Optional[int] = None,
+) -> bool:
+    repo = str(candidate_repo).strip()
+    if not repo:
+        raise ValueError("candidate repository is required")
+    supplied_instructions = (
+        _clean_human_instructions(instructions) if instructions is not None else None
+    )
+    now = int(time.time())
+    with write_txn(conn):
+        row = conn.execute(
+            """
+            SELECT h.*, t.status AS task_status
+              FROM human_actions h
+              JOIN tasks t ON t.id = h.task_id
+             WHERE h.task_id = ? AND t.task_kind = ?
+            """,
+            (task_id, HUMAN_ACTION_KIND),
+        ).fetchone()
+        if not row or row["task_status"] == "archived":
+            return False
+        current = _human_action_row_to_dict(row)
+        cleaned = (
+            supplied_instructions
+            if supplied_instructions is not None
+            else list(current["instructions"])
+        )
+        expected = str(expected_result or current["expected_result"]).strip()
+        if not expected:
+            raise ValueError("Human Action expected result is required")
+        task_update = conn.execute(
+            "UPDATE tasks SET status = 'ready', completed_at = NULL "
+            "WHERE id = ? AND task_kind = ? AND status != 'archived'",
+            (task_id, HUMAN_ACTION_KIND),
+        )
+        if task_update.rowcount != 1:
+            return False
+        conn.execute(
+            """
+            UPDATE human_actions
+               SET candidate_repo = ?, candidate_sha = ?, candidate_build = ?,
+                   candidate_environment = ?, instructions = ?, expected_result = ?,
+                   outcome = NULL, evidence = NULL, notes = NULL,
+                   expires_at = ?, superseded_at = ?, updated_at = ?
+             WHERE task_id = ?
+            """,
+            (
+                repo,
+                str(candidate_sha).strip() if candidate_sha else None,
+                str(candidate_build).strip() if candidate_build else None,
+                str(candidate_environment).strip() if candidate_environment else None,
+                json.dumps(cleaned),
+                expected,
+                int(expires_at) if expires_at is not None else None,
+                now,
+                now,
+                task_id,
+            ),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "human_action_superseded",
+            {
+                "candidate_repo": candidate_repo,
+                "candidate_sha": candidate_sha,
+                "candidate_build": candidate_build,
+                "candidate_environment": candidate_environment,
+            },
+        )
+    _demote_children_for_unsatisfied_parent(conn, task_id)
+    return True
+
+
+def _demote_children_for_unsatisfied_parent(conn: sqlite3.Connection, parent_id: str) -> None:
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ?",
+            (parent_id,),
+        ).fetchall()
+        if _parent_satisfies_dependency(conn, parent_id):
+            return
+        for row in rows:
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (row["child_id"],),
+            )
+
+
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
@@ -2847,6 +3437,7 @@ def list_tasks(
     *,
     assignee: Optional[str] = None,
     status: Optional[str] = None,
+    task_kind: Optional[str] = None,
     tenant: Optional[str] = None,
     session_id: Optional[str] = None,
     include_archived: bool = False,
@@ -2865,6 +3456,9 @@ def list_tasks(
             raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
         query += " AND status = ?"
         params.append(status)
+    if task_kind is not None:
+        query += " AND task_kind = ?"
+        params.append(_normalize_task_kind(task_kind))
     if tenant is not None:
         query += " AND tenant = ?"
         params.append(tenant)
@@ -2903,9 +3497,12 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status, claim_lock, assignee, task_kind FROM tasks WHERE id = ?",
+            (task_id,),
         ).fetchone()
         if not row:
+            return False
+        if row["task_kind"] == HUMAN_ACTION_KIND and profile != HUMAN_ACTION_OWNER:
             return False
         if row["claim_lock"] is not None and row["status"] == "running":
             raise RuntimeError(
@@ -2946,11 +3543,10 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
             (parent_id, child_id),
         )
-        # If child was ready but parent is not yet done, demote child to todo.
-        parent_status = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (parent_id,)
-        ).fetchone()["status"]
-        if parent_status != "done":
+        # If child was ready but parent is not yet satisfied, demote child to
+        # todo. Human Action parents are satisfied only by a fresh Passed
+        # outcome; other parent kinds keep the historical done/archived rule.
+        if not _parent_satisfies_dependency(conn, parent_id):
             conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
@@ -3152,7 +3748,8 @@ def route_owner_instruction(conn: sqlite3.Connection, instruction_id: int, *,
     """Route an instruction through the original card's ordinary lifecycle."""
     with write_txn(conn):
         row = conn.execute(
-            "SELECT i.task_id,i.status,t.status task_status,t.assignee task_assignee "
+            "SELECT i.task_id,i.status,t.status task_status,t.assignee task_assignee,"
+            "t.task_kind task_kind "
             "FROM task_owner_instructions i "
             "JOIN tasks t ON t.id=i.task_id WHERE i.id=?", (int(instruction_id),),
         ).fetchone()
@@ -3162,7 +3759,9 @@ def route_owner_instruction(conn: sqlite3.Connection, instruction_id: int, *,
             return str(row["status"])
         task_status = str(row["task_status"])
         was_queued = row["status"] == "queued"
-        if passive:
+        if row["task_kind"] == HUMAN_ACTION_KIND:
+            disposition = "ignored"
+        elif passive:
             disposition = "routed"
         elif not str(row["task_assignee"] or "").strip():
             # Persist the instruction without pretending an ordinary worker can
@@ -3173,13 +3772,17 @@ def route_owner_instruction(conn: sqlite3.Connection, instruction_id: int, *,
         elif task_status in {"done", "archived"} and not (explicit_rerun or was_queued):
             disposition = "ignored"
         else:
-            undone = conn.execute(
-                "SELECT 1 FROM task_links l JOIN tasks p ON p.id=l.parent_id "
-                "WHERE l.child_id=? AND p.status!='done' LIMIT 1", (row["task_id"],),
-            ).fetchone()
-            next_status = "todo" if undone else "ready"
+            parents = [
+                parent["parent_id"]
+                for parent in conn.execute(
+                    "SELECT parent_id FROM task_links WHERE child_id = ?",
+                    (row["task_id"],),
+                ).fetchall()
+            ]
+            has_unsatisfied_parent = not _parents_satisfy_dependencies(conn, parents)
+            next_status = "todo" if has_unsatisfied_parent else "ready"
             if task_status in {"blocked", "scheduled", "review", "done", "archived"} or (
-                task_status == "todo" and not undone
+                task_status == "todo" and not has_unsatisfied_parent
             ):
                 conn.execute(
                     "UPDATE tasks SET status=?,claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,"
@@ -3715,11 +4318,14 @@ def recompute_ready(
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
+        _reopen_stale_human_actions_locked(conn, int(time.time()))
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, task_kind "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
+            if row["task_kind"] == HUMAN_ACTION_KIND:
+                continue
             task_id = row["id"]
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
@@ -3728,13 +4334,14 @@ def recompute_ready(
                 # legitimate exit (it emits ``"unblocked"`` which flips
                 # this predicate back).
                 continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            parents = [
+                r["parent_id"]
+                for r in conn.execute(
+                    "SELECT parent_id FROM task_links WHERE child_id = ?",
+                    (task_id,),
+                ).fetchall()
+            ]
+            if _parents_satisfy_dependencies(conn, parents):
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
                     # circuit-breaker failure limit.  Without this
@@ -3795,13 +4402,14 @@ def claim_task(
         # 'todo' here — recompute_ready will re-promote when the parents
         # actually finish. See RCA at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
-        undone = conn.execute(
-            "SELECT 1 FROM task_links l "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        if undone:
+        parents = [
+            r["parent_id"]
+            for r in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
+        if not _parents_satisfy_dependencies(conn, parents):
             conn.execute(
                 "UPDATE tasks SET status = 'todo' "
                 "WHERE id = ? AND status = 'ready'",
@@ -3841,6 +4449,7 @@ def claim_task(
                    started_at    = COALESCE(started_at, ?)
              WHERE id = ?
                AND status = 'ready'
+               AND task_kind != 'Human Action'
                AND claim_lock IS NULL
             """,
             (lock, expires, now, task_id),
@@ -3925,6 +4534,7 @@ def claim_review_task(
                    started_at    = COALESCE(started_at, ?)
              WHERE id = ?
                AND status = 'review'
+               AND task_kind != 'Human Action'
                AND claim_lock IS NULL
             """,
             (lock, expires, now, task_id),
@@ -3985,8 +4595,9 @@ def heartbeat_claim(
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' AND claim_lock = ?",
-            (expires, task_id, lock),
+            "WHERE id = ? AND status = 'running' AND task_kind != ? "
+            "AND claim_lock = ?",
+            (expires, task_id, HUMAN_ACTION_KIND, lock),
         )
         if cur.rowcount == 1:
             run_id = _current_run_id(conn, task_id)
@@ -4036,8 +4647,8 @@ def release_stale_claims(
         "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
-        "  AND claim_expires < ?",
-        (now,),
+        "  AND claim_expires < ? AND task_kind != ?",
+        (now, HUMAN_ACTION_KIND),
     ).fetchall()
     for row in stale:
         lock = row["claim_lock"] or ""
@@ -4062,10 +4673,11 @@ def release_stale_claims(
                 cur = conn.execute(
                     "UPDATE tasks SET claim_expires = ? "
                     "WHERE id = ? AND status = 'running' "
+                    "  AND task_kind != ? "
                     "  AND claim_lock IS ? "
                     "  AND claim_expires IS NOT NULL "
                     "  AND claim_expires < ?",
-                    (new_expires, row["id"], row["claim_lock"], now),
+                    (new_expires, row["id"], HUMAN_ACTION_KIND, row["claim_lock"], now),
                 )
                 if cur.rowcount != 1:
                     continue
@@ -4108,9 +4720,9 @@ def release_stale_claims(
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                "WHERE id = ? AND status = 'running' AND task_kind != ? AND claim_lock IS ? "
                 "AND claim_expires IS NOT NULL AND claim_expires < ?",
-                (row["id"], row["claim_lock"], now),
+                (row["id"], HUMAN_ACTION_KIND, row["claim_lock"], now),
             )
             if cur.rowcount != 1:
                 continue
@@ -4164,10 +4776,12 @@ def reclaim_task(
     reclaimable state (not running, or doesn't exist).
     """
     row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        "SELECT status, claim_lock, worker_pid, task_kind FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if not row:
+        return False
+    if row["task_kind"] == HUMAN_ACTION_KIND:
         return False
     if row["status"] != "running" and row["claim_lock"] is None:
         # Nothing to reclaim — already ready / blocked / done.
@@ -4181,8 +4795,8 @@ def reclaim_task(
             "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?",
-            (task_id, prev_lock),
+            "AND claim_lock IS ? AND task_kind != ?",
+            (task_id, prev_lock, HUMAN_ACTION_KIND),
         )
         if cur.rowcount != 1:
             return False
@@ -4466,6 +5080,7 @@ def complete_task(
                        block_recurrences = 0
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
+                   AND task_kind != 'Human Action'
                 """,
                 (result, now, task_id),
             )
@@ -4484,6 +5099,7 @@ def complete_task(
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                    AND current_run_id = ?
+                   AND task_kind != 'Human Action'
                 """,
                 (result, now, task_id, int(expected_run_id)),
             )
@@ -5234,6 +5850,7 @@ def block_task(
                        block_kind    = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
+                   AND task_kind != 'Human Action'
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
                 (kind, task_id) if expected_run_id is None
                 else (kind, task_id, int(expected_run_id)),
@@ -5288,6 +5905,7 @@ def block_task(
                        block_recurrences = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
+                   AND task_kind != 'Human Action'
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
                 (kind, recurrences, task_id) if expected_run_id is None
                 else (kind, recurrences, task_id, int(expected_run_id)),
@@ -5327,6 +5945,7 @@ def block_task(
                            block_recurrences = ?
                      WHERE id = ?
                        AND status IN ('running', 'ready')
+                       AND task_kind != 'Human Action'
                     """,
                     (kind, recurrences, task_id),
                 )
@@ -5343,6 +5962,7 @@ def block_task(
                      WHERE id = ?
                        AND status IN ('running', 'ready')
                        AND current_run_id = ?
+                       AND task_kind != 'Human Action'
                     """,
                     (kind, recurrences, task_id, int(expected_run_id)),
                 )
@@ -5399,10 +6019,12 @@ def promote_task(
     promotion would succeed without mutating state.
     """
     row = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        "SELECT status, task_kind FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     if row is None:
         return False, f"task {task_id} not found"
+    if row["task_kind"] == HUMAN_ACTION_KIND:
+        return False, "Human Action cards are resolved with human-action resolve/supersede"
 
     cur_status = row["status"]
     if cur_status not in ("todo", "blocked"):
@@ -5413,14 +6035,12 @@ def promote_task(
 
     if not force:
         parents = conn.execute(
-            "SELECT t.id, t.status FROM tasks t "
-            "JOIN task_links l ON l.parent_id = t.id "
-            "WHERE l.child_id = ?",
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
             (task_id,),
         ).fetchall()
         unsatisfied = [
-            p["id"] for p in parents
-            if p["status"] not in ("done", "archived")
+            p["parent_id"] for p in parents
+            if not _parent_satisfies_dependency(conn, p["parent_id"])
         ]
         if unsatisfied:
             return False, (
@@ -5462,9 +6082,11 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     now = int(time.time())
     with write_txn(conn):
         stale = conn.execute(
-            "SELECT current_run_id FROM tasks WHERE id = ? AND status IN ('blocked', 'scheduled')",
+            "SELECT current_run_id, task_kind FROM tasks WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (task_id,),
         ).fetchone()
+        if stale and stale["task_kind"] == HUMAN_ACTION_KIND:
+            return False
         if stale and stale["current_run_id"]:
             conn.execute(
                 """
@@ -5483,13 +6105,16 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # if parents are still in progress the task must wait in 'todo'
         # until recompute_ready picks it up. RCA: Bug 2 at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
-        undone_parents = conn.execute(
-            "SELECT 1 FROM task_links l "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        new_status = "todo" if undone_parents else "ready"
+        parent_ids = [
+            r["parent_id"]
+            for r in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
+        new_status = (
+            "ready" if _parents_satisfy_dependencies(conn, parent_ids) else "todo"
+        )
         # NOTE: deliberately does NOT touch ``block_recurrences`` or
         # ``block_kind``. Resetting the recurrence counter on unblock is exactly
         # the amnesia that let a cron unblock → worker re-block loop run
@@ -5503,7 +6128,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')",
+            "WHERE id = ? AND status IN ('blocked', 'scheduled') "
+            "AND task_kind != 'Human Action'",
             (new_status, task_id),
         )
         if cur.rowcount != 1:
@@ -5545,8 +6171,9 @@ def specify_triage_task(
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
-            (task_id,),
+            "SELECT title, body, assignee FROM tasks "
+            "WHERE id = ? AND status = 'triage' AND task_kind != ?",
+            (task_id, HUMAN_ACTION_KIND),
         ).fetchone()
         if existing is None:
             return False
@@ -5568,8 +6195,8 @@ def specify_triage_task(
         params.append(task_id)
         cur = conn.execute(
             f"UPDATE tasks SET {', '.join(sets)} "
-            f"WHERE id = ? AND status = 'triage'",
-            tuple(params),
+            f"WHERE id = ? AND status = 'triage' AND task_kind != ?",
+            tuple([*params, HUMAN_ACTION_KIND]),
         )
         if cur.rowcount != 1:
             return False
@@ -5699,11 +6326,13 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, task_kind "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if root_row is None:
+            return None
+        if root_row["task_kind"] == HUMAN_ACTION_KIND:
             return None
         if root_row["status"] != "triage":
             return None
@@ -5873,6 +6502,7 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
             "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
             (task_id, task_id),
         )
+        conn.execute("DELETE FROM human_actions WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
@@ -5895,6 +6525,7 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
+        conn.execute("DELETE FROM human_actions WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
         conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
         conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
@@ -6251,6 +6882,7 @@ def schedule_task(
                    worker_pid   = NULL
              WHERE id = ?
                AND status IN ('todo', 'ready', 'running', 'blocked')
+               AND task_kind != 'Human Action'
         """
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
@@ -6655,8 +7287,9 @@ def _defer_reclaim_for_live_worker(
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' AND claim_lock IS ?",
-            (grace, task_id, claim_lock),
+            "WHERE id = ? AND status = 'running' AND task_kind != ? "
+            "AND claim_lock IS ?",
+            (grace, task_id, HUMAN_ACTION_KIND, claim_lock),
         )
         if cur.rowcount != 1:
             return
@@ -6697,14 +7330,15 @@ def heartbeat_worker(
         if expected_run_id is None:
             cur = conn.execute(
                 "UPDATE tasks SET last_heartbeat_at = ? "
-                "WHERE id = ? AND status = 'running'",
-                (now, task_id),
+                "WHERE id = ? AND status = 'running' AND task_kind != ?",
+                (now, task_id, HUMAN_ACTION_KIND),
             )
         else:
             cur = conn.execute(
                 "UPDATE tasks SET last_heartbeat_at = ? "
-                "WHERE id = ? AND status = 'running' AND current_run_id = ?",
-                (now, task_id, int(expected_run_id)),
+                "WHERE id = ? AND status = 'running' AND task_kind != ? "
+                "AND current_run_id = ?",
+                (now, task_id, HUMAN_ACTION_KIND, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
@@ -6756,7 +7390,8 @@ def enforce_max_runtime(
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
-        "  AND t.worker_pid IS NOT NULL"
+        "  AND t.worker_pid IS NOT NULL AND t.task_kind != ?",
+        (HUMAN_ACTION_KIND,),
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
@@ -6803,8 +7438,8 @@ def enforce_max_runtime(
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
-                "  AND worker_pid = ? AND claim_lock IS ?",
-                (tid, pid, row["claim_lock"]),
+                "  AND task_kind != ? AND worker_pid = ? AND claim_lock IS ?",
+                (tid, HUMAN_ACTION_KIND, pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
                 payload = {
@@ -6888,7 +7523,8 @@ def detect_stale_running(
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running'"
+        "WHERE t.status = 'running' AND t.task_kind != ?",
+        (HUMAN_ACTION_KIND,),
     ).fetchall()
 
     for row in rows:
@@ -6929,8 +7565,8 @@ def detect_stale_running(
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ?",
-                (tid, row["claim_lock"]),
+                "  AND task_kind != ? AND claim_lock IS ?",
+                (tid, HUMAN_ACTION_KIND, row["claim_lock"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -7099,7 +7735,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            "WHERE status = 'running' AND worker_pid IS NOT NULL "
+            "  AND task_kind != ?",
+            (HUMAN_ACTION_KIND,),
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
@@ -7186,8 +7824,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
                 "WHERE id = ? AND status = 'running' "
-                "  AND worker_pid = ? AND claim_lock IS ?",
-                (row["id"], pid, row["claim_lock"]),
+                "  AND task_kind != ? AND worker_pid = ? AND claim_lock IS ?",
+                (row["id"], HUMAN_ACTION_KIND, pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
                 # Rate-limited requeues are a clean release, not a crash —
@@ -7388,10 +8026,12 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status, max_retries "
+            "SELECT consecutive_failures, status, max_retries, task_kind "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
+            return False
+        if row["task_kind"] == HUMAN_ACTION_KIND:
             return False
         failures = int(row["consecutive_failures"]) + 1
         cur_status = row["status"]
@@ -7416,7 +8056,8 @@ def _record_task_failure(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status IN ('running', 'ready')",
+                    "WHERE id = ? AND status IN ('running', 'ready') "
+                    "AND task_kind != 'Human Action'",
                     (failures, error[:500], task_id),
                 )
             else:
@@ -7426,7 +8067,8 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status IN ('ready', 'running')",
+                    "WHERE id = ? AND status IN ('ready', 'running') "
+                    "AND task_kind != 'Human Action'",
                     (failures, error[:500], task_id),
                 )
             run_id = None
@@ -7705,7 +8347,9 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'ready' AND assignee IS NOT NULL "
-        "    AND claim_lock IS NULL"
+        "    AND claim_lock IS NULL "
+        "    AND task_kind != ?",
+        (HUMAN_ACTION_KIND,),
     ).fetchall()
     if not rows:
         return False
@@ -7731,7 +8375,9 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'review' AND assignee IS NOT NULL "
-        "    AND claim_lock IS NULL"
+        "    AND claim_lock IS NULL "
+        "    AND task_kind != ?",
+        (HUMAN_ACTION_KIND,),
     ).fetchall()
     if not rows:
         return False
@@ -7903,7 +8549,7 @@ def _dispatch_once_locked(
         running_count = active_total
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, task_kind FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -7960,6 +8606,9 @@ def _dispatch_once_locked(
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
+        if row["task_kind"] == HUMAN_ACTION_KIND:
+            result.skipped_nonspawnable.append(row["id"])
+            continue
         row_assignee = row["assignee"]
         if not row_assignee:
             # Honour kanban.default_assignee: when the dispatcher hits an

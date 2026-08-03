@@ -115,6 +115,155 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_human_action_api_and_brian_queue_are_source_card_views(client):
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Engineering work", "assignee": "alice"},
+    )
+    assert r.status_code == 200, r.text
+    engineering_id = r.json()["task"]["id"]
+
+    r = client.post(
+        "/api/plugins/kanban/human-actions",
+        json={
+            "title": "Verify staging",
+            "linked_task_id": engineering_id,
+            "candidate_repo": "nous/hermes-agent",
+            "candidate_sha": "abc123",
+            "instructions": ["Open staging", "Confirm login"],
+            "expected_result": "Login succeeds",
+        },
+    )
+    assert r.status_code == 200, r.text
+    human = r.json()["task"]
+    assert human["task_kind"] == "Human Action"
+    assert human["assignee"] == "Brian"
+    human_id = human["id"]
+
+    queue = client.get("/api/plugins/kanban/brian-queue")
+    assert queue.status_code == 200
+    assert [item["task"]["id"] for item in queue.json()["items"]] == [human_id]
+
+    patch = client.patch(
+        f"/api/plugins/kanban/tasks/{human_id}",
+        json={"priority": 7},
+    )
+    assert patch.status_code == 200, patch.text
+    queue = client.get("/api/plugins/kanban/brian-queue")
+    assert queue.json()["items"][0]["task"]["priority"] == 7
+
+    filtered = client.get("/api/plugins/kanban/board?task_kind=Human%20Action")
+    assert filtered.status_code == 200
+    filtered_ids = [
+        task["id"]
+        for column in filtered.json()["columns"]
+        for task in column["tasks"]
+    ]
+    assert filtered_ids == [human_id]
+
+    passed = client.post(
+        f"/api/plugins/kanban/human-actions/{human_id}/resolve",
+        json={
+            "candidate_repo": "nous/hermes-agent",
+            "candidate_sha": "abc123",
+            "outcome": "Passed",
+            "evidence": "verified",
+        },
+    )
+    assert passed.status_code == 200, passed.text
+    queue = client.get("/api/plugins/kanban/brian-queue")
+    assert queue.json()["items"] == []
+
+
+def test_human_action_board_filter_rejects_unknown_kind(client):
+    r = client.get("/api/plugins/kanban/board?task_kind=Manual")
+    assert r.status_code == 400
+    assert "task_kind must be one of" in r.json()["detail"]
+
+
+def test_human_action_api_allows_only_supported_outcomes(client):
+    create = client.post(
+        "/api/plugins/kanban/human-actions",
+        json={
+            "title": "Verify staging",
+            "candidate_repo": "repo",
+            "candidate_sha": "sha",
+            "instructions": ["Check"],
+            "expected_result": "Passes",
+        },
+    )
+    assert create.status_code == 200, create.text
+    task_id = create.json()["task"]["id"]
+
+    bad = client.post(
+        f"/api/plugins/kanban/human-actions/{task_id}/resolve",
+        json={
+            "candidate_repo": "repo",
+            "candidate_sha": "sha",
+            "outcome": "Accepted",
+            "evidence": "notes",
+        },
+    )
+    assert bad.status_code == 422
+
+    for outcome in ["Passed", "Failed", "Blocked", "Needs clarification"]:
+        ok = client.post(
+            f"/api/plugins/kanban/human-actions/{task_id}/resolve",
+            json={
+                "candidate_repo": "repo",
+                "candidate_sha": "sha",
+                "outcome": outcome,
+                "evidence": f"{outcome} evidence",
+            },
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["human_action"]["outcome"] == outcome
+
+
+def test_dashboard_rejects_generic_human_action_creation_and_lifecycle(client):
+    malformed = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Malformed", "task_kind": "Human Action"},
+    )
+    assert malformed.status_code == 400
+    assert "create_human_action" in malformed.json()["detail"]
+
+    created = client.post(
+        "/api/plugins/kanban/human-actions",
+        json={
+            "title": "Manual smoke",
+            "candidate_repo": "repo",
+            "candidate_sha": "sha",
+            "instructions": ["Check"],
+            "expected_result": "Passes",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["task"]["id"]
+
+    reassign = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"assignee": "alice"},
+    )
+    assert reassign.status_code == 400
+    assert "fixed to Brian" in reassign.json()["detail"]
+
+    complete = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "done", "result": "generic"},
+    )
+    assert complete.status_code == 400
+    assert "Human Action status" in complete.json()["detail"]
+
+    archived = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "archived"},
+    )
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["task"]["status"] == "archived"
+    assert archived.json()["task"]["assignee"] == "Brian"
+
+
 def test_board_list_recommends_persistent_workspace_for_configured_workdir(
     client, tmp_path
 ):
@@ -474,7 +623,9 @@ def test_dashboard_client_side_filtering_includes_tenant_filter():
     js = bundle.read_text()
 
     assert "if (tenantFilter && t.tenant !== tenantFilter) return false;" in js
-    assert "[boardData, tenantFilter, assigneeFilter, search]" in js
+    assert "function isOpenHumanAction(t, nowSeconds, includeArchived)" in js
+    assert "if (action.outcome !== \"Passed\") return true;" in js
+    assert "[boardData, tenantFilter, assigneeFilter, brianQueueOnly, includeArchived, search]" in js
 
 
 def test_dashboard_initial_board_uses_backend_current_when_unpinned():

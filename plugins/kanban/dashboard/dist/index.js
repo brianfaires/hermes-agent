@@ -193,6 +193,16 @@
   }
 
   const API = "/api/plugins/kanban";
+  const HUMAN_ACTION_OUTCOMES = ["Passed", "Failed", "Blocked", "Needs clarification"];
+  function isOpenHumanAction(t, nowSeconds, includeArchived) {
+    if (!t || t.task_kind !== "Human Action" || !t.human_action) return false;
+    if (t.status === "archived" && !includeArchived) return false;
+    const action = t.human_action;
+    if (action.outcome !== "Passed") return true;
+    if (action.superseded_at !== null && action.superseded_at !== undefined) return true;
+    if (action.expires_at !== null && action.expires_at !== undefined && Number(action.expires_at) <= nowSeconds) return true;
+    return false;
+  }
   const MIME_TASK = "text/x-hermes-task";
 
   // Docs link — surfaced as a `?` icon next to the board switcher and as
@@ -529,6 +539,7 @@
     const [includeArchived, setIncludeArchived] = useState(false);
     const [search, setSearch] = useState("");
     const [laneByProfile, setLaneByProfile] = useState(true);
+    const [brianQueueOnly, setBrianQueueOnly] = useState(false);
     const [configApplied, setConfigApplied] = useState(false);
 
     const [selectedTaskId, setSelectedTaskId] = useState(null);
@@ -702,6 +713,7 @@
       const filterTask = function (t) {
         if (tenantFilter && t.tenant !== tenantFilter) return false;
         if (assigneeFilter && t.assignee !== assigneeFilter) return false;
+        if (brianQueueOnly && !isOpenHumanAction(t, Math.floor(Date.now() / 1000), includeArchived)) return false;
         if (q) {
           const hay = `${t.id} ${t.title || ""} ${t.body || ""} ${t.result || ""} ${t.latest_summary || ""} ${t.assignee || ""} ${t.tenant || ""}`.toLowerCase();
           if (hay.indexOf(q) === -1) return false;
@@ -713,7 +725,7 @@
           return Object.assign({}, col, { tasks: col.tasks.filter(filterTask) });
         }),
       });
-    }, [boardData, tenantFilter, assigneeFilter, search]);
+    }, [boardData, tenantFilter, assigneeFilter, brianQueueOnly, includeArchived, search]);
 
     // --- actions ------------------------------------------------------------
     const moveTask = useCallback(function (taskId, newStatus) {
@@ -798,10 +810,15 @@
     }, [selectedIds, loadBoard, board]);
 
     const createTask = useCallback(function (body) {
-      return SDK.fetchJSON(withBoard(`${API}/tasks`, board), {
+      const createUrl = body && body.task_kind === "Human Action"
+        ? `${API}/human-actions`
+        : `${API}/tasks`;
+      const payload = Object.assign({}, body);
+      if (body && body.task_kind === "Human Action") delete payload.task_kind;
+      return SDK.fetchJSON(withBoard(createUrl, board), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       }).then(function (res) {
         // Surface dispatcher-presence warnings (e.g. "no gateway is
         // running") via the existing error banner channel. Not fatal —
@@ -1077,6 +1094,7 @@
           assigneeFilter, setAssigneeFilter,
           includeArchived, setIncludeArchived,
           laneByProfile, setLaneByProfile,
+          brianQueueOnly, setBrianQueueOnly,
           search, setSearch,
           onNudgeDispatch: function () {
             SDK.fetchJSON(withBoard(`${API}/dispatch?max=8`, board), { method: "POST" })
@@ -2223,6 +2241,14 @@
         }),
         tx(t, "lanesByProfile", "Lanes by profile"),
       ),
+      h("label", { className: "flex items-center gap-2 text-xs",
+                   title: "Show only board-local Human Action cards owned by Brian. Mutations still update the source card." },
+        h(Checkbox, {
+          checked: props.brianQueueOnly,
+          onCheckedChange: function (checked) { props.setBrianQueueOnly(checked === true); },
+        }),
+        "Brian Queue",
+      ),
       h("div", { className: "flex-1" }),
       h(Button, {
         onClick: props.onNudgeDispatch,
@@ -2240,6 +2266,7 @@
           props.setTenantFilter("");
           props.setAssigneeFilter("");
           props.setIncludeArchived(false);
+          if (props.setBrianQueueOnly) props.setBrianQueueOnly(false);
         },
         size: "sm",
         title: "Clear all active filters (search, tenant, assignee, archived).",
@@ -2847,6 +2874,10 @@
               ? h(Badge, { className: "hermes-kanban-priority",
                            title: `Priority ${t.priority}. Higher-priority tasks are claimed first by the dispatcher.` }, `P${t.priority}`)
               : null,
+            t.task_kind === "Human Action"
+              ? h(Badge, { variant: "outline", className: "hermes-kanban-human-action",
+                           title: "Human Action owned by Brian; never claimed or dispatched by agents." }, "Human Action")
+              : null,
             t.tenant
               ? h(Badge, { variant: "outline", className: "hermes-kanban-tag",
                            title: `Tenant: ${t.tenant}. Free-form tag for grouping tasks (customer, project, team).` }, t.tenant)
@@ -2885,7 +2916,7 @@
               : null,
             t.link_counts && (t.link_counts.parents + t.link_counts.children) > 0
               ? h("span", { className: "hermes-kanban-count",
-                            title: `${t.link_counts.parents} parent${t.link_counts.parents === 1 ? "" : "s"}, ${t.link_counts.children} child${t.link_counts.children === 1 ? "" : "ren"}. Children stay blocked until their parent is done.` },
+                            title: `${t.link_counts.parents} parent${t.link_counts.parents === 1 ? "" : "s"}, ${t.link_counts.children} child${t.link_counts.children === 1 ? "" : "ren"}. Children stay blocked until parents satisfy their dependency contract.` },
                   "↔ ", t.link_counts.parents + t.link_counts.children)
               : null,
             branch
@@ -2931,14 +2962,50 @@
     // = backend default.
     const [goalMode, setGoalMode] = useState(false);
     const [goalMaxTurns, setGoalMaxTurns] = useState("");
+    const [taskKind, setTaskKind] = useState("Routine");
+    const [linkedTask, setLinkedTask] = useState("");
+    const [candidateRepo, setCandidateRepo] = useState("");
+    const [candidateSha, setCandidateSha] = useState("");
+    const [candidateBuild, setCandidateBuild] = useState("");
+    const [candidateEnvironment, setCandidateEnvironment] = useState("");
+    const [instructions, setInstructions] = useState("");
+    const [expectedResult, setExpectedResult] = useState("");
+    const [expiresAt, setExpiresAt] = useState("");
 
     const submit = function () {
       const trimmed = title.trim();
       if (!trimmed) return;
+      if (taskKind === "Human Action") {
+        const instructionList = instructions
+          .split(/\n+/)
+          .map(function (s) { return s.replace(/^\s*\d+[\).\s-]*/, "").trim(); })
+          .filter(function (s) { return s.length > 0; });
+        const body = {
+          task_kind: "Human Action",
+          title: trimmed,
+          linked_task_id: linkedTask || parent || null,
+          candidate_repo: candidateRepo.trim(),
+          candidate_sha: candidateSha.trim() || null,
+          candidate_build: candidateBuild.trim() || null,
+          candidate_environment: candidateEnvironment.trim() || null,
+          instructions: instructionList,
+          expected_result: expectedResult.trim(),
+          priority: Number(priority) || 0,
+        };
+        const exp = parseInt(expiresAt, 10);
+        if (Number.isFinite(exp) && exp > 0) body.expires_at = exp;
+        props.onSubmit(body);
+        setTitle(""); setPriority(0); setParent("");
+        setTaskKind("Routine"); setLinkedTask(""); setCandidateRepo(""); setCandidateSha("");
+        setCandidateBuild(""); setCandidateEnvironment(""); setInstructions("");
+        setExpectedResult(""); setExpiresAt("");
+        return;
+      }
       const body = {
         title: trimmed,
         assignee: assignee.trim() || null,
         priority: Number(priority) || 0,
+        task_kind: taskKind,
         triage: props.columnName === "triage",
       };
       if (parent) body.parents = [parent];
@@ -2970,6 +3037,7 @@
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
       setWorkspaceKind(defaultWorkspaceKind); setWorkspacePath(defaultWorkspacePath); setBranchName("");
       setGoalMode(false); setGoalMaxTurns("");
+      setTaskKind("Routine");
     };
 
     const showPathInput = workspaceKind !== "scratch";
@@ -2997,6 +3065,19 @@
             { column: getColumnLabel(t, props.columnName) || props.columnName })),
         h("div", { className: "flex flex-col gap-3" },
           h("div", { className: "flex flex-col gap-1" },
+            fieldLabel("Kind"),
+            h(Select, Object.assign({
+              value: taskKind,
+              className: "h-8 text-sm",
+              title: "Human Action cards enter Brian Queue and are resolved with an outcome instead of claimed by agents.",
+            }, selectChangeHandler(setTaskKind)),
+              h(SelectOption, { value: "Routine" }, "Routine"),
+              h(SelectOption, { value: "Significant" }, "Significant"),
+              h(SelectOption, { value: "Critical" }, "Critical"),
+              h(SelectOption, { value: "Human Action" }, "Human Action"),
+            ),
+          ),
+          h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "taskTitleLabel", "Title")),
             h("textarea", {
               value: title,
@@ -3012,7 +3093,70 @@
               rows: 3,
             }),
           ),
-          h("div", { className: "flex gap-2" },
+          taskKind === "Human Action" ? h("div", { className: "flex flex-col gap-3" },
+            h("div", { className: "flex flex-col gap-1" },
+              fieldLabel("Linked engineering dependency"),
+              h(Select, Object.assign({
+                value: linkedTask || parent,
+                className: "h-8 text-sm",
+                title: "Task that waits on this Human Action. The Human Action card becomes its dependency.",
+              }, selectChangeHandler(function (v) { setLinkedTask(v); setParent(v); })),
+                h(SelectOption, { value: "" }, tx(t, "noParent", "— no parent —")),
+                (props.allTasks || []).map(function (task) {
+                  return h(SelectOption, { key: task.id, value: task.id },
+                    `${task.id} — ${(task.title || "").slice(0, 50)}`);
+                }),
+              ),
+            ),
+            h("div", { className: "flex gap-2" },
+              h(Input, {
+                value: candidateRepo,
+                onChange: function (e) { setCandidateRepo(e.target.value); },
+                placeholder: "repository",
+                className: "h-8 text-sm flex-1",
+              }),
+              h(Input, {
+                value: candidateSha,
+                onChange: function (e) { setCandidateSha(e.target.value); },
+                placeholder: "staging SHA",
+                className: "h-8 text-sm flex-1",
+              }),
+            ),
+            h("div", { className: "flex gap-2" },
+              h(Input, {
+                value: candidateBuild,
+                onChange: function (e) { setCandidateBuild(e.target.value); },
+                placeholder: "build",
+                className: "h-8 text-sm flex-1",
+              }),
+              h(Input, {
+                value: candidateEnvironment,
+                onChange: function (e) { setCandidateEnvironment(e.target.value); },
+                placeholder: "environment",
+                className: "h-8 text-sm flex-1",
+              }),
+            ),
+            h("textarea", {
+              value: instructions,
+              onChange: function (e) { setInstructions(e.target.value); },
+              placeholder: "1. Open staging\n2. Run smoke test",
+              className: "text-sm min-h-[5rem] max-h-48 resize-y w-full border border-input bg-transparent px-2 py-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring",
+              rows: 4,
+            }),
+            h(Input, {
+              value: expectedResult,
+              onChange: function (e) { setExpectedResult(e.target.value); },
+              placeholder: "expected result",
+              className: "h-8 text-sm",
+            }),
+            h(Input, {
+              type: "number",
+              value: expiresAt,
+              onChange: function (e) { setExpiresAt(e.target.value); },
+              placeholder: "expiry epoch seconds",
+              className: "h-8 text-sm",
+            }),
+          ) : h("div", { className: "flex gap-2" },
             h("div", { className: "flex flex-col gap-1 flex-1" },
               fieldLabel(props.columnName === "triage"
                 ? tx(t, "specifier", "specifier")
@@ -3046,7 +3190,7 @@
               }),
             ),
           ),
-          h("div", { className: "flex flex-col gap-1" },
+          taskKind === "Human Action" ? null : h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "skillsLabel", "Skills"),
               tx(t, "skillsLabelHint", "(optional, comma-separated)")),
             h(Input, {
@@ -3058,7 +3202,7 @@
               className: "h-8 text-sm",
             }),
           ),
-          h("div", { className: "flex flex-col gap-1" },
+          taskKind === "Human Action" ? null : h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "workspace", "Workspace")),
             h("div", { className: "flex gap-2" },
               h(Select, Object.assign({
@@ -3086,7 +3230,7 @@
             }, tx(t, "workspaceScratchWarning",
               "This workspace and any files left in it are deleted when the task completes.")) : null,
           ),
-          h("div", { className: "flex flex-col gap-1" },
+          taskKind === "Human Action" ? null : h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "branch", "Branch"),
               tx(t, "branchHint", "(optional, persistent workspaces only)")),
             h(Input, {
@@ -3101,13 +3245,13 @@
               spellCheck: false,
             }),
           ),
-          h("div", { className: "flex flex-col gap-1" },
+          taskKind === "Human Action" ? null : h("div", { className: "flex flex-col gap-1" },
             fieldLabel(tx(t, "parentLabel", "Parent task"),
-              tx(t, "parentLabelHint", "(child stays blocked until the parent is done)")),
+              tx(t, "parentLabelHint", "(child waits until the parent satisfies its dependency contract)")),
             h(Select, Object.assign({
               value: parent,
               className: "h-8 text-sm",
-              title: "Optional parent task. A child stays blocked in its current column until the parent is marked done.",
+              title: "Optional parent task. A child stays blocked in its current column until the parent satisfies its dependency contract.",
             }, selectChangeHandler(setParent)),
               h(SelectOption, { value: "" }, tx(t, "noParent", "— no parent —")),
               (props.allTasks || []).map(function (task) {
@@ -3116,7 +3260,7 @@
               }),
             ),
           ),
-          h("div", { className: "flex gap-2 items-center" },
+          taskKind === "Human Action" ? null : h("div", { className: "flex gap-2 items-center" },
             h("label", {
               className: "flex items-center gap-1.5 text-xs cursor-pointer select-none",
               title: "Goal mode: the worker keeps going in the same session until a judge agrees the card is done (or the turn budget runs out, which blocks it for review). Best for open-ended cards one shot rarely finishes.",
@@ -3149,7 +3293,10 @@
           h(Button, {
             type: "submit",
             size: "sm",
-            disabled: !title.trim(),
+            disabled: !title.trim() || (
+              taskKind === "Human Action"
+              && (!candidateRepo.trim() || !instructions.trim() || !expectedResult.trim())
+            ),
           }, tx(t, "create", "Create")),
         ),
       ),
@@ -3291,6 +3438,28 @@
         .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
     };
 
+    const resolveHumanAction = function (outcome) {
+      const task = data && data.task;
+      const action = task && task.human_action;
+      if (!action) return Promise.resolve();
+      const evidence = window.prompt(`Evidence for ${outcome}`);
+      if (!evidence || !evidence.trim()) return Promise.resolve();
+      setPatchErr(null);
+      return SDK.fetchJSON(withBoard(`${API}/human-actions/${encodeURIComponent(props.taskId)}/resolve`, boardSlug), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidate_repo: action.candidate_repo,
+          candidate_sha: action.candidate_sha,
+          candidate_build: action.candidate_build,
+          candidate_environment: action.candidate_environment,
+          outcome: outcome,
+          evidence: evidence.trim(),
+        }),
+      }).then(function () { load(); props.onRefresh(); })
+        .catch(function (e) { setPatchErr(parseApiErrorMessage(e)); });
+    };
+
     // Triage specifier — calls the auxiliary LLM to flesh out a rough
     // idea in the Triage column into a concrete spec (title + body with
     // goal, approach, acceptance criteria) and promotes it to todo.
@@ -3423,6 +3592,7 @@
           assignees: props.assignees || [],
           boardSlug: boardSlug,
           onPatch: doPatch,
+          onResolveHumanAction: resolveHumanAction,
           onSpecify: doSpecify,
           onDecompose: doDecompose,
           onAddParent: addLink,
@@ -3632,9 +3802,13 @@
       h(StatusActions, {
         task: t,
         onPatch: props.onPatch,
+        onResolveHumanAction: props.onResolveHumanAction,
         onSpecify: props.onSpecify,
         onDecompose: props.onDecompose,
       }),
+      t.task_kind === "Human Action" && t.human_action
+        ? h(HumanActionSection, { action: t.human_action, renderMarkdown: props.renderMarkdown })
+        : null,
       h(DiagnosticsSection, {
         task: t,
         boardSlug: props.boardSlug,
@@ -4168,6 +4342,26 @@
         size: "sm",
       }, label);
     };
+    if (task.task_kind === "Human Action") {
+      if (task.status === "archived") {
+        return h("div", { className: "hermes-kanban-actions" },
+          b(tx(t, "archive", "Archive"), { status: "archived" }, false),
+        );
+      }
+      return h("div", { className: "hermes-kanban-actions" },
+        HUMAN_ACTION_OUTCOMES.map(function (outcome) {
+          return h(Button, {
+            key: outcome,
+            onClick: function () {
+              if (props.onResolveHumanAction) props.onResolveHumanAction(outcome);
+            },
+            disabled: !props.onResolveHumanAction,
+            size: "sm",
+          }, outcome);
+        }),
+        b(tx(t, "archive", "Archive"), { status: "archived" }, task.status !== "archived"),
+      );
+    }
 
     // "Specify" appears only when the task is in the Triage column — the
     // one column where an auxiliary LLM pass is meaningful. Elsewhere
