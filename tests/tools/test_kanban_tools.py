@@ -88,6 +88,52 @@ def test_kanban_worker_env_overrides_profile_toolset_filter(monkeypatch, tmp_pat
     assert "kanban_list" not in names
 
 
+def test_kanban_worker_contextvar_overrides_filter_and_cached_nonworker_checks(
+    monkeypatch, tmp_path
+):
+    """Gateway-scoped workers must get lifecycle tools from ContextVar state.
+
+    Prime both schema and availability caches from a non-worker context first;
+    neither process-global cache may hide tools from the later task-local turn.
+    """
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from gateway.session_context import (
+        clear_session_vars,
+        reset_session_vars,
+        set_session_vars,
+    )
+    from model_tools import _clear_tool_defs_cache, get_tool_definitions
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+
+    # Cache a negative Kanban availability check and the same restricted
+    # toolset schema the ContextVar-scoped worker will request below.
+    get_tool_definitions(enabled_toolsets=["kanban"], quiet_mode=True)
+    ordinary = get_tool_definitions(enabled_toolsets=["terminal"], quiet_mode=True)
+    ordinary_names = {tool["function"]["name"] for tool in ordinary}
+    assert not any(name.startswith("kanban_") for name in ordinary_names)
+
+    tokens = set_session_vars(kanban_task="t_context_worker")
+    try:
+        worker = get_tool_definitions(
+            enabled_toolsets=["terminal"],
+            quiet_mode=True,
+        )
+    finally:
+        clear_session_vars(tokens)
+        reset_session_vars()
+
+    worker_names = {tool["function"]["name"] for tool in worker}
+    assert {"kanban_show", "kanban_complete", "kanban_block"} <= worker_names
+    assert "kanban_list" not in worker_names
+
+
 def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_path):
     """Task scope wins over profile config for board-routing tools.
 

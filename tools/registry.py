@@ -89,11 +89,12 @@ class ToolEntry:
 
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
+        "cache_check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
     )
 
-    def __init__(self, name, toolset, schema, handler, check_fn,
+    def __init__(self, name, toolset, schema, handler, check_fn, cache_check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None):
         self.name = name
@@ -101,6 +102,7 @@ class ToolEntry:
         self.schema = schema
         self.handler = handler
         self.check_fn = check_fn
+        self.cache_check_fn = cache_check_fn
         self.requires_env = requires_env
         self.is_async = is_async
         self.description = description
@@ -151,7 +153,7 @@ _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
 
 
-def _check_fn_cached(fn: Callable) -> bool:
+def _check_fn_cached(fn: Callable, *, use_cache: bool = True) -> bool:
     """Return bool(fn()), TTL-cached across calls.
 
     Exceptions are swallowed as False. A transient False/exception within
@@ -160,6 +162,17 @@ def _check_fn_cached(fn: Callable) -> bool:
     re-probes) to keep flaky external checks (Docker daemon busy, socket
     contention, probe timeout) from silently stripping tools mid-session.
     """
+    if not use_cache:
+        try:
+            return bool(fn())
+        except Exception:
+            logger.warning(
+                "context-sensitive check_fn %s raised; dependent tools will "
+                "be unavailable this turn",
+                getattr(fn, "__qualname__", fn),
+            )
+            return False
+
     now = time.monotonic()
     with _check_fn_cache_lock:
         cached = _check_fn_cache.get(fn)
@@ -259,15 +272,19 @@ class ToolRegistry:
         Mixed toolsets (e.g. ``terminal`` plus desktop-only ``read_terminal``)
         must not be gated solely by the first registered ``check_fn``.
         """
-        check_results: Dict[Callable, bool] = {}
+        check_results: Dict[tuple[Callable, bool], bool] = {}
         for entry in entries:
             if entry.toolset != toolset:
                 continue
             if not entry.check_fn:
                 return True
-            if entry.check_fn not in check_results:
-                check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-            if check_results[entry.check_fn]:
+            check_key = (entry.check_fn, entry.cache_check_fn)
+            if check_key not in check_results:
+                check_results[check_key] = _check_fn_cached(
+                    entry.check_fn,
+                    use_cache=entry.cache_check_fn,
+                )
+            if check_results[check_key]:
                 return True
         return False
 
@@ -376,8 +393,12 @@ class ToolRegistry:
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
+        cache_check_fn: bool = True,
     ):
         """Register a tool.  Called at module-import time by each tool file.
+
+        ``cache_check_fn=False`` is required for cheap checks whose result is
+        task-local (for example, checks backed by gateway ContextVars).
 
         ``override=True`` is an explicit opt-in for plugins that intend to
         replace an existing built-in tool implementation (e.g. swap the
@@ -439,6 +460,7 @@ class ToolRegistry:
                 schema=schema,
                 handler=handler,
                 check_fn=check_fn,
+                cache_check_fn=cache_check_fn,
                 requires_env=requires_env or [],
                 is_async=is_async,
                 description=description or schema.get("description", ""),
@@ -531,7 +553,7 @@ class ToolRegistry:
         """Return OpenAI-format tool schemas for the requested tool names.
 
         Only tools whose ``check_fn()`` returns True (or have no check_fn)
-        are included. ``check_fn()`` results are cached for ~30 s via
+        are included. ``check_fn()`` results are cached for ~30 s by default via
         :func:`_check_fn_cached` to amortize repeat probes (check_terminal_
         requirements probes modal/docker, browser checks probe playwright,
         etc.); TTL chosen so env-var changes (``hermes tools enable foo``)
@@ -542,16 +564,20 @@ class ToolRegistry:
         # Per-call cache on top of the 30 s TTL — handles repeat probes of the
         # same check_fn within one definitions pass without re-reading the
         # TTL clock.
-        check_results: Dict[Callable, bool] = {}
+        check_results: Dict[tuple[Callable, bool], bool] = {}
         entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
         for name in sorted(tool_names):
             entry = entries_by_name.get(name)
             if not entry:
                 continue
             if entry.check_fn:
-                if entry.check_fn not in check_results:
-                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-                if not check_results[entry.check_fn]:
+                check_key = (entry.check_fn, entry.cache_check_fn)
+                if check_key not in check_results:
+                    check_results[check_key] = _check_fn_cached(
+                        entry.check_fn,
+                        use_cache=entry.cache_check_fn,
+                    )
+                if not check_results[check_key]:
                     if not quiet:
                         logger.debug("Tool %s unavailable (check failed)", name)
                     continue

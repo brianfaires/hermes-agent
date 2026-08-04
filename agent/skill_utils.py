@@ -241,7 +241,9 @@ def _detect_environment(env: str) -> bool:
     Cached per process. Unknown env names return True (fail-open: never hide a
     skill because of a tag we don't understand).
     """
-    if env in _ENV_DETECT_CACHE:
+    # Kanban availability is task-local: a parent worker and its delegated
+    # child can share one process while only the parent owns board authority.
+    if env != "kanban" and env in _ENV_DETECT_CACHE:
         return _ENV_DETECT_CACHE[env]
 
     result = True
@@ -252,15 +254,12 @@ def _detect_environment(env: str) -> bool:
         # kanban toolset. Mirror the same signals the kanban tools themselves
         # gate on (``tools/kanban_tools.py``) so the offer filter agrees with
         # tool availability.
-        if os.getenv("HERMES_KANBAN_TASK") or os.getenv("HERMES_KANBAN_BOARD"):
-            result = True
-        else:
-            try:
-                from tools.kanban_tools import _profile_has_kanban_toolset
+        try:
+            from tools.kanban_tools import _check_kanban_mode
 
-                result = bool(_profile_has_kanban_toolset())
-            except Exception:
-                result = False
+            result = bool(_check_kanban_mode())
+        except Exception:
+            result = False
     elif env == "docker":
         try:
             from hermes_constants import is_container
@@ -277,7 +276,8 @@ def _detect_environment(env: str) -> bool:
             "/package/admin/s6-overlay"
         )
 
-    _ENV_DETECT_CACHE[env] = result
+    if env != "kanban":
+        _ENV_DETECT_CACHE[env] = result
     return result
 
 

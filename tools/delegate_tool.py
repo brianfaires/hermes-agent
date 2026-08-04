@@ -20,6 +20,8 @@ never the child's intermediate tool calls or reasoning.
 import enum
 import json
 import logging
+import shutil
+import tempfile
 
 logger = logging.getLogger(__name__)
 import os
@@ -51,6 +53,10 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "send_message",  # no cross-platform side effects
         "execute_code",  # children should reason step-by-step, not write scripts
         "cronjob",  # no scheduling more work in the parent's name
+        # A delegated child is not a dispatcher worker and must never inherit
+        # the parent's board lifecycle authority. Terminal/file tools remain
+        # available for ordinary coding and review work.
+        *TOOLSETS.get("kanban", {}).get("tools", []),
     ]
 )
 
@@ -1799,6 +1805,14 @@ def _run_single_child(
     Run a pre-built child agent. Called from within a thread.
     Returns a structured result dict.
     """
+    if child is None:
+        raise ValueError("delegated child agent is required")
+    if not getattr(child, "_delegated_kanban_home", ""):
+        setattr(
+            child,
+            "_delegated_kanban_home",
+            tempfile.mkdtemp(prefix=f"hermes-delegate-{task_index}-kanban-"),
+        )
     child_start = time.monotonic()
 
     # Get the progress callback from the child agent
@@ -2002,11 +2016,15 @@ def _run_single_child(
 
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
-            return child.run_conversation(
-                user_message=goal,
-                task_id=child_task_id,
-                stream_callback=_relay_child_text,
-            )
+            from gateway.session_context import delegated_child_kanban_scope
+
+            isolated_kanban_home = getattr(child, "_delegated_kanban_home", "")
+            with delegated_child_kanban_scope(isolated_kanban_home):
+                return child.run_conversation(
+                    user_message=goal,
+                    task_id=child_task_id,
+                    stream_callback=_relay_child_text,
+                )
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
         try:
@@ -2398,6 +2416,11 @@ def _run_single_child(
                 child.close()
         except Exception:
             logger.debug("Failed to close child agent after delegation")
+        finally:
+            shutil.rmtree(
+                getattr(child, "_delegated_kanban_home", ""),
+                ignore_errors=True,
+            )
 
 
 def _recover_tasks_from_json_string(
@@ -2586,27 +2609,41 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
-            child = _build_child_agent(
-                task_index=i,
-                goal=t["goal"],
-                context=t.get("context"),
-                # Subagents always inherit the parent's toolsets; the model
-                # cannot choose or narrow them (no model-facing toolsets arg).
-                toolsets=None,
-                model=creds["model"],
-                max_iterations=effective_max_iter,
-                task_count=n_tasks,
-                parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
-                role=effective_role,
+            isolated_kanban_home = tempfile.mkdtemp(
+                prefix=f"hermes-delegate-{i}-kanban-"
             )
+            try:
+                from gateway.session_context import delegated_child_kanban_scope
+
+                # AIAgent resolves tools, prompt guidance, and native runtime
+                # configuration during construction. Mask the parent worker at
+                # that boundary as well as during the later child turn.
+                with delegated_child_kanban_scope(isolated_kanban_home):
+                    child = _build_child_agent(
+                        task_index=i,
+                        goal=t["goal"],
+                        context=t.get("context"),
+                        # Subagents always inherit the parent's toolsets; the model
+                        # cannot choose or narrow them (no model-facing toolsets arg).
+                        toolsets=None,
+                        model=creds["model"],
+                        max_iterations=effective_max_iter,
+                        task_count=n_tasks,
+                        parent_agent=parent_agent,
+                        override_provider=creds["provider"],
+                        override_base_url=creds["base_url"],
+                        override_api_key=creds["api_key"],
+                        override_api_mode=creds["api_mode"],
+                        override_request_overrides=creds.get("request_overrides"),
+                        override_max_tokens=creds.get("max_output_tokens"),
+                        override_acp_command=creds.get("command"),
+                        override_acp_args=creds.get("args"),
+                        role=effective_role,
+                    )
+            except Exception:
+                shutil.rmtree(isolated_kanban_home, ignore_errors=True)
+                raise
+            setattr(child, "_delegated_kanban_home", isolated_kanban_home)
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             # Tee the child's progress events into its live transcript log.
@@ -2621,6 +2658,13 @@ def delegate_task(
                 )
                 child._live_transcript_path = str(_writer.path)
             children.append((i, t, child))
+    except Exception:
+        for _, _, built_child in children:
+            shutil.rmtree(
+                getattr(built_child, "_delegated_kanban_home", ""),
+                ignore_errors=True,
+            )
+        raise
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names

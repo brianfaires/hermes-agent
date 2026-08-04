@@ -1239,9 +1239,11 @@ def init_agent(
     # enabled outside a worker run), and kanban_show must actually be loaded
     # (#60119) so the guidance never references tools the session can't call.
     from agent.prompt_builder import KANBAN_GUIDANCE
+    from gateway.session_context import get_session_env
+
     agent._kanban_worker_guidance = (
         KANBAN_GUIDANCE
-        if os.environ.get("HERMES_KANBAN_TASK")
+        if get_session_env("HERMES_KANBAN_TASK", "")
         and "kanban_show" in agent.valid_tool_names
         else ""
     )

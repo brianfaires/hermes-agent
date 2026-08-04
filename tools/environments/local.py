@@ -431,6 +431,8 @@ def _inject_session_context_env(env: dict) -> None:
         from gateway.session_context import (
             _UNSET,
             _VAR_MAP,
+            delegated_child_kanban_home,
+            is_delegated_child,
             session_context_engaged,
         )
     except Exception:
@@ -446,6 +448,27 @@ def _inject_session_context_env(env: dict) -> None:
             # Unset for THIS task while a concurrent host is engaged: drop any
             # inherited global so a sibling session's value can't leak in.
             env.pop(var_name, None)
+
+    if is_delegated_child():
+        # Delegated children are not Kanban workers. Remove every inherited
+        # lifecycle/capability variable (including future HERMES_KANBAN_* keys)
+        # and point legitimate CLI/import probes at a disposable board instead
+        # of the parent worker's DB. This bridge covers foreground/background
+        # terminal, Codex app-server, ACP, and Hermes-tools MCP subprocesses.
+        for key in list(env):
+            if key.startswith("HERMES_KANBAN_"):
+                env.pop(key, None)
+        isolated_home = delegated_child_kanban_home()
+        if isolated_home:
+            env["HERMES_KANBAN_HOME"] = isolated_home
+            env["HERMES_KANBAN_DB"] = os.path.join(isolated_home, "kanban.db")
+            env["HERMES_KANBAN_WORKSPACES_ROOT"] = os.path.join(
+                isolated_home, "workspaces"
+            )
+            env["HERMES_KANBAN_ATTACHMENTS_ROOT"] = os.path.join(
+                isolated_home, "attachments"
+            )
+        env["HERMES_DELEGATED_CHILD"] = "1"
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:

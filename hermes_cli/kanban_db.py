@@ -373,6 +373,17 @@ def _normalize_board_slug(slug: Optional[str]) -> Optional[str]:
     return s
 
 
+def _delegated_kanban_home() -> Optional[Path]:
+    """Return the child-local Kanban root, if delegation isolation is active."""
+    try:
+        from gateway.session_context import delegated_child_kanban_home
+
+        delegated_home = delegated_child_kanban_home()
+    except Exception:
+        delegated_home = ""
+    return Path(delegated_home).expanduser() if delegated_home else None
+
+
 def kanban_home() -> Path:
     """Return the shared Hermes root that anchors the kanban board.
 
@@ -389,6 +400,9 @@ def kanban_home() -> Path:
     profile's ``HERMES_HOME`` would silently fork the board per profile,
     which breaks the dispatcher / worker handoff.
     """
+    delegated_home = _delegated_kanban_home()
+    if delegated_home:
+        return delegated_home
     override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     if override:
         return Path(override).expanduser()
@@ -532,6 +546,9 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
        Other boards → ``<root>/kanban/boards/<slug>/kanban.db``.
     """
+    delegated_home = _delegated_kanban_home()
+    if delegated_home:
+        return delegated_home / "kanban.db"
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
@@ -570,6 +587,9 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     that existing scratch workspaces from before the boards feature are
     preserved. Other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
     """
+    delegated_home = _delegated_kanban_home()
+    if delegated_home:
+        return delegated_home / "workspaces"
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
         return Path(override).expanduser()
@@ -600,6 +620,9 @@ def attachments_root(board: Optional[str] = None) -> Path:
     directly. Remote backends (Docker/Modal) need this directory mounted;
     see the kanban docs.
     """
+    delegated_home = _delegated_kanban_home()
+    if delegated_home:
+        return delegated_home / "attachments"
     override = os.environ.get("HERMES_KANBAN_ATTACHMENTS_ROOT", "").strip()
     if override:
         return Path(override).expanduser()

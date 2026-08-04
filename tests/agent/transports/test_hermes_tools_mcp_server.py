@@ -200,6 +200,20 @@ class TestModuleSurface:
                 "workers on codex_app_server runtime would hang"
             )
 
+    def test_delegated_mcp_process_filters_parent_kanban_tools(self, monkeypatch):
+        """The marker bridged to native runtimes defeats profile-based gating."""
+        from model_tools import get_tool_definitions
+
+        monkeypatch.setenv("HERMES_DELEGATED_CHILD", "1")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
+        definitions = get_tool_definitions(
+            enabled_toolsets=["kanban", "web"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        names = {item["function"]["name"] for item in definitions}
+        assert not any(name.startswith("kanban_") for name in names)
+
     def test_kanban_orchestrator_tools_exposed(self):
         """Orchestrator agents need to dispatch new tasks, query the
         board, and unblock/link tasks. Exposed so an orchestrator on

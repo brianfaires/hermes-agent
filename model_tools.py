@@ -269,6 +269,16 @@ _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 _TOOL_DEFS_CACHE_MAX = 8
 
 
+def _session_kanban_task() -> str:
+    """Resolve task scope from the gateway ContextVar or CLI process env."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env("HERMES_KANBAN_TASK", "") or "")
+    except Exception:
+        return str(os.environ.get("HERMES_KANBAN_TASK", "") or "")
+
+
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
     schema dependencies change (e.g. discord capability cache reset,
@@ -321,13 +331,21 @@ def get_tool_definitions(
             ts_platform = _resolve_ts_platform()
         except Exception:
             ts_platform = str(os.environ.get("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+        kanban_task_scoped = bool(_session_kanban_task())
+        try:
+            from gateway.session_context import is_delegated_child
+
+            delegated_child = is_delegated_child()
+        except Exception:
+            delegated_child = False
         cache_key = (
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
             cfg_fp,
             ts_platform,
-            bool(os.environ.get("HERMES_KANBAN_TASK")),
+            kanban_task_scoped,
+            delegated_child,
             bool(skip_tool_search_assembly),
         )
         cached = _tool_defs_cache.get(cache_key)
@@ -372,8 +390,8 @@ def _compute_tool_definitions(
 
     if enabled_toolsets is not None:
         effective_enabled_toolsets = list(enabled_toolsets)
-        if os.environ.get("HERMES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
-            # Dispatcher-spawned workers are scoped by HERMES_KANBAN_TASK and
+        if _session_kanban_task() and "kanban" not in effective_enabled_toolsets:
+            # Dispatcher and gateway workers are scoped by HERMES_KANBAN_TASK and
             # must always receive the lifecycle handoff tools. Assignee
             # profiles may intentionally restrict their normal chat toolsets
             # (for token/cost reasons), but that should not strip the kanban

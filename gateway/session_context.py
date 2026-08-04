@@ -36,7 +36,9 @@ needs to replace the import + call site:
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
 """
 
+from contextlib import contextmanager
 from contextvars import ContextVar
+import os
 from typing import Any
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
@@ -93,6 +95,17 @@ _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", defaul
 _KANBAN_BOARD: ContextVar = ContextVar("HERMES_KANBAN_BOARD", default=_UNSET)
 _KANBAN_TASK: ContextVar = ContextVar("HERMES_KANBAN_TASK", default=_UNSET)
 
+# Delegated agents are subordinate reasoning/coding lanes, not independent
+# Kanban workers.  A dispatcher worker may spawn them inside the same process,
+# so process-global HERMES_KANBAN_* values still name the parent worker.  This
+# task-local scope masks that identity and points any direct Kanban imports at a
+# disposable board.  Subprocess env builders bridge the same boundary for
+# terminal, Codex app-server, ACP, and Hermes-tools MCP children.
+_DELEGATED_CHILD: ContextVar = ContextVar("HERMES_DELEGATED_CHILD", default=False)
+_DELEGATED_KANBAN_HOME: ContextVar = ContextVar(
+    "HERMES_DELEGATED_KANBAN_HOME", default=_UNSET
+)
+
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
 
 # Whether the current session's delivery channel can route an ASYNC completion
@@ -141,6 +154,50 @@ _VAR_MAP = {
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
 }
+
+
+def is_delegated_child() -> bool:
+    """Whether the current execution context is a delegated child."""
+    if bool(_DELEGATED_CHILD.get()):
+        return True
+    return os.environ.get("HERMES_DELEGATED_CHILD", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def delegated_child_kanban_home() -> str:
+    """Return the disposable Kanban root assigned to a delegated child."""
+    value = _DELEGATED_KANBAN_HOME.get()
+    if value is not _UNSET:
+        return str(value or "")
+    if is_delegated_child():
+        return os.environ.get("HERMES_KANBAN_HOME", "").strip()
+    return ""
+
+
+@contextmanager
+def delegated_child_kanban_scope(kanban_home) -> Any:
+    """Mask parent-worker lifecycle identity for one delegated child.
+
+    Unlike ``set_session_vars`` / ``clear_session_vars``, this helper is
+    deliberately token-reset and nestable: orchestrator children can spawn
+    their own workers without losing the outer child's isolation on return.
+    """
+    home = str(kanban_home)
+    tokens = (
+        (_DELEGATED_CHILD, _DELEGATED_CHILD.set(True)),
+        (_DELEGATED_KANBAN_HOME, _DELEGATED_KANBAN_HOME.set(home)),
+        (_KANBAN_BOARD, _KANBAN_BOARD.set("")),
+        (_KANBAN_TASK, _KANBAN_TASK.set("")),
+    )
+    try:
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
 
 
 def set_current_session_id(session_id: str) -> None:

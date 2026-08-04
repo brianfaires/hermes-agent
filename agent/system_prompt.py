@@ -232,13 +232,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
     if _kanban_guidance:
         tool_guidance.append(_kanban_guidance)
-    elif (
-        _kanban_guidance is None
-        and os.environ.get("HERMES_KANBAN_TASK")
-        and "kanban_show" in agent.valid_tool_names
-    ):
-        # Fallback for code paths that bypass agent_init (rare).
-        tool_guidance.append(KANBAN_GUIDANCE)
+    elif _kanban_guidance is None:
+        from gateway.session_context import get_session_env
+
+        if (
+            get_session_env("HERMES_KANBAN_TASK", "")
+            and "kanban_show" in agent.valid_tool_names
+        ):
+            # Fallback for code paths that bypass agent_init (rare).
+            tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 

@@ -66,6 +66,15 @@ def _session_kanban_board() -> str:
     return _session_env("HERMES_KANBAN_BOARD", "")
 
 
+def _is_delegated_child() -> bool:
+    try:
+        from gateway.session_context import is_delegated_child
+
+        return is_delegated_child()
+    except Exception:
+        return False
+
+
 def _profile_has_kanban_toolset() -> bool:
     # Uses load_config() which has mtime-based caching, so this adds
     # negligible overhead. The check_fn results are further TTL-cached
@@ -91,6 +100,8 @@ def _check_kanban_mode() -> bool:
     embedded by default) and orchestrator profiles with the kanban
     toolset enabled see the Kanban lifecycle tool surface.
     """
+    if _is_delegated_child():
+        return False
     if _session_kanban_task():
         return True
     return _profile_has_kanban_toolset()
@@ -105,6 +116,8 @@ def _check_kanban_orchestrator_mode() -> bool:
     board state. Profiles that explicitly opt into the kanban toolset
     and are NOT scoped to a single task are the orchestrator surface.
     """
+    if _is_delegated_child():
+        return False
     if _session_kanban_task():
         return False
     return _profile_has_kanban_toolset()
@@ -1959,6 +1972,7 @@ registry.register(
     schema=KANBAN_SHOW_SCHEMA,
     handler=_handle_show,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="📋",
 )
 
@@ -1968,6 +1982,7 @@ registry.register(
     schema=KANBAN_LIST_SCHEMA,
     handler=_handle_list,
     check_fn=_check_kanban_orchestrator_mode,
+    cache_check_fn=False,
     emoji="📋",
 )
 
@@ -1977,6 +1992,7 @@ registry.register(
     schema=KANBAN_COMPLETE_SCHEMA,
     handler=_handle_complete,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="✔",
 )
 
@@ -1986,6 +2002,7 @@ registry.register(
     schema=KANBAN_BLOCK_SCHEMA,
     handler=_handle_block,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="⏸",
 )
 
@@ -1995,6 +2012,7 @@ registry.register(
     schema=KANBAN_HEARTBEAT_SCHEMA,
     handler=_handle_heartbeat,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="💓",
 )
 
@@ -2004,6 +2022,7 @@ registry.register(
     schema=KANBAN_COMMENT_SCHEMA,
     handler=_handle_comment,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="💬",
 )
 
@@ -2013,6 +2032,7 @@ registry.register(
     schema=KANBAN_ATTACH_SCHEMA,
     handler=_handle_attach,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="📎",
 )
 
@@ -2022,6 +2042,7 @@ registry.register(
     schema=KANBAN_ATTACH_URL_SCHEMA,
     handler=_handle_attach_url,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="📎",
 )
 
@@ -2031,6 +2052,7 @@ registry.register(
     schema=KANBAN_ATTACHMENTS_SCHEMA,
     handler=_handle_attachments,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="📎",
 )
 
@@ -2040,6 +2062,7 @@ registry.register(
     schema=KANBAN_CREATE_SCHEMA,
     handler=_handle_create,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="➕",
 )
 
@@ -2049,6 +2072,7 @@ registry.register(
     schema=KANBAN_UNBLOCK_SCHEMA,
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
+    cache_check_fn=False,
     emoji="▶",
 )
 
@@ -2058,5 +2082,6 @@ registry.register(
     schema=KANBAN_LINK_SCHEMA,
     handler=_handle_link,
     check_fn=_check_kanban_mode,
+    cache_check_fn=False,
     emoji="🔗",
 )

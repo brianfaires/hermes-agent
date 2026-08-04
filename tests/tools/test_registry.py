@@ -175,6 +175,34 @@ class TestGetDefinitions:
         assert len(defs) == 2
         assert calls["count"] == 1
 
+    def test_context_sensitive_check_fn_bypasses_cross_call_ttl_cache(self):
+        reg = ToolRegistry()
+        state = {"available": False, "calls": 0}
+
+        def context_check():
+            state["calls"] += 1
+            return state["available"]
+
+        for name in ("first", "second"):
+            reg.register(
+                name=name,
+                toolset="contextual",
+                schema=_make_schema(name),
+                handler=_dummy_handler,
+                check_fn=context_check,
+                cache_check_fn=False,
+            )
+
+        assert reg.get_definitions({"first", "second"}) == []
+        state["available"] = True
+        definitions = reg.get_definitions({"first", "second"})
+
+        assert {item["function"]["name"] for item in definitions} == {
+            "first",
+            "second",
+        }
+        assert state["calls"] == 2
+
 
 class TestUnknownToolDispatch:
     def test_returns_error_json(self):

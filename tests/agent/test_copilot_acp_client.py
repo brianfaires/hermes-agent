@@ -317,3 +317,33 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+def test_delegated_child_acp_spawn_has_no_parent_kanban_authority(
+    monkeypatch, tmp_path
+):
+    from gateway.session_context import delegated_child_kanban_scope
+
+    parent_db = tmp_path / "parent" / "kanban.db"
+    isolated_home = tmp_path / "delegated"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(parent_db))
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "91")
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "parent-claim")
+
+    captured = {}
+    client = _make_home_client(tmp_path)
+    with delegated_child_kanban_scope(isolated_home):
+        with _patch(
+            "agent.copilot_acp_client.subprocess.Popen",
+            side_effect=_fake_popen_capture(captured),
+        ):
+            with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+                client._run_prompt("inspect safely", timeout_seconds=1)
+
+    env = captured["kwargs"]["env"]
+    assert env["HERMES_DELEGATED_CHILD"] == "1"
+    assert not env.get("HERMES_KANBAN_TASK")
+    assert env["HERMES_KANBAN_DB"] == str(isolated_home / "kanban.db")
+    assert "HERMES_KANBAN_RUN_ID" not in env
+    assert "HERMES_KANBAN_CLAIM_LOCK" not in env

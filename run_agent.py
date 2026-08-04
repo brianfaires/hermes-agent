@@ -3260,7 +3260,9 @@ class AIAgent:
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
-        if os.environ.get("HERMES_KANBAN_TASK"):
+        from gateway.session_context import get_session_env
+
+        if get_session_env("HERMES_KANBAN_TASK", ""):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
                 heartbeat_current_worker_from_env()

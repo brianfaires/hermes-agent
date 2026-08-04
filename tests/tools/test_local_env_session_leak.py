@@ -24,11 +24,17 @@ the ``os.environ`` fallback.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
 import gateway.session_context as sc
-from gateway.session_context import _VAR_MAP, clear_session_vars, set_session_vars
+from gateway.session_context import (
+    _VAR_MAP,
+    clear_session_vars,
+    delegated_child_kanban_scope,
+    set_session_vars,
+)
 from tools.environments.local import _make_run_env, _sanitize_subprocess_env, hermes_subprocess_env
 
 # The full set of session vars the bridge owns.
@@ -302,3 +308,45 @@ def test_hermes_subprocess_env_unengaged_preserves_fallback(monkeypatch):
     # not engaged (autouse fixture leaves _session_context_engaged False)
     env = hermes_subprocess_env()
     assert env.get("HERMES_SESSION_KEY") == "cli-fallback-key"
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda: _make_run_env({}),
+        lambda: _sanitize_subprocess_env(dict(os.environ)),
+        hermes_subprocess_env,
+    ],
+)
+def test_delegated_child_subprocesses_receive_isolated_kanban_context(
+    monkeypatch, tmp_path: Path, builder
+):
+    """Every local/native spawn bridge strips the parent worker capability."""
+    parent_db = tmp_path / "parent" / "kanban.db"
+    parent_values = {
+        "HERMES_KANBAN_TASK": "t_parent",
+        "HERMES_KANBAN_DB": str(parent_db),
+        "HERMES_KANBAN_HOME": str(parent_db.parent),
+        "HERMES_KANBAN_BOARD": "production",
+        "HERMES_KANBAN_RUN_ID": "99",
+        "HERMES_KANBAN_CLAIM_LOCK": "parent-claim",
+        "HERMES_KANBAN_WORKSPACE": "/parent/worktree",
+        "HERMES_KANBAN_BRANCH": "wt/parent",
+        "HERMES_KANBAN_GOAL_MODE": "1",
+        "HERMES_KANBAN_WORKSPACES_ROOT": str(parent_db.parent / "workspaces"),
+        "HERMES_KANBAN_ATTACHMENTS_ROOT": str(parent_db.parent / "attachments"),
+    }
+    for key, value in parent_values.items():
+        monkeypatch.setenv(key, value)
+
+    isolated_home = tmp_path / "delegated-kanban"
+    with delegated_child_kanban_scope(isolated_home):
+        env = builder()
+
+    assert env["HERMES_DELEGATED_CHILD"] == "1"
+    assert env["HERMES_KANBAN_HOME"] == str(isolated_home)
+    assert env["HERMES_KANBAN_DB"] == str(isolated_home / "kanban.db")
+    assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(isolated_home / "workspaces")
+    assert env["HERMES_KANBAN_ATTACHMENTS_ROOT"] == str(isolated_home / "attachments")
+    for key, value in parent_values.items():
+        assert env.get(key) != value, f"parent lifecycle value leaked through {key}"

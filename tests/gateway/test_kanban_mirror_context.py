@@ -132,3 +132,58 @@ def test_kanban_tools_use_session_context_default_task_and_board(monkeypatch, tm
             scoped_conn.close()
     finally:
         clear_session_vars(tokens)
+
+
+def test_mirrored_parent_context_loads_lifecycle_tools_with_restricted_toolsets(
+    monkeypatch, tmp_path
+):
+    """The real gateway mirror binding must reach model tool resolution."""
+    conn = _make_board(monkeypatch, tmp_path)
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Gateway parent lifecycle",
+            assignee="ops",
+            board="operations",
+        )
+    finally:
+        conn.close()
+    _mirror_thread(
+        "operations",
+        kind="post",
+        thread_id="gateway-parent-thread",
+        members=[task_id],
+    )
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    from gateway.run import GatewayRunner
+    from gateway.session_context import reset_session_vars
+    from model_tools import _clear_tool_defs_cache, get_tool_definitions
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="gateway-parent-thread",
+        parent_chat_id="forum-1",
+        thread_id="gateway-parent-thread",
+        chat_name="Gateway parent",
+        chat_type="thread",
+    )
+    context = build_session_context(source, GatewayConfig())
+    runner = object.__new__(GatewayRunner)
+
+    tokens = runner._set_session_env(context)
+    try:
+        schemas = get_tool_definitions(
+            enabled_toolsets=["terminal"],
+            quiet_mode=True,
+        )
+    finally:
+        runner._clear_session_env(tokens)
+        reset_session_vars()
+
+    names = {tool["function"]["name"] for tool in schemas}
+    assert {"kanban_show", "kanban_complete", "kanban_block"} <= names
+    assert "kanban_list" not in names

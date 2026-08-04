@@ -22,6 +22,12 @@ _TERMINAL_KANBAN_TOOLS = frozenset({"kanban_complete", "kanban_block"})
 _DEFAULT_MAX_ATTEMPTS = 2
 
 
+def _kanban_task() -> str:
+    from gateway.session_context import get_session_env
+
+    return get_session_env("HERMES_KANBAN_TASK", "").strip()
+
+
 def kanban_stop_nudge_enabled() -> bool:
     """Return whether the kanban stop-guard is active for this process.
 
@@ -31,8 +37,7 @@ def kanban_stop_nudge_enabled() -> bool:
     env = os.environ.get("HERMES_KANBAN_STOP_NUDGE")
     if env is not None and env.strip().lower() in {"0", "false", "no", "off"}:
         return False
-    task = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
-    return bool(task)
+    return bool(_kanban_task())
 
 
 def _tool_call_name(tc: Any) -> str:
@@ -85,7 +90,7 @@ def build_kanban_stop_nudge(
     if session_called_kanban_terminal(messages):
         return None
 
-    tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
+    tid = (task_id or _kanban_task()).strip() or "this task"
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"

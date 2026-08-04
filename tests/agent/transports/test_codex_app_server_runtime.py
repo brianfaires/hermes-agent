@@ -378,3 +378,57 @@ class TestSpawnEnvSecretStripping:
         monkeypatch.setenv("HOME", "/users/alice")
         env = self._capture_spawn_env(monkeypatch)
         assert env.get("HOME") == "/users/alice"
+
+    def test_delegated_child_starts_codex_without_parent_kanban_root(
+        self, monkeypatch, tmp_path
+    ):
+        """Native Codex remains usable but cannot inherit worker authority."""
+        import subprocess
+
+        from agent.transports import codex_app_server as cas
+        from gateway.session_context import delegated_child_kanban_scope
+
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, cmd, *args, **kwargs):
+                captured["cmd"] = list(cmd)
+                captured["env"] = kwargs.get("env", {}).copy()
+                self.stdin = None
+                self.stdout = None
+                self.stderr = None
+                self.pid = 1
+                self.returncode = None
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        parent_db = tmp_path / "parent" / "kanban.db"
+        isolated_home = tmp_path / "delegated"
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_parent")
+        monkeypatch.setenv("HERMES_KANBAN_DB", str(parent_db))
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+        with delegated_child_kanban_scope(isolated_home):
+            client = cas.CodexAppServerClient(codex_bin="codex")
+            client._closed = True
+
+        env = captured["env"]
+        assert env["HERMES_DELEGATED_CHILD"] == "1"
+        assert not env.get("HERMES_KANBAN_TASK")
+        assert env["HERMES_KANBAN_DB"] == str(isolated_home / "kanban.db")
+        assert captured["cmd"][:2] == ["codex", "app-server"]
+        assert not any(
+            "sandbox_workspace_write.writable_roots" in arg
+            for arg in captured["cmd"]
+        )
+        assert str(parent_db.parent) not in " ".join(captured["cmd"])
