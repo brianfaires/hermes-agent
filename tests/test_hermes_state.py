@@ -5888,9 +5888,28 @@ def test_gateway_session_recovery_reopens_legacy_agent_close_rows(db):
     ) is None
 
 
+def test_gateway_peer_record_rejects_ownerless_profile_claim(db):
+    db.create_session("gw-ownerless", "telegram", user_id="u1")
+    with pytest.raises(ValueError, match="ownership is unresolved"):
+        db.record_gateway_session_peer(
+            "gw-ownerless",
+            source="telegram",
+            user_id="u1",
+            session_key="agent:main:telegram:dm:c1",
+            chat_id="c1",
+            chat_type="dm",
+        )
+
+
 def test_gateway_metadata_display_name_origin_round_trip(db):
     """record_gateway_session_peer persists display_name/origin_json (#9006)."""
-    db.create_session("gw-meta", "telegram", user_id="u1")
+    db.create_session(
+        "gw-meta",
+        "telegram",
+        user_id="u1",
+        session_key="agent:main:telegram:dm:c1",
+        profile_name="default",
+    )
     origin = {"platform": "telegram", "chat_id": "c1", "chat_name": "Alice", "chat_type": "dm"}
     db.record_gateway_session_peer(
         "gw-meta",

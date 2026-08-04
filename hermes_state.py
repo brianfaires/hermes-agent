@@ -33,6 +33,26 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 logger = logging.getLogger(__name__)
 
 
+def _gateway_profile_from_session_key(session_key: Optional[str]) -> Optional[str]:
+    """Return the profile owner encoded by an ``agent:<namespace>:...`` key."""
+    if not session_key:
+        return None
+    parts = str(session_key).split(":")
+    if len(parts) < 2 or parts[0] != "agent":
+        return None
+    namespace = parts[1] or "main"
+    return "default" if namespace == "main" else namespace
+
+
+def _normalize_gateway_profile(profile_name: Optional[str]) -> Optional[str]:
+    if profile_name is None:
+        return None
+    value = str(profile_name).strip()
+    if not value:
+        return None
+    return "default" if value == "main" else value
+
+
 def _scrub_surrogates(value: Any) -> Any:
     """Replace lone surrogates when *value* is text; pass anything else through.
 
@@ -2025,19 +2045,55 @@ class SessionDB:
         thread_id: str = None,
         display_name: str = None,
         origin_json: str = None,
+        profile_name: str = None,
     ) -> None:
-        """Persist the gateway routing peer for an existing session row.
+        """Persist the gateway routing peer without changing profile ownership.
 
         ``display_name`` / ``origin_json`` carry the gateway's presentation
         and full origin metadata (#9006) so consumers (mcp_serve, mirror,
         channel directory) can read routing data from state.db instead of
         sessions.json.  They are COALESCE'd only in the sense that ``None``
         leaves the existing value untouched.
+
+        When the multiplexing caller supplies ``profile_name``, the write fails
+        closed if the durable row belongs to another profile.  This prevents a
+        recovered foreign session ID from being made permanently cross-profile.
         """
         if not session_id or not session_key:
             return
 
         def _do(conn):
+            existing = conn.execute(
+                "SELECT profile_name, session_key FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if existing is None:
+                return
+            requested_profile = _normalize_gateway_profile(profile_name)
+            requested_key_profile = _gateway_profile_from_session_key(session_key)
+            if requested_profile is not None and requested_key_profile != requested_profile:
+                raise ValueError(
+                    "gateway session key profile mismatch: "
+                    f"key belongs to {requested_key_profile}, "
+                    f"not {requested_profile}"
+                )
+            effective_profile = requested_profile or requested_key_profile
+            if effective_profile is not None:
+                existing_profile = (
+                    _normalize_gateway_profile(existing["profile_name"])
+                    or _gateway_profile_from_session_key(existing["session_key"])
+                )
+                if existing_profile is None:
+                    raise ValueError(
+                        "gateway session profile ownership is unresolved: "
+                        f"session {session_id} has no durable owner"
+                    )
+                if existing_profile != effective_profile:
+                    raise ValueError(
+                        "gateway session profile ownership mismatch: "
+                        f"session {session_id} belongs to {existing_profile}, "
+                        f"not {effective_profile}"
+                    )
             conn.execute(
                 """UPDATE sessions
                    SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
@@ -2059,6 +2115,125 @@ class SessionDB:
             )
 
         self._execute_write(_do)
+
+    def switch_gateway_session_route(
+        self,
+        *,
+        old_session_id: str,
+        target_session_id: str,
+        route_entries: Dict[str, str],
+        route_scope: str = "",
+        target_peer: Optional[Dict[str, Any]] = None,
+        requested_profile: Optional[str] = None,
+    ) -> bool:
+        """Atomically switch a gateway route and its SQLite session lifecycle.
+
+        ``SessionStore.switch_session`` publishes a route by changing both the
+        active session row metadata and the ``gateway_routing`` index.  Those
+        writes must commit together: no target peer rewrite should be visible
+        unless the old-session lifecycle transition and durable route
+        publication also succeeded.
+        """
+        if not old_session_id or not target_session_id:
+            return False
+
+        normalized_requested = _normalize_gateway_profile(requested_profile)
+        target_peer = target_peer if isinstance(target_peer, dict) else None
+        now = time.time()
+
+        def _fail_after(step: str) -> None:
+            hook = getattr(self, "_gateway_switch_fail_after_step", None)
+            if callable(hook):
+                hook(step)
+            elif hook == step:
+                raise RuntimeError(f"injected failure after {step}")
+
+        def _owner_from_row(row) -> Optional[str]:
+            return (
+                _normalize_gateway_profile(row["profile_name"])
+                or _gateway_profile_from_session_key(row["session_key"])
+            )
+
+        def _do(conn):
+            target = conn.execute(
+                "SELECT profile_name, session_key FROM sessions WHERE id = ?",
+                (target_session_id,),
+            ).fetchone()
+            if target is None:
+                return False
+
+            target_owner = _owner_from_row(target)
+            if normalized_requested is not None:
+                if target_owner is None:
+                    raise ValueError(
+                        "gateway session profile ownership is unresolved: "
+                        f"session {target_session_id} has no durable owner"
+                    )
+                if target_owner != normalized_requested:
+                    raise ValueError(
+                        "gateway session profile ownership mismatch: "
+                        f"session {target_session_id} belongs to {target_owner}, "
+                        f"not {normalized_requested}"
+                    )
+
+            conn.execute(
+                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
+                (target_session_id,),
+            )
+            _fail_after("target_reopen")
+
+            if target_peer is not None:
+                peer_session_key = target_peer.get("session_key")
+                peer_profile = _gateway_profile_from_session_key(peer_session_key)
+                if normalized_requested is not None and peer_profile != normalized_requested:
+                    raise ValueError(
+                        "gateway session key profile mismatch: "
+                        f"key belongs to {peer_profile}, not {normalized_requested}"
+                    )
+                conn.execute(
+                    """UPDATE sessions
+                       SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
+                           chat_type = ?, thread_id = ?,
+                           display_name = COALESCE(?, display_name),
+                           origin_json = COALESCE(?, origin_json)
+                       WHERE id = ?""",
+                    (
+                        peer_session_key,
+                        target_peer.get("source"),
+                        target_peer.get("user_id"),
+                        target_peer.get("chat_id"),
+                        target_peer.get("chat_type"),
+                        target_peer.get("thread_id"),
+                        target_peer.get("display_name"),
+                        target_peer.get("origin_json"),
+                        target_session_id,
+                    ),
+                )
+            _fail_after("target_peer_rewrite")
+
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? "
+                "WHERE id = ? AND (ended_at IS NULL "
+                "OR end_reason IN ('agent_close', 'ws_orphan_reap'))",
+                (now, "session_switch", old_session_id),
+            )
+            _fail_after("old_lifecycle")
+
+            conn.execute("DELETE FROM gateway_routing WHERE scope = ?", (route_scope,))
+            if route_entries:
+                conn.executemany(
+                    "INSERT INTO gateway_routing (scope, session_key, entry_json, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    [
+                        (route_scope, key, entry_json, now)
+                        for key, entry_json in route_entries.items()
+                        if key and entry_json
+                    ],
+                )
+            _fail_after("route_publication")
+            return True
+
+        return bool(self._execute_write(_do))
 
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
         """Mark a gateway session's expiry-finalization flag in state.db.
@@ -2300,6 +2475,7 @@ class SessionDB:
         chat_id: Optional[str] = None,
         chat_type: Optional[str] = None,
         thread_id: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Find the latest recoverable gateway session for a routing peer.
 
@@ -2311,15 +2487,39 @@ class SessionDB:
         (dashboard viewer disconnect before #60609) are treated as recoverable;
         explicit conversation boundaries such as /new, /resume switches, and
         compression splits are not.
+
+        ``profile_name`` is mandatory at the multiplexing boundary.  It scopes
+        both exact-key and peer-tuple recovery so identical users/chats behind
+        different bot credentials cannot adopt one another's durable sessions.
         """
         if not session_key:
             return None
+
+        normalized_profile = _normalize_gateway_profile(profile_name)
+        profile_clause = ""
+        profile_params: List[str] = []
+        if normalized_profile == "default":
+            profile_clause = (
+                " AND (profile_name IN ('default', 'main') "
+                "OR ((profile_name IS NULL OR profile_name = '') "
+                "AND session_key GLOB 'agent:main:*'))"
+            )
+        elif normalized_profile:
+            profile_clause = (
+                " AND (profile_name = ? OR ((profile_name IS NULL OR profile_name = '') "
+                "AND session_key GLOB ?))"
+            )
+            profile_params.extend(
+                [normalized_profile, f"agent:{normalized_profile}:*"]
+            )
+
         with self._lock:
             row = self._conn.execute(
-                """
+                f"""
                 SELECT * FROM sessions
                 WHERE session_key = ?
                   AND source = ?
+                  {profile_clause}
                   AND (ended_at IS NULL OR end_reason IN ('agent_close', 'ws_orphan_reap'))
                   AND (COALESCE(message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1
@@ -2327,20 +2527,22 @@ class SessionDB:
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (session_key, source),
+                (session_key, source, *profile_params),
             ).fetchone()
             if row is not None:
                 return dict(row)
 
             # Conservative fallback for rows created by current code but with a
-            # temporarily-missing exact key: still require the complete peer
-            # tuple so we never cross chats/threads/users.
+            # temporarily-missing exact key: require profile ownership plus the
+            # complete peer tuple so recovery cannot cross profiles, chats,
+            # threads, or users.
             if chat_id is None or chat_type is None:
                 return None
             row = self._conn.execute(
-                """
+                f"""
                 SELECT * FROM sessions
                 WHERE source = ?
+                  {profile_clause}
                   AND COALESCE(user_id, '') = COALESCE(?, '')
                   AND COALESCE(chat_id, '') = COALESCE(?, '')
                   AND COALESCE(chat_type, '') = COALESCE(?, '')
@@ -2352,7 +2554,7 @@ class SessionDB:
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (source, user_id, chat_id, chat_type, thread_id),
+                (source, *profile_params, user_id, chat_id, chat_type, thread_id),
             ).fetchone()
         return dict(row) if row else None
 

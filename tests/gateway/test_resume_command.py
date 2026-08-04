@@ -481,6 +481,44 @@ class TestHandleSessionsCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_sessions_all_admin_remains_profile_scoped_in_multiplex(
+        self, tmp_path
+    ):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_default", "telegram", user_id="12345",
+            session_key="agent:main:telegram:dm:67890", chat_id="67890",
+            chat_type="dm", profile_name="default",
+        )
+        db.create_session(
+            "previous_default", "telegram", user_id="12345",
+            session_key="agent:main:telegram:dm:67890", chat_id="67890",
+            chat_type="dm", profile_name="default",
+        )
+        db.set_session_title("previous_default", "Default Previous")
+        db.create_session(
+            "ang_private", "telegram", user_id="12345",
+            session_key="agent:ang:telegram:dm:67890", chat_id="67890",
+            chat_type="dm", profile_name="ang",
+        )
+        db.set_session_title("ang_private", "Ang Private")
+        event = _make_event(text="/sessions all")
+        event.source.profile = "default"
+        runner = _make_runner(
+            session_db=db, current_session_id="current_default", event=event
+        )
+        runner.config.multiplex_profiles = True
+        runner._resume_caller_is_admin = lambda _source: True
+
+        result = await runner._handle_sessions_command(event)
+
+        assert "Default Previous" in result
+        assert "Ang Private" not in result
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_sessions_search_finds_older_titled_session(self, tmp_path):
         """`/sessions search <query>` matches titles beyond the recent-10 list
         and orders by activity, keeping the caller's own scope."""
@@ -619,6 +657,111 @@ class TestHandleSessionsCommand:
                                chat_type="group", user_id=None)
         assert await runner._resume_target_allowed(caller, "victim_chat_b_uid",
                                              allow_override=False) is False
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_target_allowed_blocks_foreign_profile_same_origin(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "ang_session",
+            "telegram",
+            user_id="12345",
+            session_key="agent:ang:telegram:group:chat-a:12345",
+            chat_id="chat-a",
+            chat_type="group",
+            profile_name="ang",
+        )
+        runner = _make_runner(session_db=db)
+        runner.config.multiplex_profiles = True
+        runner._gateway_session_origin_for_id = lambda _sid: SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-a",
+            chat_type="group",
+            user_id="12345",
+            profile="ang",
+        )
+        caller = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-a",
+            chat_type="group",
+            user_id="12345",
+            profile="default",
+        )
+
+        assert await runner._resume_target_allowed(
+            caller, "ang_session", allow_override=False
+        ) is False
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_blocks_foreign_profile_when_multiplex_disabled(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "ang_nonmultiplex",
+            "telegram",
+            user_id="12345",
+            session_key="agent:ang:telegram:group:chat-a:12345",
+            chat_id="chat-a",
+            chat_type="group",
+            profile_name="ang",
+        )
+        runner = _make_runner(session_db=db)
+        runner.config.multiplex_profiles = False
+        caller = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-a",
+            chat_type="group",
+            user_id="12345",
+        )
+
+        assert await runner._resume_target_allowed(
+            caller, "ang_nonmultiplex", allow_override=True
+        ) is False
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_visibility_blocks_foreign_profile_for_matrix_and_admin(
+        self, tmp_path
+    ):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "ang_matrix",
+            "matrix",
+            user_id="@brian:example",
+            session_key="agent:ang:matrix:dm:!room:example",
+            chat_id="!room:example",
+            chat_type="dm",
+            profile_name="ang",
+        )
+        db.set_session_title("ang_matrix", "Private Ang Session")
+        runner = _make_runner(session_db=db)
+        runner.config.multiplex_profiles = True
+        origin = SessionSource(
+            platform=Platform.MATRIX,
+            chat_id="!room:example",
+            chat_type="dm",
+            user_id="@brian:example",
+            profile="ang",
+        )
+        caller = SessionSource(
+            platform=Platform.MATRIX,
+            chat_id="!room:example",
+            chat_type="dm",
+            user_id="@brian:example",
+            profile="default",
+        )
+        runner._gateway_session_origin_for_id = lambda _sid: origin
+        row = {"id": "ang_matrix", "title": "Private Ang Session"}
+
+        assert await runner._resume_row_visible(caller, row, allow_all=False) is False
+        runner._resume_caller_is_admin = lambda _source: True
+        assert await runner._resume_row_visible(caller, row, allow_all=True) is False
         db.close()
 
     @pytest.mark.asyncio

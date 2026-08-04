@@ -38,6 +38,7 @@ from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
 from gateway.session import (
     AsyncSessionStore,
     SessionSource,
+    SessionStore,
     build_session_key,
     is_shared_multi_user_session,
 )
@@ -896,10 +897,48 @@ class GatewaySlashCommandsMixin:
         otherwise falls back to the DB row's source + user_id (the sessions
         table has no chat_id). An identity-bearing caller is allowed only when
         the row PROVES the same owner; a row that lacks enough ownership data
-        fails closed. An explicit admin ``--all`` override bypasses scoping.
+        fails closed. An explicit admin ``--all`` override bypasses origin
+        scoping only after multiplex profile ownership is proven.
         """
-        if allow_override and self._resume_caller_is_admin(source):
+        admin_override = allow_override and self._resume_caller_is_admin(source)
+
+        # Origin/chat equality is not profile equality in a multiplex gateway:
+        # the same person and chat legitimately exist in several isolated
+        # profile namespaces. Require durable profile ownership before either
+        # the live-origin or persisted-origin path can authorize /resume.
+        persisted_row = None
+        multiplex = getattr(
+            getattr(self, "config", None), "multiplex_profiles", False
+        )
+        try:
+            persisted_row = await self._session_db.get_session(target_id)
+        except Exception:
+            if multiplex:
+                return False
+        if isinstance(persisted_row, dict):
+            try:
+                if multiplex:
+                    caller_profile = SessionStore._profile_from_session_key(
+                        self._session_key_for_source(source)
+                    )
+                else:
+                    from hermes_cli.profiles import get_active_profile_name
+
+                    caller_profile = get_active_profile_name() or "default"
+            except Exception:
+                caller_profile = source.profile or "default"
+            caller_profile = "default" if caller_profile == "main" else caller_profile
+            target_owner = SessionStore._durable_owner_profile(persisted_row)
+            if target_owner is None and multiplex:
+                return False
+            if target_owner is not None and target_owner != caller_profile:
+                return False
+        elif multiplex:
+            return False
+
+        if admin_override:
             return True
+
         # Use the live origin only when it resolves to a real SessionSource; a
         # store that can't resolve it (or an unexpected lookup error) must not
         # silently allow/deny — fall through to the deterministic DB scoping.
@@ -911,7 +950,11 @@ class GatewaySlashCommandsMixin:
             return self._same_origin_chat(source, origin)
         # Inactive/persisted-only: best-effort scope by DB row source + user.
         try:
-            row = await self._session_db.get_session(target_id) or {}
+            row = (
+                persisted_row
+                if persisted_row is not None
+                else (await self._session_db.get_session(target_id) or {})
+            )
         except Exception:
             return False
         caller_src = source.platform.value if source.platform else None
@@ -1039,6 +1082,11 @@ class GatewaySlashCommandsMixin:
         unless an admin passes ``--all``.
         """
         sid = str(row.get("id") or "")
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            if not await self._resume_target_allowed(
+                source, sid, allow_override=allow_all
+            ):
+                return False
         if source.platform == Platform.MATRIX:
             # Cross-room enumeration is cross-ORIGIN data access: gate the
             # ``--all`` short-circuit behind a real configured admin, exactly
@@ -4066,6 +4114,13 @@ class GatewaySlashCommandsMixin:
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
+        if not await self._resume_target_allowed(
+            source, target_id, allow_override=(allow_all or allow_cross_room)
+        ):
+            # IDOR/profile guard: a session id/title is a routing handle, not
+            # authority. This check precedes Matrix/admin origin overrides.
+            return t("gateway.resume.blocked_not_owner", name=name)
+
         if source.platform == Platform.MATRIX:
             target_origin = self._gateway_session_origin_for_id(target_id)
             if not self._same_matrix_room(source, target_origin) and not allow_cross_room:
@@ -4076,27 +4131,19 @@ class GatewaySlashCommandsMixin:
                     room=target_origin.chat_name or target_origin.chat_id,
                     name=name,
                 )
-        elif not await self._resume_target_allowed(
-            source, target_id, allow_override=(allow_all or allow_cross_room)
-        ):
-            # IDOR guard: a session id/title is a routing handle, not authority.
-            # Bind /resume to the caller's own platform/user/chat on every
-            # non-Matrix adapter so one user can't attach to another's
-            # persisted transcript.
-            return t("gateway.resume.blocked_not_owner", name=name)
 
         # Check if already on that session
         current_entry = await self.async_session_store.get_or_create_session(source)
         if current_entry.session_id == target_id:
             return t("gateway.resume.already_on", name=name)
 
-        # Clear any running agent for this session key
-        self._release_running_agent_state(session_key)
-
-        # Switch the session entry to point at the old session
+        # Switch first. A failed durable transition must not tear down the
+        # currently running conversation.
         new_entry = await self.async_session_store.switch_session(session_key, target_id)
         if not new_entry:
             return t("gateway.resume.switch_failed")
+
+        self._release_running_agent_state(session_key)
 
         # Conversation boundary: clear ALL conversation-scoped per-session
         # state (model/reasoning overrides #10702, one-turn restores, model
@@ -4181,13 +4228,16 @@ class GatewaySlashCommandsMixin:
             limit=50 if search_query else 10,
             exclude_sources=["tool"],
         )
-        if not cross_origin:
-            # Scope the listing to the caller's own origin on every adapter so
-            # session ids/previews from other users/rooms aren't enumerable.
-            rows = [
-                row for row in rows
-                if await self._resume_row_visible(source, row, allow_all=False)
-            ]
+        # Always apply the row-level authorization filter. In multiplex mode an
+        # admin ``all`` may cross origins inside the caller's profile, never
+        # cross profile boundaries; in non-multiplex mode the existing admin
+        # override still admits all origins.
+        rows = [
+            row for row in rows
+            if await self._resume_row_visible(
+                source, row, allow_all=cross_origin
+            )
+        ]
         rows = rows[:10]
         if search_query:
             title = f"Sessions matching “{search_query}”"
@@ -4246,9 +4296,34 @@ class GatewaySlashCommandsMixin:
         # /sessions even after the parent is reopened and re-ended with a
         # different end_reason (e.g. tui_shutdown overwriting 'branched').
         try:
+            if getattr(
+                getattr(self, "config", None), "multiplex_profiles", False
+            ):
+                branch_profile = SessionStore._profile_from_session_key(session_key)
+            else:
+                try:
+                    from hermes_cli.profiles import get_active_profile_name
+
+                    branch_profile = get_active_profile_name() or "default"
+                except Exception:
+                    branch_profile = "default"
+            durable_session_key = session_key
+            if branch_profile != "default" and not getattr(
+                getattr(self, "config", None), "multiplex_profiles", False
+            ):
+                key_parts = str(session_key).split(":")
+                if len(key_parts) >= 2 and key_parts[0] == "agent":
+                    key_parts[1] = branch_profile
+                    durable_session_key = ":".join(key_parts)
             await self._session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
+                user_id=source.user_id,
+                session_key=durable_session_key,
+                chat_id=source.chat_id,
+                chat_type=source.chat_type,
+                thread_id=source.thread_id,
+                profile_name=branch_profile,
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
                 model_config={"_branched_from": parent_session_id},
                 parent_session_id=parent_session_id,
@@ -4290,6 +4365,14 @@ class GatewaySlashCommandsMixin:
         # Switch the session store entry to the new session
         new_entry = await self.async_session_store.switch_session(session_key, new_session_id)
         if not new_entry:
+            try:
+                await self._session_db.delete_session(new_session_id)
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove unpublished branch session %s: %s",
+                    new_session_id,
+                    exc,
+                )
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)
 

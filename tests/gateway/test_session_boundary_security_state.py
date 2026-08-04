@@ -2,6 +2,7 @@ from hermes_state import AsyncSessionDB
 """Regression tests for approval-state cleanup on session boundaries."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -163,6 +164,7 @@ async def test_resume_clears_session_scoped_approval_and_yolo_state():
 @pytest.mark.asyncio
 async def test_branch_clears_session_scoped_approval_and_yolo_state():
     runner, session_key = _make_branch_runner()
+    runner.config = SimpleNamespace(multiplex_profiles=True)
     other_key = "agent:main:telegram:dm:other-chat"
 
     runner._pending_skills_reload_notes = {
@@ -181,6 +183,11 @@ async def test_branch_clears_session_scoped_approval_and_yolo_state():
     result = await runner._handle_branch_command(_make_event("/branch"))
 
     assert "Branched to" in result
+    create_kwargs = runner._session_db._db.create_session.call_args.kwargs
+    assert create_kwargs["session_key"] == session_key
+    assert create_kwargs["profile_name"] == "default"
+    assert create_kwargs["user_id"] == "u1"
+    assert create_kwargs["chat_id"] == "c1"
     assert is_approved(session_key, "recursive delete") is False
     assert is_session_yolo_enabled(session_key) is False
     assert session_key not in runner._pending_approvals
@@ -191,6 +198,18 @@ async def test_branch_clears_session_scoped_approval_and_yolo_state():
     assert other_key in runner._pending_approvals
     assert other_key in runner._update_prompt_pending
     assert other_key in runner._pending_skills_reload_notes
+
+
+@pytest.mark.asyncio
+async def test_branch_switch_failure_deletes_unpublished_target():
+    runner, _session_key = _make_branch_runner()
+    runner.config = SimpleNamespace(multiplex_profiles=True)
+    runner.session_store.switch_session.return_value = None
+
+    result = await runner._handle_branch_command(_make_event("/branch"))
+
+    assert "switch" in result.lower() or "failed" in result.lower()
+    runner._session_db._db.delete_session.assert_called_once()
 
 
 @pytest.mark.asyncio

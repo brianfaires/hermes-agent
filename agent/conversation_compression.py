@@ -1277,12 +1277,49 @@ def compress_context(
                         pass
                     agent._session_db_created = False
                     try:
+                        gateway_session_key = getattr(
+                            agent, "_gateway_session_key", None
+                        )
+                        profile_name = None
+                        if gateway_session_key:
+                            key_parts = str(gateway_session_key).split(":")
+                            if len(key_parts) >= 2 and key_parts[0] == "agent":
+                                if key_parts[1] in ("", "main"):
+                                    try:
+                                        from hermes_cli.profiles import (
+                                            get_active_profile_name,
+                                        )
+
+                                        profile_name = (
+                                            get_active_profile_name() or "default"
+                                        )
+                                    except Exception:
+                                        profile_name = "default"
+                                else:
+                                    profile_name = key_parts[1]
+                        durable_gateway_session_key = gateway_session_key
+                        if (
+                            gateway_session_key
+                            and profile_name not in (None, "default")
+                            and len(key_parts) >= 2
+                            and key_parts[0] == "agent"
+                            and key_parts[1] in ("", "main")
+                        ):
+                            durable_parts = list(key_parts)
+                            durable_parts[1] = profile_name
+                            durable_gateway_session_key = ":".join(durable_parts)
                         agent._session_db.create_session(
                             session_id=agent.session_id,
                             source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                             model=agent.model,
                             model_config=agent._session_init_model_config,
                             parent_session_id=old_session_id,
+                            user_id=getattr(agent, "_user_id", None),
+                            session_key=durable_gateway_session_key,
+                            chat_id=getattr(agent, "_chat_id", None),
+                            chat_type=getattr(agent, "_chat_type", None),
+                            thread_id=getattr(agent, "_thread_id", None),
+                            profile_name=profile_name,
                         )
                     except Exception as _cs_err:
                         # The child row could not be created (e.g. FK constraint,

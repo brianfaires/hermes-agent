@@ -1139,9 +1139,11 @@ class SessionStore:
                             )
                     db_had_entries = bool(self._entries)
                 except Exception as e:
-                    logger.warning(
-                        "gateway.session: state.db routing load failed: %s", e
-                    )
+                    self._entries.clear()
+                    self._loaded = False
+                    raise RuntimeError(
+                        f"gateway state.db routing load failed: {e}"
+                    ) from e
 
         # Legacy import: sessions.json (pre-migration installs, or entries
         # written by an older gateway after a downgrade). Only fills keys the
@@ -1186,18 +1188,66 @@ class SessionStore:
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
 
+        # A shared multiplexed routing index must never expose one durable
+        # session under another profile namespace. Existing corrupt aliases are
+        # ignored in memory. If ownership cannot be read, abort this load before
+        # publishing or saving an incomplete whole-index snapshot.
+        try:
+            self._prune_cross_profile_aliases_locked()
+            self._prune_stale_sessions_locked()
+        except Exception:
+            self._entries.clear()
+            self._loaded = False
+            raise
         self._loaded = True
 
-        # Prune any sessions.json entries that point to sessions already ended
-        # in state.db. A hard gateway crash (exit code 1) skips the graceful
-        # shutdown path, so sessions.json is never cleared and is left pointing
-        # at ended sessions. On the next startup those stale entries act as live
-        # routing keys. get_or_create_session() only consulted end_reason at
-        # startup (here) until #54878 added a routing-time guard for the
-        # live-gateway case; this startup prune still self-heals crash-left
-        # entries before the first message arrives. Pruning here (lock already
-        # held) is cheap: one lookup per routing key, once at startup.
-        self._prune_stale_sessions_locked()
+    def _prune_cross_profile_aliases_locked(self) -> None:
+        """Ignore routing entries that disagree with durable profile ownership."""
+        if not getattr(self.config, "multiplex_profiles", False):
+            return
+        db = getattr(self, "_db", None)
+        if not db or not self._entries:
+            return
+
+        rejected = []
+        for key, entry in list(self._entries.items()):
+            requested_profile = self._profile_from_session_key(key)
+            if requested_profile is None:
+                rejected.append((key, entry.session_id, "invalid route namespace"))
+                continue
+            try:
+                row = db.get_session(entry.session_id)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"gateway routing ownership lookup failed for {key}: {exc}"
+                ) from exc
+            if row is None:
+                rejected.append((
+                    key,
+                    entry.session_id,
+                    "missing durable session owner",
+                ))
+                continue
+
+            owner_profile = self._durable_owner_profile(row)
+            if owner_profile is None:
+                rejected.append((
+                    key,
+                    entry.session_id,
+                    "durable profile ownership is unresolved",
+                ))
+                continue
+            if owner_profile != requested_profile:
+                rejected.append((key, entry.session_id, f"durable owner is {owner_profile}"))
+
+        for key, session_id, reason in rejected:
+            self._entries.pop(key, None)
+            logger.error(
+                "gateway.session: rejected cross-profile routing alias %r -> %s: %s",
+                key,
+                session_id,
+                reason,
+            )
 
     def _prune_stale_sessions_locked(self) -> None:
         """Remove sessions.json entries whose session has ended in state.db.
@@ -1317,9 +1367,9 @@ class SessionStore:
                         )
                         db_saved = True
                     except Exception as exc:
-                        logger.warning(
-                            "gateway.session: state.db routing save failed: %s", exc
-                        )
+                        raise RuntimeError(
+                            f"gateway state.db routing save failed: {exc}"
+                        ) from exc
             if getattr(self, "_write_sessions_json", True) or not db_saved:
                 self._save_sessions_json(data)
             self._persisted_routing_generation = generation
@@ -1399,6 +1449,16 @@ class SessionStore:
         namespace = parts[1] or "main"
         return "default" if namespace == "main" else namespace
 
+    @classmethod
+    def _durable_owner_profile(cls, row: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Resolve durable ownership, preferring explicit profile metadata."""
+        if not row:
+            return None
+        profile_name = str(row.get("profile_name") or "").strip()
+        if profile_name:
+            return "default" if profile_name == "main" else profile_name
+        return cls._profile_from_session_key(row.get("session_key"))
+
     @staticmethod
     def _active_profile_name() -> str:
         try:
@@ -1413,19 +1473,35 @@ class SessionStore:
         requested_session_key: str,
         recovered: Dict[str, Any],
     ) -> bool:
-        """Prevent non-multiplexed gateways from reviving another profile's row."""
+        """Prevent durable recovery from crossing a profile ownership boundary."""
         if getattr(self.config, "multiplex_profiles", False):
-            return True
+            requested_profile = self._profile_from_session_key(requested_session_key)
+            if requested_profile is None:
+                return False
+            return self._durable_owner_profile(recovered) == requested_profile
 
-        recovered_key = str(recovered.get("session_key") or "")
-        if not recovered_key or recovered_key == requested_session_key:
-            return True
+        requested_profile = self._active_profile_name()
+        recovered_owner = self._durable_owner_profile(recovered)
+        # Ownerless pre-profile rows remain usable only outside multiplexing;
+        # an explicit durable owner can never cross namespaces in either mode.
+        return recovered_owner is None or recovered_owner == requested_profile
 
-        recovered_profile = self._profile_from_session_key(recovered_key)
-        if recovered_profile is None:
-            return True
+    def _owner_profile_for_session_key(self, session_key: str) -> Optional[str]:
+        """Resolve the durable owner for both multiplex and legacy main keys."""
+        if getattr(self.config, "multiplex_profiles", False):
+            return self._profile_from_session_key(session_key)
+        return self._active_profile_name()
 
-        return recovered_profile == self._active_profile_name()
+    def _durable_session_key_for_route_key(self, session_key: str) -> str:
+        """Keep legacy main routing while naming durable ownership explicitly."""
+        owner = self._owner_profile_for_session_key(session_key)
+        if getattr(self.config, "multiplex_profiles", False) or owner == "default":
+            return session_key
+        parts = str(session_key).split(":")
+        if len(parts) >= 2 and parts[0] == "agent" and owner:
+            parts[1] = owner
+            return ":".join(parts)
+        return session_key
 
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
@@ -1482,6 +1558,11 @@ class SessionStore:
                 chat_id=source.chat_id,
                 chat_type=source.chat_type,
                 thread_id=source.thread_id,
+                profile_name=(
+                    self._profile_from_session_key(session_key)
+                    if getattr(self.config, "multiplex_profiles", False)
+                    else None
+                ),
             )
         except Exception as exc:
             logger.debug("Gateway session DB recovery failed for %s: %s", session_key, exc)
@@ -1531,6 +1612,11 @@ class SessionStore:
                 chat_id=source.chat_id,
                 chat_type=source.chat_type,
                 thread_id=source.thread_id,
+                profile_name=(
+                    self._profile_from_session_key(session_key)
+                    if getattr(self.config, "multiplex_profiles", False)
+                    else None
+                ),
             )
         except Exception as exc:
             logger.debug("Gateway session DB recovery failed for %s: %s",
@@ -1564,6 +1650,8 @@ class SessionStore:
         session_key: str,
         source: Optional[SessionSource],
         display_name: Optional[str] = None,
+        *,
+        strict: bool = False,
     ) -> None:
         """Persist the routing peer for an existing gateway session row."""
         if not self._db or not source:
@@ -1571,6 +1659,7 @@ class SessionStore:
         recorder = getattr(self._db, "record_gateway_session_peer", None)
         if not callable(recorder):
             return
+        durable_session_key = self._durable_session_key_for_route_key(session_key)
         try:
             origin_json = None
             try:
@@ -1581,12 +1670,13 @@ class SessionStore:
                 session_id,
                 source=source.platform.value,
                 user_id=source.user_id,
-                session_key=session_key,
+                session_key=durable_session_key,
                 chat_id=source.chat_id,
                 chat_type=source.chat_type,
                 thread_id=source.thread_id,
                 display_name=display_name or source.chat_name,
                 origin_json=origin_json,
+                profile_name=self._owner_profile_for_session_key(session_key),
             )
         except TypeError:
             # Older SessionDB without display_name/origin_json kwargs.
@@ -1595,14 +1685,18 @@ class SessionStore:
                     session_id,
                     source=source.platform.value,
                     user_id=source.user_id,
-                    session_key=session_key,
+                    session_key=durable_session_key,
                     chat_id=source.chat_id,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                 )
             except Exception as exc:
+                if strict:
+                    raise
                 logger.debug("Gateway session peer record failed for %s: %s", session_key, exc)
         except Exception as exc:
+            if strict:
+                raise
             logger.debug("Gateway session peer record failed for %s: %s", session_key, exc)
 
     def set_expiry_finalized(
@@ -1925,6 +2019,7 @@ class SessionStore:
         db_create_kwargs = None
         existing_session_id = None
         force_new_observed_entry = None
+        published_previous = None
 
         # ---- Phase 0: lock read -- existing session_id for compression tip ----
         if not force_new:
@@ -2015,6 +2110,7 @@ class SessionStore:
                         "(#54878)",
                         session_key, entry.session_id,
                     )
+                    published_previous = entry
                     self._entries.pop(session_key, None)
                     # If an expiry watcher (daily/idle reset) already finalized
                     # this session, honour the reset decision instead of silently
@@ -2038,6 +2134,7 @@ class SessionStore:
                         auto_reset_reason = _reset_reason
                         reset_had_activity = entry.last_prompt_tokens > 0
                         db_end_session_id = entry.session_id
+                        published_previous = entry
                         self._entries.pop(session_key, None)
                         entry = None
                         _needs_recover = True
@@ -2085,6 +2182,8 @@ class SessionStore:
                     force_new and current is force_new_observed_entry
                 )
                 if may_publish:
+                    if current is not None or published_previous is None:
+                        published_previous = current
                     self._entries[session_key] = candidate
                     published = candidate
                 else:
@@ -2097,47 +2196,78 @@ class SessionStore:
                     "session_id": session_id,
                     "source": source.platform.value,
                     "user_id": source.user_id,
-                    "session_key": session_key,
+                    "session_key": self._durable_session_key_for_route_key(
+                        session_key
+                    ),
                     "chat_id": source.chat_id,
                     "chat_type": source.chat_type,
                     "thread_id": source.thread_id,
-                    "profile_name": source.profile,
+                    "profile_name": self._owner_profile_for_session_key(session_key),
                 }
 
-        if _needs_save:
-            self._save_entries()
-
-        # SQLite operations outside the lock (unchanged).
-        if self._db and db_end_session_id:
-            # Use the specific reset reason so state.db is auditable (e.g.
-            # "resume_pending_expired" is distinguishable from a normal
-            # "session_reset" caused by idle/daily expiry).
-            _db_end_reason = auto_reset_reason if auto_reset_reason else "session_reset"
-            try:
-                # promote_to_session_reset, not end_session: the row may
-                # already be ended with a recoverable accidental reason
-                # (agent_close / ws_orphan_reap), which first-reason-wins
-                # end_session would preserve — leaving the reset session
-                # resurrectable by stale-route recovery (#61220, #61993).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
-                if callable(_promote):
-                    _promote(db_end_session_id, _db_end_reason)
+        created_durable = False
+        old_ended = False
+        try:
+            # Durable ownership/lifecycle must succeed before the route is
+            # published. Otherwise a failed create leaves a phantom route that
+            # another profile can later adopt.
+            if db_create_kwargs:
+                if self._db is None:
+                    if getattr(self.config, "multiplex_profiles", False):
+                        raise RuntimeError(
+                            "multiplex session creation requires durable state"
+                        )
                 else:
-                    self._db.end_session(db_end_session_id, _db_end_reason)
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+                    self._db.create_session(**db_create_kwargs)
+                    created_durable = True
+                    self._record_gateway_session_peer(
+                        session_id,
+                        session_key,
+                        source,
+                        display_name=entry.display_name,
+                        strict=True,
+                    )
 
-        if self._db and db_create_kwargs:
-            try:
-                self._db.create_session(**db_create_kwargs)
-                self._record_gateway_session_peer(
-                    session_id,
-                    session_key,
-                    source,
-                    display_name=entry.display_name,
-                )
-            except Exception as e:
-                print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+            if self._db and db_end_session_id:
+                end_reason = auto_reset_reason or "session_reset"
+                promote = getattr(self._db, "promote_to_session_reset", None)
+                if callable(promote):
+                    promote(db_end_session_id, end_reason)
+                else:
+                    self._db.end_session(db_end_session_id, end_reason)
+                old_ended = True
+
+            if _needs_save:
+                self._save_entries()
+        except Exception as exc:
+            if db_create_kwargs and entry is not None:
+                with self._lock:
+                    if self._entries.get(session_key) is entry:
+                        if published_previous is None:
+                            self._entries.pop(session_key, None)
+                        else:
+                            self._entries[session_key] = published_previous
+                try:
+                    self._save_entries()
+                except Exception as rollback_exc:
+                    logger.error(
+                        "gateway.session: create route rollback failed for %s: %s",
+                        session_key,
+                        rollback_exc,
+                    )
+            if self._db and old_ended and db_end_session_id:
+                try:
+                    self._db.reopen_session(db_end_session_id)
+                except Exception:
+                    pass
+            if self._db and created_durable and db_create_kwargs:
+                try:
+                    self._db.delete_session(db_create_kwargs["session_id"])
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"gateway session transition failed for {session_key}: {exc}"
+            ) from exc
 
         return entry
 
@@ -2346,100 +2476,171 @@ class SessionStore:
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
-        db_end_session_id = None
-        db_create_kwargs = None
-        new_entry = None
-
         with self._lock:
             self._ensure_loaded_locked()
-
             if session_key not in self._entries:
                 return None
 
             old_entry = self._entries[session_key]
-            db_end_session_id = old_entry.session_id
-
             now = _now()
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
             new_entry = SessionEntry(
                 session_key=session_key,
                 session_id=session_id,
                 created_at=now,
                 updated_at=now,
                 origin=old_entry.origin,
-                display_name=display_name if display_name is not None else old_entry.display_name,
+                display_name=(
+                    display_name if display_name is not None else old_entry.display_name
+                ),
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
             )
+            created = False
+            old_ended = False
+            if self._db:
+                try:
+                    self._db.create_session(
+                        session_id=session_id,
+                        source=(
+                            old_entry.platform.value
+                            if old_entry.platform
+                            else "unknown"
+                        ),
+                        user_id=(
+                            old_entry.origin.user_id if old_entry.origin else None
+                        ),
+                        session_key=self._durable_session_key_for_route_key(
+                            session_key
+                        ),
+                        chat_id=(
+                            old_entry.origin.chat_id if old_entry.origin else None
+                        ),
+                        chat_type=(
+                            old_entry.origin.chat_type if old_entry.origin else None
+                        ),
+                        thread_id=(
+                            old_entry.origin.thread_id if old_entry.origin else None
+                        ),
+                        profile_name=self._owner_profile_for_session_key(session_key),
+                    )
+                    created = True
+                    self._record_gateway_session_peer(
+                        session_id,
+                        session_key,
+                        old_entry.origin,
+                        display_name=new_entry.display_name,
+                        strict=True,
+                    )
+                    promote = getattr(self._db, "promote_to_session_reset", None)
+                    if callable(promote):
+                        promote(old_entry.session_id, "session_reset")
+                    else:
+                        self._db.end_session(old_entry.session_id, "session_reset")
+                    old_ended = True
+                except Exception as exc:
+                    if old_ended:
+                        try:
+                            self._db.reopen_session(old_entry.session_id)
+                        except Exception:
+                            pass
+                    if created:
+                        try:
+                            self._db.delete_session(session_id)
+                        except Exception:
+                            pass
+                    logger.warning(
+                        "gateway.session: reset durable transition failed for %s: %s",
+                        session_key,
+                        exc,
+                    )
+                    return None
 
             self._entries[session_key] = new_entry
-            self._save()
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": old_entry.platform.value if old_entry.platform else "unknown",
-                "user_id": old_entry.origin.user_id if old_entry.origin else None,
-                "session_key": session_key,
-                "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
-                "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
-                "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
-                "profile_name": old_entry.origin.profile if old_entry.origin else None,
-            }
-
-        if self._db and db_end_session_id:
             try:
-                # Promote (not plain end_session): an accidental
-                # agent_close/ws_orphan_reap end must not survive an explicit
-                # user reset, or recovery resurrects the reset session
-                # (#61993 — the user's /new was silently undone).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
-                if callable(_promote):
-                    _promote(db_end_session_id, "session_reset")
-                else:
-                    self._db.end_session(db_end_session_id, "session_reset")
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
-
-        if self._db and db_create_kwargs:
-            try:
-                self._db.create_session(**db_create_kwargs)
-                self._record_gateway_session_peer(
-                    session_id,
+                self._save()
+            except Exception as exc:
+                self._entries[session_key] = old_entry
+                try:
+                    self._save()
+                except Exception as rollback_exc:
+                    logger.error(
+                        "gateway.session: reset route rollback failed for %s: %s",
+                        session_key,
+                        rollback_exc,
+                    )
+                if self._db:
+                    try:
+                        self._db.reopen_session(old_entry.session_id)
+                    except Exception:
+                        pass
+                    if created:
+                        try:
+                            self._db.delete_session(session_id)
+                        except Exception:
+                            pass
+                logger.warning(
+                    "gateway.session: reset route publication failed for %s: %s",
                     session_key,
-                    old_entry.origin,
-                    display_name=new_entry.display_name if new_entry else None,
+                    exc,
                 )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
-
-        return new_entry
+                return None
+            return new_entry
 
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
-        """Switch a session key to point at an existing session ID.
-
-        Used by ``/resume`` to restore a previously-named session.
-        Ends the current session in SQLite (like reset), but instead of
-        generating a fresh session ID, re-uses ``target_session_id`` so the
-        old transcript is loaded on the next message. If the target session was
-        previously ended, re-open it so gateway resume semantics match the CLI.
-        """
-        db_end_session_id = None
-        new_entry = None
-
+        """Switch a session key to an existing, profile-compatible session."""
         with self._lock:
             self._ensure_loaded_locked()
-
             if session_key not in self._entries:
                 return None
 
             old_entry = self._entries[session_key]
-
-            # Don't switch if already on that session
             if old_entry.session_id == target_session_id:
                 return old_entry
 
-            db_end_session_id = old_entry.session_id
+            multiplex = getattr(self.config, "multiplex_profiles", False)
+            requested_profile = (
+                self._profile_from_session_key(session_key)
+                if multiplex
+                else self._active_profile_name()
+            )
+            target_row = None
+            target_owner = None
+            if requested_profile is None or self._db is None:
+                if multiplex:
+                    return None
+            else:
+                try:
+                    target_row = self._db.get_session(target_session_id)
+                except Exception as exc:
+                    logger.warning(
+                        "gateway.session: refusing session switch because target "
+                        "ownership could not be read for %s: %s",
+                        target_session_id,
+                        exc,
+                    )
+                    return None
+                if not isinstance(target_row, dict):
+                    return None
+                target_owner = self._durable_owner_profile(target_row)
+                if target_owner is None and multiplex:
+                    logger.warning(
+                        "gateway.session: refusing session switch to ownerless "
+                        "target %s in multiplex mode",
+                        target_session_id,
+                    )
+                    return None
+                if target_owner is not None and target_owner != requested_profile:
+                    logger.warning(
+                        "gateway.session: refusing cross-profile session switch "
+                        "%s -> %s (target owner=%r, requested owner=%r)",
+                        session_key,
+                        target_session_id,
+                        target_owner,
+                        requested_profile,
+                    )
+                    return None
 
             now = _now()
             new_entry = SessionEntry(
@@ -2452,37 +2653,106 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
             )
+            if self._db:
+                try:
+                    route_data = {
+                        key: entry.to_dict()
+                        for key, entry in self._entries.items()
+                    }
+                    route_data[session_key] = new_entry.to_dict()
+                    route_entries = {
+                        key: json.dumps(entry)
+                        for key, entry in route_data.items()
+                    }
+                    target_peer = None
+                    # Ownerless rows remain unresolved; non-multiplex legacy
+                    # resume may use them, but must never claim ownership.
+                    if target_owner is not None:
+                        origin_json = None
+                        try:
+                            origin_json = json.dumps(old_entry.origin.to_dict())
+                        except Exception:
+                            pass
+                        target_peer = {
+                            "source": old_entry.origin.platform.value,
+                            "user_id": old_entry.origin.user_id,
+                            "session_key": self._durable_session_key_for_route_key(
+                                session_key
+                            ),
+                            "chat_id": old_entry.origin.chat_id,
+                            "chat_type": old_entry.origin.chat_type,
+                            "thread_id": old_entry.origin.thread_id,
+                            "display_name": new_entry.display_name
+                            or old_entry.origin.chat_name,
+                            "origin_json": origin_json,
+                        }
+                    switcher = getattr(self._db, "switch_gateway_session_route", None)
+                    if not callable(switcher):
+                        raise RuntimeError(
+                            "SessionDB does not support atomic gateway session switch"
+                        )
+                    with self._save_lock:
+                        switched = switcher(
+                            old_session_id=old_entry.session_id,
+                            target_session_id=target_session_id,
+                            route_entries=route_entries,
+                            route_scope=self._routing_scope(),
+                            target_peer=target_peer,
+                            requested_profile=target_owner,
+                        )
+                        if switched:
+                            self._routing_generation = (
+                                getattr(self, "_routing_generation", 0) + 1
+                            )
+                            self._persisted_routing_generation = (
+                                self._routing_generation
+                            )
+                    if not switched:
+                        return None
+                except Exception as exc:
+                    logger.warning(
+                        "gateway.session: switch durable transition failed for %s: %s",
+                        session_key,
+                        exc,
+                    )
+                    return None
 
             self._entries[session_key] = new_entry
-            self._save()
-
-        if self._db and db_end_session_id:
-            try:
-                # Promote (not plain end_session): a stale agent_close /
-                # ws_orphan_reap end on the outgoing session must be upgraded
-                # to the explicit switch boundary, or recovery can resurrect
-                # it over the user's /resume choice (#61220 bug class).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
-                if callable(_promote):
-                    _promote(db_end_session_id, "session_switch")
-                else:
-                    self._db.end_session(db_end_session_id, "session_switch")
-            except Exception as e:
-                logger.debug("Session DB end_session failed: %s", e)
-
-        if self._db:
-            try:
-                self._db.reopen_session(target_session_id)
-            except Exception as e:
-                logger.debug("Session DB reopen_session failed: %s", e)
-            self._record_gateway_session_peer(
-                target_session_id,
-                session_key,
-                new_entry.origin if new_entry else None,
-                display_name=new_entry.display_name if new_entry else None,
-            )
-
-        return new_entry
+            if self._db:
+                if getattr(self, "_write_sessions_json", True):
+                    try:
+                        self._save_sessions_json(
+                            {
+                                key: entry.to_dict()
+                                for key, entry in self._entries.items()
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "gateway.session: legacy switch route mirror failed for %s: %s",
+                            session_key,
+                            exc,
+                        )
+            else:
+                try:
+                    self._save()
+                except Exception as exc:
+                    self._entries[session_key] = old_entry
+                    try:
+                        self._save()
+                    except Exception as rollback_exc:
+                        logger.error(
+                            "gateway.session: switch route rollback failed for %s: %s",
+                            session_key,
+                            rollback_exc,
+                        )
+                    logger.warning(
+                        "gateway.session: switch route publication failed for %s: %s",
+                        session_key,
+                        exc,
+                    )
+                    return None
+            return new_entry
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
         """List all sessions, optionally filtered by activity."""

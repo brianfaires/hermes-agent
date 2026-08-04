@@ -142,6 +142,67 @@ class TestOrphanRollbackOnCreateFailure:
         assert db.get_session(parent) is not None
         _ = real_create  # silence unused
 
+    def test_gateway_child_inherits_durable_profile_and_peer(self, tmp_path: Path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        parent = "PARENT_GATEWAY_ROT"
+        key = "agent:ang:telegram:dm:chat-1"
+        db.create_session(
+            parent,
+            source="telegram",
+            user_id="user-1",
+            session_key=key,
+            chat_id="chat-1",
+            chat_type="dm",
+            profile_name="ang",
+        )
+        agent = _build_agent_with_db(db, parent)
+        agent._gateway_session_key = key
+        agent._user_id = "user-1"
+        agent._chat_id = "chat-1"
+        agent._chat_type = "dm"
+        agent._thread_id = None
+
+        agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
+
+        child = db.get_session(agent.session_id)
+        assert child["parent_session_id"] == parent
+        assert child["session_key"] == key
+        assert child["profile_name"] == "ang"
+        assert child["user_id"] == "user-1"
+        assert child["chat_id"] == "chat-1"
+
+    def test_legacy_gateway_child_records_active_profile_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_active_profile_name", lambda: "coder"
+        )
+        db = SessionDB(db_path=tmp_path / "state.db")
+        parent = "PARENT_LEGACY_PROFILE_ROT"
+        live_key = "agent:main:telegram:dm:chat-1"
+        db.create_session(
+            parent,
+            source="telegram",
+            user_id="user-1",
+            session_key="agent:coder:telegram:dm:chat-1",
+            chat_id="chat-1",
+            chat_type="dm",
+            profile_name="coder",
+        )
+        agent = _build_agent_with_db(db, parent)
+        agent._gateway_session_key = live_key
+        agent._user_id = "user-1"
+        agent._chat_id = "chat-1"
+        agent._chat_type = "dm"
+        agent._thread_id = None
+
+        agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
+
+        child = db.get_session(agent.session_id)
+        assert child["parent_session_id"] == parent
+        assert child["session_key"] == "agent:coder:telegram:dm:chat-1"
+        assert child["profile_name"] == "coder"
+
 
 class TestPlatformForwardedAtBoundary:
     def test_on_session_start_receives_platform(self, tmp_path: Path):
