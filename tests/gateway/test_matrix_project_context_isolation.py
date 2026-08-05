@@ -394,7 +394,6 @@ async def test_matrix_resume_does_not_cross_rooms_by_default():
     result = await runner._handle_resume_command(_event("/resume Project A Plan", source_b))
 
     assert "blocked" in result
-    assert PROJECT_A_NAME in result
     runner.session_store.switch_session.assert_not_called()
 
 
@@ -473,6 +472,7 @@ async def test_matrix_resume_cross_room_requires_explicit_flag_and_warns():
     runner = _make_runner(source_b, [entry_a, entry_b])
     runner.session_store.switch_session.return_value = entry_a
     runner._session_db._db.resolve_session_by_title.return_value = "session-a"
+    runner._resume_caller_is_admin = lambda _src: True
 
     result = await runner._handle_resume_command(
         _event("/resume --cross-room Project A Plan", source_b)

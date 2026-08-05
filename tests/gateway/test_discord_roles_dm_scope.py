@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
+from gateway.config import PlatformConfig
 from plugins.platforms.discord.adapter import DiscordAdapter
 
 
@@ -37,6 +38,7 @@ def _set_dm_role_auth_guild(monkeypatch, guild_id=None):
 def _make_adapter(allowed_users=None, allowed_roles=None, guilds=None):
     """Build a minimal DiscordAdapter without running __init__."""
     adapter = object.__new__(DiscordAdapter)
+    adapter.config = PlatformConfig(enabled=True, token="test")
     adapter._allowed_user_ids = set(allowed_users or [])
     adapter._allowed_role_ids = set(allowed_roles or [])
 

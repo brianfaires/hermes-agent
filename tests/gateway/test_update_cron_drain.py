@@ -42,7 +42,7 @@ async def test_drain_active_agents_times_out_when_cron_still_running():
     runner, _adapter = make_restart_runner()
     runner._running_agents = {}
 
-    with patch("cron.scheduler.get_running_job_ids", return_value=frozenset({"job-1"})):
+    with patch("cron.scheduler.get_running_job_count", return_value=1):
         _snapshot, timed_out = await runner._drain_active_agents(0.05)
 
     assert timed_out is True

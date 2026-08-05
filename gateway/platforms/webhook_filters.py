@@ -43,7 +43,11 @@ def _kill_script_process_group(pid: int) -> None:
             check=False,
         )
         return
-    os.killpg(pid, signal.SIGKILL)
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        killpg(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        return
+    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def _terminate_script_process(proc: subprocess.Popen[str]) -> None:

@@ -72,6 +72,8 @@ def _make_runner():
     runner._honcho_managers = {}
     runner._honcho_configs = {}
     runner._shutdown_all_gateway_honcho = lambda: None
+    runner._kanban_runtime_owner = None
+    runner._profile_adapters = {}
     runner.session_store = MagicMock()
     return runner
 
@@ -101,6 +103,8 @@ class TestStartupPlatformIsolation:
         runner._sync_voice_mode_state_to_adapter = MagicMock()
         runner._send_update_notification = AsyncMock(return_value=True)
         runner._send_restart_notification = AsyncMock()
+        runner._validate_kanban_router_readiness = MagicMock()
+        runner._start_discord_kanban_mirror_runtime = MagicMock()
 
         adapters = {
             Platform.TELEGRAM: StubAdapter(platform=Platform.TELEGRAM),

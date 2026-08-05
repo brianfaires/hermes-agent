@@ -321,7 +321,7 @@ def test_cron_status_reports_running_gateway(monkeypatch, capsys):
     cron_cli.cron_status()
 
     out = capsys.readouterr().out
-    assert "Gateway is running" in out
+    assert "cron scheduler is healthy" in out
     assert "1234, 5678" in out
     assert "2 active job(s)" in out
     assert "2026-05-31T12:00:00Z" in out

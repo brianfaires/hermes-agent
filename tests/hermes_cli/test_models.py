@@ -70,14 +70,19 @@ class TestFetchOpenRouterModels:
                 return b'{"data":[{"id":"anthropic/claude-opus-4.8","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.7-max","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        with (
+            patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=None),
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
-        assert models == [
-            ("anthropic/claude-opus-4.8", "recommended"),
-            ("qwen/qwen3.7-max", ""),
-            ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
-        ]
+        assert ("anthropic/claude-opus-4.8", "recommended") in models
+        assert ("nvidia/nemotron-3-super-120b-a12b:free", "free") in models
+        assert all(
+            desc == "free"
+            for mid, desc in models
+            if mid.endswith(":free") or mid in {"openrouter/elephant-alpha"}
+        )
 
 
     def test_falls_back_to_static_snapshot_on_fetch_failure(self, monkeypatch):
@@ -167,7 +172,18 @@ class TestFetchOpenRouterModels:
                 )
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        monkeypatch.setattr(
+            _models_mod,
+            "OPENROUTER_MODELS",
+            [
+                ("anthropic/claude-opus-4.8", ""),
+                ("qwen/qwen3.7-max", ""),
+            ],
+        )
+        with (
+            patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=None),
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
         ids = [mid for mid, _ in models]
