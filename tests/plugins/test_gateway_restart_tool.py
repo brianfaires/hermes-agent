@@ -33,10 +33,18 @@ def _load_plugin_module():
 
 
 def _runner(*, active_agents: int = 2):
+    restart_calls = []
+
+    def request_restart(*, detached: bool = False, via_service: bool = False) -> bool:
+        restart_calls.append({"detached": detached, "via_service": via_service})
+        return True
+
     return types.SimpleNamespace(
         _restart_requested=False,
         _draining=False,
         _running_agent_count=lambda: active_agents,
+        request_restart=request_restart,
+        restart_calls=restart_calls,
     )
 
 
@@ -170,7 +178,7 @@ def test_dry_run_reports_process_scope_without_restarting(monkeypatch, tmp_path)
     monkeypatch.setattr(
         module,
         "_schedule_restart",
-        lambda *_args: pytest.fail("dry run scheduled a restart"),
+        lambda *_args, **_kwargs: pytest.fail("dry run scheduled a restart"),
     )
 
     result = json.loads(
@@ -232,7 +240,7 @@ def test_restart_rejects_missing_reason_or_confirmation(
     monkeypatch.setattr(
         module,
         "_schedule_restart",
-        lambda *_args: scheduled.append(True) or True,
+        lambda *_args, **_kwargs: scheduled.append(True) or True,
     )
 
     result = json.loads(module._handle_request_gateway_restart(args))
@@ -254,7 +262,8 @@ def test_restart_schedules_one_shared_gateway_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(
         module,
         "_schedule_restart",
-        lambda actual_runner, delay: scheduled.append((actual_runner, delay)) or True,
+        lambda actual_runner, delay, **_kwargs: scheduled.append((actual_runner, delay))
+        or True,
     )
 
     result = json.loads(
@@ -271,8 +280,35 @@ def test_restart_schedules_one_shared_gateway_restart(monkeypatch, tmp_path):
     assert scheduled[0][0] is runner
 
 
+def test_restart_with_only_calling_agent_requests_drain(monkeypatch, tmp_path):
+    module = _load_plugin_module()
+    runner = _runner(active_agents=1)
+    audit_records = []
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 0})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", audit_records.append)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+
+    result = json.loads(
+        module._handle_request_gateway_restart(
+            {"reason": "reload configuration", "confirm": "restart gateway"}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "restart_draining"
+    assert result["restart_scope"] == "all_profiles"
+    assert result["profile"] == "ops"
+    assert result["active_agents"] == 1
+    assert runner.restart_calls == [result["restart_mode"]]
+    assert audit_records[-1]["decision"] == "scheduled"
+    assert audit_records[-1]["active_agents"] == 1
+
+
 @pytest.mark.parametrize("active_agents", [1, 3])
-def test_restart_denies_when_live_runner_has_active_agents(
+def test_restart_with_active_agents_requests_drain(
     monkeypatch, tmp_path, active_agents
 ):
     module = _load_plugin_module()
@@ -284,16 +320,6 @@ def test_restart_denies_when_live_runner_has_active_agents(
     monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
     monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
     monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
-    monkeypatch.setattr(
-        module,
-        "_reserve_restart",
-        lambda *_args: pytest.fail("active-agent denial reserved cooldown"),
-    )
-    monkeypatch.setattr(
-        module,
-        "_schedule_restart",
-        lambda *_args: pytest.fail("active-agent denial scheduled a restart"),
-    )
 
     result = json.loads(
         module._handle_request_gateway_restart(
@@ -301,13 +327,10 @@ def test_restart_denies_when_live_runner_has_active_agents(
         )
     )
 
-    assert result["ok"] is False
-    assert result["error"] == "active_agents_present"
+    assert result["ok"] is True
+    assert result["status"] == "restart_draining"
     assert result["active_agents"] == active_agents
-    assert (
-        result["retry"]
-        == "Retry only after active_agents reaches zero and no agents are running."
-    )
+    assert runner.restart_calls == [result["restart_mode"]]
     assert audit_records == [
         {
             "ts": audit_records[0]["ts"],
@@ -315,9 +338,11 @@ def test_restart_denies_when_live_runner_has_active_agents(
             "reason": "reload configuration",
             "dry_run": False,
             "restart_scope": "all_profiles",
-            "decision": "deny",
-            "error": "active_agents_present",
+            "decision": "scheduled",
             "active_agents": active_agents,
+            "delay_seconds": audit_records[0]["delay_seconds"],
+            "detached": audit_records[0]["detached"],
+            "via_service": audit_records[0]["via_service"],
         }
     ]
 
@@ -434,7 +459,7 @@ def test_concurrent_requests_reserve_process_cooldown_once(monkeypatch, tmp_path
     monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
     monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
 
-    def schedule(*_args):
+    def schedule(*_args, **_kwargs):
         scheduled.append(True)
         time.sleep(0.05)
         return True
@@ -467,7 +492,9 @@ def test_failed_schedule_releases_cooldown_reservation(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
     monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
     outcomes = iter([False, True])
-    monkeypatch.setattr(module, "_schedule_restart", lambda *_args: next(outcomes))
+    monkeypatch.setattr(
+        module, "_schedule_restart", lambda *_args, **_kwargs: next(outcomes)
+    )
     args = {"reason": "reload configuration", "confirm": "restart gateway"}
 
     first = json.loads(module._handle_request_gateway_restart(args))

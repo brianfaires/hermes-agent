@@ -1477,10 +1477,21 @@ class GatewaySlashCommandsMixin:
 
         _under_service = is_gateway_supervisor_process()
         _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        restart_session_key = (
+            self._session_key_for_source(event.source) if event.source else None
+        )
         if _under_service or _in_container:
-            self.request_restart(detached=False, via_service=True)
+            self.request_restart(
+                detached=False,
+                via_service=True,
+                defer_until_session_delivered=restart_session_key,
+            )
         else:
-            self.request_restart(detached=True, via_service=False)
+            self.request_restart(
+                detached=True,
+                via_service=False,
+                defer_until_session_delivered=restart_session_key,
+            )
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))

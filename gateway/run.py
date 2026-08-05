@@ -6912,12 +6912,19 @@ class GatewayRunner(
         except Exception as e:
             logger.debug("Failed to launch systemd planned-restart helper: %s", e)
 
-    def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
+    def request_restart(
+        self,
+        *,
+        detached: bool = False,
+        via_service: bool = False,
+        defer_until_session_delivered: str | None = None,
+    ) -> bool:
         if self._restart_task_started:
             return False
         self._restart_requested = True
         self._restart_detached = detached
         self._restart_via_service = via_service
+        self._draining = True
         self._restart_task_started = True
 
         async def _run_restart() -> None:
@@ -6928,6 +6935,62 @@ class GatewayRunner(
                     logger.error("Failed to launch detached gateway restart helper: %s", e)
             await asyncio.sleep(0.05)
             await self.stop(restart=True, detached_restart=detached, service_restart=via_service)
+
+        def _start_restart_task() -> None:
+            if getattr(self, "_restart_task", None) is not None:
+                return
+            self._restart_task = asyncio.create_task(_run_restart())
+
+        def _start_restart_task_threadsafe() -> None:
+            loop = getattr(self, "_gateway_loop", None)
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if loop is None or loop is running_loop:
+                if running_loop is None:
+                    logger.error(
+                        "Gateway restart requested but no running event loop was available"
+                    )
+                    return
+                _start_restart_task()
+                return
+            if getattr(loop, "is_running", lambda: False)():
+                loop.call_soon_threadsafe(_start_restart_task)
+                return
+            if running_loop is not None:
+                _start_restart_task()
+            else:
+                logger.error(
+                    "Gateway restart requested but no running event loop was available"
+                )
+
+        def _defer_until_delivery(session_key: str | None) -> bool:
+            if not session_key:
+                return False
+            adapter_maps = [getattr(self, "adapters", {})]
+            adapter_maps.extend(
+                (getattr(self, "_profile_adapters", None) or {}).values()
+            )
+            seen_adapters: set[int] = set()
+            for adapter_map in adapter_maps:
+                for adapter in list((adapter_map or {}).values()):
+                    adapter_id = id(adapter)
+                    if adapter_id in seen_adapters:
+                        continue
+                    seen_adapters.add(adapter_id)
+                    active = getattr(adapter, "_active_sessions", {}).get(session_key)
+                    register = getattr(adapter, "register_post_delivery_callback", None)
+                    if active is None or not callable(register):
+                        continue
+                    generation = getattr(active, "_hermes_run_generation", None)
+                    register(
+                        session_key,
+                        _start_restart_task_threadsafe,
+                        generation=generation,
+                    )
+                    return True
+            return False
 
         # _run_restart is a short-lived self-terminating task (calls stop()
         # then returns).  Don't add it to _background_tasks — _stop_impl
@@ -6941,7 +7004,8 @@ class GatewayRunner(
         # loop may garbage-collect a still-pending task mid-flight.  The
         # cancel loop in _stop_impl explicitly skips _restart_task for the
         # same reason it skips _stop_task.
-        self._restart_task = asyncio.create_task(_run_restart())
+        if not _defer_until_delivery(defer_until_session_delivered):
+            _start_restart_task_threadsafe()
         return True
 
     # Drain-timeout reasons set by _stop_impl() when a still-running turn is

@@ -96,7 +96,13 @@ class TestSlashCommands:
         send.assert_called_once()
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         assert "restart" in response_text.lower() or "draining" in response_text.lower()
-        runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+        runner.request_restart.assert_called_once_with(
+            detached=False,
+            via_service=True,
+            defer_until_session_delivered=runner._session_key_for_source(
+                make_event(platform).source
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_plaintext_restart_gateway_in_group_stays_plain_text(self, adapter, runner, platform, monkeypatch):

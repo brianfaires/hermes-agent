@@ -8,7 +8,6 @@ tool.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -26,7 +25,6 @@ _TOOL_NAME = "request_gateway_restart"
 _TOOLSET = "gateway_restart"
 _PLUGIN_KEY = "gateway-restart-tool"
 _DEFAULT_COOLDOWN_SECONDS = 300
-_DEFAULT_SCHEDULE_DELAY_SECONDS = 3.0
 _cooldown_lock = threading.Lock()
 
 REQUEST_GATEWAY_RESTART_SCHEMA = {
@@ -96,14 +94,6 @@ def _hermes_home() -> Path:
 def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, parsed)
-
-
-def _coerce_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
-    try:
-        parsed = float(value)
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, parsed)
@@ -239,25 +229,18 @@ def _restart_modes() -> tuple[bool, bool]:
     return True, False
 
 
-def _schedule_restart(runner: Any, delay_seconds: float) -> bool:
+def _schedule_restart(
+    runner: Any,
+    _delay_seconds: float,
+    *,
+    defer_until_session_delivered: str | None = None,
+) -> bool:
     detached, via_service = _restart_modes()
 
-    async def _delayed_restart() -> None:
-        await asyncio.sleep(delay_seconds)
-        runner.request_restart(detached=detached, via_service=via_service)
-
-    loop = getattr(runner, "_gateway_loop", None)
-    if loop is not None and getattr(loop, "is_running", lambda: False)():
-        asyncio.run_coroutine_threadsafe(_delayed_restart(), loop)
-        return True
-
-    try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        runner.request_restart(detached=detached, via_service=via_service)
-        return True
-
-    running_loop.create_task(_delayed_restart())
+    kwargs = {"detached": detached, "via_service": via_service}
+    if defer_until_session_delivered:
+        kwargs["defer_until_session_delivered"] = defer_until_session_delivered
+    runner.request_restart(**kwargs)
     return True
 
 
@@ -266,14 +249,19 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     cooldown_seconds = _coerce_int(
         cfg.get("cooldown_seconds"), _DEFAULT_COOLDOWN_SECONDS, minimum=0
     )
-    delay_seconds = _coerce_float(
-        cfg.get("schedule_delay_seconds"),
-        _DEFAULT_SCHEDULE_DELAY_SECONDS,
-        minimum=0.5,
-    )
+    delay_seconds = 0.0
     reason = str(args.get("reason") or "").strip()
     confirm = str(args.get("confirm") or "")
     dry_run = args.get("dry_run") is True
+    caller_session_key = None
+    try:
+        from gateway.session_context import get_session_env
+
+        caller_session_key = (
+            str(get_session_env("HERMES_SESSION_KEY", "") or "").strip() or None
+        )
+    except Exception:
+        caller_session_key = None
     profile = _active_profile_name()
     now = time.time()
     runner = _resolve_runner()
@@ -337,27 +325,6 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             }
         )
 
-    if active_agents is not None and active_agents > 0:
-        record.update(
-            {
-                "decision": "deny",
-                "error": "active_agents_present",
-                "active_agents": active_agents,
-            }
-        )
-        _append_audit(record)
-        return _json(
-            {
-                "ok": False,
-                "error": "active_agents_present",
-                "active_agents": active_agents,
-                "retry": (
-                    "Retry only after active_agents reaches zero and no agents "
-                    "are running."
-                ),
-            }
-        )
-
     if getattr(runner, "_restart_requested", False) or getattr(
         runner, "_draining", False
     ):
@@ -392,7 +359,11 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
 
     schedule_error = None
     try:
-        scheduled = _schedule_restart(runner, delay_seconds)
+        scheduled = _schedule_restart(
+            runner,
+            delay_seconds,
+            defer_until_session_delivered=caller_session_key,
+        )
     except Exception as exc:
         logger.exception("shared gateway restart scheduling failed")
         scheduled = False
@@ -421,7 +392,9 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
     return _json(
         {
             "ok": True,
-            "status": "restart_scheduled",
+            "status": "restart_draining"
+            if active_agents is not None and active_agents > 0
+            else "restart_scheduled",
             "profile": profile,
             "restart_scope": "all_profiles",
             "scheduled_after_seconds": delay_seconds,

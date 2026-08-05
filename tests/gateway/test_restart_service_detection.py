@@ -21,6 +21,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.restart import EXTERNAL_GATEWAY_SUPERVISOR_ENV
+from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
 
@@ -34,6 +35,12 @@ def _make_restart_event(update_id: int | None = 100) -> MessageEvent:
     )
 
 
+def _make_profile_restart_event(profile: str) -> MessageEvent:
+    event = _make_restart_event(update_id=101)
+    event.source.profile = profile
+    return event
+
+
 def _make_runner_with_mock_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.delenv("INVOCATION_ID", raising=False)
@@ -45,6 +52,14 @@ def _make_runner_with_mock_restart(tmp_path, monkeypatch):
     return runner
 
 
+def _assert_restart_requested(runner, *, detached: bool, via_service: bool):
+    runner.request_restart.assert_called_once_with(
+        detached=detached,
+        via_service=via_service,
+        defer_until_session_delivered=build_session_key(make_restart_source()),
+    )
+
+
 @pytest.mark.asyncio
 async def test_restart_under_launchd_uses_service_path(tmp_path, monkeypatch):
     """launchd job label in XPC_SERVICE_NAME routes /restart via the service path."""
@@ -53,7 +68,7 @@ async def test_restart_under_launchd_uses_service_path(tmp_path, monkeypatch):
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    _assert_restart_requested(runner, detached=False, via_service=True)
 
 
 @pytest.mark.asyncio
@@ -64,7 +79,7 @@ async def test_restart_in_interactive_macos_shell_uses_detached_path(tmp_path, m
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    _assert_restart_requested(runner, detached=True, via_service=False)
 
 
 @pytest.mark.asyncio
@@ -74,7 +89,7 @@ async def test_restart_without_service_env_uses_detached_path(tmp_path, monkeypa
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    _assert_restart_requested(runner, detached=True, via_service=False)
 
 
 @pytest.mark.asyncio
@@ -85,7 +100,27 @@ async def test_restart_under_systemd_uses_service_path(tmp_path, monkeypatch):
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    _assert_restart_requested(runner, detached=False, via_service=True)
+
+
+@pytest.mark.asyncio
+async def test_restart_from_secondary_profile_defers_on_profile_session_key(
+    tmp_path, monkeypatch
+):
+    """Profile-routed /restart waits for the matching profile-scoped delivery."""
+    runner = _make_runner_with_mock_restart(tmp_path, monkeypatch)
+    runner.config.multiplex_profiles = True
+    event = _make_profile_restart_event("ops")
+    expected_key = build_session_key(event.source, profile="ops")
+    assert expected_key != build_session_key(event.source)
+
+    await runner._handle_restart_command(event)
+
+    runner.request_restart.assert_called_once_with(
+        detached=True,
+        via_service=False,
+        defer_until_session_delivered=expected_key,
+    )
 
 
 @pytest.mark.asyncio
@@ -98,7 +133,7 @@ async def test_restart_with_external_supervisor_marker_uses_service_path(
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    _assert_restart_requested(runner, detached=False, via_service=True)
 
 
 @pytest.mark.asyncio
@@ -111,4 +146,4 @@ async def test_false_external_supervisor_marker_keeps_detached_path(
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    _assert_restart_requested(runner, detached=True, via_service=False)

@@ -1,17 +1,37 @@
 import asyncio
+import importlib.util
+import json
 import shutil
 import subprocess
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import gateway.run as gateway_run
+import model_tools
 from agent.i18n import t
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-from gateway.session import SessionEntry, build_session_key
+from gateway.session import SessionEntry, build_session_context, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
+
+
+def _load_gateway_restart_tool():
+    plugin_path = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "gateway-restart-tool"
+        / "__init__.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "gateway_restart_tool_plugin_gateway_test", plugin_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.asyncio
@@ -44,7 +64,316 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
     assert expected != "gateway.draining"
     assert "Draining" in expected and "1" in expected
     running_agent.interrupt.assert_not_called()
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    runner.request_restart.assert_called_once_with(
+        detached=True,
+        via_service=False,
+        defer_until_session_delivered=session_key,
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_restart_tool_allows_caller_to_finish_before_restart_proceeds(
+    monkeypatch, tmp_path
+):
+    module = _load_gateway_restart_tool()
+    runner, _adapter = make_restart_runner()
+    runner._running_agents["caller"] = MagicMock()
+    stop_calls = []
+
+    async def stop(**kwargs):
+        stop_calls.append(
+            {"kwargs": kwargs, "active_agents": runner._running_agent_count()}
+        )
+        runner._shutdown_event.set()
+
+    runner.stop = stop
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 0})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda _record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(module, "_restart_modes", lambda: (False, True))
+
+    result = json.loads(
+        module._handle_request_gateway_restart(
+            {"reason": "reload configuration", "confirm": "restart gateway"}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "restart_draining"
+    assert result["active_agents"] == 1
+    assert runner._restart_task_started is True
+
+    runner._running_agents.clear()
+    await asyncio.sleep(result["scheduled_after_seconds"] + 0.1)
+    assert runner._restart_task is not None
+    await runner._restart_task
+
+    assert runner._restart_requested is True
+    assert stop_calls == [
+        {
+            "kwargs": {
+                "restart": True,
+                "detached_restart": False,
+                "service_restart": True,
+            },
+            "active_agents": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_restart_tool_drains_immediately_and_waits_for_delivery(
+    monkeypatch, tmp_path
+):
+    module = _load_gateway_restart_tool()
+    runner, adapter = make_restart_runner()
+    source = make_restart_source()
+    session_key = build_session_key(source)
+    durable_task_id = "persisted-session-id"
+    session_entry = SessionEntry(
+        session_key=session_key,
+        session_id=durable_task_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=source.platform,
+        chat_type=source.chat_type,
+    )
+    send_entered = asyncio.Event()
+    release_send = asyncio.Event()
+    stop_calls = []
+    turn_observations = {}
+
+    async def delayed_send(chat_id, content, reply_to=None, metadata=None):
+        send_entered.set()
+        await release_send.wait()
+        return await type(adapter).send(adapter, chat_id, content, reply_to, metadata)
+
+    async def stop(**kwargs):
+        stop_calls.append(
+            {"kwargs": kwargs, "active_agents": runner._running_agent_count()}
+        )
+        runner._shutdown_event.set()
+
+    async def run_tool_turn(event, source, quick_key, run_generation):
+        context = build_session_context(source, runner.config, session_entry)
+        tokens = runner._set_session_env(context)
+        try:
+            tool_result = model_tools.handle_function_call(
+                "request_gateway_restart",
+                {"reason": "reload configuration", "confirm": "restart gateway"},
+                task_id=durable_task_id,
+            )
+            repeat_result = model_tools.handle_function_call(
+                "request_gateway_restart",
+                {"reason": "reload configuration", "confirm": "restart gateway"},
+                task_id=durable_task_id,
+            )
+        finally:
+            runner._clear_session_env(tokens)
+        followup = await runner._handle_message(
+            MessageEvent(
+                text="new turn",
+                message_type=MessageType.TEXT,
+                source=make_restart_source("fresh"),
+                message_id="m-followup",
+            )
+        )
+        turn_observations["tool_result"] = tool_result
+        turn_observations["repeat_result"] = repeat_result
+        turn_observations["followup"] = followup
+        return "restart accepted"
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 60})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda _record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(module, "_restart_modes", lambda: (False, True))
+
+    entry = model_tools.registry.get_entry("request_gateway_restart")
+    original_handler = entry.handler if entry is not None else None
+    model_tools.registry.register(
+        name="request_gateway_restart",
+        toolset="gateway_restart",
+        schema=module.REQUEST_GATEWAY_RESTART_SCHEMA,
+        handler=module._handle_request_gateway_restart,
+        check_fn=module._check_available,
+    )
+    entry = model_tools.registry.get_entry("request_gateway_restart")
+    assert entry is not None
+    entry.handler = module._handle_request_gateway_restart
+    try:
+        runner.stop = stop
+        runner._handle_message_with_agent = run_tool_turn
+        runner._send_restart_notification = AsyncMock(return_value=None)
+        runner._run_processing_hook = AsyncMock()
+        runner._recover_telegram_topic_thread_id = MagicMock(return_value=None)
+        runner._is_telegram_topic_root_lobby = MagicMock(return_value=False)
+        runner._claim_active_session_slot = MagicMock(return_value=(None, None))
+        runner._begin_session_run_generation = gateway_run.GatewayRunner._begin_session_run_generation.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._is_session_run_current = gateway_run.GatewayRunner._is_session_run_current.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._bind_adapter_run_generation = gateway_run.GatewayRunner._bind_adapter_run_generation.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._set_session_env = gateway_run.GatewayRunner._set_session_env.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._clear_session_env = gateway_run.GatewayRunner._clear_session_env.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._release_turn_lease = MagicMock(return_value=False)
+        runner._restore_moa_one_shot = MagicMock()
+        runner._restore_pending_one_turn_model_override = MagicMock()
+        runner._session_run_generation = {}
+        runner._external_drain_active = False
+        runner._async_session_store = MagicMock()
+        runner._async_session_store.get_or_create_session = AsyncMock(
+            return_value=session_entry
+        )
+        runner._handle_message = gateway_run.GatewayRunner._handle_message.__get__(
+            runner, gateway_run.GatewayRunner
+        )
+        runner._handle_message_with_agent = run_tool_turn
+        adapter._message_handler = runner._handle_message
+        adapter.send = delayed_send
+
+        event = MessageEvent(
+            text="please restart",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id="m-tool",
+        )
+
+        await adapter.handle_message(event)
+        task = adapter._session_tasks[session_key]
+
+        await asyncio.wait_for(send_entered.wait(), timeout=1.0)
+        assert runner._draining is True
+        assert runner._restart_requested is True
+        assert stop_calls == []
+
+        release_send.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert runner._restart_task is not None
+        await asyncio.wait_for(runner._restart_task, timeout=1.0)
+
+        assert stop_calls == [
+            {
+                "kwargs": {
+                    "restart": True,
+                    "detached_restart": False,
+                    "service_restart": True,
+                },
+                "active_agents": 0,
+            }
+        ]
+        assert json.loads(turn_observations["tool_result"])["status"] == "restart_draining"
+        assert json.loads(turn_observations["repeat_result"])["status"] == "already_in_progress"
+        assert "not accepting new work" in turn_observations["followup"]
+    finally:
+        if original_handler is not None:
+            entry.handler = original_handler
+        else:
+            model_tools.registry.deregister("request_gateway_restart")
+
+
+@pytest.mark.asyncio
+async def test_request_restart_defers_until_secondary_profile_delivery():
+    runner, primary_adapter = make_restart_runner()
+    secondary_adapter = type(primary_adapter)()
+    secondary_source = make_restart_source(chat_id="secondary-chat")
+    secondary_key = build_session_key(secondary_source, profile="ops")
+    active = asyncio.Event()
+    active._hermes_run_generation = 7
+    secondary_adapter._active_sessions[secondary_key] = active
+    runner._profile_adapters = {"ops": {secondary_source.platform: secondary_adapter}}
+    stop_calls = []
+
+    async def stop(**kwargs):
+        stop_calls.append(kwargs)
+        runner._shutdown_event.set()
+
+    runner.stop = stop
+
+    assert runner.request_restart(
+        detached=False,
+        via_service=True,
+        defer_until_session_delivered=secondary_key,
+    ) is True
+
+    await asyncio.sleep(0)
+    assert primary_adapter._post_delivery_callbacks == {}
+    assert runner._restart_task is None
+    assert stop_calls == []
+
+    callback = secondary_adapter.pop_post_delivery_callback(
+        secondary_key,
+        generation=7,
+    )
+    assert callback is not None
+    callback()
+
+    assert runner._restart_task is not None
+    await runner._restart_task
+    assert stop_calls == [
+        {"restart": True, "detached_restart": False, "service_restart": True}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_restart_tool_restart_preserves_active_session_notification(
+    monkeypatch, tmp_path
+):
+    module = _load_gateway_restart_tool()
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    runner._restart_drain_timeout = 0.0
+    runner._launch_systemd_restart_shortcut = MagicMock()
+    source = make_restart_source(thread_id="42")
+    session_key = build_session_key(source)
+    running_agent = MagicMock()
+    runner._running_agents[session_key] = running_agent
+    runner._cache_session_source(session_key, source)
+    monkeypatch.setattr(module, "_plugin_config", lambda: {"cooldown_seconds": 0})
+    monkeypatch.setattr(module, "_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(module, "_append_audit", lambda _record: None)
+    monkeypatch.setattr(module, "_audit_path", lambda: tmp_path / "audit.jsonl")
+    monkeypatch.setattr(module, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(module, "_resolve_runner", lambda: runner)
+    monkeypatch.setattr(module, "_restart_modes", lambda: (False, True))
+
+    with patch("gateway.status.remove_pid_file"), patch(
+        "gateway.status.write_runtime_status"
+    ), patch("agent.auxiliary_client.shutdown_cached_clients"):
+        result = json.loads(
+            module._handle_request_gateway_restart(
+                {"reason": "reload configuration", "confirm": "restart gateway"}
+            )
+        )
+        await asyncio.sleep(result["scheduled_after_seconds"] + 0.1)
+        assert runner._restart_task is not None
+        await runner._restart_task
+
+    assert result["status"] == "restart_draining"
+    assert running_agent.interrupt.called
+    assert adapter.sent_calls
+    chat_id, message, metadata = adapter.sent_calls[0]
+    assert chat_id == source.chat_id
+    assert "Gateway restarting" in message
+    assert metadata["thread_id"] == source.thread_id
+    assert metadata["direct_messages_topic_id"] == source.thread_id
+    assert runner._shutdown_event.is_set() is True
 
 
 @pytest.mark.asyncio
