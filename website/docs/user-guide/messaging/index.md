@@ -450,15 +450,17 @@ When the agent running a background session uses `terminal(background=true)` to 
 
 ```yaml
 display:
-  background_process_notifications: all    # all | result | error | off
+  background_process_notifications: off    # off | result | error | all
 ```
 
 | Mode | What you receive |
 |------|-----------------|
-| `all` | Running-output updates **and** the final completion message (default) |
+| `all` | Running-output updates **and** the final completion message |
 | `result` | Only the final completion message (regardless of exit code) |
 | `error` | Only the final message when the exit code is non-zero |
-| `off` | No process watcher messages at all |
+| `off` | No implicit process watcher messages (default) |
+
+`terminal(background=true, notify_on_complete=true)` remains an explicit opt-in: it routes that process's completion back to the originating conversation even when implicit watcher notifications are off.
 
 You can also set this via environment variable:
 

@@ -1220,12 +1220,13 @@ display:
 
   # Background process notifications (gateway/messaging only).
   # Controls how chatty the process watcher is when you use
-  # terminal(background=true, notify_on_complete=true) from Telegram/Discord/etc.
-  #   off:     No watcher messages at all
+  # terminal(background=true) from Telegram/Discord/etc. Explicit
+  # notify_on_complete=true remains an opt-in completion notification.
+  #   off:     No implicit watcher messages (default)
   #   result:  Only the final completion message
   #   error:   Only the final message when exit code != 0
-  #   all:     Running output updates + final message (default)
-  background_process_notifications: all
+  #   all:     Running output updates + final message
+  background_process_notifications: off
 
 
   # Play terminal bell when agent finishes a response.

@@ -5414,10 +5414,10 @@ class GatewayRunner(
         """Load background process notification mode from config or env var.
 
         Modes:
-          - ``all``    — push running-output updates *and* the final message (default)
+          - ``all``    — push running-output updates *and* the final message
           - ``result`` — only the final completion message (regardless of exit code)
           - ``error``  — only the final message when exit code is non-zero
-          - ``off``    — no watcher messages at all
+          - ``off``    — no implicit watcher messages (default)
         """
         mode = os.getenv("HERMES_BACKGROUND_NOTIFICATIONS", "")
         if not mode:
@@ -5427,14 +5427,14 @@ class GatewayRunner(
                 mode = "off"
             elif raw not in {None, ""}:
                 mode = str(raw)
-        mode = (mode or "all").strip().lower()
+        mode = (mode or "off").strip().lower()
         valid = {"all", "result", "error", "off"}
         if mode not in valid:
             logger.warning(
-                "Unknown background_process_notifications '%s', defaulting to 'all'",
+                "Unknown background_process_notifications '%s', defaulting to 'off'",
                 mode,
             )
-            return "all"
+            return "off"
         return mode
 
     @staticmethod

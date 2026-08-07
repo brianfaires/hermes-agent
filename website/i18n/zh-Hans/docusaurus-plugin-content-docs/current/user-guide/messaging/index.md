@@ -342,15 +342,17 @@ Hermes 立即确认：
 
 ```yaml
 display:
-  background_process_notifications: all    # all | result | error | off
+  background_process_notifications: off    # off | result | error | all
 ```
 
 | 模式 | 你收到的内容 |
 |------|-----------------|
-| `all` | 运行输出更新**以及**最终完成消息（默认） |
+| `all` | 运行输出更新**以及**最终完成消息 |
 | `result` | 仅最终完成消息（无论退出码） |
 | `error` | 仅在退出码非零时的最终消息 |
-| `off` | 不接收任何进程监控消息 |
+| `off` | 不接收隐式进程监控消息（默认） |
+
+`terminal(background=true, notify_on_complete=true)` 仍是显式选择：即使隐式监控通知已关闭，它也会将该进程的完成事件路由回原始会话。
 
 也可通过环境变量设置：
 

@@ -71,11 +71,11 @@ def _watcher_dict(session_id="proc_test", thread_id=""):
 
 class TestLoadBackgroundNotificationsMode:
 
-    def test_defaults_to_all(self, monkeypatch, tmp_path):
+    def test_defaults_to_off(self, monkeypatch, tmp_path):
         import gateway.run as gw
         monkeypatch.setattr(gw, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert GatewayRunner._load_background_notifications_mode() == "off"
 
     def test_reads_config_yaml(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
@@ -104,14 +104,14 @@ class TestLoadBackgroundNotificationsMode:
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
         assert GatewayRunner._load_background_notifications_mode() == "off"
 
-    def test_invalid_value_defaults_to_all(self, monkeypatch, tmp_path):
+    def test_invalid_value_defaults_to_off(self, monkeypatch, tmp_path):
         (tmp_path / "config.yaml").write_text(
             "display:\n  background_process_notifications: banana\n"
         )
         import gateway.run as gw
         monkeypatch.setattr(gw, "_hermes_home", tmp_path)
         monkeypatch.delenv("HERMES_BACKGROUND_NOTIFICATIONS", raising=False)
-        assert GatewayRunner._load_background_notifications_mode() == "all"
+        assert GatewayRunner._load_background_notifications_mode() == "off"
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,9 @@ async def test_agent_notification_carries_message_id_reply_anchor(monkeypatch, t
         pass
     monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
 
-    runner = _build_runner(monkeypatch, tmp_path, "all")
+    # Explicit notify_on_complete remains an opt-in even when implicit watcher
+    # notifications use the default-off policy.
+    runner = _build_runner(monkeypatch, tmp_path, "off")
     adapter = runner.adapters[Platform.TELEGRAM]
 
     watcher = {

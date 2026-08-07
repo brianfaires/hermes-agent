@@ -521,11 +521,26 @@ def test_background_without_notify_emits_silent_process_hint(monkeypatch, tmp_pa
     hint = result.get("hint", "")
     assert hint, "Silent background process must include a hint field"
     assert "notify_on_complete" in hint, (
-        "Hint must name the corrective flag so the agent can self-correct"
+        "Hint must name the explicit user-notification flag"
     )
-    assert "silent" in hint.lower() or "no way to learn" in hint.lower(), (
-        "Hint must explain the failure mode, not just suggest the fix"
+    assert "process(action='poll')" in hint or "process(action='wait')" in hint, (
+        "Hint must direct the agent to internal process tracking"
     )
+    assert "almost certainly wanted" not in hint.lower()
+
+
+def test_notify_on_complete_schema_is_explicit_user_notification_opt_in():
+    from tools.terminal_tool import TERMINAL_SCHEMA
+
+    props = TERMINAL_SCHEMA["parameters"]["properties"]
+    description = props["notify_on_complete"]["description"].lower()
+    assert props["notify_on_complete"]["default"] is False
+    assert "user-facing" in description
+    assert "opt-in" in description
+
+    background_description = props["background"]["description"].lower()
+    assert "almost always pair" not in background_description
+    assert "must set notify_on_complete" not in background_description
 
 
 def test_background_with_notify_does_not_emit_hint(monkeypatch, tmp_path):

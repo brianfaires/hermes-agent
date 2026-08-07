@@ -966,9 +966,7 @@ Reserve terminal for: builds, installs, git, processes, scripts, network, packag
 Because exported environment state persists, activate a virtualenv or export setup variables once per session; do not re-source the same environment before every command unless a command proves the shell state was reset.
 
 Foreground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for short commands.
-Background: Set background=true to get a session_id. Almost always pair with notify_on_complete=true — bg without notify runs SILENTLY and you have no way to learn it finished short of calling process(action='poll') yourself. Two legitimate uses:
-  (1) Long-lived processes that never exit (servers, watchers, daemons) — silent is correct, there's no exit to notify on.
-  (2) Long-running bounded tasks (tests, builds, deploys, CI pollers, batch jobs) — MUST set notify_on_complete=true. Without it you'll either forget to poll or sit blocked waiting for the user to surface the result.
+Background: Set background=true to get a session_id. User-facing completion notifications are opt-in and default off. Use notify_on_complete=true only when the user wants an out-of-band completion message. Otherwise track bounded work with process(action='poll'/'wait'), or prefer foreground execution when practical. Long-lived servers/watchers normally remain silent.
 For servers/watchers, do NOT use shell-level background wrappers (nohup/disown/setsid/trailing '&') in foreground mode. Use background=true so Hermes can track lifecycle and output.
 After starting a server, verify readiness with a health check or log signal, then run tests in a separate terminal() call. Avoid blind sleep loops.
 Use process(action="poll") for progress checks, process(action="wait") to block until done.
@@ -2502,26 +2500,18 @@ def terminal_tool(
                 # watch_patterns is a silent process. The agent has NO way to
                 # learn it finished short of calling process(action="poll"/"wait")
                 # explicitly. That's correct only for genuine long-lived
-                # processes that never exit (servers, watchers). For every
-                # bounded task (tests, builds, CI pollers, deploys, batch
-                # jobs) the agent almost certainly wanted notification and
-                # forgot the flag. May 2026 PR #31231 incident: bg CI poller
-                # ran fine, exited green, agent never noticed — user had to
-                # surface the result. Cheap nudge here costs ~one read for
-                # server cases (false positive) and prevents silent
-                # blindness for bounded-task cases (false negative).
+                # processes that never exit (servers, watchers). Bounded work
+                # must instead be tracked explicitly with process poll/wait,
+                # unless the user requested an out-of-band completion message.
                 if background and not notify_on_complete and not watch_patterns:
                     result_data["hint"] = (
                         "background=true without notify_on_complete=true means "
                         "this process runs SILENTLY — you will not be told when "
-                        "it exits. If this is a bounded task (test suite, build, "
-                        "CI poller, deploy, anything with a defined end), you "
-                        "almost certainly wanted notify_on_complete=true so the "
-                        "system pings you on exit. Re-launch with "
-                        "notify_on_complete=true, or call process(action='poll') "
-                        "/ process(action='wait') yourself to learn the outcome. "
-                        "Only ignore this hint for genuine long-lived processes "
-                        "that never exit (servers, watchers, daemons)."
+                        "it exits. Track bounded work with process(action='poll') "
+                        "or process(action='wait'). Set notify_on_complete=true "
+                        "only when the user wants a user-facing, out-of-band "
+                        "completion notification. Long-lived servers/watchers "
+                        "normally remain silent."
                     )
 
                 # Nudge: homebrewed CI watcher built from `gh pr view`
@@ -3083,7 +3073,7 @@ TERMINAL_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "Run the command in the background. Almost always pair with notify_on_complete=true — without it, the process runs silently and you'll have no way to learn it finished short of calling process(action='poll') yourself (easy to forget, leading to silent blindness on long jobs). Two legitimate patterns: (1) Long-lived processes that never exit (servers, watchers, daemons) — these stay silent because there's no exit to notify on. (2) Long-running bounded tasks (tests, builds, deploys, CI pollers, batch jobs) — these MUST set notify_on_complete=true. For short commands, prefer foreground with a generous timeout instead.",
+                "description": "Run the command in the background. User-facing completion notifications are opt-in and default off. Use notify_on_complete=true only when the user wants an out-of-band completion message. Otherwise track bounded work with process(action='poll'/'wait'), or prefer foreground execution when practical. Long-lived servers/watchers normally remain silent.",
                 "default": False
             },
             "timeout": {
@@ -3102,7 +3092,7 @@ TERMINAL_SCHEMA = {
             },
             "notify_on_complete": {
                 "type": "boolean",
-                "description": "When true (and background=true), you'll be automatically notified exactly once when the process finishes. **This is the right choice for almost every long-running task** — tests, builds, deployments, multi-item batch jobs, anything that takes over a minute and has a defined end. Use this and keep working on other things; the system notifies you on exit. MUTUALLY EXCLUSIVE with watch_patterns — when both are set, watch_patterns is dropped.",
+                "description": "Opt-in user-facing notification. When true (and background=true), the process completion is routed back to the originating conversation so the agent can send one completion message. Defaults to false. Use only when the user wants an out-of-band completion update; otherwise track the process with poll/wait. MUTUALLY EXCLUSIVE with watch_patterns — when both are set, watch_patterns is dropped.",
                 "default": False
             },
             "watch_patterns": {
