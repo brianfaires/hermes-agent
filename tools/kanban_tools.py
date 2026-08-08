@@ -1111,6 +1111,13 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    from hermes_cli.profiles import profile_exists
+
+    if not profile_exists(str(assignee)):
+        return tool_error(
+            f"assignee profile {assignee!r} is not installed; "
+            "create the profile first or choose an installed profile"
+        )
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")

@@ -203,6 +203,12 @@ def worker_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    # Handler validation should see the synthetic assignees used throughout
+    # this isolated unit-test board as installed profiles.
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profile_exists",
+        lambda _profile: True,
+    )
     from pathlib import Path as _Path
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 
@@ -1211,6 +1217,21 @@ def test_create_rejects_no_assignee(worker_env):
     assert json.loads(kt._handle_create({"title": "t"})).get("error")
 
 
+def test_create_rejects_uninstalled_assignee(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profile_exists",
+        lambda profile: profile != "missing-worker",
+    )
+    out = json.loads(kt._handle_create({
+        "title": "orphaned work",
+        "assignee": "missing-worker",
+    }))
+
+    assert "not installed" in out["error"]
+
+
 def test_create_rejects_non_list_parents(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({"title": "t", "assignee": "a", "parents": 42})
@@ -1917,6 +1938,10 @@ def multi_board_env(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.setenv("HERMES_PROFILE", "test-orchestrator")
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profile_exists",
+        lambda _profile: True,
+    )
     from pathlib import Path as _Path
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 

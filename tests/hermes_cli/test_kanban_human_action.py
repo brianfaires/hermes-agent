@@ -97,6 +97,7 @@ def test_human_action_crud_and_brian_queue_filter(kanban_home):
 
     assert task.task_kind == "Human Action"
     assert task.assignee == "Brian"
+    assert task.status == "blocked"
     assert action["owner"] == "Brian"
     assert action["linked_task_id"] == engineering
     assert action["instructions"] == ["Open staging", "Run smoke test"]
@@ -289,8 +290,8 @@ def test_human_action_is_never_claimed_or_dispatched(kanban_home, monkeypatch):
 
     assert spawned == []
     assert result.spawned == []
-    assert human in result.skipped_nonspawnable
-    assert task.status == "ready"
+    assert human not in result.skipped_nonspawnable
+    assert task.status == "blocked"
     assert task.claim_lock is None
 
 

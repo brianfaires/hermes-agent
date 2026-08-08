@@ -2912,6 +2912,20 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+                if initial_status == "blocked":
+                    # ``blocked`` at creation is an explicit operator hold,
+                    # not a dependency-derived transient state. Record the
+                    # same sticky-block signal used by block_task so routine
+                    # recomputation cannot silently promote it to ready.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {
+                            "reason": "created blocked",
+                            "source": "initial_status",
+                        },
+                    )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -3161,7 +3175,7 @@ def create_human_action(
     now = int(time.time())
     with write_txn(conn):
         conn.execute(
-            "UPDATE tasks SET task_kind = ?, assignee = ?, status = 'ready' WHERE id = ?",
+            "UPDATE tasks SET task_kind = ?, assignee = ? WHERE id = ?",
             (HUMAN_ACTION_KIND, HUMAN_ACTION_OWNER, task_id),
         )
         conn.execute(
@@ -4287,9 +4301,9 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       finish, transient infra error clears).
 
     The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
+    ``"blocked"`` / release event for the task.  Both ``"unblocked"`` and
+    ``"promoted_manual"`` explicitly release a hold.  If the most recent
+    relevant event is ``"blocked"``, the task is sticky and
     ``recompute_ready`` must *not* auto-promote it.
 
     Returns ``False`` when there is no such event at all (e.g. the task
@@ -4299,7 +4313,8 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? "
+        "AND kind IN ('blocked', 'unblocked', 'promoted_manual') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()

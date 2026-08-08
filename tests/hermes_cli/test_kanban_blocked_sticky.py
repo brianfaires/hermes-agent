@@ -99,6 +99,55 @@ def test_worker_block_on_child_with_done_parents_is_still_sticky(kanban_home: Pa
         assert kb.get_task(conn, child).status == "blocked"
 
 
+def test_task_created_blocked_is_not_auto_promoted(kanban_home: Path) -> None:
+    """An explicit initial blocked state is an operator hold, not a
+    dependency-derived transient state. Dispatcher/list recomputation must
+    preserve it until an explicit unblock."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="hold for explicit prioritization",
+            assignee=None,
+            initial_status="blocked",
+        )
+
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        assert kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_manual_promotion_clears_creation_hold_for_later_recovery(
+    kanban_home: Path,
+) -> None:
+    """Manual promotion releases the initial hold for future recovery."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="release then retry",
+            assignee="worker",
+            initial_status="blocked",
+        )
+
+        promoted, error = kb.promote_task(conn, tid, actor="test-operator")
+        assert promoted and error is None
+
+        # Model a later dispatcher/circuit-breaker transition. Those paths
+        # deliberately do not emit an explicit ``blocked`` event and remain
+        # eligible for bounded auto-recovery below the failure limit.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', consecutive_failures = 1 "
+                "WHERE id = ?",
+                (tid,),
+            )
+
+        assert kb.recompute_ready(conn) == 1
+        assert kb.get_task(conn, tid).status == "ready"
+
+
 # ---------------------------------------------------------------------------
 # Circuit-breaker blocks still auto-recover (preserve #40c1decb3 intent)
 # ---------------------------------------------------------------------------
