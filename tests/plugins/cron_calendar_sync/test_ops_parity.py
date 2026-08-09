@@ -349,3 +349,125 @@ def test_single_job_cli_redacts_quoted_dict_secret_failures(
     output = capsys.readouterr().out
     assert "dict-secret-value" not in output
     assert "'client_secret': 'REDACTED'" in output
+
+
+@pytest.mark.parametrize("stale_kind", ["not-found", "gone", "not-found-class"])
+def test_stale_tracked_output_instance_is_readopted_without_error(
+    tmp_path, monkeypatch, stale_kind
+):
+    runner, _ = load_runner(monkeypatch)
+    output = tmp_path / "2026-01-01_09-00-00.md"
+    output.write_text("## Response\nok")
+    state = {
+        "run_outputs": {
+            "job1": {
+                output.name: {"instance_id": "stale-instance", "render_version": 1}
+            }
+        }
+    }
+    calls = []
+
+    class Gone(Exception):
+        class resp:
+            status = 410
+
+    class Missing(Exception):
+        class resp:
+            status = 404
+
+    CalendarNotFoundError = type("CalendarNotFoundError", (Exception,), {})
+    stale_error = {
+        "not-found": Missing("tracked instance is missing"),
+        "gone": Gone("tracked instance is gone"),
+        "not-found-class": CalendarNotFoundError("tracked instance was not found"),
+    }[stale_kind]
+
+    class Request:
+        def __init__(self, result=None, error=None):
+            self.result = result
+            self.error = error
+
+        def execute(self):
+            if self.error:
+                raise self.error
+            return self.result
+
+    class Events:
+        def get(self, **kwargs):
+            calls.append(("get", kwargs["eventId"]))
+            return Request(error=stale_error)
+
+        def instances(self, **kwargs):
+            calls.append(("instances", kwargs["eventId"]))
+            return Request(
+                result={
+                    "items": [
+                        {
+                            "id": "current-instance",
+                            "description": "existing",
+                            "start": {"dateTime": "2026-01-01T09:00:00-08:00"},
+                        }
+                    ]
+                }
+            )
+
+        def patch(self, **kwargs):
+            calls.append(("patch", kwargs["eventId"]))
+            return Request(result={})
+
+    service = types.SimpleNamespace(events=lambda: Events())
+
+    attached, messages = runner.attach_output_file_to_instance(
+        service, "calendar", "series", job(), state, output, False
+    )
+
+    assert attached == 1
+    assert messages == []
+    assert state["run_outputs"]["job1"][output.name]["instance_id"] == "current-instance"
+    assert calls == [
+        ("get", "stale-instance"),
+        ("instances", "series"),
+        ("patch", "current-instance"),
+    ]
+
+
+def test_transient_tracked_output_instance_failure_aborts_before_fallback(
+    tmp_path, monkeypatch
+):
+    runner, _ = load_runner(monkeypatch)
+    output = tmp_path / "2026-01-01_09-00-00.md"
+    output.write_text("## Response\nok")
+    state = {
+        "run_outputs": {
+            "job1": {
+                output.name: {"instance_id": "tracked-instance", "render_version": 1}
+            }
+        }
+    }
+    calls = []
+
+    class Request:
+        def execute(self):
+            raise RuntimeError("temporary Calendar failure")
+
+    class Events:
+        def get(self, **kwargs):
+            calls.append(("get", kwargs["eventId"]))
+            return Request()
+
+        def instances(self, **kwargs):
+            calls.append(("instances", kwargs["eventId"]))
+            raise AssertionError("transient tracked-instance failure reached fallback")
+
+    service = types.SimpleNamespace(events=lambda: Events())
+
+    with pytest.raises(RuntimeError, match="temporary Calendar failure"):
+        runner.attach_output_file_to_instance(
+            service, "calendar", "series", job(), state, output, False
+        )
+
+    assert calls == [("get", "tracked-instance")]
+    assert state["run_outputs"]["job1"][output.name] == {
+        "instance_id": "tracked-instance",
+        "render_version": 1,
+    }

@@ -472,6 +472,11 @@ def truncate_rrule_at_now(rrule: str) -> str:
     return "RRULE:" + ";".join(parts)
 
 
+def _stale_calendar_instance_error(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status in {404, 410} or exc.__class__.__name__ == "CalendarNotFoundError"
+
+
 def attach_output_file_to_instance(
     service,
     calendar_id: str,
@@ -503,7 +508,8 @@ def attach_output_file_to_instance(
             tracked[output_file.name].update({"attached_at": datetime.now(LOCAL_TZ).isoformat(), "render_version": RUN_OUTPUT_RENDER_VERSION})
             return 1, messages
         except Exception as exc:
-            messages.append(f"{job_id} {output_file.name}: existing tracked instance refresh failed: {exc}")
+            if not _stale_calendar_instance_error(exc):
+                raise
     duration = timedelta(minutes=estimate_minutes(job))
     time_min = (run_at - timedelta(hours=6)).isoformat()
     time_max = (run_at + duration + timedelta(hours=6)).isoformat()
