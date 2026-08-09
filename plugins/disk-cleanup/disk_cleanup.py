@@ -123,6 +123,8 @@ def _wildcard_cleanup_plan(item: Dict[str, Any], now: datetime) -> Tuple[List[Di
     for child in _iter_descendants(parent):
         if not child.is_file():
             continue
+        if _is_durable_scripts_path(child):
+            continue
         try:
             child_stat = child.stat()
         except OSError:
@@ -149,11 +151,16 @@ def _wildcard_cleanup_plan(item: Dict[str, Any], now: datetime) -> Tuple[List[Di
     removable_dirs: Set[Path] = set()
     dirs = [p for p in _iter_descendants(parent) if p.is_dir()]
     for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        if _is_durable_scripts_path(d):
+            continue
         try:
             children = list(d.iterdir())
         except OSError:
             continue
-        if children and all(child in removable_files or child in removable_dirs for child in children):
+        if children and all(
+            child in removable_files or child in removable_dirs
+            for child in children
+        ):
             removable_dirs.add(d)
 
     return auto_files, sorted(removable_dirs, key=lambda p: len(p.parts), reverse=True)
@@ -246,7 +253,7 @@ ALLOWED_CATEGORIES = {
 
 _EMPTY_DIR_PROTECTED_TOP_LEVEL = frozenset({
     "logs", "memories", "sessions", "cron", "cronjobs",
-    "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
+    "cache", "scripts", "skills", "plugins", "disk-cleanup", "optional-skills",
     "hermes-agent", "backups", "profiles", ".worktrees",
 })
 
@@ -286,6 +293,28 @@ def _is_protected_cron_path(p: Path) -> bool:
             _PROTECTED_CRON_PATHS.add(str(base / ".tick.lock"))
     resolved = str(p.resolve())
     return resolved in _PROTECTED_CRON_PATHS
+
+
+def _is_durable_scripts_path(path: Path) -> bool:
+    """Return True for durable user scripts under the active/default profile.
+
+    ``HERMES_HOME/scripts`` is the active profile's scripts directory. A
+    default home can also contain profile homes under
+    ``HERMES_HOME/profiles/<name>/scripts``.
+    """
+    try:
+        rel = path.resolve().relative_to(get_hermes_home())
+    except (ValueError, OSError):
+        return False
+    parts = rel.parts
+    return (
+        (len(parts) >= 1 and parts[0] == "scripts")
+        or (
+            len(parts) >= 3
+            and parts[0] == "profiles"
+            and parts[2] == "scripts"
+        )
+    )
 
 
 def fmt_size(n: float) -> str:
@@ -364,6 +393,9 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
 
     for item in tracked:
         if _is_wildcard_path_str(item["path"]):
+            parent = _wildcard_parent_from_str(item["path"])
+            if _is_durable_scripts_path(parent):
+                continue
             auto_files, removable_dirs = _wildcard_cleanup_plan(item, now)
             auto.extend(auto_files)
             auto.extend({
@@ -377,6 +409,8 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
 
         p = Path(item["path"])
         if not p.exists():
+            continue
+        if _is_durable_scripts_path(p):
             continue
         age = _age_days_from_timestamp(item["timestamp"], now)
         cat = item["category"]
@@ -430,6 +464,12 @@ def quick() -> Dict[str, Any]:
             if not parent.exists():
                 _log(f"STALE: {item['path']} (removed from tracking)")
                 continue
+            if _is_durable_scripts_path(parent):
+                _log(
+                    f"SKIP durable scripts wildcard: {item['path']} "
+                    "(removed from tracking)"
+                )
+                continue
 
             auto_files, removable_dirs = _wildcard_cleanup_plan(item, now)
             for file_item in auto_files:
@@ -460,6 +500,10 @@ def quick() -> Dict[str, Any]:
 
         if not p.exists():
             _log(f"STALE: {p} (removed from tracking)")
+            continue
+
+        if _is_durable_scripts_path(p):
+            _log(f"SKIP durable scripts path: {p} (removed from tracking)")
             continue
 
         if _is_legacy_auto_delete_dir(item["path"], cat):
@@ -713,6 +757,8 @@ def guess_category(path: Path) -> Optional[str]:
     try:
         rel = path.resolve().relative_to(hermes_home)
         top = rel.parts[0] if rel.parts else ""
+        if _is_durable_scripts_path(path):
+            return None
         if len(rel.parts) >= 3 and rel.parts[:2] == ("cron", "output"):
             return "cron-output"
         if top in {

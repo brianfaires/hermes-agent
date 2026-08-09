@@ -133,6 +133,14 @@ class TestGuessCategory:
         # Even though it matches test_* pattern, logs/ is excluded.
         assert dg.guess_category(p) is None
 
+    def test_profile_scripts_test_file_returns_none(self, _isolate_env):
+        dg = _load_lib()
+        scripts_dir = _isolate_env / "profiles" / "worker" / "scripts"
+        scripts_dir.mkdir(parents=True)
+        p = scripts_dir / "test_cron_calendar_recurring_sync.py"
+        p.write_text("x")
+        assert dg.guess_category(p) is None
+
     def test_cron_output_subtree_categorised(self, _isolate_env):
         dg = _load_lib()
         # Only files under ``cron/output/`` are disposable run artifacts.
@@ -336,6 +344,80 @@ class TestStaleCronEntryMigration:
 
 
 class TestTrackForgetQuick:
+    def test_quick_drops_stale_test_entry_for_active_scripts_file(self, _isolate_env):
+        dg = _load_lib()
+        script = _isolate_env / "scripts" / "test_cleanup_job.py"
+        script.parent.mkdir()
+        script.write_text("print('keep')\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(script),
+            "category": "test",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": script.stat().st_size,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert script.exists()
+        assert dg.load_tracked() == []
+
+    def test_quick_drops_stale_test_entry_for_nested_profile_scripts_file(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        script = (
+            _isolate_env
+            / "profiles"
+            / "worker"
+            / "scripts"
+            / "test_cleanup_job.py"
+        )
+        script.parent.mkdir(parents=True)
+        script.write_text("print('keep')\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(script),
+            "category": "test",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": script.stat().st_size,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert script.exists()
+        assert dg.load_tracked() == []
+
+    def test_quick_drops_stale_wildcard_for_nested_profile_scripts(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        scripts_dir = _isolate_env / "profiles" / "worker" / "scripts"
+        scripts_dir.mkdir(parents=True)
+        script = scripts_dir / "test_cleanup_job.py"
+        script.write_text("print('keep')\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": f"{scripts_dir}/*",
+            "category": "test",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert script.exists()
+        assert dg.load_tracked() == []
+
     def test_track_then_quick_deletes_test(self, _isolate_env):
         dg = _load_lib()
         p = _isolate_env / "test_a.py"
@@ -517,6 +599,26 @@ class TestStatus:
 
 
 class TestDryRun:
+    def test_dry_run_omits_stale_test_entry_for_scripts_file(self, _isolate_env):
+        dg = _load_lib()
+        script = _isolate_env / "scripts" / "test_cleanup_job.py"
+        script.parent.mkdir()
+        script.write_text("print('keep')\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(script),
+            "category": "test",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": script.stat().st_size,
+        }]))
+
+        auto, prompt = dg.dry_run()
+
+        assert auto == []
+        assert prompt == []
+
     def test_classifies_by_category(self, _isolate_env):
         dg = _load_lib()
         test_f = _isolate_env / "test_x.py"
@@ -620,6 +722,30 @@ class TestOnSessionEndHook:
         assert p.exists()
         pi._on_session_end(session_id="s1", completed=True, interrupted=False)
         assert not p.exists(), "test file should be auto-deleted"
+
+    def test_write_file_durable_scripts_test_file_persists(self, _isolate_env):
+        pi = _load_plugin_init()
+        p = _isolate_env / "scripts" / "test_cron_calendar_recurring_sync.py"
+        p.parent.mkdir()
+        p.write_text("x")
+        pi._on_post_tool_call(
+            tool_name="write_file",
+            args={"path": str(p), "content": "x"},
+            result="OK",
+            task_id="", session_id="s-durable-script",
+        )
+
+        pi._on_session_end(
+            session_id="s-durable-script",
+            completed=True,
+            interrupted=False,
+        )
+
+        assert p.exists(), "durable scripts/test_*.py file must not be deleted"
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        if tracked_file.exists():
+            data = json.loads(tracked_file.read_text())
+            assert all(Path(item["path"]) != p.resolve() for item in data)
 
     def test_noop_when_no_test_tracked(self, _isolate_env):
         pi = _load_plugin_init()
