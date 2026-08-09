@@ -1071,9 +1071,13 @@ def handle_function_call(
         task_id: Unique identifier for terminal/browser session isolation.
         user_task: The user's original task (for browser_snapshot context).
         enabled_tools: Tool names enabled for this session.  When provided,
-                       execute_code uses this list to determine which sandbox
-                       tools to generate.  Falls back to the process-global
-                       ``_last_resolved_tool_names`` for backward compat.
+                       non-bridge calls whose tool name is outside the list are
+                       rejected before request middleware, hooks, or registry
+                       dispatch can observe them. ``execute_code`` also uses
+                       this list to determine which sandbox tools to generate.
+                       ``None`` preserves legacy unrestricted dispatch and
+                       falls back to the process-global
+                       ``_last_resolved_tool_names`` for sandbox generation.
         enabled_toolsets: The session's enabled toolsets.  Used to scope the
                        Tool Search bridge catalog so ``tool_search`` /
                        ``tool_describe`` / ``tool_call`` only see and invoke
@@ -1102,6 +1106,11 @@ def handle_function_call(
         from tools import tool_search as _ts_mod  # noqa: F401
     except Exception:
         _ts_mod = None
+
+    if enabled_tools is not None and function_name not in set(enabled_tools):
+        return json.dumps({
+            "error": f"{function_name} is not available in this session",
+        }, ensure_ascii=False)
 
     if _ts_mod is not None and _ts_mod.is_bridge_tool(function_name):
         try:
@@ -1166,7 +1175,7 @@ def handle_function_call(
                 tool_call_id=tool_call_id,
                 session_id=session_id,
                 user_task=user_task,
-                enabled_tools=enabled_tools,
+                enabled_tools=[underlying_name],
                 skip_pre_tool_call_hook=skip_pre_tool_call_hook,
                 skip_tool_request_middleware=skip_tool_request_middleware,
                 tool_request_middleware_trace=list(_tool_middleware_trace),

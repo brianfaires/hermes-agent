@@ -1,0 +1,11 @@
+name: google_workspace_broker
+version: 0.1.0
+description: "Capability-isolated Google Workspace plugin using a local Unix-socket broker. The plugin owns no credentials or tokens."
+author: NousResearch
+kind: backend
+provides_tools:
+  - google_calendar_read
+  - google_calendar_manage
+  - google_gmail_read
+  - google_gmail_labels
+  - google_gmail_drafts

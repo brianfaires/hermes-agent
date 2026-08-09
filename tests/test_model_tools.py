@@ -30,6 +30,191 @@ class TestHandleFunctionCall:
         assert "error" in result
         assert "totally_fake_tool_xyz" in result["error"]
 
+    def test_enabled_tools_restricts_direct_non_execute_code_dispatch(self, monkeypatch):
+        dispatch_called = False
+
+        def fake_dispatch(*args, **kwargs):
+            nonlocal dispatch_called
+            dispatch_called = True
+            return '{"ok":true}'
+
+        monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
+
+        result = json.loads(handle_function_call(
+            "web_search",
+            {"q": "test"},
+            enabled_tools=["read_file"],
+        ))
+
+        assert "not available" in result["error"]
+        assert not dispatch_called
+
+    def test_enabled_tools_rejects_before_request_middleware_and_registry_dispatch(self, monkeypatch):
+        calls = []
+
+        def fake_apply(*args, **kwargs):
+            calls.append("request_middleware")
+            raise AssertionError("request middleware must not run for forged disabled tools")
+
+        def fake_dispatch(*args, **kwargs):
+            calls.append("registry_dispatch")
+            raise AssertionError("registry dispatch must not run for forged disabled tools")
+
+        monkeypatch.setattr("hermes_cli.middleware.apply_tool_request_middleware", fake_apply)
+        monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
+
+        result = json.loads(handle_function_call(
+            "web_search",
+            {"q": "test"},
+            enabled_tools=["read_file"],
+        ))
+
+        assert "not available" in result["error"]
+        assert calls == []
+
+    def test_enabled_tools_none_preserves_backward_compatible_dispatch(self, monkeypatch):
+        seen = {}
+
+        def fake_dispatch(tool_name, args, **kwargs):
+            seen["call"] = (tool_name, args, kwargs)
+            return '{"ok":true}'
+
+        monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
+
+        result = json.loads(handle_function_call("web_search", {"q": "test"}, enabled_tools=None))
+
+        assert result == {"ok": True}
+        assert seen["call"][0] == "web_search"
+
+    def test_tool_call_allows_valid_deferred_tool_with_bridge_enabled_tools(self, monkeypatch):
+        from tools import registry as tool_registry
+        from tools import tool_search
+
+        tool_name = "deferred_regression_tool"
+        toolset = "deferred_regression_toolset"
+        tool_registry.registry.deregister(tool_name)
+        try:
+            tool_registry.registry.register(
+                name=tool_name,
+                toolset=toolset,
+                schema={
+                    "name": tool_name,
+                    "description": "Deferred regression tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "integer"}},
+                    },
+                },
+                handler=lambda args, **kwargs: json.dumps({"ok": args["value"]}),
+            )
+            monkeypatch.setattr(
+                tool_search,
+                "load_config",
+                lambda: tool_search.ToolSearchConfig.from_raw({"enabled": "on"}),
+            )
+
+            result = json.loads(handle_function_call(
+                tool_search.TOOL_CALL_NAME,
+                {"name": tool_name, "arguments": {"value": 7}},
+                enabled_tools=[
+                    tool_search.TOOL_SEARCH_NAME,
+                    tool_search.TOOL_DESCRIBE_NAME,
+                    tool_search.TOOL_CALL_NAME,
+                ],
+                enabled_toolsets=[toolset],
+            ))
+
+            assert result == {"ok": 7}
+        finally:
+            tool_registry.registry.deregister(tool_name)
+
+    def test_tool_call_disabled_by_enabled_tools_rejects_before_underlying_dispatch(self, monkeypatch):
+        from tools import registry as tool_registry
+        from tools import tool_search
+
+        tool_name = "disabled_bridge_deferred_regression_tool"
+        toolset = "disabled_bridge_deferred_regression_toolset"
+        calls = []
+        tool_registry.registry.deregister(tool_name)
+
+        def handler(args, **kwargs):
+            calls.append(("handler", args, kwargs))
+            raise AssertionError("underlying handler must not run for disabled tool_call bridge")
+
+        try:
+            tool_registry.registry.register(
+                name=tool_name,
+                toolset=toolset,
+                schema={
+                    "name": tool_name,
+                    "description": "Disabled bridge regression tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                handler=handler,
+            )
+            monkeypatch.setattr(
+                tool_search,
+                "load_config",
+                lambda: tool_search.ToolSearchConfig.from_raw({"enabled": "on"}),
+            )
+
+            result = json.loads(handle_function_call(
+                tool_search.TOOL_CALL_NAME,
+                {"name": tool_name, "arguments": {}},
+                enabled_tools=[
+                    tool_search.TOOL_SEARCH_NAME,
+                    tool_search.TOOL_DESCRIBE_NAME,
+                ],
+                enabled_toolsets=[toolset],
+            ))
+
+            assert "not available" in result["error"]
+            assert calls == []
+        finally:
+            tool_registry.registry.deregister(tool_name)
+
+    def test_direct_deferred_tool_dispatch_still_rejects_bridge_only_enabled_tools(self, monkeypatch):
+        from tools import registry as tool_registry
+        from tools import tool_search
+
+        tool_name = "forged_deferred_regression_tool"
+        toolset = "forged_deferred_regression_toolset"
+        dispatch_called = False
+        tool_registry.registry.deregister(tool_name)
+
+        def handler(args, **kwargs):
+            nonlocal dispatch_called
+            dispatch_called = True
+            return json.dumps({"ok": True})
+
+        try:
+            tool_registry.registry.register(
+                name=tool_name,
+                toolset=toolset,
+                schema={
+                    "name": tool_name,
+                    "description": "Forged deferred regression tool",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                handler=handler,
+            )
+
+            result = json.loads(handle_function_call(
+                tool_name,
+                {},
+                enabled_tools=[
+                    tool_search.TOOL_SEARCH_NAME,
+                    tool_search.TOOL_DESCRIBE_NAME,
+                    tool_search.TOOL_CALL_NAME,
+                ],
+                enabled_toolsets=[toolset],
+            ))
+
+            assert "not available" in result["error"]
+            assert not dispatch_called
+        finally:
+            tool_registry.registry.deregister(tool_name)
+
     def test_exception_returns_json_error(self):
         # Even if something goes wrong, should return valid JSON
         result = handle_function_call("web_search", None)  # None args may cause issues
