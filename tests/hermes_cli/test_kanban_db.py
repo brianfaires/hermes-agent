@@ -1196,6 +1196,146 @@ def test_max_runtime_uses_current_run_start_after_retry(kanban_home, monkeypatch
         assert kb.get_task(conn, t).status == "running"
 
 
+def test_max_runtime_defers_when_live_worker_survives_termination(
+    kanban_home, monkeypatch,
+):
+    """A max-runtime worker that survives SIGTERM/SIGKILL keeps ownership."""
+    import json
+    import signal
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+    signals: list[int] = []
+
+    def _signal(_pid, sig):
+        signals.append(sig)
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="wedged", assignee="worker", max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        timed_out = kb.enforce_max_runtime(conn, signal_fn=_signal)
+
+        assert timed_out == []
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
+        assert task.claim_lock is not None
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'reclaim_deferred'",
+            (t,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload"])
+        assert payload["reason"] == "max_runtime_worker_alive"
+        assert payload["termination_attempted"] is True
+        assert payload["host_local"] is True
+        assert payload["terminated"] is False
+
+
+def test_max_runtime_later_tick_times_out_after_deferred_worker_dies(
+    kanban_home, monkeypatch,
+):
+    """A deferred max-runtime reclaim retries, then times out normally once dead."""
+    alive = {"value": True}
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: alive["value"])
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="eventually-dead", assignee="worker",
+            max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        first = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
+        assert first == []
+        assert kb.get_task(conn, t).status == "running"
+
+        alive["value"] = False
+        second = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
+
+        assert second == [t]
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert task.worker_pid is None
+        assert task.consecutive_failures == 1
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+        assert "reclaim_deferred" in kinds
+        assert "timed_out" in kinds
+
+
+def test_dispatch_does_not_spawn_replacement_for_live_max_runtime_worker(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """dispatch_once must not create a second writer while old PID is alive."""
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(kb.os, "kill", lambda _pid, _sig: None)
+    spawned: list[str] = []
+
+    def _spawn(task, _workspace):
+        spawned.append(task.id)
+        return 67890
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="do-not-duplicate", assignee="worker",
+            max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        result = kb.dispatch_once(conn, spawn_fn=_spawn)
+
+        assert result.timed_out == []
+        assert spawned == []
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
+        assert kb.latest_run(conn, t).id == run_id
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+        assert "reclaim_deferred" in kinds
+        assert "timed_out" not in kinds
+
+
 def test_heartbeat_extends_claim(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
