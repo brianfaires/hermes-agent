@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -373,11 +375,9 @@ def test_bridge_create_and_update_forward_complete_managed_snapshots(
     captured = []
     snapshot = job(marker="preserved", __profile_home="/untrusted/source")
     monkeypatch.setattr(bridge, "_enabled", lambda: True)
-    monkeypatch.setattr(bridge, "OPS_RUNNER", tmp_path / "runner.py")
     monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
     monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    bridge.OPS_RUNNER.write_text("# runner")
     monkeypatch.setattr(
         bridge.subprocess,
         "run",
@@ -387,13 +387,289 @@ def test_bridge_create_and_update_forward_complete_managed_snapshots(
 
     handler(snapshot)
 
-    expected_snapshot = {key: value for key, value in snapshot.items() if key != "__profile_home"}
-    expected_snapshot["__profile"] = "ops"
+    revision = captured[0]["job"]["record_revision"]
+    assert len(revision) == 64
+    int(revision, 16)
     assert captured == [{
         "operation": operation,
-        "job": expected_snapshot,
+        "job": {
+            "__profile": "ops",
+            "id": "job1",
+            "enabled": True,
+            "state": "scheduled",
+            "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+            "schedule_display": "0 9 * * *",
+            "record_revision": revision,
+        },
     }]
     assert "__profile_home" not in captured[0]["job"]
+    assert "marker" not in captured[0]["job"]
+    assert "name" not in captured[0]["job"]
+
+
+def test_bridge_update_invokes_authoritative_ops_relay_with_redacted_description_metadata(
+    monkeypatch, tmp_path
+):
+    captured = {}
+    private_marker = "PRIVATE-MARKER-12345"
+    snapshot = job(
+        id="job1",
+        name="Operator supplied title",
+        name_is_explicit=True,
+        prompt=f"private prompt {private_marker}",
+        prompt_path="/home/brian/private/prompt.md",
+        origin={"platform": "telegram", "chat_id": "private-chat"},
+        deliver="discord",
+        skills=["ops-skill"],
+        skill="ops-skill",
+        model="gpt-5",
+        provider="openai",
+        script="collect.py",
+        no_agent=True,
+        enabled_toolsets=["web", "terminal"],
+        repeat={"times": 3, "completed": 1},
+        base_url=f"https://example.test/{private_marker}",
+        last_error=f"failed with {private_marker}",
+        __profile_home="/untrusted/source",
+    )
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.update({"args": args, "kwargs": kwargs})
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    bridge.on_update(snapshot)
+
+    args = captured["args"][0]
+    payload = __import__("json").loads(captured["kwargs"]["input"])
+    assert args[:2] == [bridge.sys.executable, str(bridge.OPS_RECONCILER)]
+    assert args[2:] == ["--single-job"]
+    assert payload == {
+        "operation": "update",
+        "job": {
+            "id": "job1",
+            "name": "Operator supplied title",
+            "name_is_explicit": True,
+            "enabled": True,
+            "state": "scheduled",
+            "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+            "schedule_display": "0 9 * * *",
+            "skills": ["ops-skill"],
+            "skill": "ops-skill",
+            "model": "gpt-5",
+            "provider": "openai",
+            "script": "collect.py",
+            "no_agent": True,
+            "repeat": {"times": 3, "completed": 1},
+            "deliver": "discord",
+            "enabled_toolsets": ["web", "terminal"],
+            "record_revision": payload["job"]["record_revision"],
+            "__profile": "ops",
+        },
+    }
+    assert len(payload["job"]["record_revision"]) == 64
+    int(payload["job"]["record_revision"], 16)
+    serialized = __import__("json").dumps(payload)
+    assert "private prompt" not in serialized
+    assert "prompt_path" not in serialized
+    assert "private-chat" not in serialized
+    assert private_marker not in serialized
+    assert "__profile_home" not in serialized
+
+
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        "telegram:-1001234567890:42,discord:channel-123,email:person@example.test",
+        ["telegram:-1001234567890:42", "discord:channel-123", "email:person@example.test"],
+        ("telegram:-1001234567890:42", "discord:channel-123", "email:person@example.test"),
+    ],
+)
+def test_bridge_summarizes_targeted_and_comma_delivery_without_ids(
+    monkeypatch, tmp_path, delivery
+):
+    captured = {}
+    snapshot = job(
+        deliver=delivery,
+        origin={"platform": "telegram", "chat_id": "-1001234567890", "topic_id": "42"},
+    )
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.update({"payload": json.loads(kwargs["input"])})
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    bridge.on_update(snapshot)
+
+    payload = captured["payload"]
+    assert payload["job"]["deliver"] == "telegram,discord,email"
+    assert len(payload["job"]["record_revision"]) == 64
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "-1001234567890" not in serialized
+    assert "channel-123" not in serialized
+    assert "person@example.test" not in serialized
+    assert "topic_id" not in serialized
+
+
+def test_bridge_normalizes_managed_absolute_script_and_rejects_escapes(
+    monkeypatch, tmp_path
+):
+    managed_script = tmp_path / "scripts" / "reports" / "daily.py"
+    managed_script.parent.mkdir(parents=True)
+    managed_script.write_text("print('ok')\n")
+    outside_script = tmp_path / "outside.py"
+    outside_script.write_text("print('outside')\n")
+    captured = []
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.append(json.loads(kwargs["input"]))
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    bridge.on_update(job(script=str(managed_script)))
+    bridge.on_update(job(id="job2", script=str(outside_script)))
+    bridge.on_update(job(id="job3", script="../outside.py"))
+
+    assert captured[0]["job"]["script"] == "scripts/reports/daily.py"
+    assert "script" not in captured[1]["job"]
+    assert "script" not in captured[2]["job"]
+
+
+def test_bridge_record_revision_tracks_only_safe_acceptance_metadata(
+    monkeypatch, tmp_path
+):
+    private_marker = "PRIVATE-MARKER-67890"
+    base = job(
+        prompt=f"do not serialize {private_marker}",
+        prompt_path="/tmp/private-prompt.md",
+        origin={"platform": "telegram", "chat_id": "chat-123", "topic_id": "topic-9"},
+        credentials={"api_key": private_marker},
+        base_url=f"https://example.test/{private_marker}",
+        root="/tmp/arbitrary-root",
+        last_error=f"failed {private_marker}",
+        deliver="telegram:chat-123:topic-9",
+        skills=["alpha"],
+        skill="alpha",
+        model="gpt-5",
+        provider="openai",
+        enabled_toolsets=["web"],
+        script="daily.py",
+        no_agent=True,
+        repeat={"times": 3, "completed": 1},
+    )
+    captured = []
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.append(json.loads(kwargs["input"])["job"])
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    variants = {
+        "same": {},
+        "delivery_target": {"deliver": "telegram:chat-456:topic-9"},
+        "skills": {"skills": ["beta"]},
+        "skill": {"skill": "beta"},
+        "model": {"model": "gpt-5.1"},
+        "provider": {"provider": "anthropic"},
+        "enabled_toolsets": {"enabled_toolsets": ["terminal"]},
+        "script": {"script": "weekly.py"},
+        "no_agent": {"no_agent": False},
+        "repeat": {"repeat": {"times": 4, "completed": 1}},
+        "prompt": {"prompt": f"changed prompt {private_marker}"},
+        "prompt_path": {"prompt_path": "/tmp/other-private-prompt.md"},
+        "origin": {"origin": {"platform": "telegram", "chat_id": "chat-999"}},
+        "credentials": {"credentials": {"token": private_marker}},
+        "base_url": {"base_url": f"https://other.example.test/{private_marker}"},
+        "root": {"root": "/tmp/other-root"},
+        "error_text": {"last_error": f"other failure {private_marker}"},
+    }
+    for name, overrides in variants.items():
+        bridge.on_update(job(**(base | overrides | {"id": name})))
+
+    revisions = {item["id"]: item["record_revision"] for item in captured}
+    assert len(revisions["same"]) == hashlib.sha256().digest_size * 2
+    assert int(revisions["same"], 16) >= 0
+    for key in (
+        "delivery_target",
+        "skills",
+        "skill",
+        "model",
+        "provider",
+        "enabled_toolsets",
+        "script",
+        "no_agent",
+        "repeat",
+    ):
+        assert revisions[key] != revisions["same"]
+    for key in (
+        "prompt",
+        "prompt_path",
+        "origin",
+        "credentials",
+        "base_url",
+        "root",
+        "error_text",
+    ):
+        assert revisions[key] == revisions["same"]
+
+    serialized = json.dumps(captured, sort_keys=True)
+    assert private_marker not in serialized
+    assert "chat-123" not in serialized
+    assert "topic-9" not in serialized
+    assert "private-prompt" not in serialized
+    assert "arbitrary-root" not in serialized
+    assert "other failure" not in serialized
+
+
+def test_bridge_ignores_legacy_disabled_calendar_sync_config(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: captured.append(__import__("json").loads(kwargs["input"]))
+        or bridge.subprocess.CompletedProcess(args, 0),
+    )
+
+    bridge.on_remove(job())
+
+    revision = captured[0]["job"]["record_revision"]
+    assert len(revision) == 64
+    int(revision, 16)
+    assert captured == [{
+        "operation": "remove",
+        "job": {
+            "__profile": "ops",
+            "id": "job1",
+            "enabled": True,
+            "state": "scheduled",
+            "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+            "schedule_display": "0 9 * * *",
+            "record_revision": revision,
+        },
+    }]
 
 
 def test_bridge_complete_forwards_managed_output_and_duration(monkeypatch, tmp_path):
@@ -431,6 +707,23 @@ def test_bridge_rejects_absolute_job_id_output_escape(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path / "managed"})
 
     assert bridge._safe_output_file(str(output), malicious_job) is None
+
+
+def test_bridge_rejects_unsafe_job_id_before_ops_relay(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(bridge, "_enabled", lambda: True)
+    monkeypatch.setattr(bridge, "MANAGED_HOMES", {tmp_path})
+    monkeypatch.setattr(bridge, "MANAGED_PROFILES", {tmp_path: "ops"})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    bridge.on_update(job(id="../escaped"))
+
+    assert calls == []
 
 
 def test_bridge_logs_failed_runner_status_without_stderr(monkeypatch, tmp_path, caplog):
