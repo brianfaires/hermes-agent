@@ -616,6 +616,50 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
+def _available_alternative_web_provider(current_name: str, capability: str):
+    """Return an available provider for this capability, excluding current.
+
+    Used only for in-flight provider exhaustion recovery. Explicit configured
+    providers still win during normal resolution; this helper is intentionally
+    called after Tavily has returned HTTP 429 for the current operation.
+    """
+    try:
+        from agent.web_search_registry import _LEGACY_PREFERENCE, list_providers
+
+        providers = {
+            provider.name: provider
+            for provider in list_providers()
+            if provider.name != current_name
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("web provider fallback lookup failed: %s", exc)
+        return None
+
+    def _supports(provider) -> bool:
+        if capability == "search":
+            return bool(provider.supports_search())
+        if capability == "extract":
+            return bool(provider.supports_extract())
+        return False
+
+    def _available(provider) -> bool:
+        try:
+            return bool(provider.is_available())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("web fallback provider %s unavailable: %s", provider.name, exc)
+            return False
+
+    ordered_names = [
+        *[name for name in _LEGACY_PREFERENCE if name in providers],
+        *sorted(name for name in providers if name not in _LEGACY_PREFERENCE),
+    ]
+    for name in ordered_names:
+        provider = providers[name]
+        if _supports(provider) and _available(provider):
+            return provider
+    return None
+
+
 def web_search_tool(query: str, limit: int = 5) -> str:
     """
     Search the web for information using available search API backend.
@@ -720,7 +764,25 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            response_data = provider.search(query, limit)
+            try:
+                response_data = provider.search(query, limit)
+            except Exception as exc:
+                from plugins.web.tavily.provider import TavilyQuotaExhaustedError
+
+                if provider.name != "tavily" or not isinstance(exc, TavilyQuotaExhaustedError):
+                    raise
+                fallback = _available_alternative_web_provider(provider.name, "search")
+                if fallback is None:
+                    response_data = {
+                        "success": False,
+                        "error": "Tavily search failed: HTTP 429",
+                    }
+                else:
+                    logger.info(
+                        "Tavily search returned HTTP 429; retrying via %s",
+                        fallback.name,
+                    )
+                    response_data = fallback.search(query, limit)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -934,14 +996,42 @@ async def web_extract_tool(
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
             import inspect
-            if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
-            else:
-                # Run sync extract() in a thread so we don't block the
-                # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
-                )
+            try:
+                if inspect.iscoroutinefunction(provider.extract):
+                    results = await provider.extract(safe_urls, format=format)
+                else:
+                    # Run sync extract() in a thread so we don't block the
+                    # event loop on network I/O.
+                    results = await asyncio.to_thread(
+                        provider.extract, safe_urls, format=format
+                    )
+            except Exception as exc:
+                from plugins.web.tavily.provider import TavilyQuotaExhaustedError
+
+                if provider.name != "tavily" or not isinstance(exc, TavilyQuotaExhaustedError):
+                    raise
+                fallback = _available_alternative_web_provider(provider.name, "extract")
+                if fallback is None:
+                    results = [
+                        {
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "error": "Tavily extract failed: HTTP 429",
+                        }
+                        for url in safe_urls
+                    ]
+                else:
+                    logger.info(
+                        "Tavily extract returned HTTP 429; retrying via %s",
+                        fallback.name,
+                    )
+                    if inspect.iscoroutinefunction(fallback.extract):
+                        results = await fallback.extract(safe_urls, format=format)
+                    else:
+                        results = await asyncio.to_thread(
+                            fallback.extract, safe_urls, format=format
+                        )
 
         # Reconstruct the original input order across invalid, blocked, and
         # provider-processed entries. Providers are expected to preserve the

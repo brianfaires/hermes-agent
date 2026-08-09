@@ -32,6 +32,10 @@ from agent.web_search_provider import WebSearchProvider
 logger = logging.getLogger(__name__)
 
 
+class TavilyQuotaExhaustedError(RuntimeError):
+    """Raised when Tavily reports quota/rate exhaustion via HTTP 429."""
+
+
 def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """POST to the Tavily API and return the parsed JSON response.
 
@@ -153,6 +157,8 @@ class TavilyWebSearchProvider(WebSearchProvider):
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Execute a Tavily search."""
         try:
+            import httpx
+
             from tools.interrupt import is_interrupted
 
             if is_interrupted():
@@ -171,6 +177,11 @@ class TavilyWebSearchProvider(WebSearchProvider):
             return _normalize_tavily_search_results(raw)
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                raise TavilyQuotaExhaustedError("Tavily HTTP 429") from exc
+            logger.warning("Tavily search error: %s", exc)
+            return {"success": False, "error": f"Tavily search failed: {exc}"}
         except Exception as exc:  # noqa: BLE001 — including httpx errors
             logger.warning("Tavily search error: %s", exc)
             return {"success": False, "error": f"Tavily search failed: {exc}"}
@@ -182,6 +193,8 @@ class TavilyWebSearchProvider(WebSearchProvider):
         list-of-results shape; per-URL failures become items with ``error``.
         """
         try:
+            import httpx
+
             from tools.interrupt import is_interrupted
 
             if is_interrupted():
@@ -202,6 +215,14 @@ class TavilyWebSearchProvider(WebSearchProvider):
             )
         except ValueError as exc:
             return [{"url": u, "title": "", "content": "", "error": str(exc)} for u in urls]
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 429:
+                raise TavilyQuotaExhaustedError("Tavily HTTP 429") from exc
+            logger.warning("Tavily extract error: %s", exc)
+            return [
+                {"url": u, "title": "", "content": "", "error": f"Tavily extract failed: {exc}"}
+                for u in urls
+            ]
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tavily extract error: %s", exc)
             return [

@@ -493,6 +493,162 @@ class TestDispatchersTriggerPluginDiscovery:
             restore()
 
 
+class TestTavilyQuotaFallback:
+    """Tavily HTTP 429 exhaustion should reroute only the current web call
+    through another already-available provider at the dispatcher seam.
+    """
+
+    def _clear_registry(self):
+        from agent import web_search_registry
+
+        with web_search_registry._lock:
+            original = dict(web_search_registry._providers)
+            web_search_registry._providers.clear()
+
+        def _restore():
+            with web_search_registry._lock:
+                web_search_registry._providers.clear()
+                web_search_registry._providers.update(original)
+
+        return _restore
+
+    def _http_status_error(self, status_code: int):
+        import httpx
+
+        request = httpx.Request("POST", "https://api.tavily.com/search")
+        response = httpx.Response(status_code, request=request, text="rate limit")
+        return httpx.HTTPStatusError(
+            f"{status_code} response", request=request, response=response
+        )
+
+    def test_search_falls_back_from_tavily_429_to_available_provider(self, monkeypatch):
+        from agent.web_search_provider import WebSearchProvider
+        from agent.web_search_registry import register_provider
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+        from tools import web_tools
+
+        class FakeExa(WebSearchProvider):
+            @property
+            def name(self) -> str:
+                return "exa"
+
+            @property
+            def display_name(self) -> str:
+                return "Fake Exa"
+
+            def is_available(self) -> bool:
+                return True
+
+            def supports_search(self) -> bool:
+                return True
+
+            def search(self, query, limit=5):
+                return {"success": True, "data": {"web": [
+                    {
+                        "title": "fallback",
+                        "url": "https://fallback.example",
+                        "description": query,
+                        "position": 1,
+                    }
+                ]}}
+
+        restore = self._clear_registry()
+        try:
+            register_provider(TavilyWebSearchProvider())
+            register_provider(FakeExa())
+            monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+            monkeypatch.setattr(
+                web_tools, "_load_web_config", lambda: {"search_backend": "tavily"}
+            )
+            monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+            monkeypatch.setattr(
+                web_tools.httpx,
+                "post",
+                lambda *a, **kw: (_ for _ in ()).throw(self._http_status_error(429)),
+            )
+
+            result = json.loads(web_tools.web_search_tool("quota case", limit=2))
+
+            assert result["success"] is True
+            assert result["data"]["web"][0]["title"] == "fallback"
+            assert "Tavily" not in json.dumps(result)
+        finally:
+            restore()
+
+    def test_extract_falls_back_from_tavily_429_to_available_provider(self, monkeypatch):
+        import asyncio
+
+        from agent.web_search_provider import WebSearchProvider
+        from agent.web_search_registry import register_provider
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+        from tools import web_tools
+
+        class FakeExa(WebSearchProvider):
+            @property
+            def name(self) -> str:
+                return "exa"
+
+            @property
+            def display_name(self) -> str:
+                return "Fake Exa"
+
+            def is_available(self) -> bool:
+                return True
+
+            def supports_extract(self) -> bool:
+                return True
+
+            def extract(self, urls, **kwargs):
+                return [
+                    {
+                        "url": url,
+                        "title": "fallback",
+                        "content": f"fallback content {pos}",
+                        "raw_content": f"fallback content {pos}",
+                        "metadata": {},
+                    }
+                    for pos, url in enumerate(urls)
+                ]
+
+        restore = self._clear_registry()
+        try:
+            register_provider(TavilyWebSearchProvider())
+            register_provider(FakeExa())
+
+            async def _safe_url(url):
+                return True
+
+            monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+            monkeypatch.setattr(
+                web_tools, "_load_web_config", lambda: {"extract_backend": "tavily"}
+            )
+            monkeypatch.setattr(web_tools, "async_is_safe_url", _safe_url)
+            monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+            monkeypatch.setattr(
+                web_tools.httpx,
+                "post",
+                lambda *a, **kw: (_ for _ in ()).throw(self._http_status_error(429)),
+            )
+
+            result = json.loads(asyncio.run(web_tools.web_extract_tool([
+                {"href": "https://example.com/a"},
+                {"not_url": "missing"},
+                "https://example.com/b",
+            ])))
+
+            assert [r["url"] for r in result["results"]] == [
+                "https://example.com/a",
+                "",
+                "https://example.com/b",
+            ]
+            assert result["results"][0]["title"] == "fallback"
+            assert "Invalid URL item at index 1" in result["results"][1]["error"]
+            assert result["results"][2]["title"] == "fallback"
+            assert "Tavily" not in json.dumps(result)
+        finally:
+            restore()
+
+
 class TestDisabledPluginDiagnostic:
     """#40190 follow-up: when the configured web backend names a bundled
     web plugin the user put in ``plugins.disabled``, the dispatcher must
@@ -621,4 +777,3 @@ class TestDisabledPluginDiagnostic:
             assert "No web search provider configured" not in err
         finally:
             restore()
-
