@@ -13,7 +13,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # Local development uses focused tests. Pushes to staging run the full
+    # hosted gate before the same exact commit is eligible for main.
+    branches: [main, staging]
 
 permissions:
   contents: read
