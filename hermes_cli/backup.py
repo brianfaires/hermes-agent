@@ -13,13 +13,14 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, List, Optional, cast
 
 from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
 
@@ -233,7 +234,12 @@ def _should_exclude(rel_path: Path) -> bool:
     return False
 
 
-def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> bool:
+def _should_skip_backup_file(
+    abs_path: Path,
+    rel_path: Path,
+    out_path: Optional[Path],
+    out_file_id: Optional[tuple[int, int]] = None,
+) -> bool:
     """Return True when a candidate file should not be written to a backup zip."""
     if _should_exclude(rel_path):
         return True
@@ -242,6 +248,17 @@ def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> 
     # write can copy data from outside HERMES_HOME.
     if abs_path.is_symlink():
         return True
+
+    if out_file_id is not None:
+        try:
+            file_stat = abs_path.stat()
+            if (file_stat.st_dev, file_stat.st_ino) == out_file_id:
+                return True
+        except OSError:
+            pass
+
+    if out_path is None:
+        return False
 
     try:
         return abs_path.resolve() == out_path.resolve()
@@ -296,16 +313,69 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+class _CountingWriter:
+    """Minimal binary stream wrapper that tracks bytes written by zipfile."""
+
+    def __init__(self, raw: BinaryIO):
+        self.raw = raw
+        self.bytes_written = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: bytes) -> int:
+        view = memoryview(data)
+        total = 0
+        while total < len(view):
+            written = self.raw.write(view[total:])
+            if written is None:
+                written = len(view) - total
+            if written <= 0:
+                raise OSError("backup output stream stopped accepting data")
+            total += written
+        self.bytes_written += total
+        return total
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+
 def run_backup(args) -> None:
     """Create a zip backup of the Hermes home directory."""
     hermes_root = get_default_hermes_root()
+    stream_output = getattr(args, "output", None) == "-"
+    log_stream = sys.stderr if stream_output else sys.stdout
+    stream_file_id: Optional[tuple[int, int]] = None
+    if stream_output:
+        try:
+            stdout_stat = os.fstat(sys.stdout.buffer.fileno())
+            if stat.S_ISREG(stdout_stat.st_mode):
+                stream_file_id = (stdout_stat.st_dev, stdout_stat.st_ino)
+        except (AttributeError, OSError, ValueError):
+            pass
 
     if not hermes_root.is_dir():
-        print(f"Error: Hermes home directory not found at {hermes_root}")
+        print(f"Error: Hermes home directory not found at {hermes_root}", file=log_stream)
         sys.exit(1)
 
     # Determine output path
-    if args.output:
+    out_path: Optional[Path]
+    staging_dir = hermes_root / "backups"
+    if stream_output:
+        out_path = None
+        staging_arg = getattr(args, "staging_dir", None)
+        if staging_arg:
+            staging_dir = Path(staging_arg).expanduser().resolve()
+        else:
+            # Stream mode has no output file parent. Keep SQLite snapshots off
+            # the system temp dir by defaulting to Hermes' own backup area.
+            staging_dir = hermes_root / "backups"
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Error: could not create staging directory {staging_dir}: {exc}", file=log_stream)
+            sys.exit(1)
+    elif args.output:
         out_path = Path(args.output).expanduser().resolve()
         # If user gave a directory, put the zip inside it
         if out_path.is_dir():
@@ -315,15 +385,18 @@ def run_backup(args) -> None:
         stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         out_path = Path.home() / f"hermes-backup-{stamp}.zip"
 
-    # Ensure the suffix is .zip
-    if out_path.suffix.lower() != ".zip":
-        out_path = out_path.with_suffix(out_path.suffix + ".zip")
+    if not stream_output:
+        assert out_path is not None
+        # Ensure the suffix is .zip
+        if out_path.suffix.lower() != ".zip":
+            out_path = out_path.with_suffix(out_path.suffix + ".zip")
 
-    # Ensure parent directory exists
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure parent directory exists
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = out_path.parent
 
     # Collect files
-    print(f"Scanning {display_hermes_home()} ...")
+    print(f"Scanning {display_hermes_home()} ...", file=log_stream)
     files_to_add: list[tuple[Path, Path]] = []  # (absolute, relative)
     skipped_dirs = set()
 
@@ -347,7 +420,7 @@ def run_backup(args) -> None:
             fpath = dp / fname
             rel = fpath.relative_to(hermes_root)
 
-            if _should_skip_backup_file(fpath, rel, out_path):
+            if _should_skip_backup_file(fpath, rel, out_path, stream_file_id):
                 continue
 
             files_to_add.append((fpath, rel))
@@ -377,102 +450,133 @@ def run_backup(args) -> None:
             external_to_add.append((fpath, arcname))
 
     if not files_to_add and not external_to_add:
-        print("No files to back up.")
+        print("No files to back up.", file=log_stream)
+        if stream_output:
+            # A successful zero-byte stream would let a downstream encryptor
+            # publish an artifact that can never be restored as a ZIP.
+            sys.exit(1)
         return
 
     # Create the zip
     file_count = len(files_to_add) + len(external_to_add)
-    print(f"Backing up {file_count} files ...")
+    print(f"Backing up {file_count} files ...", file=log_stream)
 
     total_bytes = 0
     errors = []
     t0 = time.monotonic()
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
-            try:
-                # Safe copy for SQLite databases (handles WAL mode)
-                if abs_path.suffix == ".db":
-                    # Stage the snapshot alongside the output zip so that the
-                    # temp file lives on the same filesystem.  The system
-                    # default (/tmp) may be a small tmpfs that cannot hold
-                    # large databases, causing silent backup incompleteness.
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".db", delete=False, dir=str(out_path.parent)
-                    ) as tmp:
-                        tmp_db = Path(tmp.name)
-                    if _safe_copy_db(abs_path, tmp_db):
-                        zf.write(tmp_db, arcname=str(rel_path))
-                        total_bytes += tmp_db.stat().st_size
-                        tmp_db.unlink(missing_ok=True)
+    zip_target: Path | _CountingWriter
+    stream_writer: Optional[_CountingWriter] = None
+    if stream_output:
+        stream_writer = _CountingWriter(sys.stdout.buffer)
+        zip_target = stream_writer
+    else:
+        assert out_path is not None
+        zip_target = out_path
+
+    try:
+        with zipfile.ZipFile(
+            cast(Any, zip_target),
+            "w",
+            zipfile.ZIP_DEFLATED,
+            compresslevel=6,
+        ) as zf:
+            for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
+                try:
+                    # Safe copy for SQLite databases (handles WAL mode)
+                    if abs_path.suffix == ".db":
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".db", delete=False, dir=str(staging_dir)
+                        ) as tmp:
+                            tmp_db = Path(tmp.name)
+                        try:
+                            if _safe_copy_db(abs_path, tmp_db):
+                                zf.write(tmp_db, arcname=str(rel_path))
+                                total_bytes += tmp_db.stat().st_size
+                            else:
+                                errors.append(f"  {rel_path}: SQLite safe copy failed")
+                                continue
+                        finally:
+                            tmp_db.unlink(missing_ok=True)
                     else:
-                        tmp_db.unlink(missing_ok=True)
-                        errors.append(f"  {rel_path}: SQLite safe copy failed")
-                        continue
-                else:
-                    zf.write(abs_path, arcname=str(rel_path))
+                        zf.write(abs_path, arcname=str(rel_path))
+                        total_bytes += abs_path.stat().st_size
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {rel_path}: {exc}")
+                    continue
+
+                # Progress every 500 files
+                if i % 500 == 0:
+                    print(f"  {i}/{file_count} files ...", file=log_stream)
+
+            # External memory-provider state, stored under the ``_external/`` arc
+            # prefix. These never include ``.db`` files in practice (config/env
+            # blobs), so a straight zf.write is fine.
+            for abs_path, arcname in external_to_add:
+                try:
+                    zf.write(abs_path, arcname=arcname)
                     total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"  {rel_path}: {exc}")
-                continue
-
-            # Progress every 500 files
-            if i % 500 == 0:
-                print(f"  {i}/{file_count} files ...")
-
-        # External memory-provider state, stored under the ``_external/`` arc
-        # prefix. These never include ``.db`` files in practice (config/env
-        # blobs), so a straight zf.write is fine.
-        for abs_path, arcname in external_to_add:
-            try:
-                zf.write(abs_path, arcname=arcname)
-                total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError, ValueError) as exc:
-                errors.append(f"  {arcname}: {exc}")
-                continue
+                except (PermissionError, OSError, ValueError) as exc:
+                    errors.append(f"  {arcname}: {exc}")
+                    continue
+    except (PermissionError, OSError, ValueError) as exc:
+        print(f"Error: backup write failed: {exc}", file=log_stream)
+        sys.exit(1)
 
     elapsed = time.monotonic() - t0
-    zip_size = out_path.stat().st_size
+    if stream_writer is not None:
+        zip_size = stream_writer.bytes_written
+    else:
+        assert out_path is not None
+        zip_size = out_path.stat().st_size
 
     # Summary
-    print()
+    target_label = "stdout" if stream_output else str(out_path)
+    print(file=log_stream)
     if errors:
-        print(f"Backup incomplete: {out_path}")
+        print(f"Backup incomplete: {target_label}", file=log_stream)
     else:
-        print(f"Backup complete: {out_path}")
-    print(f"  Files:       {file_count}")
-    print(f"  Original:    {_format_size(total_bytes)}")
-    print(f"  Compressed:  {_format_size(zip_size)}")
-    print(f"  Time:        {elapsed:.1f}s")
+        print(f"Backup complete: {target_label}", file=log_stream)
+    print(f"  Files:       {file_count}", file=log_stream)
+    print(f"  Original:    {_format_size(total_bytes)}", file=log_stream)
+    print(f"  Compressed:  {_format_size(zip_size)}", file=log_stream)
+    print(f"  Time:        {elapsed:.1f}s", file=log_stream)
 
     if external_to_add:
         print(
             f"\n  Included {len(external_to_add)} memory-provider file(s) "
-            f"stored outside {display_hermes_home()}."
+            f"stored outside {display_hermes_home()}.",
+            file=log_stream,
         )
 
     if skipped_external:
         print(
             f"\n  Skipped {len(skipped_external)} memory-provider path(s) "
-            f"outside your home directory (not portable):"
+            f"outside your home directory (not portable):",
+            file=log_stream,
         )
         for p in sorted(skipped_external)[:10]:
-            print(f"    {p}")
+            print(f"    {p}", file=log_stream)
 
     if skipped_dirs:
-        print("\n  Excluded directories:")
+        print("\n  Excluded directories:", file=log_stream)
         for d in sorted(skipped_dirs):
-            print(f"    {d}/")
+            print(f"    {d}/", file=log_stream)
 
     if errors:
-        print(f"\n  Warnings ({len(errors)} files skipped):")
+        print(f"\n  Warnings ({len(errors)} files skipped):", file=log_stream)
         for e in errors[:10]:
-            print(e)
+            print(e, file=log_stream)
         if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more")
+            print(f"  ... and {len(errors) - 10} more", file=log_stream)
+        sys.exit(1)
 
     if not errors:
-        print(f"\nRestore with: hermes import {out_path.name}")
+        if stream_output:
+            print("\nRestore by saving the stream to a zip, then run: hermes import <backup.zip>", file=log_stream)
+        else:
+            assert out_path is not None
+            print(f"\nRestore with: hermes import {out_path.name}", file=log_stream)
 
 
 # ---------------------------------------------------------------------------

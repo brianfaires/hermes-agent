@@ -1,5 +1,6 @@
 """Tests for hermes backup and import commands."""
 
+import io
 import json
 import os
 import sqlite3
@@ -75,6 +76,36 @@ def _symlink_file_or_skip(link: Path, target: Path) -> None:
         link.symlink_to(target)
     except OSError as exc:
         pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+
+class _BinaryOnlyStdout:
+    def __init__(self, buffer):
+        self.buffer = buffer
+
+    def write(self, _text):
+        raise AssertionError("backup stream mode wrote text to stdout")
+
+    def flush(self):
+        self.buffer.flush()
+
+
+class _UnseekableBytesSink:
+    def __init__(self):
+        self._buffer = io.BytesIO()
+
+    def write(self, data: bytes) -> int:
+        return self._buffer.write(data)
+
+    def flush(self) -> None:
+        pass
+
+    def getvalue(self) -> bytes:
+        return self._buffer.getvalue()
+
+
+class _PartialWriteSink(_UnseekableBytesSink):
+    def write(self, data: bytes) -> int:
+        return self._buffer.write(data[: max(1, len(data) // 3)])
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +304,12 @@ class TestBackup:
         monkeypatch.setattr(backup_mod.sqlite3, "connect", connect_with_failed_backup)
         out_zip = tmp_path / "backup.zip"
         try:
-            backup_mod.run_backup(Namespace(output=str(out_zip)))
+            with pytest.raises(SystemExit) as excinfo:
+                backup_mod.run_backup(Namespace(output=str(out_zip)))
         finally:
             writer.close()
+
+        assert excinfo.value.code == 1
 
         with zipfile.ZipFile(out_zip) as zf:
             assert "config.yaml" in zf.namelist()
@@ -317,6 +351,226 @@ class TestBackup:
         # output zip's directory rather than the system temp default.
         assert staged_dirs, "no SQLite snapshot was staged"
         assert all(d == str(out_dir) for d in staged_dirs), staged_dirs
+
+    def test_streamed_backup_bytes_are_valid_and_restorable(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stream = io.BytesIO()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(stream))
+
+        from hermes_cli.backup import run_backup, run_import
+        run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Backup complete: stdout" in captured.err
+
+        zip_path = tmp_path / "streamed.zip"
+        zip_path.write_bytes(stream.getvalue())
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            assert "config.yaml" in zf.namelist()
+            assert "state.db" not in zf.namelist()
+            assert "memory_store.db" in zf.namelist()
+
+        restored_home = tmp_path / "restored" / ".hermes"
+        restored_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(restored_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "restored")
+        monkeypatch.setattr("sys.stdout", io.StringIO())
+        run_import(Namespace(zipfile=str(zip_path), force=True))
+
+        assert (restored_home / "config.yaml").read_text() == "model:\n  provider: openrouter\n"
+        assert (restored_home / "skills" / "my-skill" / "SKILL.md").exists()
+
+    def test_stream_backup_supports_unseekable_stdout_sink(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sink = _UnseekableBytesSink()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(sink))
+
+        from hermes_cli.backup import run_backup
+        run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        with zipfile.ZipFile(io.BytesIO(sink.getvalue()), "r") as zf:
+            assert "config.yaml" in zf.namelist()
+            assert zf.read("config.yaml") == b"model:\n  provider: openrouter\n"
+
+    def test_stream_backup_retries_partial_writes(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        sink = _PartialWriteSink()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(sink))
+
+        from hermes_cli.backup import run_backup
+        run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        with zipfile.ZipFile(io.BytesIO(sink.getvalue()), "r") as zf:
+            assert zf.testzip() is None
+            assert zf.read("config.yaml") == b"model:\n  provider: openrouter\n"
+
+    def test_stream_backup_skips_redirected_output_inside_hermes(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = hermes_home / "streamed.zip"
+        with out_zip.open("wb") as stream:
+            monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(stream))
+
+            from hermes_cli.backup import run_backup
+            run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            assert zf.testzip() is None
+            assert "streamed.zip" not in zf.namelist()
+            assert zf.read("config.yaml") == b"model:\n  provider: openrouter\n"
+
+    def test_stream_backup_progress_uses_stderr_only(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+        many = hermes_home / "many"
+        many.mkdir()
+        for i in range(501):
+            (many / f"{i:03d}.txt").write_text(f"{i}\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stream = io.BytesIO()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(stream))
+
+        from hermes_cli.backup import run_backup
+        run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "500/" in captured.err
+        payload = stream.getvalue()
+        assert b"Scanning " not in payload
+        assert b"500/" not in payload
+        with zipfile.ZipFile(io.BytesIO(payload), "r") as zf:
+            assert "many/500.txt" in zf.namelist()
+
+    def test_stream_backup_uses_staging_dir_for_db_snapshots(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(io.BytesIO()))
+
+        staging_dir = tmp_path / "large-staging-volume"
+
+        import hermes_cli.backup as backup_mod
+        staged_dirs = []
+        real_ntf = backup_mod.tempfile.NamedTemporaryFile
+
+        def _spy(*a, **kw):
+            staged_dirs.append(kw.get("dir"))
+            return real_ntf(*a, **kw)
+
+        monkeypatch.setattr(backup_mod.tempfile, "NamedTemporaryFile", _spy)
+        backup_mod.run_backup(Namespace(output="-", staging_dir=str(staging_dir)))
+
+        assert staged_dirs, "no SQLite snapshot was staged"
+        assert all(d == str(staging_dir.resolve()) for d in staged_dirs), staged_dirs
+
+    def test_incomplete_stream_exits_nonzero(self, tmp_path, monkeypatch, capsys):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stream = io.BytesIO()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(stream))
+
+        import hermes_cli.backup as backup_mod
+
+        def _fail_db_snapshot(_src, _dst):
+            return False
+
+        monkeypatch.setattr(backup_mod, "_safe_copy_db", _fail_db_snapshot)
+        with pytest.raises(SystemExit) as excinfo:
+            backup_mod.run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        assert excinfo.value.code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Backup incomplete: stdout" in captured.err
+        assert "SQLite safe copy failed" in captured.err
+        assert b"Backup incomplete" not in stream.getvalue()
+
+    def test_empty_stream_exits_nonzero_without_emitting_bytes(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "__pycache__").mkdir()
+        (hermes_home / "__pycache__" / "only.pyc").write_bytes(b"cache")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        stream = io.BytesIO()
+        monkeypatch.setattr("sys.stdout", _BinaryOnlyStdout(stream))
+
+        from hermes_cli.backup import run_backup
+        with pytest.raises(SystemExit) as excinfo:
+            run_backup(Namespace(output="-", staging_dir=str(tmp_path / "stage")))
+
+        assert excinfo.value.code == 1
+        assert stream.getvalue() == b""
+
+    def test_file_backup_ignores_stream_staging_dir_and_remains_valid(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_dir = tmp_path / "backup-disk"
+        out_dir.mkdir()
+        out_zip = out_dir / "backup.zip"
+        staging_dir = tmp_path / "stream-only-stage"
+
+        import hermes_cli.backup as backup_mod
+        staged_dirs = []
+        real_ntf = backup_mod.tempfile.NamedTemporaryFile
+
+        def _spy(*a, **kw):
+            staged_dirs.append(kw.get("dir"))
+            return real_ntf(*a, **kw)
+
+        monkeypatch.setattr(backup_mod.tempfile, "NamedTemporaryFile", _spy)
+        backup_mod.run_backup(Namespace(output=str(out_zip), staging_dir=str(staging_dir)))
+
+        assert out_zip.exists()
+        assert staged_dirs, "no SQLite snapshot was staged"
+        assert all(d == str(out_dir) for d in staged_dirs), staged_dirs
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            assert "config.yaml" in zf.namelist()
+            assert "memory_store.db" in zf.namelist()
 
     def test_pre_update_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
         """The pre-update/pre-migration zip path (_write_full_zip_backup) must
@@ -1116,11 +1370,13 @@ class TestBackupEdgeCases:
 
         from hermes_cli.backup import run_backup
         try:
-            run_backup(args)
+            with pytest.raises(SystemExit) as excinfo:
+                run_backup(args)
         finally:
             # Restore permissions for cleanup
             bad_file.chmod(0o644)
 
+        assert excinfo.value.code == 1
         # Zip should still be created with the readable files
         assert out_zip.exists()
 
@@ -1142,8 +1398,10 @@ class TestBackupEdgeCases:
         args = Namespace(output=str(out_zip))
 
         from hermes_cli.backup import run_backup
-        run_backup(args)
+        with pytest.raises(SystemExit) as excinfo:
+            run_backup(args)
 
+        assert excinfo.value.code == 1
         # Zip should still be created with the valid files
         assert out_zip.exists()
         with zipfile.ZipFile(out_zip, "r") as zf:
