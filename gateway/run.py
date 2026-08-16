@@ -1938,7 +1938,7 @@ from gateway.turn_lease import SessionTurnLeaseRegistry
 from gateway.errors import MultiplexConfigError
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
-from gateway.slash_commands import GatewaySlashCommandsMixin
+from gateway.slash_commands import GatewaySlashCommandsMixin, parse_new_session_args
 from plugins.platforms.discord.kanban_mirror.runtime import DiscordKanbanMirrorRuntimeMixin
 from plugins.platforms.discord.voice_runtime import DiscordVoiceRuntimeMixin
 from gateway.platforms.base import (
@@ -10146,6 +10146,49 @@ class GatewayRunner(
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    async def _handle_new_command(
+        self,
+        event: MessageEvent,
+    ) -> Optional[Union[str, EphemeralReply]]:
+        """Run shared /new behavior for idle and active-session dispatch paths."""
+        source = event.source
+        if await asyncio.to_thread(self._is_telegram_topic_root_lobby, source):
+            return self._telegram_topic_root_new_message()
+        _, inline_new_prompt = parse_new_session_args(event.get_command_args())
+
+        async def _do_reset():
+            reset_result = await self._handle_reset_command(event)
+            if not inline_new_prompt:
+                return reset_result
+
+            try:
+                adapter = self._adapter_for_source(source)
+                if adapter and reset_result:
+                    await adapter.send(
+                        str(source.chat_id),
+                        str(reset_result),
+                        metadata=self._thread_metadata_for_source(source),
+                    )
+            except Exception:
+                logger.debug(
+                    "/new inline-prompt reset notice send failed",
+                    exc_info=True,
+                )
+
+            prompt_event = dataclasses.replace(event, text=inline_new_prompt)
+            return await self._handle_message(prompt_event)
+
+        return await self._maybe_confirm_destructive_slash(
+            event=event,
+            command="new",
+            title="/new",
+            detail=(
+                "This starts a fresh session and discards the current "
+                "conversation history."
+            ),
+            execute=_do_reset,
+        )
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -10600,7 +10643,7 @@ class GatewayRunner(
                 )
                 # Clean up the running agent entry so the reset handler
                 # doesn't think an agent is still active.
-                return await self._handle_reset_command(event)
+                return await self._handle_new_command(event)
 
             # /queue <prompt> — queue without interrupting.
             # Semantics: each /queue invocation produces its own full agent
@@ -11037,20 +11080,7 @@ class GatewayRunner(
                     break
 
         if canonical == "new":
-            if await asyncio.to_thread(self._is_telegram_topic_root_lobby, source):
-                return self._telegram_topic_root_new_message()
-            async def _do_reset():
-                return await self._handle_reset_command(event)
-            return await self._maybe_confirm_destructive_slash(
-                event=event,
-                command="new",
-                title="/new",
-                detail=(
-                    "This starts a fresh session and discards the current "
-                    "conversation history."
-                ),
-                execute=_do_reset,
-            )
+            return await self._handle_new_command(event)
 
         if canonical == "topic":
             return await self._handle_topic_command(event)

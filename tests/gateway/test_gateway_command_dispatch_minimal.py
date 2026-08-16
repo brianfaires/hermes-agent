@@ -41,6 +41,19 @@ def _session_entry() -> SessionEntry:
     )
 
 
+def _new_session_entry() -> SessionEntry:
+    return SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-2",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=0,
+        is_fresh_reset=True,
+    )
+
+
 def _make_runner():
     from gateway.run import GatewayRunner
 
@@ -60,8 +73,18 @@ def _make_runner():
     )
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = _session_entry()
+
+    def _reset_session(_session_key):
+        entry = _new_session_entry()
+        runner.session_store.get_or_create_session.return_value = entry
+        runner.session_store._entries[_session_key] = entry
+        return entry
+
+    runner.session_store.reset_session.side_effect = _reset_session
     runner.session_store.load_transcript.return_value = []
     runner.session_store.has_any_sessions.return_value = True
+    runner.session_store._entries = {build_session_key(_make_source()): _session_entry()}
+    runner.session_store._generate_session_key.return_value = build_session_key(_make_source())
     runner._running_agents = {}
     runner._running_agents_ts = {}
     runner._pending_messages = {}
@@ -97,6 +120,9 @@ def _make_runner():
     runner._is_telegram_topic_root_lobby = lambda _source: False
     runner._should_send_telegram_lobby_reminder = lambda _source: False
     runner._check_slash_access = lambda _source, _command: None
+    runner._read_user_config = lambda: {
+        "approvals": {"destructive_slash_confirm": False}
+    }
     runner._begin_session_run_generation = lambda _key: 1
     runner._release_running_agent_state = lambda key: runner._running_agents.pop(key, None)
     return runner, adapter
@@ -146,3 +172,94 @@ async def test_idle_queue_without_payload_returns_usage():
     assert result == "Usage: /queue <prompt>"
     assert called is False
     assert runner._running_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_new_parenthesized_prompt_reaches_new_session_once():
+    runner, adapter = _make_runner()
+    captured = {}
+
+    async def fake_handle_message_with_agent(event, source, key, generation):
+        captured.setdefault("calls", []).append(
+            {
+                "text": event.text,
+                "command": event.get_command(),
+                "source": source,
+                "key": key,
+                "generation": generation,
+            }
+        )
+        entry = await runner.async_session_store.get_or_create_session(source)
+        captured["session_id"] = entry.session_id
+        return "agent response"
+
+    runner._handle_message_with_agent = fake_handle_message_with_agent
+
+    result = await runner._handle_message(_make_event("/new (first prompt)"))
+
+    assert result == "agent response"
+    assert captured["calls"] == [
+        {
+            "text": "first prompt",
+            "command": None,
+            "source": _make_source(),
+            "key": build_session_key(_make_source()),
+            "generation": 1,
+        }
+    ]
+    assert captured["session_id"] == "sess-2"
+    runner.session_store.reset_session.assert_called_once_with(
+        build_session_key(_make_source())
+    )
+    assert runner.session_store.get_or_create_session.call_args_list[-1].args == (
+        _make_source(),
+    )
+    runner._session_db.set_session_title.assert_not_called()
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_active_new_parenthesized_prompt_reaches_new_session_once():
+    runner, adapter = _make_runner()
+    session_key = build_session_key(_make_source())
+    running_agent = MagicMock()
+    runner._running_agents[session_key] = running_agent
+    runner._running_agents_ts[session_key] = 0
+    captured = {}
+
+    async def fake_handle_message_with_agent(event, source, key, generation):
+        captured.setdefault("calls", []).append(
+            {
+                "text": event.text,
+                "command": event.get_command(),
+                "source": source,
+                "key": key,
+                "generation": generation,
+            }
+        )
+        entry = await runner.async_session_store.get_or_create_session(source)
+        captured["session_id"] = entry.session_id
+        return "agent response"
+
+    runner._handle_message_with_agent = fake_handle_message_with_agent
+
+    result = await runner._handle_message(_make_event("/new (first prompt)"))
+
+    assert result == "agent response"
+    running_agent.interrupt.assert_called_once_with("Session reset requested")
+    assert captured["calls"] == [
+        {
+            "text": "first prompt",
+            "command": None,
+            "source": _make_source(),
+            "key": session_key,
+            "generation": 1,
+        }
+    ]
+    assert captured["session_id"] == "sess-2"
+    runner.session_store.reset_session.assert_called_once_with(session_key)
+    assert runner.session_store.get_or_create_session.call_args_list[-1].args == (
+        _make_source(),
+    )
+    runner._session_db.set_session_title.assert_not_called()
+    adapter.send.assert_awaited_once()

@@ -386,12 +386,12 @@ class TestResetCommandWithTitle:
 
 
 class TestNewInHelp:
-    """Verify /new appears in help text with the [name] args hint."""
+    """Verify /new appears in help text with both supported argument forms."""
 
     def test_new_command_in_help_output(self):
-        """The gateway help output includes /new with the [name] hint."""
+        """The gateway help output includes /new title and prompt hints."""
         from hermes_cli.commands import gateway_help_lines
         lines = gateway_help_lines()
         new_line = next((line for line in lines if line.startswith("`/new ")), None)
         assert new_line is not None
-        assert "[name]" in new_line
+        assert "[name|(<prompt>)]" in new_line

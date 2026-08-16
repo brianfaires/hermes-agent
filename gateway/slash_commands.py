@@ -59,6 +59,19 @@ logger = logging.getLogger("gateway.run")
 _RESET_CLEANUP_TIMEOUT_S = 30.0
 
 
+def parse_new_session_args(args: str) -> tuple[str, str]:
+    """Return ``(title, inline_prompt)`` for gateway ``/new`` arguments.
+
+    Plain ``/new <name>`` keeps the existing title-setting behavior.
+    ``/new (<prompt>)`` starts a fresh session and delivers ``<prompt>`` as
+    the first user turn in that new session.
+    """
+    text = str(args or "").strip()
+    if text.startswith("(") and text.endswith(")"):
+        return "", text[1:-1].strip()
+    return text, ""
+
+
 def _model_switch_skew_guard() -> Optional[str]:
     """Refuse a model switch when the gateway is running stale code.
 
@@ -317,9 +330,9 @@ class GatewaySlashCommandsMixin:
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>
-        _title_arg = event.get_command_args().strip()
+        _title_arg, _inline_prompt = parse_new_session_args(event.get_command_args())
         _title_note = ""
-        if _title_arg and self._session_db and new_entry:
+        if _title_arg and not _inline_prompt and self._session_db and new_entry:
             from hermes_state import SessionDB
             try:
                 sanitized = SessionDB.sanitize_title(_title_arg)
