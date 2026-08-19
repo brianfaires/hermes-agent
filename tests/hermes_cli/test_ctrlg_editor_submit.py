@@ -84,3 +84,38 @@ def test_slash_command_dispatched_not_queued():
 
     assert seen.get("cmd") == "/status"
     assert c._pending_input.empty()
+
+
+def test_slash_command_from_editor_preserves_trailing_whitespace():
+    c = _make()
+    seen = {}
+    c.process_command = lambda command: seen.setdefault("cmd", command) or True
+    buf = _FakeBuf("  /log   private — text  ")
+
+    c._submit_editor_buffer(buf)
+
+    assert seen.get("cmd") == "/log   private — text  "
+
+
+def test_process_command_passes_verbatim_plugin_arguments(monkeypatch):
+    import cli as cli_module
+    from hermes_cli import plugins as plugins_module
+
+    c = _make()
+    c._pending_resume_sessions = None
+    c.config = {}
+    received = []
+    monkeypatch.setattr(cli_module, "_get_plugin_cmd_handler_names", lambda: {"log"})
+    monkeypatch.setattr(
+        plugins_module,
+        "get_plugin_command_handler",
+        lambda name: (lambda args: received.append(args)) if name == "log" else None,
+    )
+    monkeypatch.setattr(
+        plugins_module,
+        "get_plugin_command_metadata",
+        lambda name: {"verbatim_args": True} if name == "log" else None,
+    )
+
+    assert c.process_command("/log   private — text  ") is True
+    assert received == ["  private — text  "]

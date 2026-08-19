@@ -532,6 +532,9 @@ class PluginContext:
         handler: Callable,
         description: str = "",
         args_hint: str = "",
+        *,
+        verbatim_args: bool = False,
+        inline_while_busy: bool = False,
     ) -> None:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
@@ -548,6 +551,13 @@ class PluginContext:
         command picker. Plugin commands without ``args_hint`` register as
         parameterless in Discord and still accept trailing text when invoked
         as free-form chat.
+
+        By default, dispatch sites preserve legacy behavior and pass stripped,
+        normalized arguments. Privacy-sensitive commands may opt into
+        ``verbatim_args`` to receive the exact delivered text after the command
+        delimiter. Commands that are safe to run without touching the active
+        agent may opt into ``inline_while_busy`` so gateway adapters dispatch
+        them while the session is busy instead of queueing or interrupting.
 
         Names conflicting with built-in commands are rejected with a warning.
         """
@@ -577,6 +587,8 @@ class PluginContext:
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "args_hint": (args_hint or "").strip(),
+            "verbatim_args": bool(verbatim_args),
+            "inline_while_busy": bool(inline_while_busy),
         }
         logger.debug("Plugin %s registered command: /%s", self.manifest.name, clean)
 
@@ -2346,6 +2358,19 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def get_plugin_command_metadata(name: str) -> Optional[dict]:
+    """Return metadata for a plugin-registered slash command, or ``None``."""
+    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    return dict(entry) if entry else None
+
+
+def command_args_for_dispatch(raw_args: str, metadata: Optional[dict]) -> str:
+    """Apply a plugin command's argument-normalization policy."""
+    if metadata and metadata.get("verbatim_args"):
+        return raw_args or ""
+    return (raw_args or "").strip()
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

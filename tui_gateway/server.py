@@ -13042,13 +13042,18 @@ def _(rid, params: dict) -> dict:
 
     try:
         from hermes_cli.plugins import (
+            command_args_for_dispatch,
             get_plugin_command_handler,
+            get_plugin_command_metadata,
             resolve_plugin_command_result,
         )
 
         handler = get_plugin_command_handler(name)
         if handler:
-            result = resolve_plugin_command_result(handler(arg))
+            meta = get_plugin_command_metadata(name) or {}
+            result = resolve_plugin_command_result(
+                handler(command_args_for_dispatch(arg, meta))
+            )
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
@@ -14607,8 +14612,8 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
 
-    cmd = params.get("command", "").strip()
-    if not cmd:
+    cmd = params.get("command", "")
+    if not str(cmd).strip():
         return _err(rid, 4004, "empty command")
 
     # Skill and bundle slash commands plus _pending_input commands must NOT go
@@ -14619,7 +14624,10 @@ def _(rid, params: dict) -> dict:
     _cmd_text = cmd.lstrip("/") if cmd.startswith("/") else cmd
     _cmd_parts = _cmd_text.split(maxsplit=1)
     _cmd_base = (_cmd_parts[0] if _cmd_parts else "").lower()
-    _cmd_arg = _cmd_parts[1] if len(_cmd_parts) > 1 else ""
+    _cmd_arg = ""
+    if _cmd_base:
+        _tail = _cmd_text[len(_cmd_parts[0]):] if _cmd_parts else ""
+        _cmd_arg = _tail[1:] if _tail and _tail[0].isspace() else _tail
 
     live_output = _live_slash_command_output(
         params.get("session_id", ""), session, _cmd_base, _cmd_arg
@@ -14686,18 +14694,24 @@ def _(rid, params: dict) -> dict:
     if _cmd_base:
         try:
             from hermes_cli.plugins import (
+                command_args_for_dispatch,
                 get_plugin_command_handler,
+                get_plugin_command_metadata,
                 resolve_plugin_command_result,
             )
 
             plugin_handler = get_plugin_command_handler(_cmd_base)
+            plugin_meta = get_plugin_command_metadata(_cmd_base) or {}
         except Exception:
             plugin_handler = None
+            plugin_meta = {}
             resolve_plugin_command_result = None
 
     if plugin_handler and resolve_plugin_command_result:
         try:
-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
+            result = resolve_plugin_command_result(
+                plugin_handler(command_args_for_dispatch(_cmd_arg, plugin_meta))
+            )
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})

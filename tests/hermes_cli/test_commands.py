@@ -2191,6 +2191,30 @@ class TestPluginCommandEnumeration:
         assert is_gateway_known_command("metricas") is True
         assert is_gateway_known_command("definitely-not-registered") is False
 
+    def test_should_bypass_active_session_recognizes_inline_plugin_commands(self, monkeypatch):
+        """Only plugin commands that explicitly opt in bypass active sessions."""
+        from hermes_cli.commands import should_bypass_active_session
+
+        self._patch_plugin_commands(monkeypatch, {
+            "capture": {
+                "handler": lambda _a: "ok",
+                "description": "Capture",
+                "args_hint": "",
+                "plugin": "p",
+                "inline_while_busy": True,
+            },
+            "normal": {
+                "handler": lambda _a: "ok",
+                "description": "Normal",
+                "args_hint": "",
+                "plugin": "p",
+                "inline_while_busy": False,
+            },
+        })
+
+        assert should_bypass_active_session("capture") is True
+        assert should_bypass_active_session("normal") is False
+
     def test_is_gateway_known_command_still_recognizes_builtins(self, monkeypatch):
         """Built-in commands must remain known even when plugin discovery fails."""
         from hermes_cli import plugins as _plugins_mod

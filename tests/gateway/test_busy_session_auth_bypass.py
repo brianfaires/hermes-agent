@@ -165,6 +165,91 @@ class TestBusySessionAuthBypass:
         assert sk in adapter._pending_messages
 
     @pytest.mark.asyncio
+    async def test_inline_plugin_command_runs_without_queue_or_interrupt(self, monkeypatch):
+        """Inline plugin commands execute during busy runs with verbatim args."""
+        from gateway.run import GatewayRunner
+        from hermes_cli import plugins as plugins_mod
+
+        received = []
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_command_metadata",
+            lambda name: {
+                "handler": lambda _a: "unused",
+                "description": "Log",
+                "args_hint": "<text>",
+                "plugin": "private-journal",
+                "inline_while_busy": True,
+                "verbatim_args": True,
+            } if name == "log" else None,
+        )
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_command_handler",
+            lambda name: (lambda args: received.append(args) or "Logged id at 2026-08-19T00:00:00+00:00")
+            if name == "log"
+            else None,
+        )
+        runner, _sentinel = _make_runner(authorized_users={"user1"})
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="/log   private — text  ", user_id="user1")
+        sk = build_session_key(event.source)
+        running_agent = MagicMock()
+        runner._running_agents[sk] = running_agent
+        runner.adapters[event.source.platform] = adapter
+
+        result = await GatewayRunner._handle_active_session_busy_message(
+            runner, event, sk
+        )
+
+        assert result is True
+        assert received == ["  private — text  "]
+        assert sk not in adapter._pending_messages
+        running_agent.interrupt.assert_not_called()
+        adapter._send_with_retry.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_inline_plugin_command_respects_busy_slash_access(self, monkeypatch):
+        """Busy inline plugin commands must not bypass command access control."""
+        from gateway.run import GatewayRunner
+        from hermes_cli import plugins as plugins_mod
+
+        handler = MagicMock(return_value="should not run")
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_command_metadata",
+            lambda name: {
+                "plugin": "private-journal",
+                "inline_while_busy": True,
+                "verbatim_args": True,
+            } if name == "log" else None,
+        )
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_command_handler",
+            lambda name: handler if name == "log" else None,
+        )
+        runner, _sentinel = _make_runner(authorized_users={"user1"})
+        runner._check_slash_access = lambda _source, _command: "denied"
+        adapter = _make_adapter()
+        event = _make_event(text="/log private", user_id="user1")
+        sk = build_session_key(event.source)
+        running_agent = MagicMock()
+        runner._running_agents[sk] = running_agent
+        runner.adapters[event.source.platform] = adapter
+
+        result = await GatewayRunner._handle_active_session_busy_message(
+            runner, event, sk
+        )
+
+        assert result is True
+        handler.assert_not_called()
+        running_agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        adapter._send_with_retry.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_unauthorized_user_during_drain_still_blocked(self):
         """Even during drain mode, unauthorized users must be dropped."""
         from gateway.run import GatewayRunner

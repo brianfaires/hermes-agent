@@ -1893,6 +1893,16 @@ class MessageEvent:
         args = args.replace("\u2014\u2014", "--").replace("\u2014", "--").replace("\u2013", "-")
         return args
 
+    def get_command_args_raw(self) -> str:
+        """Get command arguments exactly as delivered after the first delimiter."""
+        if not self.is_command():
+            return self.text
+        text = self.text or ""
+        for idx, ch in enumerate(text):
+            if ch.isspace():
+                return text[idx + 1:]
+        return ""
+
 
 @dataclass
 class TextDebounceState:
