@@ -2374,6 +2374,7 @@ class SessionDB:
         chat_id: str,
         thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> Optional[str]:
         """Find the most recent live session_id for a platform + chat origin.
 
@@ -2382,17 +2383,39 @@ class SessionDB:
         provided, exact sender matches are preferred; if multiple distinct
         users share the chat and none matches, returns None rather than
         contaminating another participant's session.
+
+        ``profile_name`` scopes lookup to durable gateway ownership.  The only
+        alias equivalence allowed here is the established ``main`` ⇔
+        ``default`` mapping used by multiplex recovery guards.
         """
         if not platform or chat_id in (None, ""):
             return None
+        normalized_profile = _normalize_gateway_profile(profile_name)
+        profile_clause = ""
+        profile_params: list = []
+        if normalized_profile == "default":
+            profile_clause = (
+                " AND (profile_name IN ('default', 'main') "
+                "OR ((profile_name IS NULL OR profile_name = '') "
+                "AND session_key GLOB 'agent:main:*'))"
+            )
+        elif normalized_profile:
+            profile_clause = (
+                " AND (profile_name = ? OR ((profile_name IS NULL OR profile_name = '') "
+                "AND session_key GLOB ?))"
+            )
+            profile_params.extend(
+                [normalized_profile, f"agent:{normalized_profile}:*"]
+            )
         query = """
             SELECT id, user_id, started_at FROM sessions
             WHERE LOWER(source) = LOWER(?)
               AND session_key IS NOT NULL
               AND chat_id = ?
               AND ended_at IS NULL
-        """
+        """ + profile_clause
         params: list = [platform, str(chat_id)]
+        params.extend(profile_params)
         if thread_id is not None:
             query += " AND COALESCE(thread_id, '') = ?"
             params.append(str(thread_id))

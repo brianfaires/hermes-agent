@@ -506,6 +506,8 @@ class TestSendMessageTool:
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
              patch("gateway.session_context.get_session_env") as get_session_env_mock, \
+             patch("hermes_constants.get_hermes_home", return_value="/tmp/hermes-ang"), \
+             patch("hermes_cli.profiles.get_active_profile_name", return_value="ang"), \
              patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
             get_session_env_mock.side_effect = lambda name, default="": {
                 "HERMES_SESSION_PLATFORM": "telegram",
@@ -529,7 +531,94 @@ class TestSendMessageTool:
             source_label="telegram",
             thread_id=None,
             user_id="user-123",
+            profile_name="ang",
+            profile_home="/tmp/hermes-ang",
         )
+
+    def test_default_standalone_send_mirrors_only_default_profile_session(
+        self, tmp_path
+    ):
+        import hermes_state
+
+        config, _telegram_cfg = _make_config()
+        profile_home = tmp_path / "default-home"
+        profile_home.mkdir()
+        db = hermes_state.SessionDB(db_path=profile_home / "state.db")
+
+        def create_session(session_id, profile_name):
+            namespace = "main" if profile_name == "default" else profile_name
+            db.create_session(
+                session_id,
+                "telegram",
+                user_id="8244556262",
+                session_key=f"agent:{namespace}:telegram:dm:8244556262",
+                chat_id="8244556262",
+                chat_type="dm",
+                profile_name=profile_name,
+            )
+            db.append_message(
+                session_id,
+                role="user",
+                content=f"{profile_name} fixture",
+            )
+
+        try:
+            create_session("sess-default", "default")
+            create_session("sess-ang", "ang")
+            create_session("sess-ops", "ops")
+            before_default = db.get_messages("sess-default", include_inactive=True)
+            before_ang = db.get_messages("sess-ang", include_inactive=True)
+            before_ops = db.get_messages("sess-ops", include_inactive=True)
+
+            with patch("gateway.config.load_gateway_config", return_value=config), \
+                 patch("tools.interrupt.is_interrupted", return_value=False), \
+                 patch("model_tools._run_async", side_effect=_run_async_immediately), \
+                 patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+                 patch("hermes_constants.get_hermes_home", return_value=profile_home), \
+                 patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
+                result = json.loads(
+                    send_message_tool(
+                        {
+                            "action": "send",
+                            "target": "telegram:8244556262",
+                            "message": "default standalone reminder",
+                        }
+                    )
+                )
+
+            after_default = db.get_messages("sess-default", include_inactive=True)
+            assert result["success"] is True
+            assert result["mirrored"] is True
+            assert after_default[:-1] == before_default
+            assert after_default[-1]["role"] == "assistant"
+            assert after_default[-1]["content"] == "default standalone reminder"
+            assert db.get_messages("sess-ang", include_inactive=True) == before_ang
+            assert db.get_messages("sess-ops", include_inactive=True) == before_ops
+        finally:
+            db.close()
+
+    def test_mirror_fails_closed_when_profile_scope_cannot_be_resolved(self):
+        config, _telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("hermes_cli.profiles.get_active_profile_name", side_effect=RuntimeError("scope unavailable")), \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert "mirrored" not in result
+        mirror_mock.assert_not_called()
 
     def test_media_tag_outside_allowed_roots_is_not_sent(self, tmp_path, monkeypatch):
         # This test exercises the strict-allowlist path; force strict mode on

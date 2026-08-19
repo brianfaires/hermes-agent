@@ -6032,6 +6032,61 @@ def test_find_session_by_origin_matching_rules(db):
     ) is None
 
 
+def test_find_session_by_origin_scopes_profile_ownership(db):
+    db.create_session(
+        "gw-default",
+        "telegram",
+        user_id="8244556262",
+        session_key="agent:main:telegram:dm:8244556262",
+        chat_id="8244556262",
+        chat_type="dm",
+        profile_name="default",
+    )
+    db.create_session(
+        "gw-ang",
+        "telegram",
+        user_id="8244556262",
+        session_key="agent:ang:telegram:dm:8244556262",
+        chat_id="8244556262",
+        chat_type="dm",
+        profile_name="ang",
+    )
+    db.create_session(
+        "gw-ops",
+        "telegram",
+        user_id="8244556262",
+        session_key="agent:ops:telegram:dm:8244556262",
+        chat_id="8244556262",
+        chat_type="dm",
+        profile_name="ops",
+    )
+
+    assert db.find_session_by_origin(
+        platform="telegram",
+        chat_id="8244556262",
+        user_id="8244556262",
+        profile_name="default",
+    ) == "gw-default"
+    assert db.find_session_by_origin(
+        platform="telegram",
+        chat_id="8244556262",
+        user_id="8244556262",
+        profile_name="main",
+    ) == "gw-default"
+    assert db.find_session_by_origin(
+        platform="telegram",
+        chat_id="8244556262",
+        user_id="8244556262",
+        profile_name="ang",
+    ) == "gw-ang"
+    assert db.find_session_by_origin(
+        platform="telegram",
+        chat_id="8244556262",
+        user_id="8244556262",
+        profile_name="missing",
+    ) is None
+
+
 def test_v18_backfill_from_sessions_json(tmp_path, monkeypatch):
     """Migration backfills display_name/origin_json/expiry_finalized from sessions.json."""
     import hermes_state as hs
@@ -6377,4 +6432,3 @@ class TestLoneSurrogatePersistence:
         db.create_session("s1", source="cli")
         assert db.set_session_title("s1", "title \ud835 bad") is True
         assert db.get_session("s1")["title"] == "title \ufffd bad"
-

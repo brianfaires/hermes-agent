@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch, MagicMock
 
 import gateway.mirror as mirror_mod
+import hermes_state
 from gateway.mirror import (
     mirror_to_session,
     _find_session_id,
@@ -17,6 +18,31 @@ def _setup_sessions(tmp_path, sessions_data):
     index_file = sessions_dir / "sessions.json"
     index_file.write_text(json.dumps(sessions_data))
     return sessions_dir, index_file
+
+
+def _create_gateway_session(
+    db,
+    session_id,
+    *,
+    profile_name,
+    chat_id="8244556262",
+    user_id="8244556262",
+):
+    namespace = "main" if profile_name == "default" else profile_name
+    db.create_session(
+        session_id=session_id,
+        source="telegram",
+        user_id=user_id,
+        session_key=f"agent:{namespace}:telegram:dm:{user_id}",
+        chat_id=chat_id,
+        chat_type="dm",
+        profile_name=profile_name,
+    )
+    db.append_message(session_id=session_id, role="user", content=f"{profile_name} fixture")
+
+
+def _message_rows(db, session_id):
+    return [dict(row) for row in db.get_messages(session_id, include_inactive=True)]
 
 
 class TestFindSessionId:
@@ -244,6 +270,66 @@ class TestMirrorToSession:
             result = mirror_to_session("telegram", "123", "msg")
 
         assert result is False
+
+    def test_profile_scoped_mirror_does_not_contaminate_newer_same_peer_sessions(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        db = hermes_state.SessionDB()
+        try:
+            _create_gateway_session(db, "sess_default", profile_name="default")
+            _create_gateway_session(db, "sess_ang", profile_name="ang")
+            _create_gateway_session(db, "sess_ops", profile_name="ops")
+            before_default = _message_rows(db, "sess_default")
+            before_ang = _message_rows(db, "sess_ang")
+            before_ops = _message_rows(db, "sess_ops")
+
+            result = mirror_to_session(
+                "telegram",
+                "8244556262",
+                "default standalone reminder",
+                source_label="cron",
+                user_id="8244556262",
+                role="user",
+                profile_name="default",
+            )
+
+            assert result is True
+            after_default = _message_rows(db, "sess_default")
+            assert after_default[:-1] == before_default
+            assert after_default[-1]["role"] == "user"
+            assert after_default[-1]["content"] == "default standalone reminder"
+            assert _message_rows(db, "sess_ang") == before_ang
+            assert _message_rows(db, "sess_ops") == before_ops
+        finally:
+            db.close()
+
+    def test_profile_scoped_mirror_skips_when_same_profile_session_is_absent(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        db = hermes_state.SessionDB()
+        try:
+            _create_gateway_session(db, "sess_ang", profile_name="ang")
+            _create_gateway_session(db, "sess_ops", profile_name="ops")
+            before_ang = _message_rows(db, "sess_ang")
+            before_ops = _message_rows(db, "sess_ops")
+
+            result = mirror_to_session(
+                "telegram",
+                "8244556262",
+                "orphan default reminder",
+                source_label="cron",
+                user_id="8244556262",
+                role="user",
+                profile_name="default",
+            )
+
+            assert result is False
+            assert _message_rows(db, "sess_ang") == before_ang
+            assert _message_rows(db, "sess_ops") == before_ops
+        finally:
+            db.close()
 
 
 class TestAppendToSqlite:

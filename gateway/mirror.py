@@ -12,6 +12,7 @@ the full SessionStore machinery.
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
@@ -30,6 +31,8 @@ def mirror_to_session(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     role: str = "assistant",
+    profile_name: Optional[str] = None,
+    profile_home: Optional[str] = None,
 ) -> bool:
     """
     Append a delivery-mirror message to the target session's transcript.
@@ -57,6 +60,8 @@ def mirror_to_session(
             str(chat_id),
             thread_id=thread_id,
             user_id=user_id,
+            profile_name=profile_name,
+            profile_home=profile_home,
         )
         if not session_id:
             logger.debug(
@@ -76,7 +81,7 @@ def mirror_to_session(
             "mirror_source": source_label,
         }
 
-        _append_to_sqlite(session_id, mirror_msg)
+        _append_to_sqlite(session_id, mirror_msg, profile_home=profile_home)
 
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
@@ -98,6 +103,8 @@ def _find_session_id(
     chat_id: str,
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    profile_home: Optional[str] = None,
 ) -> Optional[str]:
     """
     Find the active session_id for a platform + chat_id pair.
@@ -110,11 +117,16 @@ def _find_session_id(
     When *user_id* is provided, prefer exact sender matches. If multiple
     same-chat candidates exist and none matches the user, return None instead
     of guessing and contaminating another participant's session.
+
+    When *profile_name* is provided, require durable ownership in that profile
+    namespace.  ``main`` is canonicalized to ``default``; no other aliases or
+    cross-profile fallbacks are accepted.
     """
     # Primary: state.db
     try:
         from hermes_state import SessionDB
-        db = SessionDB()
+        db_path = Path(profile_home) / "state.db" if profile_home else None
+        db = SessionDB(db_path=db_path)
         try:
             finder = getattr(db, "find_session_by_origin", None)
             if callable(finder):
@@ -123,6 +135,7 @@ def _find_session_id(
                     chat_id=chat_id,
                     thread_id=thread_id,
                     user_id=user_id,
+                    profile_name=profile_name,
                 )
                 if session_id:
                     return str(session_id)
@@ -132,17 +145,31 @@ def _find_session_id(
         logger.debug("Mirror state.db session lookup failed: %s", e)
 
     # Fallback: sessions.json (pre-migration databases)
-    if not _SESSIONS_INDEX.exists():
+    sessions_index = (
+        Path(profile_home) / "sessions" / "sessions.json"
+        if profile_home
+        else _SESSIONS_INDEX
+    )
+    if not sessions_index.exists():
         return None
 
     try:
-        with open(_SESSIONS_INDEX, encoding="utf-8") as f:
+        with open(sessions_index, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return None
 
     platform_lower = platform.lower()
     candidates = []
+    normalized_profile = None
+    if profile_name is not None:
+        try:
+            from hermes_state import _normalize_gateway_profile
+            normalized_profile = _normalize_gateway_profile(profile_name)
+        except Exception:
+            normalized_profile = str(profile_name).strip() or None
+            if normalized_profile == "main":
+                normalized_profile = "default"
 
     for _key, entry in data.items():
         # Skip documentation/metadata sentinels (keys starting with "_", e.g.
@@ -154,6 +181,25 @@ def _find_session_id(
 
         if entry_platform != platform_lower:
             continue
+        if normalized_profile:
+            try:
+                from hermes_state import (
+                    _gateway_profile_from_session_key,
+                    _normalize_gateway_profile,
+                )
+                owner_profile = (
+                    _normalize_gateway_profile(entry.get("profile_name"))
+                    or _normalize_gateway_profile(origin.get("profile"))
+                    or _gateway_profile_from_session_key(
+                        entry.get("session_key") or _key
+                    )
+                )
+            except Exception:
+                owner_profile = entry.get("profile_name") or origin.get("profile")
+                if owner_profile == "main":
+                    owner_profile = "default"
+            if owner_profile != normalized_profile:
+                continue
 
         origin_chat_id = str(origin.get("chat_id", ""))
         if origin_chat_id == str(chat_id):
@@ -187,13 +233,17 @@ def _find_session_id(
     return best_entry.get("session_id")
 
 
-
-def _append_to_sqlite(session_id: str, message: dict) -> None:
+def _append_to_sqlite(
+    session_id: str,
+    message: dict,
+    profile_home: Optional[str] = None,
+) -> None:
     """Append a message to the SQLite session database."""
     db = None
     try:
         from hermes_state import SessionDB
-        db = SessionDB()
+        db_path = Path(profile_home) / "state.db" if profile_home else None
+        db = SessionDB(db_path=db_path)
         db.append_message(
             session_id=session_id,
             role=message.get("role", "assistant"),

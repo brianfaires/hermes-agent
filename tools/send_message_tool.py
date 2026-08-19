@@ -508,8 +508,13 @@ def _handle_send(args):
             try:
                 from gateway.mirror import mirror_to_session
                 from gateway.session_context import get_session_env
+                from hermes_constants import get_hermes_home
+                from hermes_cli.profiles import get_active_profile_name
+
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
                 user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                profile_name = get_active_profile_name() or "default"
+                profile_home = str(get_hermes_home())
                 if mirror_to_session(
                     platform_name,
                     chat_id,
@@ -517,6 +522,8 @@ def _handle_send(args):
                     source_label=source_label,
                     thread_id=thread_id,
                     user_id=user_id,
+                    profile_name=profile_name,
+                    profile_home=profile_home,
                 ):
                     result["mirrored"] = True
             except Exception:
