@@ -5873,6 +5873,57 @@ class GatewayRunner(
         if not adapter:
             return False  # let default path handle it
 
+        _busy_cmd = event.get_command()
+        if _busy_cmd:
+            _plugin_handler = None
+            try:
+                from hermes_cli.plugins import (
+                    command_args_for_dispatch,
+                    get_plugin_command_handler,
+                    get_plugin_command_metadata,
+                )
+
+                _plugin_command = _busy_cmd.replace("_", "-")
+                _plugin_meta = get_plugin_command_metadata(_plugin_command) or {}
+                _plugin_handler = get_plugin_command_handler(_plugin_command)
+                if _plugin_handler and _plugin_meta.get("inline_while_busy"):
+                    _denied = self._check_slash_access(event.source, _plugin_command)
+                    if _denied is not None:
+                        _text = str(_denied)
+                        if _text:
+                            await adapter._send_with_retry(
+                                chat_id=event.source.chat_id,
+                                content=_text,
+                                reply_to=event.message_id,
+                            )
+                        return True
+                    _raw_args = (
+                        event.get_command_args_raw()
+                        if _plugin_meta.get("verbatim_args") and hasattr(event, "get_command_args_raw")
+                        else event.get_command_args()
+                    )
+                    _plugin_args = command_args_for_dispatch(_raw_args, _plugin_meta)
+                    _plugin_result = _plugin_handler(_plugin_args)
+                    if asyncio.iscoroutine(_plugin_result):
+                        _plugin_result = await _plugin_result
+                    _text = str(_plugin_result) if _plugin_result else ""
+                    if _text:
+                        await adapter._send_with_retry(
+                            chat_id=event.source.chat_id,
+                            content=_text,
+                            reply_to=event.message_id,
+                        )
+                    return True
+            except Exception as exc:
+                logger.warning("Plugin command dispatch failed while agent was busy: %s", exc)
+                if _plugin_handler:
+                    await adapter._send_with_retry(
+                        chat_id=event.source.chat_id,
+                        content="Plugin command failed.",
+                        reply_to=event.message_id,
+                    )
+                    return True
+
         # --- Internal synthetic events must never interrupt/steer ---
         # Async-delegation completions (delegate_task(background=true)) and
         # background-process completions (terminal notify_on_complete) re-enter
@@ -10798,6 +10849,37 @@ class GatewayRunner(
                     f"mid-turn. Wait for the current response or `/stop` first."
                 )
 
+            if _evt_cmd:
+                _plugin_handler = None
+                try:
+                    from hermes_cli.plugins import (
+                        command_args_for_dispatch,
+                        get_plugin_command_handler,
+                        get_plugin_command_metadata,
+                    )
+
+                    _plugin_command = _evt_cmd.replace("_", "-")
+                    _plugin_meta = get_plugin_command_metadata(_plugin_command) or {}
+                    _plugin_handler = get_plugin_command_handler(_plugin_command)
+                    if _plugin_handler and _plugin_meta.get("inline_while_busy"):
+                        _denied = self._check_slash_access(source, _plugin_command)
+                        if _denied is not None:
+                            return _denied
+                        _raw_args = (
+                            event.get_command_args_raw()
+                            if _plugin_meta.get("verbatim_args") and hasattr(event, "get_command_args_raw")
+                            else event.get_command_args()
+                        )
+                        _plugin_args = command_args_for_dispatch(_raw_args, _plugin_meta)
+                        _plugin_result = _plugin_handler(_plugin_args)
+                        if asyncio.iscoroutine(_plugin_result):
+                            _plugin_result = await _plugin_result
+                        return str(_plugin_result) if _plugin_result else None
+                except Exception as exc:
+                    logger.warning("Plugin command dispatch failed while agent was running: %s", exc)
+                    if _plugin_handler:
+                        return "Plugin command failed."
+
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
                 adapter = self._adapter_for_source(source)
@@ -11396,20 +11478,37 @@ class GatewayRunner(
 
         # Plugin-registered slash commands
         if command:
+            plugin_handler = None
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
+                from hermes_cli.plugins import (
+                    command_args_for_dispatch,
+                    get_plugin_command_handler,
+                    get_plugin_command_metadata,
+                )
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
-                plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
+                plugin_command = command.replace("_", "-")
+                plugin_handler = get_plugin_command_handler(plugin_command)
                 if plugin_handler:
-                    user_args = event.get_command_args().strip()
+                    meta = get_plugin_command_metadata(plugin_command) or {}
+                    denied = self._check_slash_access(source, plugin_command)
+                    if denied is not None:
+                        return denied
+                    raw_args = (
+                        event.get_command_args_raw()
+                        if meta.get("verbatim_args") and hasattr(event, "get_command_args_raw")
+                        else event.get_command_args()
+                    )
+                    user_args = command_args_for_dispatch(raw_args, meta)
                     result = plugin_handler(user_args)
                     if asyncio.iscoroutine(result):
                         result = await result
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
+                if plugin_handler:
+                    return "Plugin command failed."
 
         # Skill slash commands: /skill-name loads the skill and sends to agent.
         # resolve_skill_command_key() handles the Telegram underscore/hyphen

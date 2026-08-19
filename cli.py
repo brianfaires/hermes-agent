@@ -6132,7 +6132,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         loop via the Task callback, so it must be cheap and non-blocking.
         """
         try:
-            text = (getattr(buffer, "text", "") or "").strip()
+            raw_text = getattr(buffer, "text", "") or ""
+            text = raw_text.strip()
+            if text and _looks_like_slash_command(text):
+                text = raw_text.lstrip()
         except Exception:
             return
         if not text:
@@ -8697,6 +8700,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # Lowercase only for dispatch matching; preserve original case for arguments
         cmd_lower = command.lower().strip()
         cmd_original = command.strip()
+        cmd_delivered = command.lstrip()
 
         # Resolve aliases via central registry so adding an alias is a one-line
         # change in hermes_cli/commands.py instead of touching every dispatch site.
@@ -9223,12 +9227,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Check for plugin-registered slash commands
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
                 from hermes_cli.plugins import (
+                    command_args_for_dispatch,
                     get_plugin_command_handler,
+                    get_plugin_command_metadata,
                     resolve_plugin_command_result,
                 )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                plugin_name = base_cmd.lstrip("/")
+                plugin_handler = get_plugin_command_handler(plugin_name)
                 if plugin_handler:
-                    user_args = cmd_original[len(base_cmd):].strip()
+                    meta = get_plugin_command_metadata(plugin_name) or {}
+                    # Legacy command parsing uses ``cmd_original`` (stripped), but
+                    # verbatim plugin commands must retain trailing whitespace.
+                    raw_args = cmd_delivered[len(base_cmd):]
+                    if raw_args and raw_args[0].isspace():
+                        raw_args = raw_args[1:]
+                    user_args = command_args_for_dispatch(raw_args, meta)
                     try:
                         result = resolve_plugin_command_result(
                             plugin_handler(user_args)
@@ -13267,7 +13280,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 return
 
             # --- Normal input routing ---
-            text = event.app.current_buffer.text.strip()
+            raw_text = event.app.current_buffer.text
+            text = raw_text.strip()
+            if text and _looks_like_slash_command(text):
+                text = raw_text.lstrip()
             has_images = bool(self._attached_images)
             if text or has_images:
                 # Handle /model directly on the UI thread so interactive pickers

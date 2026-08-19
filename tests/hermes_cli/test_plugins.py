@@ -1830,6 +1830,35 @@ class TestPluginCommands:
         entry = mgr._plugin_commands["metricas"]
         assert entry["args_hint"] == "dias:7 formato:json"
 
+    def test_register_command_policy_defaults_legacy_behavior(self):
+        """Commands default to stripped args and normal busy-session handling."""
+        mgr = PluginManager()
+        manifest = PluginManifest(name="test-plugin", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_command("foo", lambda a: a)
+
+        entry = mgr._plugin_commands["foo"]
+        assert entry["verbatim_args"] is False
+        assert entry["inline_while_busy"] is False
+
+    def test_register_command_policy_can_opt_into_verbatim_and_inline_busy(self):
+        """Privacy-sensitive commands can opt into raw args and busy inline dispatch."""
+        mgr = PluginManager()
+        manifest = PluginManifest(name="test-plugin", source="user")
+        ctx = PluginContext(manifest, mgr)
+
+        ctx.register_command(
+            "capture",
+            lambda a: a,
+            verbatim_args=True,
+            inline_while_busy=True,
+        )
+
+        entry = mgr._plugin_commands["capture"]
+        assert entry["verbatim_args"] is True
+        assert entry["inline_while_busy"] is True
+
     def test_register_command_args_hint_whitespace_trimmed(self):
         """args_hint leading/trailing whitespace is stripped."""
         mgr = PluginManager()
@@ -2040,6 +2069,18 @@ class TestPluginCommands:
         handler = mgr._plugin_commands["echo"]["handler"]
         handler("hello world")
         assert received == ["hello world"]
+
+    def test_command_args_for_dispatch_preserves_verbatim_policy(self):
+        from hermes_cli.plugins import command_args_for_dispatch
+
+        meta = {"verbatim_args": True}
+
+        assert command_args_for_dispatch("  keep — dash  ", meta) == "  keep — dash  "
+
+    def test_command_args_for_dispatch_keeps_legacy_stripping_by_default(self):
+        from hermes_cli.plugins import command_args_for_dispatch
+
+        assert command_args_for_dispatch("  trim me  ", {}) == "trim me"
 
     def test_multiple_plugins_register_different_commands(self):
         """Multiple plugins can each register their own commands."""

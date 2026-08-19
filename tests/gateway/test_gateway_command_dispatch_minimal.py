@@ -146,3 +146,141 @@ async def test_idle_queue_without_payload_returns_usage():
     assert result == "Usage: /queue <prompt>"
     assert called is False
     assert runner._running_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_cold_inline_plugin_command_does_not_enter_agent_or_session_history(monkeypatch):
+    from hermes_cli import plugins as plugins_mod
+
+    runner, _adapter = _make_runner()
+    received = []
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: (lambda args: received.append(args) or "Logged id at 2026-08-19T00:00:00+00:00")
+        if name == "log"
+        else None,
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_metadata",
+        lambda name: {
+            "plugin": "private-journal",
+            "inline_while_busy": True,
+            "verbatim_args": True,
+        } if name == "log" else None,
+    )
+
+    async def fail_agent(*_args, **_kwargs):
+        raise AssertionError("journal command entered agent path")
+
+    runner._handle_message_with_agent = fail_agent
+
+    result = await runner._handle_message(_make_event("/log   raw private text  "))
+
+    assert result == "Logged id at 2026-08-19T00:00:00+00:00"
+    assert received == ["  raw private text  "]
+    runner.session_store.load_transcript.assert_not_called()
+    assert runner._running_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_private_plugin_command_does_not_fall_through_to_agent(monkeypatch):
+    from hermes_cli import plugins as plugins_mod
+
+    runner, _adapter = _make_runner()
+
+    def fail_capture(_args):
+        raise RuntimeError("holding store unavailable")
+
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: fail_capture if name == "log" else None,
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_metadata",
+        lambda name: {
+            "plugin": "private-journal",
+            "inline_while_busy": True,
+            "verbatim_args": True,
+        } if name == "log" else None,
+    )
+
+    async def fail_agent(*_args, **_kwargs):
+        raise AssertionError("failed private command entered agent path")
+
+    runner._handle_message_with_agent = fail_agent
+
+    result = await runner._handle_message(_make_event("/log private sentinel"))
+
+    assert result == "Plugin command failed."
+    runner.session_store.load_transcript.assert_not_called()
+    assert runner._running_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_ordinary_followup_after_log_has_no_journal_text(monkeypatch):
+    from hermes_cli import plugins as plugins_mod
+
+    runner, _adapter = _make_runner()
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: (lambda _args: "Logged id at 2026-08-19T00:00:00+00:00")
+        if name == "log"
+        else None,
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_metadata",
+        lambda name: {
+            "plugin": "private-journal",
+            "inline_while_busy": True,
+            "verbatim_args": True,
+        } if name == "log" else None,
+    )
+    seen = []
+
+    async def fake_handle_message_with_agent(event, *_args, **_kwargs):
+        seen.append(event.text)
+        return {"final_response": "ok", "messages": [{"role": "user", "content": event.text}]}
+
+    runner._handle_message_with_agent = fake_handle_message_with_agent
+
+    assert await runner._handle_message(_make_event("/log journal raw sentinel")) == "Logged id at 2026-08-19T00:00:00+00:00"
+    assert await runner._handle_message(_make_event("ordinary follow-up")) == {
+        "final_response": "ok",
+        "messages": [{"role": "user", "content": "ordinary follow-up"}],
+    }
+    assert seen == ["ordinary follow-up"]
+    assert "journal raw sentinel" not in repr(seen)
+
+
+@pytest.mark.asyncio
+async def test_cold_inline_plugin_command_respects_slash_access(monkeypatch):
+    from hermes_cli import plugins as plugins_mod
+
+    runner, _adapter = _make_runner()
+    handler = MagicMock(return_value="should not run")
+    runner._check_slash_access = lambda _source, _command: "denied"
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: handler if name == "log" else None,
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_metadata",
+        lambda name: {
+            "plugin": "private-journal",
+            "inline_while_busy": True,
+            "verbatim_args": True,
+        } if name == "log" else None,
+    )
+
+    result = await runner._handle_message(_make_event("/log private"))
+
+    assert result == "denied"
+    handler.assert_not_called()

@@ -319,6 +319,34 @@ class TestAllResolvableCommandsBypassGuard:
             "not silently discarded"
         )
 
+    @pytest.mark.asyncio
+    async def test_inline_plugin_command_bypasses_guard(self, monkeypatch):
+        """Plugin commands with inline_while_busy dispatch without queueing."""
+        from hermes_cli import plugins as plugins_mod
+
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_commands",
+            lambda: {
+                "log": {
+                    "handler": lambda _a: "ok",
+                    "description": "Log",
+                    "args_hint": "<text>",
+                    "plugin": "private-journal",
+                    "inline_while_busy": True,
+                    "verbatim_args": True,
+                }
+            },
+        )
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event("/log   private — text  "))
+
+        assert sk not in adapter._pending_messages
+        assert any("handled:log" in r for r in adapter.sent_responses)
+
     def test_should_bypass_returns_true_for_every_registered_command(self):
         """Spot-check: the commands previously-broken on Discord all bypass."""
         from hermes_cli.commands import should_bypass_active_session

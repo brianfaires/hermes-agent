@@ -1462,6 +1462,28 @@ def test_slash_exec_handles_plugin_commands_in_live_gateway(server):
     assert worker.calls == []
 
 
+def test_slash_exec_preserves_verbatim_plugin_arguments(server):
+    sid = "test-session"
+    server._sessions[sid] = {"session_key": sid, "agent": None, "slash_worker": None}
+    received = []
+
+    with patch(
+        "hermes_cli.plugins.get_plugin_command_handler",
+        lambda name: (lambda arg: received.append(arg) or "ok") if name == "log" else None,
+    ), patch(
+        "hermes_cli.plugins.get_plugin_command_metadata",
+        lambda name: {"verbatim_args": True} if name == "log" else None,
+    ):
+        resp = server.handle_request({
+            "id": "r-plugin-verbatim",
+            "method": "slash.exec",
+            "params": {"command": "log   private — text  ", "session_id": sid},
+        })
+
+    assert resp["result"] == {"output": "ok"}
+    assert received == ["  private — text  "]
+
+
 def test_slash_exec_plugin_lookup_failure_falls_back_to_worker(server):
     """Plugin discovery failures must not break ordinary slash-worker commands."""
     sid = "test-session"
