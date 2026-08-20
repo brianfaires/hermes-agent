@@ -48,3 +48,22 @@ def flatten_message_text(content: Any, *, sep: str = "\n") -> str:
         return str(content)
     except Exception:
         return ""
+
+
+def latest_user_message_text(
+    messages: list[Any], *, current_turn_user_idx: int | None = None
+) -> str:
+    """Return visible text from the current real user turn in a transcript."""
+    if (
+        isinstance(current_turn_user_idx, int)
+        and not isinstance(current_turn_user_idx, bool)
+        and 0 <= current_turn_user_idx < len(messages)
+    ):
+        current = messages[current_turn_user_idx]
+        if isinstance(current, Mapping) and current.get("role") == "user":
+            return flatten_message_text(current.get("content"))
+
+    for message in reversed(messages):
+        if isinstance(message, Mapping) and message.get("role") == "user":
+            return flatten_message_text(message.get("content"))
+    return ""

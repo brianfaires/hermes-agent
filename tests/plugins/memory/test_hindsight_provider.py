@@ -652,6 +652,69 @@ class TestToolHandlers:
         assert "bank_id" not in item
         assert "retain_async" not in item
 
+    @pytest.mark.parametrize(
+        "source_user_content",
+        [
+            "Log: private family event",
+            "Log entry. private family event",
+            "Quick log: private family event",
+        ],
+    )
+    def test_retain_denies_personal_history_log_source(
+        self, provider, source_user_content
+    ):
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {
+                "content": "A transformed summary that no longer contains the trigger.",
+                "context": "user shorthand glossary",
+                "tags": ["user-preference", "shorthand"],
+            },
+            source_user_content=source_user_content,
+        ))
+
+        assert "error" in result
+        assert "Personal History Log" in result["error"]
+        provider._client.aretain_batch.assert_not_called()
+
+    def test_retain_denies_personal_history_log_content_without_source(self, provider):
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {"content": "Quick log: private family event"},
+        ))
+
+        assert "error" in result
+        assert "Personal History Log" in result["error"]
+        provider._client.aretain_batch.assert_not_called()
+
+    def test_retain_denies_personal_history_log_metadata_without_source(self, provider):
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {
+                "content": "A transformed summary that no longer contains the trigger.",
+                "context": "personal log update",
+                "tags": ["personal-log", "family"],
+            },
+        ))
+
+        assert "error" in result
+        assert "Personal History Log" in result["error"]
+        provider._client.aretain_batch.assert_not_called()
+
+    def test_retain_allows_unrelated_explicit_remember(self, provider):
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {
+                "content": "The literal label Log: routes to the append-only ledger.",
+                "context": "user preference",
+                "tags": ["workflow"],
+            },
+            source_user_content="Remember that the literal label Log: is reserved.",
+        ))
+
+        assert result["result"] == "Memory stored successfully."
+        provider._client.aretain_batch.assert_called_once()
+
     def test_retain_with_tags(self, provider_with_config):
         p = provider_with_config(retain_tags=["pref", "ui"])
         p.handle_tool_call("hindsight_retain", {"content": "likes dark mode"})

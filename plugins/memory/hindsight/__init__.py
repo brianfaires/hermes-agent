@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 
@@ -342,6 +343,13 @@ REFLECT_SCHEMA = {
 }
 
 
+_PERSONAL_HISTORY_LOG_TRIGGER = re.compile(
+    r"^\s*(?:\[[^\]\r\n]{1,64}\]\s*)?"
+    r"(?:log\s*:|log\s+entry\.(?=\s|$)|quick\s+log\s*:)",
+    re.IGNORECASE,
+)
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -427,6 +435,36 @@ def _normalize_retain_tags(value: Any) -> List[str]:
         seen.add(tag)
         normalized.append(tag)
     return normalized
+
+
+def _is_personal_history_log_retain(
+    content: Any,
+    *,
+    source_user_content: Any = "",
+    context: Any = None,
+    tags: Any = None,
+) -> bool:
+    """Return whether an explicit retain belongs to the Personal History Log.
+
+    The source turn is authoritative because a model may summarize or otherwise
+    transform the entry before calling the tool. Context/tags provide a
+    fail-closed fallback for callers that do not have source-turn context.
+    """
+    for candidate in (source_user_content, content):
+        if isinstance(candidate, str) and _PERSONAL_HISTORY_LOG_TRIGGER.match(candidate):
+            return True
+
+    normalized_context = " ".join(
+        str(context or "").lower().replace("-", " ").split()
+    )
+    if "personal history log" in normalized_context or "personal log" in normalized_context:
+        return True
+
+    normalized_tags = {
+        str(tag).strip().lower().replace("_", "-")
+        for tag in _normalize_retain_tags(tags)
+    }
+    return bool({"personal-log", "personal-history-log"} & normalized_tags)
 
 
 _OBSERVATION_SCOPE_KEYWORDS = {"per_tag", "combined", "all_combinations"}
@@ -1706,6 +1744,19 @@ class HindsightMemoryProvider(MemoryProvider):
             if not content:
                 return tool_error("Missing required parameter: content")
             context = args.get("context")
+            if _is_personal_history_log_retain(
+                content,
+                source_user_content=kwargs.get("source_user_content", ""),
+                context=context,
+                tags=args.get("tags"),
+            ):
+                logger.warning(
+                    "Denied explicit Hindsight retain for Personal History Log content"
+                )
+                return tool_error(
+                    "Denied: Personal History Log content must not be stored in Hindsight; "
+                    "preserve it only in the authoritative append-only log."
+                )
             try:
                 item = self._build_retain_kwargs(
                     content,

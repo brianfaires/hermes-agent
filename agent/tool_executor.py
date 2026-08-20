@@ -31,6 +31,7 @@ from agent.display import (
     redact_tool_args_for_display as _redact_tool_args_for_display,
     _detect_tool_failure,
 )
+from agent.message_content import latest_user_message_text as _latest_user_message_text
 from agent.tool_guardrails import ToolGuardrailDecision
 from agent.tool_dispatch_helpers import (
     _is_destructive_command,
@@ -1466,7 +1467,16 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             _mem_result = None
             try:
                 def _execute(next_args: dict) -> Any:
-                    return agent._memory_manager.handle_tool_call(function_name, next_args)
+                    return agent._memory_manager.handle_tool_call(
+                        function_name,
+                        next_args,
+                        source_user_content=_latest_user_message_text(
+                            messages,
+                            current_turn_user_idx=getattr(
+                                agent, "_persist_user_message_idx", None
+                            ),
+                        ),
+                    )
                 function_result, function_args = _run_agent_tool_execution_middleware(
                     agent,
                     function_name=function_name,
