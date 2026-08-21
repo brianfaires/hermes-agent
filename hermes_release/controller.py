@@ -1186,6 +1186,295 @@ def _promotion_prepared_state(
     return payload
 
 
+def _require_stopped_staging_runtime_for_promotion(
+    cfg: Config,
+    *,
+    sha: str,
+    service_id: str,
+    old_pid: int,
+) -> dict[str, Any]:
+    return _require_runtime(
+        cfg,
+        running=False,
+        branch=cfg.staging_branch,
+        sha=sha,
+        source=cfg.checkout_path,
+        service_id=service_id,
+        old_pid=old_pid,
+    )
+
+
+def _stored_consumed_authorization(cfg: Config, state: dict[str, Any], *, operation: str, sha: str) -> dict[str, Any]:
+    operation_id = state.get("operation_id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise ReleaseError(
+            "promotion_recovery_required",
+            "prepared promotion state has no operation id",
+            "Preserve release evidence and recover with the recorded operation id; do not request a second approval.",
+            state=str(state.get("state") or "unknown"),
+        )
+    consumed = _read_consumed_authorizations(cfg)
+    operations = consumed.get("operations") if isinstance(consumed.get("operations"), dict) else {}
+    proof = operations.get(operation_id)
+    if not isinstance(proof, dict):
+        raise ReleaseError(
+            "promotion_recovery_required",
+            "prepared promotion has no stored consumed authorization proof",
+            "Preserve release evidence and recover using the already-consumed authorization proof; do not request a second approval.",
+            state=str(state.get("state") or "unknown"),
+        )
+    if proof.get("operation") != operation or proof.get("candidate_sha") != sha or proof.get("approval_hash") not in set(consumed.get("consumed") or []):
+        raise ReleaseError(
+            "promotion_recovery_required",
+            "stored authorization proof does not match the prepared promotion",
+            "Preserve release evidence and recover with the exact stored authorization proof for this candidate.",
+            state=str(state.get("state") or "unknown"),
+        )
+    return proof
+
+
+def _promotion_resume_refs(cfg: Config, sha: str, rollback_sha: str) -> dict[str, str]:
+    remote = _remote_heads(cfg)
+    local_main = _local_ref(cfg, cfg.main_branch)
+    local_staging = _local_ref(cfg, cfg.staging_branch)
+    remote_main = remote[cfg.main_branch]
+    remote_staging = remote[cfg.staging_branch]
+    if local_staging != sha or remote_staging != sha:
+        raise ReleaseError(
+            "sha_drift",
+            "staging ref no longer equals the prepared candidate",
+            "Stop; requalify the current staging ref before attempting promotion recovery.",
+        )
+    if local_main not in {rollback_sha, sha}:
+        raise ReleaseError(
+            "main_ref_drift",
+            "local main is neither the rollback SHA nor the prepared candidate",
+            "Stop; preserve evidence and recover with one reviewed forward commit rather than rewriting main.",
+            details={"local_main": local_main},
+        )
+    if remote_main not in {rollback_sha, sha}:
+        raise ReleaseError(
+            "published_main_ambiguity",
+            "authoritative main is neither the rollback SHA nor the prepared candidate",
+            "Stop; preserve evidence and recover with one reviewed forward commit from the published main state.",
+            details={"remote_main": remote_main},
+        )
+    return {
+        "local_main": local_main,
+        "remote_main": remote_main,
+        "local_staging": local_staging,
+        "remote_staging": remote_staging,
+    }
+
+
+def _promotion_resume_identities(cfg: Config, state: dict[str, Any], sha: str) -> tuple[str, str, int, dict[str, Any]]:
+    if state.get("candidate_sha") != sha:
+        raise ReleaseError(
+            "candidate_mismatch",
+            "prepared promotion state is for a different candidate",
+            "Retry with the exact candidate in release state, or recover with a reviewed forward commit; do not rewrite main.",
+            state=str(state.get("state") or "unknown"),
+        )
+    rollback_sha = state.get("rollback_sha")
+    if not isinstance(rollback_sha, str) or not SHA_RE.fullmatch(rollback_sha):
+        raise ReleaseError(
+            "promotion_recovery_required",
+            "prepared promotion state has no exact rollback SHA",
+            "Preserve release evidence and recover with the exact rollback/candidate proof before mutating main.",
+            state=str(state.get("state") or "unknown"),
+        )
+    service_id = _require_configured_service_id(cfg)
+    stored_runtime = state.get("runtime") if isinstance(state.get("runtime"), dict) else {}
+    stored_service_id = str(stored_runtime.get("service_id") or "")
+    if stored_service_id and stored_service_id != service_id:
+        raise ReleaseError(
+            "runtime_identity_mismatch",
+            "stored runtime service identity does not match configured service",
+            "Inspect release state and configured service_id before retrying.",
+        )
+    old_pid = stored_runtime.get("old_pid") if isinstance(stored_runtime.get("old_pid"), int) else stored_runtime.get("pid")
+    if not isinstance(old_pid, int):
+        raise ReleaseError("runtime_identity_mismatch", "prepared promotion runtime old pid is missing", "Fix the runtime proof before retrying.")
+    authorization_proof = _stored_consumed_authorization(cfg, state, operation="promote", sha=sha)
+    return rollback_sha, service_id, old_pid, authorization_proof
+
+
+def _start_promoted_main(
+    cfg: Config,
+    *,
+    operation_id: str,
+    sha: str,
+    rollback_sha: str,
+    service_id: str,
+    old_pid: int,
+    stopped_runtime: dict[str, Any],
+    authorization_proof: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        _run_lifecycle(cfg, "start")
+        runtime = _require_runtime(
+            cfg,
+            running=True,
+            branch=cfg.main_branch,
+            sha=sha,
+            source=cfg.checkout_path,
+            service_id=service_id,
+            old_pid=old_pid,
+            require_new_pid=True,
+        )
+        smoke = _require_smoke(
+            cfg,
+            branch=cfg.main_branch,
+            sha=sha,
+            source=cfg.checkout_path,
+            service_id=str(runtime["service_id"]),
+            pid=int(runtime["pid"]),
+        )
+    except ReleaseError as exc:
+        stop_status = _best_effort_stop(
+            cfg,
+            branch=stopped_runtime.get("branch") if isinstance(stopped_runtime.get("branch"), str) else None,
+            sha=stopped_runtime.get("sha") if isinstance(stopped_runtime.get("sha"), str) else None,
+            source=cfg.checkout_path,
+            service_id=stopped_runtime.get("service_id") if isinstance(stopped_runtime.get("service_id"), str) else None,
+            old_pid=stopped_runtime.get("old_pid") if isinstance(stopped_runtime.get("old_pid"), int) else None,
+        )
+        _atomic_write_json(
+            cfg.state_path,
+            {
+                "operation_id": operation_id,
+                "state": "promotion-recovery-required",
+                "phase": "startup-failed-after-published-main",
+                "candidate_sha": sha,
+                "rollback_sha": rollback_sha,
+                "promoted": True,
+                "authorization": authorization_proof,
+                "startup_stop": stop_status,
+            },
+        )
+        _append_journal(cfg, {"operation_id": operation_id, "step": "promotion_recovery_required", "error": exc.code})
+        raise ReleaseError(
+            "promotion_recovery_required",
+            "main was published but startup/smoke failed",
+            "Create a normal revert or recovery commit from the published main state; do not rewrite main.",
+            state="promotion-recovery-required",
+        ) from exc
+    _atomic_write_json(
+        cfg.state_path,
+        {
+            "operation_id": operation_id,
+            "state": "promoted",
+            "candidate_sha": sha,
+            "rollback_sha": rollback_sha,
+            "promoted": True,
+            "smoke": smoke,
+            "runtime": runtime,
+            "authorization": authorization_proof,
+        },
+    )
+    _append_journal(cfg, {"operation_id": operation_id, "step": "promoted", "smoke": smoke})
+    return {"ok": True, "command": "promote", "state": "promoted", "candidate_sha": sha, "operation_id": operation_id}
+
+
+def _resume_promotion(cfg: Config, sha: str, state: dict[str, Any]) -> dict[str, Any]:
+    phase = str(state.get("phase") or "unknown")
+    if phase not in {"stopped-on-staging", "switched-to-main", "local-main-ready", "published-main"}:
+        _raise_incomplete_recovery_required(state)
+    operation_id = str(state["operation_id"])
+    rollback_sha, service_id, old_pid, authorization_proof = _promotion_resume_identities(cfg, state, sha)
+    _probe(cfg, "writers")
+    stopped_runtime = _require_stopped_staging_runtime_for_promotion(
+        cfg,
+        sha=sha,
+        service_id=service_id,
+        old_pid=old_pid,
+    )
+    refs = _promotion_resume_refs(cfg, sha, rollback_sha)
+    branch = _current_branch(cfg)
+    head = _git(cfg, "rev-parse", "HEAD")
+    if phase == "stopped-on-staging":
+        if branch != cfg.staging_branch or head != sha or refs["local_main"] != rollback_sha or refs["remote_main"] != rollback_sha:
+            raise ReleaseError(
+                "promotion_recovery_required",
+                "stopped-on-staging promotion state does not match checkout/ref reality",
+                "Run hermes-release rollback with the same config to return to known-good main.",
+                state="promotion-prepared",
+            )
+        _verify_checked_out_tree(cfg, cfg.staging_branch, sha)
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
+        switch = _run(["git", "switch", cfg.main_branch], cwd=cfg.checkout_path)
+        if switch.returncode != 0:
+            raise ReleaseError("switch_failed", "git switch main failed", "Keep the gateway stopped and inspect the checkout before retrying.", details={"stderr": switch.stderr.strip()})
+        _verify_checked_out_tree(cfg, cfg.main_branch, rollback_sha)
+        _atomic_write_json(
+            cfg.state_path,
+            _promotion_prepared_state(operation_id, "switched-to-main", sha, rollback_sha, authorization_proof, promoted=False, runtime=stopped_runtime),
+        )
+        phase = "switched-to-main"
+        branch = cfg.main_branch
+        head = rollback_sha
+    if phase == "switched-to-main":
+        if branch != cfg.main_branch or head not in {rollback_sha, sha}:
+            raise ReleaseError(
+                "promotion_recovery_required",
+                "switched-to-main promotion state does not match checkout reality",
+                "Run hermes-release rollback with the same config if main is still at rollback; otherwise recover with one reviewed forward commit.",
+                state="promotion-prepared",
+            )
+        _verify_checked_out_tree(cfg, cfg.main_branch, head)
+        if head == rollback_sha:
+            stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
+            merge = _run(["git", "merge", "--ff-only", cfg.staging_branch], cwd=cfg.checkout_path)
+            if merge.returncode != 0:
+                raise ReleaseError("merge_failed", "git merge --ff-only staging failed", "Do not force main; inspect divergence and requalify the release.", details={"stderr": merge.stderr.strip()})
+            _verify_checked_out_tree(cfg, cfg.main_branch, sha)
+        _atomic_write_json(
+            cfg.state_path,
+            _promotion_prepared_state(operation_id, "local-main-ready", sha, rollback_sha, authorization_proof, promoted=False, runtime=stopped_runtime),
+        )
+        phase = "local-main-ready"
+    if phase == "local-main-ready":
+        if _current_branch(cfg) != cfg.main_branch or _git(cfg, "rev-parse", "HEAD") != sha:
+            raise ReleaseError(
+                "promotion_recovery_required",
+                "local-main-ready promotion state does not match checkout reality",
+                "Recover with one reviewed forward commit; do not rewrite published main.",
+                state="promotion-prepared",
+            )
+        _verify_checked_out_tree(cfg, cfg.main_branch, sha)
+        refs = _promotion_resume_refs(cfg, sha, rollback_sha)
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
+        if refs["remote_main"] == rollback_sha:
+            push = _run(["git", "push", cfg.remote, cfg.main_branch], cwd=cfg.checkout_path)
+            if push.returncode != 0:
+                raise ReleaseError("push_failed", "git push main failed", "Preserve evidence and inspect the remote before retrying promotion.", details={"stderr": push.stderr.strip()})
+        refs = _promotion_resume_refs(cfg, sha, rollback_sha)
+        if refs["remote_main"] != sha:
+            raise ReleaseError("remote_readback_failed", "origin/main did not read back as candidate", "Do not retry blindly; inspect remote refs and preserved promotion evidence.")
+        _atomic_write_json(
+            cfg.state_path,
+            _promotion_prepared_state(operation_id, "published-main", sha, rollback_sha, authorization_proof, promoted=True, runtime=stopped_runtime),
+        )
+    elif phase == "published-main":
+        refs = _promotion_resume_refs(cfg, sha, rollback_sha)
+        if refs["remote_main"] != sha:
+            raise ReleaseError(
+                "published_main_ambiguity",
+                "published-main state does not match authoritative remote main",
+                "Stop; preserve evidence and recover with one reviewed forward commit from the published main state.",
+            )
+    return _start_promoted_main(
+        cfg,
+        operation_id=operation_id,
+        sha=sha,
+        rollback_sha=rollback_sha,
+        service_id=service_id,
+        old_pid=old_pid,
+        stopped_runtime=stopped_runtime,
+        authorization_proof=authorization_proof,
+    )
+
+
 def promote_dry_run(cfg: Config, sha: str) -> dict[str, Any]:
     _validate_static_config(cfg)
     _validate_sha(sha)
@@ -1536,6 +1825,8 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
     operation_id = f"promote-{uuid.uuid4().hex}"
     with _lock(cfg):
         state = _read_state(cfg)
+        if state and state.get("state") == "promotion-prepared":
+            return _resume_promotion(cfg, sha, state)
         _refuse_incomplete_operation(state)
         if not state or state.get("state") != "staging-active" or state.get("candidate_sha") != sha:
             raise ReleaseError("no_staged_candidate", "candidate is not active on staging", f"Stage and soak {sha} before promoting it.")
@@ -1572,14 +1863,14 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
             ),
         )
         _run_lifecycle(cfg, "stop")
-        stopped_runtime = _require_runtime(
+        old_pid = manifest["runtime"].get("pid") if isinstance(manifest["runtime"].get("pid"), int) else None
+        if old_pid is None:
+            raise ReleaseError("runtime_identity_mismatch", "pre-stop runtime pid is missing", "Fix the runtime probe schema, then retry.")
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(
             cfg,
-            running=False,
-            branch=cfg.staging_branch,
             sha=sha,
-            source=cfg.checkout_path,
             service_id=service_id,
-            old_pid=manifest["runtime"].get("pid") if isinstance(manifest["runtime"].get("pid"), int) else None,
+            old_pid=old_pid,
         )
         _verify_refs(cfg, sha, require_main_current=state["rollback_sha"])
         _require_checkout_position(cfg, cfg.staging_branch, sha)
@@ -1595,10 +1886,35 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
                 runtime=stopped_runtime,
             ),
         )
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(
+            cfg,
+            sha=sha,
+            service_id=service_id,
+            old_pid=old_pid,
+        )
         switch = _run(["git", "switch", cfg.main_branch], cwd=cfg.checkout_path)
         if switch.returncode != 0:
             raise ReleaseError("switch_failed", "git switch main failed", "Keep the gateway stopped and inspect the checkout before retrying.", details={"stderr": switch.stderr.strip()})
+        _verify_checked_out_tree(cfg, cfg.main_branch, state["rollback_sha"])
+        _atomic_write_json(
+            cfg.state_path,
+            _promotion_prepared_state(
+                operation_id,
+                "switched-to-main",
+                sha,
+                state["rollback_sha"],
+                authorization_proof,
+                promoted=False,
+                runtime=stopped_runtime,
+            ),
+        )
         _verify_refs(cfg, sha, require_main_current=state["rollback_sha"])
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(
+            cfg,
+            sha=sha,
+            service_id=service_id,
+            old_pid=old_pid,
+        )
         merge = _run(["git", "merge", "--ff-only", cfg.staging_branch], cwd=cfg.checkout_path)
         if merge.returncode != 0:
             raise ReleaseError("merge_failed", "git merge --ff-only staging failed", "Do not force main; inspect divergence and requalify the release.", details={"stderr": merge.stderr.strip()})
@@ -1614,6 +1930,12 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
                 promoted=False,
                 runtime=stopped_runtime,
             ),
+        )
+        stopped_runtime = _require_stopped_staging_runtime_for_promotion(
+            cfg,
+            sha=sha,
+            service_id=service_id,
+            old_pid=old_pid,
         )
         push = _run(["git", "push", cfg.remote, cfg.main_branch], cwd=cfg.checkout_path)
         if push.returncode != 0:

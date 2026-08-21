@@ -303,6 +303,37 @@ def replace_stop_with_stopped_runtime_mutation(config: Path, tmp_path: Path, mut
     write_config_data(config, data)
 
 
+def replace_runtime_probe_with_stopped_drift(
+    config: Path,
+    tmp_path: Path,
+    *,
+    mutate_on_stopped_probe: int,
+    mutation: dict[str, object],
+) -> None:
+    data = read_config(config)
+    probe = tmp_path / "runtime-drift-probe.py"
+    counter = tmp_path / "runtime-drift-count.txt"
+    probe.write_text(
+        "import json, pathlib\n"
+        f"runtime = pathlib.Path({str(tmp_path / 'runtime.json')!r})\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        f"mutation = {mutation!r}\n"
+        f"mutate_on = {mutate_on_stopped_probe!r}\n"
+        "data = json.loads(runtime.read_text())\n"
+        "if data.get('stopped') is True or data.get('running') is False:\n"
+        "    count = int(counter.read_text()) if counter.exists() else 0\n"
+        "    count += 1\n"
+        "    counter.write_text(str(count))\n"
+        "    if count == mutate_on:\n"
+        "        data.update(mutation)\n"
+        "        runtime.write_text(json.dumps(data))\n"
+        "print(json.dumps(data))\n",
+        encoding="utf-8",
+    )
+    data["probes"]["runtime"] = [sys.executable, str(probe)]  # type: ignore[index]
+    write_config_data(config, data)
+
+
 def cli(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "hermes_release", "--config", str(config), *args],
@@ -851,6 +882,40 @@ def test_promote_stopped_probe_must_match_staged_identity_before_main_switch_or_
     assert git(checkout, "branch", "--show-current") == before_branch
     assert git(checkout, "rev-parse", "HEAD") == before_head
     assert git(checkout, "rev-parse", "refs/remotes/origin/main") == before_main
+
+
+@pytest.mark.parametrize(
+    ("mutate_on_stopped_probe", "expected_branch", "expected_head_name"),
+    [
+        (2, "staging", "staging_sha"),
+        (3, "main", "main_sha"),
+        (4, "main", "staging_sha"),
+    ],
+)
+def test_promote_reproves_stopped_runtime_immediately_before_each_post_stop_mutation(
+    tmp_path: Path,
+    mutate_on_stopped_probe: int,
+    expected_branch: str,
+    expected_head_name: str,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    rewrite_auth(config, sha, "promote", "OOB-456")
+    replace_runtime_probe_with_stopped_drift(
+        config,
+        tmp_path,
+        mutate_on_stopped_probe=mutate_on_stopped_probe,
+        mutation={"old_pid": 9999},
+    )
+
+    assert_failure(cli(config, "promote", sha, "--authorize", "OOB-456"), "runtime_identity_mismatch")
+
+    assert git(checkout, "branch", "--show-current") == expected_branch
+    assert git(checkout, "rev-parse", "HEAD") == repo[expected_head_name]
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == repo["main_sha"]
 
 
 @pytest.mark.parametrize(
@@ -1612,6 +1677,171 @@ def test_promote_push_failure_reports_local_main_ready_phase(tmp_path: Path) -> 
     assert status["state"] == "promotion-prepared"
     assert status["phase"] == "local-main-ready"
     assert status["promoted"] is False
+
+
+def _write_consumed_promote_proof(config: Path, operation_id: str, sha: str) -> dict[str, object]:
+    proof = {
+        "approval_hash": "stored-approval",
+        "candidate_sha": sha,
+        "expires_at": "2026-08-20T13:00:00Z",
+        "not_before": "2026-08-20T12:00:00Z",
+        "operation": "promote",
+        "reference_hash": "stored-reference",
+        "single_use": True,
+        "window_hash": "stored-window",
+    }
+    state_dir = Path(read_config(config)["state_dir"])
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "authorization-consumed.json").write_text(
+        json.dumps({"consumed": [proof["approval_hash"]], "operations": {operation_id: proof}}),
+        encoding="utf-8",
+    )
+    return proof
+
+
+def _write_promotion_prepared_fixture(
+    config: Path,
+    tmp_path: Path,
+    *,
+    operation_id: str,
+    phase: str,
+    candidate_sha: str,
+    rollback_sha: str,
+    promoted: bool = False,
+) -> None:
+    proof = _write_consumed_promote_proof(config, operation_id, candidate_sha)
+    state_dir = Path(read_config(config)["state_dir"])
+    (state_dir / "release-state.json").write_text(
+        json.dumps(
+            {
+                "operation_id": operation_id,
+                "state": "promotion-prepared",
+                "phase": phase,
+                "candidate_sha": candidate_sha,
+                "rollback_sha": rollback_sha,
+                "promoted": promoted,
+                "runtime": {
+                    "ok": True,
+                    "running": False,
+                    "stopped": True,
+                    "source": str(read_config(config)["checkout_path"]),
+                    "branch": "staging",
+                    "sha": candidate_sha,
+                    "service_id": "hermes-gateway-test",
+                    "old_pid": 2222,
+                },
+                "authorization": proof,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "running": False,
+                "stopped": True,
+                "source": str(read_config(config)["checkout_path"]),
+                "branch": "staging",
+                "sha": candidate_sha,
+                "service_id": "hermes-gateway-test",
+                "old_pid": 2222,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase", "advance_local_main"),
+    [
+        ("switched-to-main", False),
+        ("switched-to-main", True),
+    ],
+)
+def test_promote_resumes_after_main_switch_or_merge_before_state_write_without_new_authorization(
+    tmp_path: Path,
+    phase: str,
+    advance_local_main: bool,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    git(checkout, "switch", "main")
+    if advance_local_main:
+        git(checkout, "merge", "--ff-only", "staging")
+    _write_promotion_prepared_fixture(
+        config,
+        tmp_path,
+        operation_id="promote-crash",
+        phase=phase,
+        candidate_sha=sha,
+        rollback_sha=str(repo["main_sha"]),
+    )
+    rewrite_auth(config, sha, "promote", "DIFFERENT-UNCONSUMED")
+
+    promoted = assert_success(cli(config, "promote", sha))
+
+    assert promoted["state"] == "promoted"
+    assert promoted["operation_id"] == "promote-crash"
+    assert git(checkout, "branch", "--show-current") == "main"
+    assert git(checkout, "rev-parse", "HEAD") == sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == sha
+
+
+def test_promote_rerun_retries_only_push_readback_start_after_local_main_ready(
+    tmp_path: Path,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    hook = Path(str(repo["remote"])) / "hooks" / "pre-receive"
+    hook.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    hook.chmod(stat.S_IRWXU)
+    rewrite_auth(config, sha, "promote", "OOB-456")
+    assert_failure(cli(config, "promote", sha, "--authorize", "OOB-456"), "push_failed")
+    hook.unlink()
+    rewrite_auth(config, sha, "promote", "DIFFERENT-UNCONSUMED")
+
+    promoted = assert_success(cli(config, "promote", sha))
+
+    assert promoted["state"] == "promoted"
+    assert git(checkout, "rev-parse", "HEAD") == sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == sha
+
+
+def test_promote_rerun_after_push_before_state_write_detects_published_candidate_without_repush(
+    tmp_path: Path,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    git(checkout, "switch", "main")
+    git(checkout, "merge", "--ff-only", "staging")
+    git(checkout, "push", "origin", "main")
+    _write_promotion_prepared_fixture(
+        config,
+        tmp_path,
+        operation_id="promote-pushed-crash",
+        phase="local-main-ready",
+        candidate_sha=sha,
+        rollback_sha=str(repo["main_sha"]),
+    )
+    hook = Path(str(repo["remote"])) / "hooks" / "pre-receive"
+    hook.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    hook.chmod(stat.S_IRWXU)
+
+    promoted = assert_success(cli(config, "promote", sha))
+
+    assert promoted["state"] == "promoted"
+    assert promoted["operation_id"] == "promote-pushed-crash"
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == sha
 
 
 def test_rollback_start_failure_persists_recovery_required_and_stops_gateway(tmp_path: Path) -> None:
