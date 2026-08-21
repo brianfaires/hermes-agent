@@ -138,7 +138,7 @@ cat > "$SANDBOX/release-config.json" <<EOF
   "archive_encryption": {
     "argv": ["$SANDBOX/bin/encrypt-archive", "--input", "{input}", "--output", "{output}"],
     "verify_argv": ["$SANDBOX/bin/verify-archive", "--output", "{output}", "--sha256", "{sha256}"],
-    "output": "$SANDBOX/encrypted/repo-local.tar.gz.enc"
+    "output": "$SANDBOX/encrypted/{operation_id}-repo-local.tar.gz.enc"
   },
   "probes": {
     "runtime": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/runtime.json').read_text())"],
@@ -193,6 +193,9 @@ Expected evidence:
   `archive_encryption.output` encrypt a temporary plaintext tarball with
   `shell=False`, verify JSON `{ok:true, encrypted:true, artifact_sha256:<sha>}`
   against the exact output SHA-256, and delete plaintext before mutation.
+  Use `{operation_id}` in the output path as shown above so repeated release
+  operations preserve distinct encrypted artifacts; the controller refuses to
+  overwrite an existing resolved output.
 - The final `rollback` fails closed with
   `"code": "post_promotion_rollback_refused"` and tells the operator to recover
   with a normal revert or recovery commit rather than rewriting published

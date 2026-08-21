@@ -383,6 +383,61 @@ def test_stage_status_promote_and_stage_rollback_happy_path(tmp_path: Path) -> N
     assert "revert" in refused["recovery_action"].lower()
 
 
+def test_real_successful_stage_retry_is_idempotent_with_consumed_authorization(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+
+    staged = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    retried = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+
+    assert retried["idempotent"] is True
+    assert retried["operation_id"] == staged["operation_id"]
+    consumed = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    assert len(consumed["consumed"]) == 1
+
+
+def test_promote_dry_run_validates_active_staging_without_writes(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    staged = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    before_state = (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8")
+    before_journal = (tmp_path / "state" / "release-journal.jsonl").read_text(encoding="utf-8")
+    before_consumed = (tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8")
+    rewrite_auth(config, sha, "promote", "OOB-DRY")
+
+    result = assert_success(cli_with_global_dry_run(config, "promote", sha, "--authorize", "OOB-DRY"))
+
+    assert result["command"] == "promote"
+    assert result["dry_run"] is True
+    assert result["candidate_sha"] == sha
+    assert result["operation_id"] == staged["operation_id"]
+    assert (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8") == before_state
+    assert (tmp_path / "state" / "release-journal.jsonl").read_text(encoding="utf-8") == before_journal
+    assert (tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8") == before_consumed
+    assert git(checkout, "branch", "--show-current") == "staging"
+
+
+def test_promote_dry_run_rejects_staging_drift_without_writes(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    before_state = (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8")
+    git(checkout, "switch", "main")
+    rewrite_auth(config, sha, "promote", "OOB-DRY")
+
+    assert_failure(cli_with_global_dry_run(config, "promote", sha, "--authorize", "OOB-DRY"), "stale_state_mismatch")
+
+    assert (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8") == before_state
+    consumed = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    assert len(consumed["consumed"]) == 1
+
+
 @pytest.mark.parametrize(
     ("mutate", "code"),
     [
@@ -881,6 +936,99 @@ def test_sensitive_repo_local_archive_uses_configured_encryptor(tmp_path: Path) 
     assert not Path(archive["plaintext_path"]).exists()
 
 
+def test_encrypted_archive_output_template_preserves_distinct_operation_outputs(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    encryptor = tmp_path / "bin" / "encrypt-archive"
+    verifier = tmp_path / "bin" / "verify-archive"
+    encryptor.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, shutil, sys\n"
+        "shutil.copyfile(pathlib.Path(sys.argv[sys.argv.index('--input') + 1]), pathlib.Path(sys.argv[sys.argv.index('--output') + 1]))\n",
+        encoding="utf-8",
+    )
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import hashlib, json, pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "print(json.dumps({'ok': True, 'encrypted': True, 'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))\n",
+        encoding="utf-8",
+    )
+    encryptor.chmod(stat.S_IRWXU)
+    verifier.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["archive_encryption"] = {
+        "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(tmp_path / "encrypted" / "{operation_id}.tar.gz.enc"),
+    }
+    write_config_data(config, data)
+
+    first = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))["repo_local_archive"]["archive"]
+    assert_success(cli(config, "rollback"))
+    rewrite_auth(config, sha, "stage", "OOB-456")
+    second = assert_success(cli(config, "stage", sha, "--authorize", "OOB-456"))["repo_local_archive"]["archive"]
+
+    assert first != second
+    assert Path(first).exists()
+    assert Path(second).exists()
+
+
+def test_encrypted_archive_refuses_to_overwrite_existing_output(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    encryptor = tmp_path / "bin" / "encrypt-archive"
+    verifier = tmp_path / "bin" / "verify-archive"
+    encrypted = tmp_path / "encrypted.tar.gz.enc"
+    encrypted.write_text("existing\n", encoding="utf-8")
+    encryptor.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    verifier.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    encryptor.chmod(stat.S_IRWXU)
+    verifier.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["archive_encryption"] = {
+        "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(encrypted),
+    }
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "archive_output_exists")
+
+    assert encrypted.read_text(encoding="utf-8") == "existing\n"
+    assert not any((tmp_path / "state" / "archives").glob("*.tar.gz")) if (tmp_path / "state" / "archives").exists() else True
+
+
+def test_archive_encryption_timeout_is_structured_and_plaintext_removed(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    slow = tmp_path / "bin" / "slow-encrypt"
+    encrypted = tmp_path / "encrypted.tar.gz.enc"
+    slow.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n", encoding="utf-8")
+    slow.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["lifecycle"]["timeout_seconds"] = 1  # type: ignore[index]
+    data["archive_encryption"] = {
+        "argv": [str(slow), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(slow), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(encrypted),
+    }
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "archive_encryption_failed")
+
+    assert not any((tmp_path / "state" / "archives").glob("*.tar.gz")) if (tmp_path / "state" / "archives").exists() else True
+
+
 def test_encrypted_archive_requires_verifier_bound_to_output_hash(tmp_path: Path) -> None:
     repo = init_release_repo(tmp_path)
     checkout = repo["checkout"]
@@ -1004,6 +1152,143 @@ def test_startup_failure_rolls_back_when_safe_and_stays_stopped_when_uncertain(t
     rollback_probe = uncertain / "rollback-safe.json"
     rollback_probe.write_text(json.dumps({"ok": False, "reason": "fixture uncertainty"}), encoding="utf-8")
     assert_failure(cli(config2, "stage", sha2, "--authorize", "OOB-123"), "rollback_uncertain")
+
+
+def test_incomplete_stage_stopped_on_main_fails_closed_and_rollback_recovers(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "release-state.json").write_text(
+        json.dumps(
+            {
+                "operation_id": "stage-crash",
+                "state": "staging-prepared",
+                "phase": "stopped-on-main",
+                "candidate_sha": sha,
+                "rollback_sha": repo["main_sha"],
+                "promoted": False,
+                "runtime": {"pid": 1111, "service_id": "hermes-gateway-test"},
+                "authorization": {"approval_hash": "stored", "reference_hash": "stored"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({"ok": True, "running": False, "stopped": True, "source": str(checkout), "service_id": "hermes-gateway-test"}), encoding="utf-8")
+
+    failed = assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "recovery_required")
+    assert failed["state"] == "staging-prepared"
+    rolled = assert_success(cli(config, "rollback"))
+
+    assert rolled["state"] == "rolled-back"
+    assert git(checkout, "branch", "--show-current") == "main"
+    assert git(checkout, "rev-parse", "HEAD") == repo["main_sha"]
+
+
+def test_incomplete_stage_switched_to_staging_fails_closed_and_rollback_recovers(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    git(checkout, "switch", "staging")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "release-state.json").write_text(
+        json.dumps(
+            {
+                "operation_id": "stage-crash",
+                "state": "staging-prepared",
+                "phase": "switched-to-staging",
+                "candidate_sha": sha,
+                "rollback_sha": repo["main_sha"],
+                "promoted": False,
+                "runtime": {"pid": 1111, "service_id": "hermes-gateway-test"},
+                "authorization": {"approval_hash": "stored", "reference_hash": "stored"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({"ok": True, "running": False, "stopped": True, "source": str(checkout), "service_id": "hermes-gateway-test"}), encoding="utf-8")
+
+    failed = assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "recovery_required")
+    assert failed["state"] == "staging-prepared"
+    rolled = assert_success(cli(config, "rollback"))
+
+    assert rolled["state"] == "rolled-back"
+    assert git(checkout, "branch", "--show-current") == "main"
+
+
+def test_promote_reports_local_main_ready_and_published_phases(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    (tmp_path / "smoke.json").write_text(json.dumps({"ok": True, "bad_on_main": {"sha": "0" * 40}}), encoding="utf-8")
+    rewrite_auth(config, sha, "promote", "OOB-456")
+
+    failed = assert_failure(cli(config, "promote", sha, "--authorize", "OOB-456"), "promotion_recovery_required")
+
+    assert failed["state"] == "promotion-recovery-required"
+    state = json.loads((tmp_path / "state" / "release-state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "startup-failed-after-published-main"
+    assert state["promoted"] is True
+
+
+def test_promote_push_failure_reports_local_main_ready_phase(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    hook = Path(str(repo["remote"])) / "hooks" / "pre-receive"
+    hook.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    hook.chmod(stat.S_IRWXU)
+    rewrite_auth(config, sha, "promote", "OOB-456")
+
+    assert_failure(cli(config, "promote", sha, "--authorize", "OOB-456"), "push_failed")
+
+    status = assert_success(cli(config, "status"))
+    assert status["state"] == "promotion-prepared"
+    assert status["phase"] == "local-main-ready"
+    assert status["promoted"] is False
+
+
+def test_rollback_start_failure_persists_recovery_required_and_stops_gateway(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    data = read_config(config)
+    fail_start = tmp_path / "fail-start" / "hermes"
+    fail_start.parent.mkdir()
+    fail_start.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
+        f"python3 - <<'PY'\nimport json,pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid')}})\npath.write_text(json.dumps(data))\nPY\n"
+        "fi\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = start ]; then exit 4; fi\n",
+        encoding="utf-8",
+    )
+    fail_start.chmod(0o700)
+    data["lifecycle"]["stop"] = [str(fail_start), "gateway", "stop"]  # type: ignore[index]
+    data["lifecycle"]["start"] = [str(fail_start), "gateway", "start"]  # type: ignore[index]
+    write_config_data(config, data)
+
+    failed = assert_failure(cli(config, "rollback"), "rollback_recovery_required")
+
+    assert failed["state"] == "rollback-recovery-required"
+    state = json.loads((tmp_path / "state" / "release-state.json").read_text(encoding="utf-8"))
+    assert state["state"] == "rollback-recovery-required"
+    assert state["startup_stop"]["stopped"] is True
+    assert json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))["stopped"] is True
 
 
 def test_journal_crash_recovery_and_idempotent_stage_retry(tmp_path: Path) -> None:
