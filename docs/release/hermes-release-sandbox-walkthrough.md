@@ -27,10 +27,33 @@ git -C "$SANDBOX/checkout" checkout main
 git -C "$SANDBOX/checkout" checkout -b staging origin/staging
 git -C "$SANDBOX/checkout" checkout main
 export CANDIDATE_SHA="$(git -C "$SANDBOX/checkout" rev-parse refs/heads/staging)"
-cat > "$SANDBOX/bin/hermes" <<'EOF'
+cat > "$SANDBOX/bin/hermes" <<EOF
 #!/usr/bin/env bash
 set -eu
-printf '%s\n' "$*" >> "$SANDBOX/lifecycle.log"
+printf '%s\n' "\$*" >> "$SANDBOX/lifecycle.log"
+if [ "\${*: -2:1}" = gateway ] && [ "\${*: -1}" = stop ]; then
+  python3 - <<'PY'
+import json, pathlib
+path = pathlib.Path("$SANDBOX/runtime.json")
+data = json.loads(path.read_text())
+data.update({"ok": True, "running": False, "stopped": True, "old_pid": data.get("pid")})
+path.write_text(json.dumps(data))
+PY
+fi
+if [ "\${*: -2:1}" = gateway ] && [ "\${*: -1}" = start ]; then
+  python3 - <<'PY'
+import json, pathlib, subprocess
+checkout = pathlib.Path("$SANDBOX/checkout")
+path = pathlib.Path("$SANDBOX/runtime.json")
+old = json.loads(path.read_text())
+branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=checkout, text=True).strip()
+sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+path.write_text(json.dumps({
+  "ok": True, "running": True, "stopped": False, "pid": int(old.get("pid", 1111)) + 1111,
+  "source": str(checkout), "branch": branch, "sha": sha, "service_id": "hermes-gateway-sandbox"
+}))
+PY
+fi
 EOF
 chmod 700 "$SANDBOX/bin/hermes"
 ```
@@ -38,19 +61,28 @@ chmod 700 "$SANDBOX/bin/hermes"
 Create deterministic machine-readable receipts and probes:
 
 ```bash
-for name in authorization ci review compatibility backup; do
+for name in ci review; do
   cat > "$SANDBOX/receipts/$name.json" <<EOF
 {"sha":"$CANDIDATE_SHA","status":"ok","issued_at":"2026-08-20T12:00:00Z"}
 EOF
 done
+cat > "$SANDBOX/receipts/authorization.json" <<EOF
+{"sha":"$CANDIDATE_SHA","status":"ok","operation":"stage","reference_id":"OOB-SANDBOX","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
+EOF
+cat > "$SANDBOX/receipts/compatibility.json" <<EOF
+{"sha":"$CANDIDATE_SHA","status":"ok","issued_at":"2026-08-20T12:00:00Z","scope":["repo_local"]}
+EOF
+cat > "$SANDBOX/receipts/backup.json" <<EOF
+{"sha":"$CANDIDATE_SHA","status":"ok","issued_at":"2026-08-20T12:00:00Z","scope":["repo_local"]}
+EOF
 cat > "$SANDBOX/writers.json" <<EOF
 {"ok":true,"active":[]}
 EOF
 cat > "$SANDBOX/runtime.json" <<EOF
-{"ok":true,"pid":1111,"source":"$SANDBOX/checkout"}
+{"ok":true,"running":true,"stopped":false,"pid":1111,"source":"$SANDBOX/checkout","branch":"main","sha":"$(git -C "$SANDBOX/checkout" rev-parse HEAD)","service_id":"hermes-gateway-sandbox"}
 EOF
 cat > "$SANDBOX/smoke.json" <<EOF
-{"ok":true,"pid":2222,"source":"$SANDBOX/checkout","sha":"$CANDIDATE_SHA"}
+{"ok":true}
 EOF
 cat > "$SANDBOX/rollback-safe.json" <<EOF
 {"ok":true}
@@ -63,6 +95,7 @@ cat > "$SANDBOX/release-config.json" <<EOF
   "remote": "origin",
   "main_branch": "main",
   "staging_branch": "staging",
+  "release_scopes": ["repo_local"],
   "reproducible_untracked_globs": [".venv/**", "node_modules/**", "__pycache__/**"],
   "authorization_receipt": "$SANDBOX/receipts/authorization.json",
   "ci_receipt": "$SANDBOX/receipts/ci.json",
@@ -78,7 +111,7 @@ cat > "$SANDBOX/release-config.json" <<EOF
   "probes": {
     "runtime": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/runtime.json').read_text())"],
     "writers": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/writers.json').read_text())"],
-    "smoke": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/smoke.json').read_text())"],
+    "smoke": ["python3", "-c", "import json,pathlib,subprocess; checkout=pathlib.Path('$SANDBOX/checkout'); base=json.loads(pathlib.Path('$SANDBOX/smoke.json').read_text()); branch=subprocess.check_output(['git','branch','--show-current'],cwd=checkout,text=True).strip(); sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=checkout,text=True).strip(); runtime=json.loads(pathlib.Path('$SANDBOX/runtime.json').read_text()); payload={'ok':base.get('ok') is True,'source':str(checkout),'branch':branch,'sha':sha,'pid':runtime.get('pid'),'service_id':runtime.get('service_id')}; print(json.dumps(payload))"],
     "rollback_safety": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/rollback-safe.json').read_text())"]
   },
   "forbidden_live_paths": ["/home/brian/.hermes/config.yaml", "/home/brian/.hermes/hermes-agent"]
@@ -93,7 +126,13 @@ python -m hermes_release --config "$SANDBOX/release-config.json" preflight "$CAN
 python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX
 python -m hermes_release --config "$SANDBOX/release-config.json" status
 python -m hermes_release --config "$SANDBOX/release-config.json" rollback
+cat > "$SANDBOX/receipts/authorization.json" <<EOF
+{"sha":"$CANDIDATE_SHA","status":"ok","operation":"stage","reference_id":"OOB-SANDBOX-2","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
+EOF
 python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX-2
+cat > "$SANDBOX/receipts/authorization.json" <<EOF
+{"sha":"$CANDIDATE_SHA","status":"ok","operation":"promote","reference_id":"OOB-SANDBOX-3","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
+EOF
 python -m hermes_release --config "$SANDBOX/release-config.json" promote "$CANDIDATE_SHA" --authorize OOB-SANDBOX-3
 python -m hermes_release --config "$SANDBOX/release-config.json" rollback
 ```
@@ -104,13 +143,23 @@ Expected evidence:
   `$SANDBOX/state` directory.
 - `stage` returns `"state": "staging-active"`, switches `$SANDBOX/checkout` to
   `staging`, and appends `gateway stop` then `gateway start` to
-  `$SANDBOX/lifecycle.log`.
+  `$SANDBOX/lifecycle.log`. It also persists only hashed authorization
+  evidence, not the raw `OOB-*` value.
 - `status` returns the durable state from
   `$SANDBOX/state/release-state.json`.
 - The first `rollback` returns `"state": "rolled-back"` and switches the
   checkout back to `main`.
 - `promote` returns `"state": "promoted"`, fast-forwards local and remote
   `main` to `$CANDIDATE_SHA`, and restarts through the fake lifecycle command.
+- If `release_scopes` includes `config_secrets`, `database_schema`, or
+  `dependencies`, the backup/compatibility receipts must include the matching
+  encrypted/private artifact, integrity, restore/list, and rollback
+  compatibility proof fields. The minimal `repo_local` scope above accepts the
+  compact receipt.
+- If sensitive repo-local files such as `.env` exist, configure
+  `archive_encryption.argv` and `archive_encryption.output` so the controller
+  encrypts a temporary plaintext tarball with `shell=False`, hashes the
+  encrypted artifact, and deletes the plaintext before mutation.
 - The final `rollback` fails closed with
   `"code": "post_promotion_rollback_refused"` and tells the operator to recover
   with a normal revert or recovery commit rather than rewriting published
