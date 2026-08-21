@@ -38,7 +38,7 @@ if [ "\${*: -2:1}" = gateway ] && [ "\${*: -1}" = stop ]; then
 import json, pathlib
 path = pathlib.Path("$SANDBOX/runtime.json")
 data = json.loads(path.read_text())
-data.update({"ok": True, "running": False, "stopped": True, "old_pid": data.get("pid")})
+data.update({"ok": True, "running": False, "stopped": True, "old_pid": data.get("pid", data.get("old_pid"))})
 path.write_text(json.dumps(data))
 PY
 fi
@@ -79,7 +79,14 @@ import sys
 path = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
 expected = sys.argv[sys.argv.index("--sha256") + 1]
 actual = hashlib.sha256(path.read_bytes()).hexdigest()
-print(json.dumps({"ok": actual == expected, "encrypted": True, "artifact_sha256": actual}))
+print(json.dumps({
+  "ok": actual == expected,
+  "encrypted": True,
+  "artifact_sha256": actual,
+  "operation_id": sys.argv[sys.argv.index("--operation-id") + 1],
+  "candidate_sha": sys.argv[sys.argv.index("--candidate-sha") + 1],
+  "rollback_sha": sys.argv[sys.argv.index("--rollback-sha") + 1],
+}))
 EOF
 chmod 700 "$SANDBOX/bin/verify-archive"
 ```
@@ -137,7 +144,7 @@ cat > "$SANDBOX/release-config.json" <<EOF
   },
   "archive_encryption": {
     "argv": ["$SANDBOX/bin/encrypt-archive", "--input", "{input}", "--output", "{output}"],
-    "verify_argv": ["$SANDBOX/bin/verify-archive", "--output", "{output}", "--sha256", "{sha256}"],
+    "verify_argv": ["$SANDBOX/bin/verify-archive", "--output", "{output}", "--sha256", "{sha256}", "--operation-id", "{operation_id}", "--candidate-sha", "{candidate_sha}", "--rollback-sha", "{rollback_sha}"],
     "output": "$SANDBOX/encrypted/{operation_id}-repo-local.tar.gz.enc"
   },
   "probes": {
@@ -191,8 +198,10 @@ Expected evidence:
 - If sensitive repo-local files such as `.env` exist, the configured
   `archive_encryption.argv`, `archive_encryption.verify_argv`, and
   `archive_encryption.output` encrypt a temporary plaintext tarball with
-  `shell=False`, verify JSON `{ok:true, encrypted:true, artifact_sha256:<sha>}`
-  against the exact output SHA-256, and delete plaintext before mutation.
+  `shell=False`, verify JSON `{ok:true, encrypted:true, artifact_sha256:<sha>,
+  operation_id:<id>, candidate_sha:<sha>, rollback_sha:<sha>}` against the
+  exact output SHA-256 and release operation/SHA bindings, and delete plaintext
+  before mutation.
   Use `{operation_id}` in the output path as shown above so repeated release
   operations preserve distinct encrypted artifacts; the controller refuses to
   overwrite an existing resolved output.

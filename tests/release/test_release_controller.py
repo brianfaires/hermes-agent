@@ -82,7 +82,7 @@ def write_fake_hermes(path: Path, log_path: Path, runtime_path: Path, checkout: 
         "import json, pathlib\n"
         f"path = pathlib.Path({str(runtime_path)!r})\n"
         "data = json.loads(path.read_text())\n"
-        "data.update({'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid')})\n"
+        "data.update({'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid', data.get('old_pid'))})\n"
         "path.write_text(json.dumps(data))\n"
         "PY\n"
         "fi\n"
@@ -275,6 +275,32 @@ def read_config(config: Path) -> dict[str, object]:
 
 def write_config_data(config: Path, data: dict[str, object]) -> None:
     config.write_text(json.dumps(data), encoding="utf-8")
+
+
+def replace_stop_with_stopped_runtime_mutation(config: Path, tmp_path: Path, mutation: dict[str, object]) -> None:
+    data = read_config(config)
+    stop_hermes = tmp_path / "mutating-stop" / "hermes"
+    stop_hermes.parent.mkdir(exist_ok=True)
+    stop_hermes.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"path = pathlib.Path({str(tmp_path / 'runtime.json')!r})\n"
+        f"mutation = {mutation!r}\n"
+        "data = json.loads(path.read_text())\n"
+        "data.update({'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid', data.get('old_pid'))})\n"
+        "data.update(mutation)\n"
+        "path.write_text(json.dumps(data))\n"
+        "PY\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    stop_hermes.chmod(0o700)
+    data["lifecycle"]["stop"] = [str(stop_hermes), "gateway", "stop"]  # type: ignore[index]
+    write_config_data(config, data)
 
 
 def cli(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -700,6 +726,53 @@ def test_authorization_hash_is_bound_to_operation(tmp_path: Path) -> None:
     assert promoted["state"] == "promoted"
 
 
+def test_authorization_digest_is_bound_to_validated_window_and_redacted_everywhere(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    raw_reference = "SECRET-REFERENCE-TOKEN-123"
+    config = write_config(tmp_path, checkout, sha, auth_reference=raw_reference)
+
+    first = assert_success(cli(config, "stage", sha, "--authorize", raw_reference))
+    first_stdout = json.dumps(first)
+    first_consumed = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    first_proof = first_consumed["operations"][first["operation_id"]]
+    assert first_proof["not_before"] == "2026-08-20T12:00:00Z"
+    assert first_proof["expires_at"] == "2026-08-20T13:00:00Z"
+    assert first_proof["single_use"] is True
+    assert_success(cli(config, "rollback"))
+
+    rewrite_auth(
+        config,
+        sha,
+        "stage",
+        raw_reference,
+        not_before="2026-08-20T12:01:00Z",
+        expires_at="2026-08-20T13:01:00Z",
+    )
+    second = assert_success(cli(config, "stage", sha, "--authorize", raw_reference))
+    second_stdout = json.dumps(second)
+    consumed = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    second_proof = consumed["operations"][second["operation_id"]]
+
+    assert first_proof["approval_hash"] != second_proof["approval_hash"]
+    assert first_proof["window_hash"] != second_proof["window_hash"]
+    assert second_proof["not_before"] == "2026-08-20T12:01:00Z"
+    assert second_proof["expires_at"] == "2026-08-20T13:01:00Z"
+    assert second_proof["single_use"] is True
+    persisted = "\n".join(
+        [
+            first_stdout,
+            second_stdout,
+            (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8"),
+            (tmp_path / "state" / "release-journal.jsonl").read_text(encoding="utf-8"),
+            (tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"),
+        ]
+    )
+    assert raw_reference not in persisted
+    assert "TOKEN-123" not in persisted
+
+
 @pytest.mark.parametrize(
     ("field", "value", "code"),
     [
@@ -720,6 +793,92 @@ def test_stage_fails_closed_for_wrong_started_runtime_identity(tmp_path: Path, f
     smoke.write_text(json.dumps({"ok": True, "bad_on_staging": {field: value}}), encoding="utf-8")
 
     assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), code)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"source": "/tmp/wrong-source"},
+        {"branch": "staging"},
+        {"sha": "0" * 40},
+        {"service_id": "wrong-service"},
+        {"old_pid": 9999},
+    ],
+)
+def test_stage_stopped_probe_must_match_pre_stop_identity_before_switch(tmp_path: Path, mutation: dict[str, object]) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    before_branch = git(checkout, "branch", "--show-current")
+    before_head = git(checkout, "rev-parse", "HEAD")
+    before_main = git(checkout, "rev-parse", "refs/remotes/origin/main")
+    replace_stop_with_stopped_runtime_mutation(config, tmp_path, mutation)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "runtime_identity_mismatch")
+
+    assert git(checkout, "branch", "--show-current") == before_branch
+    assert git(checkout, "rev-parse", "HEAD") == before_head
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == before_main
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"source": "/tmp/wrong-source"},
+        {"branch": "main"},
+        {"sha": "0" * 40},
+        {"service_id": "wrong-service"},
+        {"old_pid": 9999},
+    ],
+)
+def test_promote_stopped_probe_must_match_staged_identity_before_main_switch_or_push(
+    tmp_path: Path, mutation: dict[str, object]
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    rewrite_auth(config, sha, "promote", "OOB-456")
+    before_branch = git(checkout, "branch", "--show-current")
+    before_head = git(checkout, "rev-parse", "HEAD")
+    before_main = git(checkout, "rev-parse", "refs/remotes/origin/main")
+    replace_stop_with_stopped_runtime_mutation(config, tmp_path, mutation)
+
+    assert_failure(cli(config, "promote", sha, "--authorize", "OOB-456"), "runtime_identity_mismatch")
+
+    assert git(checkout, "branch", "--show-current") == before_branch
+    assert git(checkout, "rev-parse", "HEAD") == before_head
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == before_main
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"source": "/tmp/wrong-source"},
+        {"branch": "main"},
+        {"sha": "0" * 40},
+        {"service_id": "wrong-service"},
+        {"old_pid": 9999},
+    ],
+)
+def test_manual_rollback_stopped_probe_must_match_staged_identity_before_switch(
+    tmp_path: Path, mutation: dict[str, object]
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    before_branch = git(checkout, "branch", "--show-current")
+    before_head = git(checkout, "rev-parse", "HEAD")
+    replace_stop_with_stopped_runtime_mutation(config, tmp_path, mutation)
+
+    assert_failure(cli(config, "rollback"), "runtime_identity_mismatch")
+
+    assert git(checkout, "branch", "--show-current") == before_branch
+    assert git(checkout, "rev-parse", "HEAD") == before_head
 
 
 @pytest.mark.parametrize(
@@ -853,7 +1012,7 @@ def test_stage_requires_current_branch_and_head_again_after_stop(tmp_path: Path)
         f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
         "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
         f"  git -C {str(checkout)!r} switch staging >/dev/null\n"
-        f"  python3 - <<'PY'\nimport json, pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid')}})\npath.write_text(json.dumps(data))\nPY\n"
+        f"  python3 - <<'PY'\nimport json, pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid', data.get('old_pid'))}})\npath.write_text(json.dumps(data))\nPY\n"
         "fi\n",
         encoding="utf-8",
     )
@@ -915,14 +1074,33 @@ def test_sensitive_repo_local_archive_uses_configured_encryptor(tmp_path: Path) 
         "import hashlib, json, pathlib, sys\n"
         "path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
         "sha = sys.argv[sys.argv.index('--sha256') + 1]\n"
-        "print(json.dumps({'ok': True, 'encrypted': True, 'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))\n",
+        "print(json.dumps({\n"
+        "  'ok': True,\n"
+        "  'encrypted': True,\n"
+        "  'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),\n"
+        "  'operation_id': sys.argv[sys.argv.index('--operation-id') + 1],\n"
+        "  'candidate_sha': sys.argv[sys.argv.index('--candidate-sha') + 1],\n"
+        "  'rollback_sha': sys.argv[sys.argv.index('--rollback-sha') + 1],\n"
+        "}))\n",
         encoding="utf-8",
     )
     verifier.chmod(stat.S_IRWXU)
     data = json.loads(config.read_text(encoding="utf-8"))
     data["archive_encryption"] = {
         "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
-        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "verify_argv": [
+            str(verifier),
+            "--output",
+            "{output}",
+            "--sha256",
+            "{sha256}",
+            "--operation-id",
+            "{operation_id}",
+            "--candidate-sha",
+            "{candidate_sha}",
+            "--rollback-sha",
+            "{rollback_sha}",
+        ],
         "output": str(encrypted),
     }
     config.write_text(json.dumps(data), encoding="utf-8")
@@ -954,7 +1132,14 @@ def test_encrypted_archive_output_template_preserves_distinct_operation_outputs(
         "#!/usr/bin/env python3\n"
         "import hashlib, json, pathlib, sys\n"
         "path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
-        "print(json.dumps({'ok': True, 'encrypted': True, 'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))\n",
+        "print(json.dumps({\n"
+        "  'ok': True,\n"
+        "  'encrypted': True,\n"
+        "  'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),\n"
+        "  'operation_id': sys.argv[sys.argv.index('--operation-id') + 1],\n"
+        "  'candidate_sha': sys.argv[sys.argv.index('--candidate-sha') + 1],\n"
+        "  'rollback_sha': sys.argv[sys.argv.index('--rollback-sha') + 1],\n"
+        "}))\n",
         encoding="utf-8",
     )
     encryptor.chmod(stat.S_IRWXU)
@@ -962,7 +1147,19 @@ def test_encrypted_archive_output_template_preserves_distinct_operation_outputs(
     data = read_config(config)
     data["archive_encryption"] = {
         "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
-        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "verify_argv": [
+            str(verifier),
+            "--output",
+            "{output}",
+            "--sha256",
+            "{sha256}",
+            "--operation-id",
+            "{operation_id}",
+            "--candidate-sha",
+            "{candidate_sha}",
+            "--rollback-sha",
+            "{rollback_sha}",
+        ],
         "output": str(tmp_path / "encrypted" / "{operation_id}.tar.gz.enc"),
     }
     write_config_data(config, data)
@@ -1065,6 +1262,93 @@ def test_encrypted_archive_requires_verifier_bound_to_output_hash(tmp_path: Path
     assert not any((tmp_path / "state" / "archives").glob("*.tar.gz")) if (tmp_path / "state" / "archives").exists() else True
 
 
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("operation_id", "stage-wrong"),
+        ("candidate_sha", "0" * 40),
+        ("rollback_sha", "1" * 40),
+        ("artifact_sha256", "2" * 64),
+    ],
+)
+def test_encrypted_archive_verifier_must_echo_operation_and_sha_bindings(
+    tmp_path: Path, field: str, wrong_value: str
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    rollback_sha = str(repo["main_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    encryptor = tmp_path / "bin" / "encrypt-archive"
+    verifier = tmp_path / "bin" / "verify-archive"
+    encrypted = tmp_path / "encrypted.tar.gz.enc"
+    encryptor.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, shutil, sys\n"
+        "shutil.copyfile(pathlib.Path(sys.argv[sys.argv.index('--input') + 1]), pathlib.Path(sys.argv[sys.argv.index('--output') + 1]))\n",
+        encoding="utf-8",
+    )
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import hashlib, json, pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "actual = hashlib.sha256(path.read_bytes()).hexdigest()\n"
+        "proof = {\n"
+        "  'ok': True,\n"
+        "  'encrypted': True,\n"
+        "  'artifact_sha256': actual,\n"
+        "  'operation_id': sys.argv[sys.argv.index('--operation-id') + 1],\n"
+        "  'candidate_sha': sys.argv[sys.argv.index('--candidate-sha') + 1],\n"
+        "  'rollback_sha': sys.argv[sys.argv.index('--rollback-sha') + 1],\n"
+        "}\n"
+        f"proof[{field!r}] = {wrong_value!r}\n"
+        "print(json.dumps(proof))\n",
+        encoding="utf-8",
+    )
+    encryptor.chmod(stat.S_IRWXU)
+    verifier.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["archive_encryption"] = {
+        "argv": [
+            str(encryptor),
+            "--input",
+            "{input}",
+            "--output",
+            "{output}",
+            "--operation-id",
+            "{operation_id}",
+            "--candidate-sha",
+            "{candidate_sha}",
+            "--rollback-sha",
+            "{rollback_sha}",
+            "--sha256",
+            "{sha256}",
+        ],
+        "verify_argv": [
+            str(verifier),
+            "--output",
+            "{output}",
+            "--operation-id",
+            "{operation_id}",
+            "--candidate-sha",
+            "{candidate_sha}",
+            "--rollback-sha",
+            "{rollback_sha}",
+            "--sha256",
+            "{sha256}",
+        ],
+        "output": str(encrypted),
+    }
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "archive_encryption_verify_failed")
+
+    assert git(checkout, "branch", "--show-current") == "main"
+    assert git(checkout, "rev-parse", "HEAD") == rollback_sha
+    assert not any((tmp_path / "state" / "archives").glob("*.tar.gz")) if (tmp_path / "state" / "archives").exists() else True
+
+
 def test_repo_local_inventory_handles_quoted_names_and_rejects_traversal(tmp_path: Path) -> None:
     from hermes_release.controller import _load_config, _inventory_repo_local, _archive_non_reproducible, ReleaseError
 
@@ -1154,6 +1438,50 @@ def test_startup_failure_rolls_back_when_safe_and_stays_stopped_when_uncertain(t
     assert_failure(cli(config2, "stage", sha2, "--authorize", "OOB-123"), "rollback_uncertain")
 
 
+def test_automatic_rollback_requires_stopped_probe_bound_to_failed_staging_identity_before_switching_main(
+    tmp_path: Path,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    data = read_config(config)
+    scripted = tmp_path / "startup-containment" / "hermes"
+    counter = tmp_path / "startup-containment" / "stop-count"
+    scripted.parent.mkdir()
+    scripted.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
+        "python3 - <<'PY'\n"
+        "import json, pathlib\n"
+        f"path = pathlib.Path({str(tmp_path / 'runtime.json')!r})\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "count = int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(count + 1))\n"
+        "data = json.loads(path.read_text())\n"
+        "data.update({'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid', data.get('old_pid'))})\n"
+        "if count == 1:\n"
+        "    data['old_pid'] = 9999\n"
+        "path.write_text(json.dumps(data))\n"
+        "PY\n"
+        "fi\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = start ]; then exit 4; fi\n",
+        encoding="utf-8",
+    )
+    scripted.chmod(0o700)
+    data["lifecycle"]["stop"] = [str(scripted), "gateway", "stop"]  # type: ignore[index]
+    data["lifecycle"]["start"] = [str(scripted), "gateway", "start"]  # type: ignore[index]
+    write_config_data(config, data)
+
+    failed = assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "rollback_uncertain")
+
+    assert failed["state"] == "stopped"
+    assert git(checkout, "branch", "--show-current") == "staging"
+    assert git(checkout, "rev-parse", "HEAD") == sha
+
+
 def test_incomplete_stage_stopped_on_main_fails_closed_and_rollback_recovers(tmp_path: Path) -> None:
     repo = init_release_repo(tmp_path)
     checkout = repo["checkout"]
@@ -1177,7 +1505,21 @@ def test_incomplete_stage_stopped_on_main_fails_closed_and_rollback_recovers(tmp
         encoding="utf-8",
     )
     runtime = tmp_path / "runtime.json"
-    runtime.write_text(json.dumps({"ok": True, "running": False, "stopped": True, "source": str(checkout), "service_id": "hermes-gateway-test"}), encoding="utf-8")
+    runtime.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "running": False,
+                "stopped": True,
+                "source": str(checkout),
+                "branch": "main",
+                "sha": repo["main_sha"],
+                "service_id": "hermes-gateway-test",
+                "old_pid": 1111,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     failed = assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "recovery_required")
     assert failed["state"] == "staging-prepared"
@@ -1212,7 +1554,21 @@ def test_incomplete_stage_switched_to_staging_fails_closed_and_rollback_recovers
         encoding="utf-8",
     )
     runtime = tmp_path / "runtime.json"
-    runtime.write_text(json.dumps({"ok": True, "running": False, "stopped": True, "source": str(checkout), "service_id": "hermes-gateway-test"}), encoding="utf-8")
+    runtime.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "running": False,
+                "stopped": True,
+                "source": str(checkout),
+                "branch": "staging",
+                "sha": sha,
+                "service_id": "hermes-gateway-test",
+                "old_pid": 1111,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     failed = assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "recovery_required")
     assert failed["state"] == "staging-prepared"
@@ -1272,7 +1628,7 @@ def test_rollback_start_failure_persists_recovery_required_and_stops_gateway(tmp
         "set -eu\n"
         f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
         "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
-        f"python3 - <<'PY'\nimport json,pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid')}})\npath.write_text(json.dumps(data))\nPY\n"
+        f"python3 - <<'PY'\nimport json,pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid', data.get('old_pid'))}})\npath.write_text(json.dumps(data))\nPY\n"
         "fi\n"
         "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = start ]; then exit 4; fi\n",
         encoding="utf-8",

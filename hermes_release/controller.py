@@ -105,6 +105,10 @@ def _parse_time(value: str) -> datetime:
         ) from exc
 
 
+def _canonical_time(value: str) -> str:
+    return _parse_time(value).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _load_config(path: Path) -> Config:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -310,8 +314,24 @@ def _verify_receipt_scope(data: dict[str, Any], cfg: Config, label: str) -> None
         )
 
 
-def _hash_authorization(reference_id: str, operation: str, sha: str) -> str:
-    return hashlib.sha256(f"{sha}\0{operation}\0{reference_id}".encode("utf-8")).hexdigest()
+def _hash_authorization(
+    reference_id: str,
+    operation: str,
+    sha: str,
+    *,
+    not_before: str,
+    expires_at: str,
+    single_use: bool,
+) -> str:
+    payload = {
+        "candidate_sha": sha,
+        "expires_at": expires_at,
+        "not_before": not_before,
+        "operation": operation,
+        "reference_id": reference_id,
+        "single_use": single_use,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _consumed_authorizations_path(cfg: Config) -> Path:
@@ -340,23 +360,39 @@ def _verify_authorization(cfg: Config, sha: str, operation: str, reference_id: s
         raise ReleaseError("authorization_operation_mismatch", "authorization receipt operation does not match command", f"Obtain authorization for {operation}, then retry.")
     if data.get("reference_id") != reference_id:
         raise ReleaseError("authorization_id_mismatch", "authorization receipt reference does not match --authorize", f"Retry with the exact approved --authorize reference for {operation}.")
-    not_before = data.get("not_before")
-    expires_at = data.get("expires_at")
-    if not isinstance(not_before, str) or not isinstance(expires_at, str):
+    not_before_raw = data.get("not_before")
+    expires_at_raw = data.get("expires_at")
+    if not isinstance(not_before_raw, str) or not isinstance(expires_at_raw, str):
         raise ReleaseError("authorization_window_invalid", "authorization receipt window is missing", f"Regenerate authorization with not_before and expires_at for {operation}.")
+    not_before = _canonical_time(not_before_raw)
+    expires_at = _canonical_time(expires_at_raw)
     if cfg.current_time < _parse_time(not_before):
         raise ReleaseError("authorization_not_yet_valid", "authorization is not yet valid", f"Wait until the authorization window opens, then retry {operation}.")
     if cfg.current_time > _parse_time(expires_at):
         raise ReleaseError("authorization_expired", "authorization has expired", f"Obtain a fresh authorization receipt for {operation}, then retry.")
     if data.get("single_use") is not True:
         raise ReleaseError("authorization_not_single_use", "authorization receipt must be explicitly single-use", f"Obtain a single-use authorization receipt for {operation}, then retry.")
-    approval_hash = _hash_authorization(reference_id, operation, sha)
+    window_hash = hashlib.sha256(f"{not_before}\0{expires_at}\0true".encode("utf-8")).hexdigest()
+    approval_hash = _hash_authorization(
+        reference_id,
+        operation,
+        sha,
+        not_before=not_before,
+        expires_at=expires_at,
+        single_use=True,
+    )
     consumed = _read_consumed_authorizations(cfg)
     if approval_hash in set(consumed.get("consumed") or []):
         raise ReleaseError("authorization_reused", "authorization receipt was already consumed", f"Obtain a fresh single-use authorization receipt for {operation}, then retry.")
     return {
         "approval_hash": approval_hash,
+        "candidate_sha": sha,
+        "expires_at": expires_at,
+        "not_before": not_before,
+        "operation": operation,
         "reference_hash": hashlib.sha256(reference_id.encode("utf-8")).hexdigest(),
+        "single_use": True,
+        "window_hash": window_hash,
     }
 
 
@@ -440,7 +476,6 @@ def _require_runtime(
     if not running:
         if data.get("stopped") is not True:
             raise ReleaseError("runtime_not_stopped", "runtime probe did not prove the gateway stopped", "Leave the gateway stopped and inspect lifecycle evidence before retrying.")
-        return data
     mismatches: dict[str, Any] = {}
     expected_source = str((source or cfg.checkout_path).resolve())
     if data.get("source") != expected_source:
@@ -451,11 +486,14 @@ def _require_runtime(
         mismatches["sha"] = data.get("sha")
     if service_id is not None and data.get("service_id") != service_id:
         mismatches["service_id"] = data.get("service_id")
-    pid = data.get("pid")
-    if not isinstance(pid, int):
-        mismatches["pid"] = pid
-    elif require_new_pid and old_pid is not None and pid == old_pid:
-        mismatches["pid"] = pid
+    if running:
+        pid = data.get("pid")
+        if not isinstance(pid, int):
+            mismatches["pid"] = pid
+        elif require_new_pid and old_pid is not None and pid == old_pid:
+            mismatches["pid"] = pid
+    elif old_pid is not None and data.get("old_pid") != old_pid:
+        mismatches["old_pid"] = data.get("old_pid")
     if mismatches:
         raise ReleaseError("runtime_identity_mismatch", "runtime identity does not match expected checkout/service", "Leave the gateway stopped and inspect runtime identity before retrying.", details=mismatches)
     return data
@@ -639,7 +677,22 @@ def _validate_repo_local_relpath(rel: str) -> None:
         )
 
 
-def _archive_non_reproducible(cfg: Config, operation_id: str, inventory: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+def _render_archive_template(value: Any, bindings: dict[str, str]) -> str:
+    rendered = str(value)
+    for key, replacement in bindings.items():
+        rendered = rendered.replace("{" + key + "}", replacement)
+    return rendered
+
+
+def _archive_non_reproducible(
+    cfg: Config,
+    operation_id: str,
+    inventory: dict[str, Any],
+    *,
+    candidate_sha: str | None = None,
+    rollback_sha: str | None = None,
+    dry_run: bool,
+) -> dict[str, Any]:
     paths = list(inventory.get("non_reproducible") or [])
     for rel in paths:
         _validate_repo_local_relpath(str(rel))
@@ -662,9 +715,22 @@ def _archive_non_reproducible(cfg: Config, operation_id: str, inventory: dict[st
                 tar.add(source, arcname=rel, recursive=True)
     archive.chmod(0o600)
     if sensitive:
+        if candidate_sha is None or rollback_sha is None:
+            archive.unlink(missing_ok=True)
+            raise ReleaseError(
+                "archive_encryption_verify_failed",
+                "archive encryption proof cannot be bound without release SHAs",
+                "Retry through the release controller path so archive verification receives exact operation and SHA inputs.",
+            )
         encryption = cfg.archive_encryption or {}
         output_template = str(encryption.get("output") or cfg.archive_dir / f"{operation_id}-repo-local.tar.gz.enc")
-        output = Path(output_template.replace("{operation_id}", operation_id)).resolve()
+        archive_bindings = {
+            "candidate_sha": candidate_sha,
+            "current_sha": rollback_sha,
+            "operation_id": operation_id,
+            "rollback_sha": rollback_sha,
+        }
+        output = Path(_render_archive_template(output_template, archive_bindings)).resolve()
         argv_template = encryption.get("argv")
         if not isinstance(argv_template, list) or not argv_template:
             archive.unlink(missing_ok=True)
@@ -677,7 +743,8 @@ def _archive_non_reproducible(cfg: Config, operation_id: str, inventory: dict[st
                 "Configure archive_encryption.output with {operation_id} or remove the stale operation-bound output after preserving it.",
                 details={"output": str(output)},
             )
-        argv = [str(item).replace("{input}", str(archive)).replace("{output}", str(output)) for item in argv_template]
+        argv_bindings = {**archive_bindings, "input": str(archive), "output": str(output)}
+        argv = [_render_archive_template(item, argv_bindings) for item in argv_template]
         try:
             output.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             try:
@@ -704,10 +771,8 @@ def _archive_non_reproducible(cfg: Config, operation_id: str, inventory: dict[st
                     "archive encryption verifier is missing",
                     "Configure archive_encryption.verify_argv to prove the encrypted artifact hash before mutation.",
                 )
-            verify_argv = [
-                str(item).replace("{input}", str(archive)).replace("{output}", str(output)).replace("{sha256}", digest)
-                for item in verify_template
-            ]
+            verify_bindings = {**argv_bindings, "sha256": digest}
+            verify_argv = [_render_archive_template(item, verify_bindings) for item in verify_template]
             try:
                 verify = _run(verify_argv, timeout=int(cfg.lifecycle.get("timeout_seconds", 60)))
             except subprocess.TimeoutExpired as exc:
@@ -731,12 +796,19 @@ def _archive_non_reproducible(cfg: Config, operation_id: str, inventory: dict[st
                     "archive encryption verifier did not emit JSON",
                     "Fix archive_encryption.verify_argv so it emits machine-readable JSON.",
                 ) from exc
-            if proof.get("ok") is not True or proof.get("encrypted") is not True or proof.get("artifact_sha256") != digest:
+            expected_proof = {
+                "artifact_sha256": digest,
+                "candidate_sha": candidate_sha,
+                "operation_id": operation_id,
+                "rollback_sha": rollback_sha,
+            }
+            proof_mismatches = {key: proof.get(key) for key, value in expected_proof.items() if proof.get(key) != value}
+            if proof.get("ok") is not True or proof.get("encrypted") is not True or proof_mismatches:
                 raise ReleaseError(
                     "archive_encryption_verify_failed",
-                    "archive encryption verifier did not prove the exact encrypted artifact",
-                    "Fix archive_encryption.verify_argv so artifact_sha256 equals the output file SHA-256.",
-                    details={"verifier": proof},
+                    "archive encryption verifier did not prove the exact operation-bound encrypted artifact",
+                    "Fix archive_encryption.verify_argv so it echoes operation_id, candidate_sha, rollback_sha, and artifact_sha256 exactly.",
+                    details={"verifier": proof, "mismatches": proof_mismatches},
                 )
         finally:
             archive.unlink(missing_ok=True)
@@ -970,7 +1042,14 @@ def _manifest(
         "current_head": refs["head"],
         "refs": refs,
         "inventory": inventory,
-        "repo_local_archive": _archive_non_reproducible(cfg, operation_id, inventory, dry_run=dry_run),
+        "repo_local_archive": _archive_non_reproducible(
+            cfg,
+            operation_id,
+            inventory,
+            candidate_sha=sha,
+            rollback_sha=refs["local_main"],
+            dry_run=dry_run,
+        ),
         "runtime": runtime,
         "writers": writers,
     }
@@ -1175,7 +1254,15 @@ def stage(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool = F
         )
         try:
             _run_lifecycle(cfg, "stop")
-            stopped_runtime = _require_runtime(cfg, running=False)
+            stopped_runtime = _require_runtime(
+                cfg,
+                running=False,
+                branch=cfg.main_branch,
+                sha=manifest["rollback_sha"],
+                source=cfg.checkout_path,
+                service_id=service_id,
+                old_pid=old_pid,
+            )
             _verify_refs(cfg, sha, require_main_current=manifest["rollback_sha"])
             _require_checkout_position(cfg, cfg.main_branch, manifest["rollback_sha"])
             _atomic_write_json(
@@ -1242,7 +1329,13 @@ def stage(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool = F
             _verify_checked_out_tree(cfg, cfg.staging_branch, sha)
         except ReleaseError as exc:
             _append_journal(cfg, {"operation_id": operation_id, "step": "startup_failed", "error": exc.code})
-            _attempt_safe_stage_rollback(cfg, manifest, operation_id)
+            _attempt_safe_stage_rollback(
+                cfg,
+                manifest,
+                operation_id,
+                candidate_started=exc.code == "runtime_identity_mismatch",
+                candidate_pid=runtime.get("pid") if "runtime" in locals() and isinstance(runtime.get("pid"), int) else None,
+            )
             if exc.code == "runtime_identity_mismatch":
                 raise ReleaseError(
                     "runtime_identity_mismatch",
@@ -1281,13 +1374,31 @@ def stage(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool = F
         }
 
 
-def _attempt_safe_stage_rollback(cfg: Config, manifest: dict[str, Any], operation_id: str) -> None:
+def _attempt_safe_stage_rollback(
+    cfg: Config,
+    manifest: dict[str, Any],
+    operation_id: str,
+    *,
+    candidate_started: bool,
+    candidate_pid: int | None = None,
+) -> None:
     try:
         rollback_safety = _probe(cfg, "rollback_safety")
         refs = _verify_refs(cfg, manifest["candidate_sha"], require_main_current=manifest["rollback_sha"])
         _require_checkout_position(cfg, cfg.staging_branch, manifest["candidate_sha"], code="rollback_uncertain")
         _run_lifecycle(cfg, "stop")
-        _require_runtime(cfg, running=False)
+        stopped_expected_branch = cfg.staging_branch if candidate_started else cfg.main_branch
+        stopped_expected_sha = manifest["candidate_sha"] if candidate_started else manifest["rollback_sha"]
+        stopped_expected_old_pid = candidate_pid if candidate_started and candidate_pid is not None else manifest["runtime"].get("pid")
+        stopped_runtime = _require_runtime(
+            cfg,
+            running=False,
+            branch=stopped_expected_branch,
+            sha=stopped_expected_sha,
+            source=cfg.checkout_path,
+            service_id=str(manifest["runtime"].get("service_id") or ""),
+            old_pid=stopped_expected_old_pid if isinstance(stopped_expected_old_pid, int) else None,
+        )
     except ReleaseError as exc:
         raise ReleaseError(
             "rollback_uncertain",
@@ -1322,7 +1433,14 @@ def _attempt_safe_stage_rollback(cfg: Config, manifest: dict[str, Any], operatio
             pid=int(runtime["pid"]),
         )
     except ReleaseError as exc:
-        stop_status = _best_effort_stop(cfg)
+        stop_status = _best_effort_stop(
+            cfg,
+            branch=stopped_runtime.get("branch") if isinstance(stopped_runtime.get("branch"), str) else None,
+            sha=stopped_runtime.get("sha") if isinstance(stopped_runtime.get("sha"), str) else None,
+            source=cfg.checkout_path,
+            service_id=stopped_runtime.get("service_id") if isinstance(stopped_runtime.get("service_id"), str) else None,
+            old_pid=stopped_runtime.get("old_pid") if isinstance(stopped_runtime.get("old_pid"), int) else None,
+        )
         _persist_rollback_recovery_required(
             cfg,
             operation_id=operation_id,
@@ -1354,10 +1472,26 @@ def _attempt_safe_stage_rollback(cfg: Config, manifest: dict[str, Any], operatio
     _append_journal(cfg, {"operation_id": operation_id, "step": "automatic_rollback_complete"})
 
 
-def _best_effort_stop(cfg: Config) -> dict[str, Any]:
+def _best_effort_stop(
+    cfg: Config,
+    *,
+    branch: str | None = None,
+    sha: str | None = None,
+    source: Path | None = None,
+    service_id: str | None = None,
+    old_pid: int | None = None,
+) -> dict[str, Any]:
     try:
         _run_lifecycle(cfg, "stop")
-        stopped = _require_runtime(cfg, running=False)
+        stopped = _require_runtime(
+            cfg,
+            running=False,
+            branch=branch,
+            sha=sha,
+            source=source,
+            service_id=service_id,
+            old_pid=old_pid,
+        )
         return {"stopped": True, "runtime": stopped}
     except ReleaseError as stop_exc:
         return {
@@ -1438,7 +1572,15 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
             ),
         )
         _run_lifecycle(cfg, "stop")
-        stopped_runtime = _require_runtime(cfg, running=False)
+        stopped_runtime = _require_runtime(
+            cfg,
+            running=False,
+            branch=cfg.staging_branch,
+            sha=sha,
+            source=cfg.checkout_path,
+            service_id=service_id,
+            old_pid=manifest["runtime"].get("pid") if isinstance(manifest["runtime"].get("pid"), int) else None,
+        )
         _verify_refs(cfg, sha, require_main_current=state["rollback_sha"])
         _require_checkout_position(cfg, cfg.staging_branch, sha)
         _atomic_write_json(
@@ -1513,7 +1655,14 @@ def promote(cfg: Config, sha: str, authorization: str | None, *, dry_run: bool =
                 pid=int(runtime["pid"]),
             )
         except ReleaseError as exc:
-            stop_status = _best_effort_stop(cfg)
+            stop_status = _best_effort_stop(
+                cfg,
+                branch=stopped_runtime.get("branch") if isinstance(stopped_runtime.get("branch"), str) else None,
+                sha=stopped_runtime.get("sha") if isinstance(stopped_runtime.get("sha"), str) else None,
+                source=cfg.checkout_path,
+                service_id=stopped_runtime.get("service_id") if isinstance(stopped_runtime.get("service_id"), str) else None,
+                old_pid=stopped_runtime.get("old_pid") if isinstance(stopped_runtime.get("old_pid"), int) else None,
+            )
             _atomic_write_json(
                 cfg.state_path,
                 {
@@ -1560,7 +1709,7 @@ def rollback(cfg: Config) -> dict[str, Any]:
             raise ReleaseError("rollback_uncertain", "candidate identity is missing or invalid", "Leave the gateway stopped and ask Brian to choose the recovery path.")
         operation_id = f"rollback-{uuid.uuid4().hex}"
         stored_runtime = state.get("runtime") if isinstance(state.get("runtime"), dict) else {}
-        old_pid = stored_runtime.get("pid")
+        old_pid = stored_runtime.get("pid") if isinstance(stored_runtime.get("pid"), int) else stored_runtime.get("old_pid")
         stored_service_id = str(stored_runtime.get("service_id") or "")
         if stored_service_id and stored_service_id != service_id:
             raise ReleaseError("runtime_identity_mismatch", "stored runtime service identity does not match configured service", "Inspect release state and configured service_id before retrying.")
@@ -1586,7 +1735,17 @@ def rollback(cfg: Config) -> dict[str, Any]:
                 details={"branch": current_branch, "head": current_head},
             )
         _run_lifecycle(cfg, "stop")
-        _require_runtime(cfg, running=False)
+        stopped_expected_branch = cfg.staging_branch if current_branch == cfg.staging_branch else cfg.main_branch
+        stopped_expected_sha = candidate_sha if current_branch == cfg.staging_branch else rollback_sha
+        stopped_runtime = _require_runtime(
+            cfg,
+            running=False,
+            branch=stopped_expected_branch,
+            sha=stopped_expected_sha,
+            source=cfg.checkout_path,
+            service_id=service_id,
+            old_pid=old_pid if isinstance(old_pid, int) else None,
+        )
         _verify_refs(cfg, candidate_sha, require_main_current=rollback_sha)
         result = _run(["git", "switch", cfg.main_branch], cwd=cfg.checkout_path)
         if result.returncode != 0:
@@ -1606,7 +1765,14 @@ def rollback(cfg: Config) -> dict[str, Any]:
             )
             smoke = _require_smoke(cfg, branch=cfg.main_branch, sha=rollback_sha, source=cfg.checkout_path, service_id=str(runtime["service_id"]), pid=int(runtime["pid"]))
         except ReleaseError as exc:
-            stop_status = _best_effort_stop(cfg)
+            stop_status = _best_effort_stop(
+                cfg,
+                branch=stopped_runtime.get("branch") if isinstance(stopped_runtime.get("branch"), str) else None,
+                sha=stopped_runtime.get("sha") if isinstance(stopped_runtime.get("sha"), str) else None,
+                source=cfg.checkout_path,
+                service_id=stopped_runtime.get("service_id") if isinstance(stopped_runtime.get("service_id"), str) else None,
+                old_pid=stopped_runtime.get("old_pid") if isinstance(stopped_runtime.get("old_pid"), int) else None,
+            )
             _persist_rollback_recovery_required(
                 cfg,
                 operation_id=operation_id,
