@@ -1393,19 +1393,30 @@ def _resume_promotion(cfg: Config, sha: str, state: dict[str, Any]) -> dict[str,
     branch = _current_branch(cfg)
     head = _git(cfg, "rev-parse", "HEAD")
     if phase == "stopped-on-staging":
-        if branch != cfg.staging_branch or head != sha or refs["local_main"] != rollback_sha or refs["remote_main"] != rollback_sha:
+        if refs["local_main"] != rollback_sha or refs["remote_main"] != rollback_sha:
             raise ReleaseError(
                 "promotion_recovery_required",
                 "stopped-on-staging promotion state does not match checkout/ref reality",
                 "Run hermes-release rollback with the same config to return to known-good main.",
                 state="promotion-prepared",
             )
-        _verify_checked_out_tree(cfg, cfg.staging_branch, sha)
-        stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
-        switch = _run(["git", "switch", cfg.main_branch], cwd=cfg.checkout_path)
-        if switch.returncode != 0:
-            raise ReleaseError("switch_failed", "git switch main failed", "Keep the gateway stopped and inspect the checkout before retrying.", details={"stderr": switch.stderr.strip()})
-        _verify_checked_out_tree(cfg, cfg.main_branch, rollback_sha)
+        if branch == cfg.staging_branch and head == sha:
+            _verify_checked_out_tree(cfg, cfg.staging_branch, sha)
+            stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
+            switch = _run(["git", "switch", cfg.main_branch], cwd=cfg.checkout_path)
+            if switch.returncode != 0:
+                raise ReleaseError("switch_failed", "git switch main failed", "Keep the gateway stopped and inspect the checkout before retrying.", details={"stderr": switch.stderr.strip()})
+            _verify_checked_out_tree(cfg, cfg.main_branch, rollback_sha)
+        elif branch == cfg.main_branch and head == rollback_sha:
+            _verify_checked_out_tree(cfg, cfg.main_branch, rollback_sha)
+            stopped_runtime = _require_stopped_staging_runtime_for_promotion(cfg, sha=sha, service_id=service_id, old_pid=old_pid)
+        else:
+            raise ReleaseError(
+                "promotion_recovery_required",
+                "stopped-on-staging promotion state does not match checkout/ref reality",
+                "Run hermes-release rollback with the same config to return to known-good main.",
+                state="promotion-prepared",
+            )
         _atomic_write_json(
             cfg.state_path,
             _promotion_prepared_state(operation_id, "switched-to-main", sha, rollback_sha, authorization_proof, promoted=False, runtime=stopped_runtime),

@@ -1791,6 +1791,77 @@ def test_promote_resumes_after_main_switch_or_merge_before_state_write_without_n
     assert git(checkout, "rev-parse", "refs/remotes/origin/main") == sha
 
 
+def test_promote_resumes_after_switch_main_before_stopped_phase_write_without_new_authorization(
+    tmp_path: Path,
+) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    rollback_sha = str(repo["main_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    git(checkout, "switch", "main")
+    _write_promotion_prepared_fixture(
+        config,
+        tmp_path,
+        operation_id="promote-switch-crash",
+        phase="stopped-on-staging",
+        candidate_sha=sha,
+        rollback_sha=rollback_sha,
+    )
+    consumed_before = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    state_before = json.loads((tmp_path / "state" / "release-state.json").read_text(encoding="utf-8"))
+    runtime_before = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+
+    assert state_before["state"] == "promotion-prepared"
+    assert state_before["phase"] == "stopped-on-staging"
+    assert state_before["authorization"] == consumed_before["operations"]["promote-switch-crash"]
+    assert git(checkout, "branch", "--show-current") == "main"
+    assert git(checkout, "rev-parse", "HEAD") == rollback_sha
+    assert git(checkout, "rev-parse", "refs/heads/main") == rollback_sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == rollback_sha
+    assert git(checkout, "rev-parse", "refs/heads/staging") == sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/staging") == sha
+    assert git(checkout, "diff", "--stat") == ""
+    assert git(checkout, "diff", "--cached", "--stat") == ""
+    assert runtime_before == {
+        "ok": True,
+        "running": False,
+        "stopped": True,
+        "source": str(checkout),
+        "branch": "staging",
+        "sha": sha,
+        "service_id": "hermes-gateway-test",
+        "old_pid": 2222,
+    }
+
+    promoted = assert_success(cli(config, "promote", sha))
+
+    assert promoted["state"] == "promoted"
+    assert promoted["operation_id"] == "promote-switch-crash"
+    assert json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8")) == consumed_before
+    assert git(checkout, "branch", "--show-current") == "main"
+    assert git(checkout, "rev-parse", "HEAD") == sha
+    assert git(checkout, "rev-parse", "refs/heads/main") == sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/main") == sha
+    assert git(checkout, "rev-parse", "refs/heads/staging") == sha
+    assert git(checkout, "rev-parse", "refs/remotes/origin/staging") == sha
+    runtime_after = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
+    assert runtime_after["ok"] is True
+    assert runtime_after["running"] is True
+    assert runtime_after["stopped"] is False
+    assert runtime_after["source"] == str(checkout)
+    assert runtime_after["branch"] == "main"
+    assert runtime_after["sha"] == sha
+    assert runtime_after["service_id"] == "hermes-gateway-test"
+    assert runtime_after["pid"] != runtime_before["old_pid"]
+    assert (tmp_path / "lifecycle.log").read_text(encoding="utf-8").splitlines() == [
+        "gateway stop",
+        "gateway start",
+        "gateway start",
+    ]
+
+
 def test_promote_rerun_retries_only_push_readback_start_after_local_main_ready(
     tmp_path: Path,
 ) -> None:
