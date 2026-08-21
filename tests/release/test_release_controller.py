@@ -117,6 +117,8 @@ def write_receipt(
     not_before: str = "2026-08-20T12:00:00Z",
     expires_at: str = "2026-08-20T13:00:00Z",
     scopes: list[str] | None = None,
+    single_use: bool | None = True,
+    rollback_sha: str | None = None,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {"sha": sha, "status": "ok" if ok else "failed", "issued_at": now}
@@ -127,9 +129,10 @@ def write_receipt(
                 "reference_id": reference_id,
                 "not_before": not_before,
                 "expires_at": expires_at,
-                "single_use": True,
             }
         )
+        if single_use is not None:
+            data["single_use"] = single_use
     elif kind == "backup":
         declared = scopes or ["repo_local"]
         data["scope"] = declared
@@ -152,7 +155,7 @@ def write_receipt(
         declared = scopes or ["repo_local"]
         data["scope"] = declared
         if "dependencies" in declared or "database_schema" in declared:
-            data["rollback_compatibility"] = {"rollback_sha": sha, "backward": True, "rollback": True}
+            data["rollback_compatibility"] = {"rollback_sha": rollback_sha or sha, "backward": True, "rollback": True}
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
 
@@ -170,19 +173,24 @@ def write_config(
     auth_operation: str = "stage",
     auth_reference: str = "OOB-123",
     release_scopes: list[str] | None = None,
+    service_id: str = "hermes-gateway-test",
+    runtime_service_id: str | None = None,
+    writers_payload: dict[str, object] | None = None,
 ) -> Path:
     state_dir = tmp_path / "state"
     receipts = tmp_path / "receipts"
     lifecycle_log = tmp_path / "lifecycle.log"
     fake_hermes = tmp_path / "bin" / "hermes"
     fake_hermes.parent.mkdir(exist_ok=True)
-    service_id = "hermes-gateway-test"
     smoke = tmp_path / "smoke.json"
     smoke.write_text(json.dumps({"ok": smoke_ok}), encoding="utf-8")
     rollback = tmp_path / "rollback-safe.json"
     rollback.write_text(json.dumps({"ok": True}), encoding="utf-8")
     writers = tmp_path / "writers.json"
-    writers.write_text(json.dumps({"ok": not writer_active, "active": ["writer"] if writer_active else []}), encoding="utf-8")
+    writers.write_text(
+        json.dumps(writers_payload if writers_payload is not None else {"ok": not writer_active, "active": ["writer"] if writer_active else []}),
+        encoding="utf-8",
+    )
     runtime = tmp_path / "runtime.json"
     runtime.write_text(
         json.dumps(
@@ -194,7 +202,7 @@ def write_config(
                 "source": str(checkout),
                 "branch": "main",
                 "sha": git(checkout, "rev-parse", "HEAD"),
-                "service_id": service_id,
+                "service_id": runtime_service_id or service_id,
             }
         ),
         encoding="utf-8",
@@ -213,10 +221,11 @@ def write_config(
         "staging_branch": "staging",
         "reproducible_untracked_globs": [".venv/**", "node_modules/**", "__pycache__/**"],
         "release_scopes": scopes,
+        "service_id": service_id,
         "authorization_receipt": str(auth_path),
         "ci_receipt": str(write_receipt(receipts / "ci.json", sha=sha)),
         "review_receipt": str(write_receipt(receipts / "review.json", sha=sha)),
-        "compatibility_receipt": str(write_receipt(receipts / "compat.json", sha=sha, kind="compatibility", scopes=scopes)),
+        "compatibility_receipt": str(write_receipt(receipts / "compat.json", sha=sha, kind="compatibility", scopes=scopes, rollback_sha=git(checkout, "rev-parse", "HEAD"))),
         "backup_receipt": str(write_receipt(receipts / "backup.json", sha=backup_sha or sha, kind="backup", scopes=scopes)),
         "backup_max_age_seconds": 3600,
         "lifecycle": {
@@ -258,6 +267,14 @@ def write_config(
 def rewrite_auth(config: Path, sha: str, operation: str, reference_id: str, **kwargs: object) -> None:
     data = json.loads(config.read_text(encoding="utf-8"))
     write_receipt(Path(data["authorization_receipt"]), sha=sha, kind="authorization", operation=operation, reference_id=reference_id, **kwargs)
+
+
+def read_config(config: Path) -> dict[str, object]:
+    return json.loads(config.read_text(encoding="utf-8"))
+
+
+def write_config_data(config: Path, data: dict[str, object]) -> None:
+    config.write_text(json.dumps(data), encoding="utf-8")
 
 
 def cli(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -506,6 +523,49 @@ def test_state_dir_and_archive_must_not_be_inside_checkout(tmp_path: Path) -> No
     assert_failure(cli(config, "preflight", sha), "unsafe_state_location")
 
 
+@pytest.mark.parametrize("command", ["preflight", "stage", "status"])
+def test_static_config_guard_rejects_unsafe_locations_before_any_state_write(tmp_path: Path, command: str) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    data = read_config(config)
+    data["state_dir"] = str(checkout / ".release-state")
+    write_config_data(config, data)
+
+    before = sorted(p.relative_to(checkout) for p in checkout.rglob("*"))
+    args = [command] if command == "status" else [command, sha, "--authorize", "OOB-123"] if command == "stage" else [command, sha]
+
+    assert_failure(cli(config, *args), "unsafe_state_location")
+
+    assert sorted(p.relative_to(checkout) for p in checkout.rglob("*")) == before
+    assert not (checkout / ".release-state").exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_archive_encryption_output_inside_checkout_is_rejected_before_state_write(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    encryptor = tmp_path / "bin" / "encrypt-archive"
+    encryptor.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    encryptor.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["archive_encryption"] = {
+        "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(encryptor), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(checkout / "unsafe.enc"),
+    }
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "unsafe_archive_location")
+
+    assert not (tmp_path / "state").exists()
+    assert not (checkout / "unsafe.enc").exists()
+
+
 @pytest.mark.parametrize(
     ("mutate_auth", "code"),
     [
@@ -526,6 +586,37 @@ def test_stage_authorization_receipt_is_mandatory_exact_and_in_window(tmp_path: 
     assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), code)
 
 
+@pytest.mark.parametrize("single_use", [False, None])
+def test_authorization_requires_explicit_single_use_true(tmp_path: Path, single_use: bool | None) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    rewrite_auth(config, sha, "stage", "OOB-123", single_use=single_use)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "authorization_not_single_use")
+
+    assert not (tmp_path / "state").exists()
+
+
+def test_failed_preflight_does_not_consume_authorization_and_retry_can_succeed(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha, writer_active=True)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "active_writers")
+    assert not (tmp_path / "state" / "authorization-consumed.json").exists()
+
+    writers = tmp_path / "writers.json"
+    writers.write_text(json.dumps({"ok": True, "active": []}), encoding="utf-8")
+    staged = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+
+    assert staged["state"] == "staging-active"
+    consumed = json.loads((tmp_path / "state" / "authorization-consumed.json").read_text(encoding="utf-8"))
+    assert len(consumed["consumed"]) == 1
+
+
 def test_authorization_receipt_is_single_use_and_redacted(tmp_path: Path) -> None:
     repo = init_release_repo(tmp_path)
     checkout = repo["checkout"]
@@ -534,11 +625,24 @@ def test_authorization_receipt_is_single_use_and_redacted(tmp_path: Path) -> Non
 
     assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
     rewrite_auth(config, sha, "promote", "OOB-123")
-    assert_failure(cli(config, "promote", sha, "--authorize", "OOB-123"), "authorization_reused")
+    assert_success(cli(config, "promote", sha, "--authorize", "OOB-123"))
     journal = (tmp_path / "state" / "release-journal.jsonl").read_text(encoding="utf-8")
     state = (tmp_path / "state" / "release-state.json").read_text(encoding="utf-8")
     assert "OOB-123" not in journal
     assert "OOB-123" not in state
+
+
+def test_authorization_hash_is_bound_to_operation(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+
+    assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
+    rewrite_auth(config, sha, "promote", "OOB-123")
+    promoted = assert_success(cli(config, "promote", sha, "--authorize", "OOB-123"))
+
+    assert promoted["state"] == "promoted"
 
 
 @pytest.mark.parametrize(
@@ -585,14 +689,136 @@ def test_scoped_backup_and_compatibility_receipts_fail_closed_when_schema_is_gen
     assert_failure(cli(config, "preflight", sha), code)
 
 
+def test_receipts_must_explicitly_cover_every_declared_release_scope(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    scopes = ["repo_local", "config_secrets", "dependencies"]
+    config = write_config(tmp_path, checkout, sha, release_scopes=scopes)
+    data = read_config(config)
+    write_receipt(Path(data["backup_receipt"]), sha=sha, kind="backup", scopes=["repo_local", "config_secrets"])
+    write_receipt(Path(data["compatibility_receipt"]), sha=sha, kind="compatibility", scopes=["repo_local"])
+
+    assert_failure(cli(config, "preflight", sha), "receipt_scope_mismatch")
+
+
+def test_unknown_release_scope_is_rejected(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha, release_scopes=["repo_local", "surprise_scope"])
+
+    assert_failure(cli(config, "preflight", sha), "unknown_release_scope")
+
+
+def test_compatibility_rollback_sha_must_equal_actual_rollback_sha(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha, release_scopes=["dependencies"])
+    data = read_config(config)
+    write_receipt(Path(data["compatibility_receipt"]), sha=sha, kind="compatibility", scopes=["dependencies"], rollback_sha=sha)
+
+    assert_failure(cli(config, "preflight", sha), "compatibility_schema_invalid")
+
+
+@pytest.mark.parametrize(
+    "writers_payload",
+    [
+        {"ok": True, "active": ["writer"]},
+        {"ok": True, "active": None},
+        {"ok": True},
+        {"ok": True, "active": "none"},
+    ],
+)
+def test_writers_probe_must_prove_exactly_empty_active_list(tmp_path: Path, writers_payload: dict[str, object]) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha, writers_payload=writers_payload)
+
+    assert_failure(cli(config, "preflight", sha), "active_writers")
+
+
+def test_stage_reruns_writers_probe_under_lock_before_stop(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    data = read_config(config)
+    writers_probe = tmp_path / "writers-probe.py"
+    writers_probe.write_text(
+        "import json, pathlib\n"
+        f"counter=pathlib.Path({str(tmp_path / 'writers-count')!r})\n"
+        "count=int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(count + 1))\n"
+        "print(json.dumps({'ok': count == 0, 'active': [] if count == 0 else ['late-writer']}))\n",
+        encoding="utf-8",
+    )
+    data["probes"]["writers"] = [sys.executable, str(writers_probe)]  # type: ignore[index]
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "active_writers")
+
+    assert not (tmp_path / "lifecycle.log").exists()
+    assert git(checkout, "branch", "--show-current") == "main"
+
+
+def test_mutating_commands_require_configured_service_id(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    data = read_config(config)
+    del data["service_id"]
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "service_id_required")
+
+
+def test_preflight_rejects_wrong_configured_service_identity(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha, service_id="expected-service", runtime_service_id="actual-service")
+
+    assert_failure(cli(config, "preflight", sha), "runtime_identity_mismatch")
+
+
+def test_stage_requires_current_branch_and_head_again_after_stop(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    config = write_config(tmp_path, checkout, sha)
+    data = read_config(config)
+    drift_hermes = tmp_path / "bin" / "hermes"
+    drift_hermes.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        f"printf '%s\\n' \"$*\" >> {str(tmp_path / 'lifecycle.log')!r}\n"
+        "if [ \"${*: -2:1}\" = gateway ] && [ \"${*: -1}\" = stop ]; then\n"
+        f"  git -C {str(checkout)!r} switch staging >/dev/null\n"
+        f"  python3 - <<'PY'\nimport json, pathlib\npath=pathlib.Path({str(tmp_path / 'runtime.json')!r})\ndata=json.loads(path.read_text())\ndata.update({{'ok': True, 'running': False, 'stopped': True, 'old_pid': data.get('pid')}})\npath.write_text(json.dumps(data))\nPY\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    drift_hermes.chmod(0o700)
+    data["lifecycle"]["stop"] = [str(drift_hermes), "gateway", "stop"]  # type: ignore[index]
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "branch_cas_failed")
+
+    assert git(checkout, "branch", "--show-current") == "staging"
+
+
 def test_minimal_code_only_scope_accepts_generic_backup_and_compatibility_receipts(tmp_path: Path) -> None:
     repo = init_release_repo(tmp_path)
     checkout = repo["checkout"]
     sha = str(repo["staging_sha"])
     config = write_config(tmp_path, checkout, sha, release_scopes=["repo_local"])
     data = json.loads(config.read_text(encoding="utf-8"))
-    write_receipt(Path(data["backup_receipt"]), sha=sha)
-    write_receipt(Path(data["compatibility_receipt"]), sha=sha)
+    write_receipt(Path(data["backup_receipt"]), sha=sha, kind="backup", scopes=["repo_local"])
+    write_receipt(Path(data["compatibility_receipt"]), sha=sha, kind="compatibility", scopes=["repo_local"])
 
     assert_success(cli(config, "preflight", sha))
 
@@ -618,6 +844,7 @@ def test_sensitive_repo_local_archive_uses_configured_encryptor(tmp_path: Path) 
     (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
     config = write_config(tmp_path, checkout, sha)
     encryptor = tmp_path / "bin" / "encrypt-archive"
+    verifier = tmp_path / "bin" / "verify-archive"
     encrypted = tmp_path / "encrypted.tar.gz.enc"
     encryptor.write_text(
         "#!/usr/bin/env python3\n"
@@ -628,8 +855,21 @@ def test_sensitive_repo_local_archive_uses_configured_encryptor(tmp_path: Path) 
         encoding="utf-8",
     )
     encryptor.chmod(stat.S_IRWXU)
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import hashlib, json, pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "sha = sys.argv[sys.argv.index('--sha256') + 1]\n"
+        "print(json.dumps({'ok': True, 'encrypted': True, 'artifact_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))\n",
+        encoding="utf-8",
+    )
+    verifier.chmod(stat.S_IRWXU)
     data = json.loads(config.read_text(encoding="utf-8"))
-    data["archive_encryption"] = {"argv": [str(encryptor), "--input", "{input}", "--output", "{output}"], "output": str(encrypted)}
+    data["archive_encryption"] = {
+        "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(encrypted),
+    }
     config.write_text(json.dumps(data), encoding="utf-8")
 
     result = assert_success(cli(config, "stage", sha, "--authorize", "OOB-123"))
@@ -639,6 +879,62 @@ def test_sensitive_repo_local_archive_uses_configured_encryptor(tmp_path: Path) 
     assert archive["sha256"]
     assert encrypted.exists()
     assert not Path(archive["plaintext_path"]).exists()
+
+
+def test_encrypted_archive_requires_verifier_bound_to_output_hash(tmp_path: Path) -> None:
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    (checkout / ".env").write_text("TOKEN=super-secret-token\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    encryptor = tmp_path / "bin" / "encrypt-archive"
+    verifier = tmp_path / "bin" / "verify-archive"
+    encrypted = tmp_path / "encrypted.tar.gz.enc"
+    encryptor.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, shutil, sys\n"
+        "shutil.copyfile(pathlib.Path(sys.argv[sys.argv.index('--input') + 1]), pathlib.Path(sys.argv[sys.argv.index('--output') + 1]))\n",
+        encoding="utf-8",
+    )
+    verifier.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({'ok': True, 'encrypted': True, 'artifact_sha256': '0' * 64}))\n",
+        encoding="utf-8",
+    )
+    encryptor.chmod(stat.S_IRWXU)
+    verifier.chmod(stat.S_IRWXU)
+    data = read_config(config)
+    data["archive_encryption"] = {
+        "argv": [str(encryptor), "--input", "{input}", "--output", "{output}"],
+        "verify_argv": [str(verifier), "--output", "{output}", "--sha256", "{sha256}"],
+        "output": str(encrypted),
+    }
+    write_config_data(config, data)
+
+    assert_failure(cli(config, "stage", sha, "--authorize", "OOB-123"), "archive_encryption_verify_failed")
+
+    assert not any((tmp_path / "state" / "archives").glob("*.tar.gz")) if (tmp_path / "state" / "archives").exists() else True
+
+
+def test_repo_local_inventory_handles_quoted_names_and_rejects_traversal(tmp_path: Path) -> None:
+    from hermes_release.controller import _load_config, _inventory_repo_local, _archive_non_reproducible, ReleaseError
+
+    repo = init_release_repo(tmp_path)
+    checkout = repo["checkout"]
+    sha = str(repo["staging_sha"])
+    tricky = checkout / "space and\nnewline.txt"
+    tricky.write_text("fixture\n", encoding="utf-8")
+    config = write_config(tmp_path, checkout, sha)
+    cfg = _load_config(config)
+
+    inventory = _inventory_repo_local(cfg)
+
+    assert "space and\nnewline.txt" in inventory["non_reproducible"]
+    inventory["non_reproducible"].append("../escape")
+    with pytest.raises(ReleaseError) as excinfo:
+        _archive_non_reproducible(cfg, "unit", inventory, dry_run=False)
+    assert excinfo.value.code == "unsafe_repo_local_path"
 
 
 def test_promotion_startup_failure_after_main_advances_requires_recovery(tmp_path: Path) -> None:

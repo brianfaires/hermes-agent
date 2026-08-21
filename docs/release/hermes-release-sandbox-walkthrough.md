@@ -8,6 +8,8 @@ Run it from a disposable directory. All paths below stay under `$SANDBOX`.
 
 ```bash
 export SANDBOX="$(mktemp -d)"
+export HERMES_RELEASE_SOURCE="$(pwd)"
+export PYTHONPATH="$HERMES_RELEASE_SOURCE${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$SANDBOX/bin" "$SANDBOX/receipts"
 git init --bare "$SANDBOX/origin.git"
 git clone "$SANDBOX/origin.git" "$SANDBOX/seed"
@@ -56,6 +58,30 @@ PY
 fi
 EOF
 chmod 700 "$SANDBOX/bin/hermes"
+cat > "$SANDBOX/bin/encrypt-archive" <<'EOF'
+#!/usr/bin/env python3
+import pathlib
+import shutil
+import sys
+
+src = pathlib.Path(sys.argv[sys.argv.index("--input") + 1])
+dst = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+shutil.copyfile(src, dst)
+EOF
+chmod 700 "$SANDBOX/bin/encrypt-archive"
+cat > "$SANDBOX/bin/verify-archive" <<'EOF'
+#!/usr/bin/env python3
+import hashlib
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+expected = sys.argv[sys.argv.index("--sha256") + 1]
+actual = hashlib.sha256(path.read_bytes()).hexdigest()
+print(json.dumps({"ok": actual == expected, "encrypted": True, "artifact_sha256": actual}))
+EOF
+chmod 700 "$SANDBOX/bin/verify-archive"
 ```
 
 Create deterministic machine-readable receipts and probes:
@@ -95,6 +121,7 @@ cat > "$SANDBOX/release-config.json" <<EOF
   "remote": "origin",
   "main_branch": "main",
   "staging_branch": "staging",
+  "service_id": "hermes-gateway-sandbox",
   "release_scopes": ["repo_local"],
   "reproducible_untracked_globs": [".venv/**", "node_modules/**", "__pycache__/**"],
   "authorization_receipt": "$SANDBOX/receipts/authorization.json",
@@ -107,6 +134,11 @@ cat > "$SANDBOX/release-config.json" <<EOF
     "stop": ["$SANDBOX/bin/hermes", "gateway", "stop"],
     "start": ["$SANDBOX/bin/hermes", "gateway", "start"],
     "timeout_seconds": 5
+  },
+  "archive_encryption": {
+    "argv": ["$SANDBOX/bin/encrypt-archive", "--input", "{input}", "--output", "{output}"],
+    "verify_argv": ["$SANDBOX/bin/verify-archive", "--output", "{output}", "--sha256", "{sha256}"],
+    "output": "$SANDBOX/encrypted/repo-local.tar.gz.enc"
   },
   "probes": {
     "runtime": ["python3", "-c", "import pathlib; print(pathlib.Path('$SANDBOX/runtime.json').read_text())"],
@@ -122,19 +154,19 @@ EOF
 Expected command flow:
 
 ```bash
-python -m hermes_release --config "$SANDBOX/release-config.json" preflight "$CANDIDATE_SHA"
-python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX
-python -m hermes_release --config "$SANDBOX/release-config.json" status
-python -m hermes_release --config "$SANDBOX/release-config.json" rollback
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" preflight "$CANDIDATE_SHA"
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" status
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" rollback
 cat > "$SANDBOX/receipts/authorization.json" <<EOF
 {"sha":"$CANDIDATE_SHA","status":"ok","operation":"stage","reference_id":"OOB-SANDBOX-2","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
 EOF
-python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX-2
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX-2
 cat > "$SANDBOX/receipts/authorization.json" <<EOF
 {"sha":"$CANDIDATE_SHA","status":"ok","operation":"promote","reference_id":"OOB-SANDBOX-3","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
 EOF
-python -m hermes_release --config "$SANDBOX/release-config.json" promote "$CANDIDATE_SHA" --authorize OOB-SANDBOX-3
-python -m hermes_release --config "$SANDBOX/release-config.json" rollback
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" promote "$CANDIDATE_SHA" --authorize OOB-SANDBOX-3
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" rollback
 ```
 
 Expected evidence:
@@ -156,10 +188,11 @@ Expected evidence:
   encrypted/private artifact, integrity, restore/list, and rollback
   compatibility proof fields. The minimal `repo_local` scope above accepts the
   compact receipt.
-- If sensitive repo-local files such as `.env` exist, configure
-  `archive_encryption.argv` and `archive_encryption.output` so the controller
-  encrypts a temporary plaintext tarball with `shell=False`, hashes the
-  encrypted artifact, and deletes the plaintext before mutation.
+- If sensitive repo-local files such as `.env` exist, the configured
+  `archive_encryption.argv`, `archive_encryption.verify_argv`, and
+  `archive_encryption.output` encrypt a temporary plaintext tarball with
+  `shell=False`, verify JSON `{ok:true, encrypted:true, artifact_sha256:<sha>}`
+  against the exact output SHA-256, and delete plaintext before mutation.
 - The final `rollback` fails closed with
   `"code": "post_promotion_rollback_refused"` and tells the operator to recover
   with a normal revert or recovery commit rather than rewriting published
