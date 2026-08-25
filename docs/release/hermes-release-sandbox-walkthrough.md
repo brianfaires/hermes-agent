@@ -161,19 +161,19 @@ EOF
 Expected command flow:
 
 ```bash
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" preflight "$CANDIDATE_SHA"
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" status
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" rollback
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" preflight "$CANDIDATE_SHA"
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" status
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" rollback
 cat > "$SANDBOX/receipts/authorization.json" <<EOF
 {"sha":"$CANDIDATE_SHA","status":"ok","operation":"stage","reference_id":"OOB-SANDBOX-2","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
 EOF
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX-2
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" stage "$CANDIDATE_SHA" --authorize OOB-SANDBOX-2
 cat > "$SANDBOX/receipts/authorization.json" <<EOF
 {"sha":"$CANDIDATE_SHA","status":"ok","operation":"promote","reference_id":"OOB-SANDBOX-3","not_before":"2026-08-20T12:00:00Z","expires_at":"2026-08-20T13:00:00Z","single_use":true}
 EOF
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" promote "$CANDIDATE_SHA" --authorize OOB-SANDBOX-3
-PYTHONPATH="$HERMES_RELEASE_SOURCE" python -m hermes_release --config "$SANDBOX/release-config.json" rollback
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" promote "$CANDIDATE_SHA" --authorize OOB-SANDBOX-3
+PYTHONPATH="$HERMES_RELEASE_SOURCE" python3 -m hermes_release --config "$SANDBOX/release-config.json" rollback
 ```
 
 Expected evidence:
