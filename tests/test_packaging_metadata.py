@@ -178,6 +178,22 @@ def _version_tuple(spec: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def _locked_versions(package_name: str) -> list[str]:
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    versions = []
+    in_package = False
+    expected = f'name = "{package_name}"'
+    for line in lock.splitlines():
+        if line.startswith("[[package]]"):
+            in_package = False
+        elif line.strip() == expected:
+            in_package = True
+        elif in_package and line.startswith("version = "):
+            versions.append(line.split("=", 1)[1].strip().strip('"'))
+            in_package = False
+    return versions
+
+
 def test_starlette_pinned_above_cve_2026_48710_floor_in_pyproject():
     """Every extra that declares Starlette must pin a patched (>=1.0.1) version.
 
@@ -220,18 +236,7 @@ def test_locked_starlette_is_not_vulnerable_to_cve_2026_48710():
     resolved version is >= the CVE-2026-48710 fix floor so a stale-lock
     regression can't ship a vulnerable Starlette to users.
     """
-    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
-    versions = []
-    in_starlette = False
-    for line in lock.splitlines():
-        if line.startswith("[[package]]"):
-            in_starlette = False
-        elif line.strip() == 'name = "starlette"':
-            in_starlette = True
-        elif in_starlette and line.startswith("version = "):
-            versions.append(line.split("=", 1)[1].strip().strip('"'))
-            in_starlette = False
-
+    versions = _locked_versions("starlette")
     assert versions, "starlette not found in uv.lock"
     for ver in versions:
         assert _version_tuple(ver) >= _STARLETTE_CVE_FLOOR, (
@@ -239,6 +244,24 @@ def test_locked_starlette_is_not_vulnerable_to_cve_2026_48710():
             f"floor {'.'.join(map(str, _STARLETTE_CVE_FLOOR))} — regenerate the "
             f"lockfile after bumping the pin"
         )
+
+
+def test_locked_security_dependency_floors_do_not_regress():
+    """The committed uv.lock must carry the reviewed security floors."""
+    floors = {
+        "aiohttp": (3, 14, 3),
+        "cryptography": (50, 0, 0),
+        "pillow": (12, 3, 0),
+        "h2": (4, 4, 1),
+    }
+    for package, floor in floors.items():
+        versions = _locked_versions(package)
+        assert versions, f"{package} not found in uv.lock"
+        for ver in versions:
+            assert _version_tuple(ver) >= floor, (
+                f"uv.lock resolves {package}=={ver}, below the reviewed security "
+                f"floor {'.'.join(map(str, floor))} — regenerate uv.lock"
+            )
 
 
 def test_locale_catalogs_ship_in_both_wheel_and_sdist():
@@ -376,6 +399,34 @@ def test_pyproject_and_lazy_deps_pins_agree():
         "version of the same package — bump both in lockstep:\n  "
         + "\n  ".join(mismatches)
     )
+
+
+def test_declared_security_dependency_floors_do_not_regress():
+    """Reviewed CVE pins must stay at or above the patched manifest floors."""
+    floors = {
+        "aiohttp": (3, 14, 3),
+        "cryptography": (50, 0, 0),
+        "pillow": (12, 3, 0),
+        "h2": (4, 4, 1),
+    }
+    py = _pins_from_specs(_pyproject_pinned_specs())
+    lazy = _pins_from_specs(_lazy_deps_pinned_specs())
+
+    for package, floor in floors.items():
+        canon = _canonical(package)
+        versions = py.get(canon)
+        assert versions, f"{package} must be exact-pinned in pyproject.toml"
+        for ver in versions:
+            assert _version_tuple(ver) >= floor, (
+                f"pyproject.toml pins {package}=={ver}, below the reviewed "
+                f"security floor {'.'.join(map(str, floor))}"
+            )
+
+        for ver in lazy.get(canon, set()):
+            assert _version_tuple(ver) >= floor, (
+                f"tools/lazy_deps.py pins {package}=={ver}, below the reviewed "
+                f"security floor {'.'.join(map(str, floor))}"
+            )
 
 
 def _lazy_deps_by_feature():
