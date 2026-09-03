@@ -296,6 +296,14 @@ def _format_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+def _display_path(path: Path) -> str:
+    """Return a user-friendly display path with ~/ shorthand when possible."""
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 def run_backup(args) -> None:
     """Create a zip backup of the Hermes home directory."""
     hermes_root = get_default_hermes_root()
@@ -323,7 +331,7 @@ def run_backup(args) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Collect files
-    print(f"Scanning {display_hermes_home()} ...")
+    print(f"Scanning {_display_path(hermes_root)} ...")
     files_to_add: list[tuple[Path, Path]] = []  # (absolute, relative)
     skipped_dirs = set()
 
