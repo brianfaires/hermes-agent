@@ -20,3 +20,7 @@ Allowed decisions: `KEEP`, `REWRITE`, `DROP_UPSTREAM`, `DROP_LOW_VALUE`, `DROP_O
 For each feature record: legacy commits/branches, current symptom, upstream evidence, value judgment, chosen placement, migration commit, tests, review, rollback tag, and UAT requirement.
 
 No historical commit is replayed merely because it exists. Mixed commits are split by behavior; historical dependency pins are regenerated from the v0.21 dependency graph.
+
+| Feature | Legacy source | Current symptom | Decision | Placement | Migration commit | Tests | Rollback |
+|---|---|---|---|---|---|---|---|
+| Run hosted CI on persistent staging pushes before main promotion | `597d7030585eb574e30b40eb44c11764f79f7891` | Current `.github/workflows/ci.yaml` only runs push orchestration on `main`, so staging pushes do not receive the complete hosted gate. | `KEEP` | Existing upstream CI orchestrator trigger | This slice | `tests/ci/test_staging_workflow_gate.py` | Revert this slice to remove the staging push trigger. |
