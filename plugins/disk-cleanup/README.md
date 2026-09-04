@@ -13,7 +13,7 @@ never needs to remember to call a tool.
 
 | Hook | Behaviour |
 |---|---|
-| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME`, track it silently as `test` / `temp` / `cron-output`. |
+| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a disposable file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME`, track it silently as `test` / `temp` / `cron-output`. Durable script trees are excluded. |
 | `on_session_end` | If any test files were auto-tracked during this turn, run `quick` cleanup (no prompts). |
 
 Deletion rules (same as the original PR):
@@ -46,6 +46,10 @@ Deletion rules (same as the original PR):
 - The state directory `$HERMES_HOME/disk-cleanup/` is itself excluded
 - `$HERMES_HOME/logs/`, `memories/`, `sessions/`, `skills/`, `plugins/`,
   and config files are never tracked
+- Durable script trees at `$HERMES_HOME/scripts` and
+  `$HERMES_HOME/profiles/<name>/scripts` are never auto-tracked, shown as
+  dry-run deletion candidates, or deleted from stale/manual tracked state,
+  regardless of their stored category
 - Backup/restore is scoped to `tracked.json` — the plugin never touches
   agent logs
 - Atomic writes: `.tmp` → backup → rename

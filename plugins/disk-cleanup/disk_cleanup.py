@@ -146,7 +146,7 @@ ALLOWED_CATEGORIES = {
 
 _EMPTY_DIR_PROTECTED_TOP_LEVEL = frozenset({
     "logs", "memories", "sessions", "cron", "cronjobs",
-    "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
+    "cache", "scripts", "skills", "plugins", "disk-cleanup", "optional-skills",
     "hermes-agent", "backups", "profiles", ".worktrees",
     # User-authored project trees — never sweep empty directories
     # inside these (#75403).
@@ -189,6 +189,25 @@ def _is_protected_cron_path(p: Path) -> bool:
             _PROTECTED_CRON_PATHS.add(str(base / ".tick.lock"))
     resolved = str(p.resolve())
     return resolved in _PROTECTED_CRON_PATHS
+
+
+def _is_durable_script_path(p: Path) -> bool:
+    """Return True for user-maintained scripts under active or named profiles."""
+    hermes_home = get_hermes_home()
+    try:
+        rel = p.resolve().relative_to(hermes_home)
+    except (ValueError, OSError):
+        return False
+
+    parts = rel.parts
+    return (
+        len(parts) >= 1
+        and parts[0] == "scripts"
+    ) or (
+        len(parts) >= 3
+        and parts[0] == "profiles"
+        and parts[2] == "scripts"
+    )
 
 
 def fmt_size(n: float) -> str:
@@ -268,6 +287,8 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
         p = Path(item["path"])
         if not p.exists():
             continue
+        if _is_durable_script_path(p):
+            continue
         age = (now - datetime.fromisoformat(item["timestamp"])).days
         cat = item["category"]
         size = item["size"]
@@ -319,6 +340,10 @@ def quick() -> Dict[str, Any]:
 
         if not p.exists():
             _log(f"STALE: {p} (removed from tracking)")
+            continue
+
+        if _is_durable_script_path(p):
+            _log(f"SKIP durable script path: {p} (removed from tracking)")
             continue
 
         age = (now - datetime.fromisoformat(item["timestamp"])).days
@@ -579,8 +604,8 @@ def guess_category(path: Path) -> Optional[str]:
         top = rel.parts[0] if rel.parts else ""
         if top in {
             "disk-cleanup", "logs", "memories", "sessions", "config.yaml",
-            "skills", "plugins", ".env", "USER.md", "MEMORY.md", "SOUL.md",
-            "auth.json", "hermes-agent",
+            "scripts", "skills", "plugins", ".env", "USER.md", "MEMORY.md",
+            "SOUL.md", "auth.json", "hermes-agent",
             # User-authored and project trees — never auto-delete files
             # inside these just because they happen to be named test_* or
             # tmp_* (#75403, also #32164, #37721).

@@ -225,6 +225,85 @@ class TestStaleCronEntryMigration:
         assert not run_md.exists()
 
 
+class TestDurableScriptMigration:
+    @pytest.mark.parametrize(
+        "parts",
+        [
+            ("scripts",),
+            ("profiles", "worker", "scripts"),
+        ],
+    )
+    def test_quick_drops_tracked_script_root_without_deleting_it(
+        self, _isolate_env, parts
+    ):
+        dg = _load_lib()
+        scripts_dir = _isolate_env.joinpath(*parts)
+        scripts_dir.mkdir(parents=True)
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(scripts_dir),
+            "category": "temp",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+        assert summary["deleted"] == 0
+        assert scripts_dir.exists(), "durable scripts root must not be deleted"
+        assert json.loads(tracked_file.read_text()) == []
+
+    def test_quick_drops_old_temp_entry_under_active_profile_scripts(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        script = _isolate_env / "scripts" / "sync_state.tmp"
+        script.parent.mkdir()
+        script.write_text("durable\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(script),
+            "category": "temp",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 8,
+        }]))
+
+        summary = dg.quick()
+        assert summary["deleted"] == 0
+        assert script.exists(), "active-profile scripts must not be deleted"
+        assert json.loads(tracked_file.read_text()) == []
+
+    def test_dry_run_omits_old_temp_entry_under_nested_profile_scripts(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        script = (
+            _isolate_env
+            / "profiles"
+            / "worker"
+            / "scripts"
+            / "sync_state.tmp"
+        )
+        script.parent.mkdir(parents=True)
+        script.write_text("durable\n")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(script),
+            "category": "temp",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 8,
+        }]))
+
+        auto, prompt = dg.dry_run()
+        assert auto == []
+        assert prompt == []
+
+
 class TestTrackForgetQuick:
     def test_track_then_quick_deletes_test(self, _isolate_env):
         dg = _load_lib()
@@ -341,6 +420,30 @@ class TestOnSessionEndHook:
         assert p.exists()
         pi._on_session_end(session_id="s1", completed=True, interrupted=False)
         assert not p.exists(), "test file should be auto-deleted"
+
+    def test_write_file_durable_scripts_test_file_persists(self, _isolate_env):
+        pi = _load_plugin_init()
+        p = _isolate_env / "scripts" / "test_cron_calendar_recurring_sync.py"
+        p.parent.mkdir()
+        p.write_text("x")
+
+        pi._on_post_tool_call(
+            tool_name="write_file",
+            args={"path": str(p), "content": "x"},
+            result="OK",
+            task_id="", session_id="s-durable-script",
+        )
+        pi._on_session_end(
+            session_id="s-durable-script",
+            completed=True,
+            interrupted=False,
+        )
+
+        assert p.exists(), "durable scripts/test_*.py file must not be deleted"
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        if tracked_file.exists():
+            data = json.loads(tracked_file.read_text())
+            assert all(Path(item["path"]) != p.resolve() for item in data)
 
     def test_noop_when_no_test_tracked(self, _isolate_env):
         pi = _load_plugin_init()
