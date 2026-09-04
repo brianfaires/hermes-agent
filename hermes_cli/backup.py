@@ -838,7 +838,7 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
     # Collect files
     scan_started = time.monotonic()
     logger.info("backup phase=scan status=started")
-    print(f"Scanning {display_hermes_home()} ...")
+    print(f"Scanning {display_hermes_home(hermes_root)} ...")
     files_to_add: list[tuple[Path, Path]] = []  # (absolute, relative)
     skipped_dirs = set()
 

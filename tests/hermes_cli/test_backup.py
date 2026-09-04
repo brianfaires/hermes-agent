@@ -165,6 +165,32 @@ class TestShouldExclude:
 
 class TestBackup:
 
+    def test_profile_mode_scan_status_reports_default_root_scope(self, tmp_path, monkeypatch, capsys):
+        """Profile-mode full backup output must name the root scope it archives."""
+        hermes_root = tmp_path / ".hermes"
+        profile_home = hermes_root / "profiles" / "coder"
+        profile_home.mkdir(parents=True)
+        (hermes_root / "config.yaml").write_text("model: root\n")
+        (profile_home / "config.yaml").write_text("model: coder\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+
+        from hermes_cli.backup import run_backup
+
+        run_backup(Namespace(output=str(out_zip)))
+
+        output = capsys.readouterr().out
+        assert "Scanning ~/.hermes ..." in output
+        assert "Scanning ~/.hermes/profiles/coder ..." not in output
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = zf.namelist()
+        assert "config.yaml" in names
+        assert "profiles/coder/config.yaml" in names
+
 
     def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
         """SQLite staging temp files must be created on the output zip's

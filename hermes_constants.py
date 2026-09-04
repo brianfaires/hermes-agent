@@ -1111,8 +1111,8 @@ def _legacy_path_has_content(path: Path) -> bool:
     return True
 
 
-def display_hermes_home() -> str:
-    """Return a user-friendly display string for the current HERMES_HOME.
+def display_hermes_home(home: str | Path | None = None) -> str:
+    """Return a user-friendly display string for a Hermes home path.
 
     Uses ``~/`` shorthand for readability::
 
@@ -1121,10 +1121,10 @@ def display_hermes_home() -> str:
         custom:   ``/opt/hermes-custom``
 
     Use this in **user-facing** print/log messages instead of hardcoding
-    ``~/.hermes``.  For code that needs a real ``Path``, use
-    :func:`get_hermes_home` instead.
+    ``~/.hermes``.  Defaults to the current ``HERMES_HOME``.  For code that
+    needs a real ``Path``, use :func:`get_hermes_home` instead.
     """
-    home = get_hermes_home()
+    home_path = Path(home) if home is not None else get_hermes_home()
     try:
         # as_posix(): on Windows, str() of a relative Path renders
         # backslashes, producing mixed-separator chimeras like
@@ -1132,9 +1132,9 @@ def display_hermes_home() -> str:
         # sub-paths. ``~/`` shorthand implies POSIX rendering; keep the
         # whole string consistent (forward slashes work everywhere,
         # including Windows shells and Python APIs).
-        return "~/" + home.relative_to(Path.home()).as_posix()
+        return "~/" + home_path.relative_to(Path.home()).as_posix()
     except ValueError:
-        return str(home)
+        return str(home_path)
 
 
 def secure_parent_dir(path: Path) -> None:
