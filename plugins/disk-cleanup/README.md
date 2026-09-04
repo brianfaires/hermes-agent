@@ -39,6 +39,31 @@ Deletion rules (same as the original PR):
 /disk-cleanup forget <path>              # stop tracking
 ```
 
+## Wildcard policies
+
+A tracked path may end in `/*` to create a persistent cleanup policy over a
+safe directory's descendants. The wildcard must be exactly an absolute parent
+path followed by `/*`, for example:
+
+```
+$HERMES_HOME/audio_cache/*
+$HERMES_HOME/cron/output/*
+```
+
+For wildcard policies, cleanup evaluates each descendant regular file by that
+file's own mtime and the stored category: `test` files are eligible
+immediately, `temp` files after 7 days, and `cron-output` files after 14 days.
+`dry-run` lists the eligible descendant files, not the wildcard policy record.
+`quick` deletes eligible files, leaves young files in place, removes descendant
+directories only after they become empty, keeps the wildcard parent directory,
+and retains the wildcard policy for future runs.
+
+Malformed wildcard strings, unsupported wildcard shapes, unsafe parents,
+symlink escapes, `$HERMES_HOME/*`, protected top-level trees such as
+`logs/*`, `memories/*`, `sessions/*`, `skills/*`, `plugins/*`, `profiles/*`,
+cron control-plane trees other than exact `cron/output/*`, and durable script
+trees are ignored or rejected.
+
 ## Safety
 
 - `is_safe_path()` rejects anything outside `HERMES_HOME` or `/tmp/hermes-*`
@@ -46,10 +71,14 @@ Deletion rules (same as the original PR):
 - The state directory `$HERMES_HOME/disk-cleanup/` is itself excluded
 - `$HERMES_HOME/logs/`, `memories/`, `sessions/`, `skills/`, `plugins/`,
   and config files are never tracked
+- Wildcard policies rooted at `$HERMES_HOME` or durable top-level trees are
+  rejected by `track` and ignored/dropped when found in stale manual state
 - Durable script trees at `$HERMES_HOME/scripts` and
   `$HERMES_HOME/profiles/<name>/scripts` are never auto-tracked, shown as
   dry-run deletion candidates, or deleted from stale/manual tracked state,
   regardless of their stored category
+- Wildcard cleanup never follows symlinked files or directories and never
+  deletes the wildcard parent directory itself
 - Backup/restore is scoped to `tracked.json` — the plugin never touches
   agent logs
 - Atomic writes: `.tmp` → backup → rename

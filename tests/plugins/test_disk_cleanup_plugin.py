@@ -14,6 +14,7 @@ Covers the bundled plugin at ``plugins/disk-cleanup/``:
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -68,6 +69,11 @@ def _load_plugin_init():
     sys.modules["hermes_plugins.disk_cleanup"] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _set_age_in_days(path: Path, days: int):
+    ts = path.stat().st_mtime - (days * 24 * 60 * 60)
+    os.utime(path, (ts, ts))
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +329,288 @@ class TestTrackForgetQuick:
         assert dg.forget(str(p)) == 1
         assert p.exists()  # forget does NOT delete the file
 
+    def test_track_and_forget_wildcard_policy(self, _isolate_env):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        root.mkdir()
+        policy = f"{root}/*"
+
+        assert dg.track(policy, "temp", silent=True) is True
+        assert dg.load_tracked()[0]["path"] == policy
+        assert dg.forget(policy) == 1
+        assert dg.load_tracked() == []
+
+    def test_track_rejects_durable_script_wildcard_policy(self, _isolate_env):
+        dg = _load_lib()
+        scripts_dir = _isolate_env / "scripts"
+        scripts_dir.mkdir()
+
+        assert dg.track(f"{scripts_dir}/*", "temp", silent=True) is False
+        assert dg.load_tracked() == []
+
+    @pytest.mark.parametrize("directory_name", ["?", "[abc]"])
+    def test_track_rejects_unsupported_wildcard_shapes(
+        self, _isolate_env, directory_name
+    ):
+        dg = _load_lib()
+        unsupported_parent = _isolate_env / "audio_cache" / directory_name
+        unsupported_parent.mkdir(parents=True)
+
+        assert dg.track(
+            f"{unsupported_parent}/*", "temp", silent=True
+        ) is False
+        assert dg.load_tracked() == []
+
+    @pytest.mark.parametrize(
+        "parts",
+        [
+            (),
+            ("logs",),
+            ("memories",),
+            ("sessions",),
+            ("skills",),
+            ("plugins",),
+            ("profiles",),
+            ("cron",),
+            ("cron", "control"),
+        ],
+    )
+    def test_track_rejects_durable_wildcard_policy_roots(
+        self, _isolate_env, parts
+    ):
+        dg = _load_lib()
+        root = _isolate_env.joinpath(*parts)
+        root.mkdir(parents=True, exist_ok=True)
+
+        assert dg.track(f"{root}/*", "temp", silent=True) is False
+        assert dg.load_tracked() == []
+
+    def test_quick_wildcard_recursively_prunes_old_files_and_keeps_policy(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        nested = root / "job" / "chunks"
+        nested.mkdir(parents=True)
+        old_file = nested / "old.wav"
+        old_file.write_text("old")
+        _set_age_in_days(old_file, 10)
+        young_file = root / "fresh.wav"
+        young_file.write_text("young")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        policy = f"{root}/*"
+        tracked_file.write_text(json.dumps([{
+            "path": policy,
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 1
+        assert not old_file.exists()
+        assert not nested.exists()
+        assert young_file.exists()
+        assert root.exists()
+        assert json.loads(tracked_file.read_text())[0]["path"] == policy
+
+    def test_quick_drops_logs_wildcard_policy_without_deleting_descendants(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "logs"
+        root.mkdir()
+        old_log = root / "old.log"
+        old_log.write_text("durable log")
+        _set_age_in_days(old_log, 10)
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": f"{root}/*",
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert old_log.exists()
+        assert json.loads(tracked_file.read_text()) == []
+
+    def test_quick_drops_logs_wildcard_syntax_without_deleting_literal_star(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "logs"
+        literal_star = root / "*"
+        literal_star.mkdir(parents=True)
+        durable_log = literal_star / "old.log"
+        durable_log.write_text("durable log")
+        _set_age_in_days(durable_log, 10)
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": f"{root}/*",
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert durable_log.exists()
+        assert json.loads(tracked_file.read_text()) == []
+
+    @pytest.mark.parametrize("policy_first", [True, False])
+    def test_quick_preserves_wildcard_root_when_old_parent_entry_exists(
+        self, _isolate_env, policy_first
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        root.mkdir()
+        young_file = root / "fresh.wav"
+        young_file.write_text("young")
+        policy = f"{root}/*"
+
+        wildcard_item = {
+            "path": policy,
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }
+        parent_item = {
+            "path": str(root),
+            "category": "temp",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 0,
+        }
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps(
+            [wildcard_item, parent_item]
+            if policy_first
+            else [parent_item, wildcard_item]
+        ))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert root.exists()
+        assert young_file.exists()
+        remaining = json.loads(tracked_file.read_text())
+        assert [item["path"] for item in remaining] == [policy]
+
+    @pytest.mark.parametrize("policy_first", [True, False])
+    @pytest.mark.parametrize("tracked_kind", ["file", "directory"])
+    def test_quick_drops_ordinary_entries_below_valid_wildcard_root(
+        self, _isolate_env, policy_first, tracked_kind
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        root.mkdir()
+        policy = f"{root}/*"
+
+        if tracked_kind == "file":
+            young_file = root / "fresh.wav"
+            young_file.write_text("young")
+            stale_path = young_file
+        else:
+            stale_path = root / "job"
+            stale_path.mkdir()
+            young_file = stale_path / "fresh.wav"
+            young_file.write_text("young")
+
+        wildcard_item = {
+            "path": policy,
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }
+        stale_ordinary_item = {
+            "path": str(stale_path),
+            "category": "temp",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+            "size": 0,
+        }
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps(
+            [wildcard_item, stale_ordinary_item]
+            if policy_first
+            else [stale_ordinary_item, wildcard_item]
+        ))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert root.exists()
+        assert young_file.exists()
+        remaining = json.loads(tracked_file.read_text())
+        assert [item["path"] for item in remaining] == [policy]
+
+    def test_quick_wildcard_ignores_symlink_escape(self, _isolate_env):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        root.mkdir()
+        outside = _isolate_env.parent / "outside-old.wav"
+        outside.write_text("outside")
+        _set_age_in_days(outside, 10)
+        link = root / "escape.wav"
+        link.symlink_to(outside)
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": f"{root}/*",
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert outside.exists()
+        assert link.exists()
+
+    def test_quick_cron_output_wildcard_prunes_old_descendants(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "cron" / "output"
+        run_dir = root / "job-1"
+        run_dir.mkdir(parents=True)
+        old_file = run_dir / "run.md"
+        old_file.write_text("old")
+        _set_age_in_days(old_file, 20)
+        young_file = run_dir / "fresh.md"
+        young_file.write_text("young")
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        policy = f"{root}/*"
+        tracked_file.write_text(json.dumps([{
+            "path": policy,
+            "category": "cron-output",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 1
+        assert not old_file.exists()
+        assert young_file.exists()
+        assert root.exists()
+        assert json.loads(tracked_file.read_text())[0]["path"] == policy
+
 
 class TestStatus:
     def test_empty_status(self, _isolate_env):
@@ -356,6 +644,35 @@ class TestDryRun:
         auto, prompt = dg.dry_run()
         # test → auto, other → neither (doesn't hit any rule)
         assert any(i["path"] == str(test_f) for i in auto)
+
+    def test_wildcard_dry_run_lists_eligible_files_not_policy(
+        self, _isolate_env
+    ):
+        dg = _load_lib()
+        root = _isolate_env / "audio_cache"
+        root.mkdir()
+        old_file = root / "old.wav"
+        old_file.write_text("old")
+        _set_age_in_days(old_file, 10)
+        young_file = root / "fresh.wav"
+        young_file.write_text("young")
+        policy = f"{root}/*"
+
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": policy,
+            "category": "temp",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "size": 0,
+        }]))
+
+        auto, prompt = dg.dry_run()
+
+        assert [item["path"] for item in auto] == [str(old_file)]
+        assert policy not in [item["path"] for item in auto]
+        assert str(young_file) not in [item["path"] for item in auto]
+        assert prompt == []
 
 
 # ---------------------------------------------------------------------------

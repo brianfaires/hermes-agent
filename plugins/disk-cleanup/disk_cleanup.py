@@ -26,7 +26,7 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from hermes_constants import get_hermes_home
@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
+_WILDCARD_SYNTAX_CHARS = frozenset("*?[")
+
 def get_state_dir() -> Path:
     """State dir — separate from ``$HERMES_HOME/logs/``."""
     return get_hermes_home() / "disk-cleanup"
@@ -57,6 +59,156 @@ def get_tracked_file() -> Path:
 def get_log_file() -> Path:
     """Audit log — intentionally NOT under ``$HERMES_HOME/logs/``."""
     return get_state_dir() / "cleanup.log"
+
+
+def _has_wildcard_syntax(path_str: str) -> bool:
+    return any(char in path_str for char in _WILDCARD_SYNTAX_CHARS)
+
+
+def _is_wildcard_policy(path_str: str) -> bool:
+    parent_text = path_str[:-2]
+    return (
+        path_str.endswith("/*")
+        and not _has_wildcard_syntax(parent_text)
+        and Path(parent_text).is_absolute()
+    )
+
+
+def _wildcard_parent(path_str: str) -> Optional[Path]:
+    if not _is_wildcard_policy(path_str):
+        return None
+    return Path(path_str[:-2])
+
+
+def _is_safe_wildcard_policy_parent(parent: Path) -> bool:
+    """Return True when *parent* is safe to use as a recursive policy root."""
+    if not parent.is_dir() or parent.is_symlink():
+        return False
+    if not is_safe_path(parent):
+        return False
+
+    hermes_home = get_hermes_home()
+    try:
+        rel = parent.resolve().relative_to(hermes_home)
+    except (ValueError, OSError):
+        return True
+
+    if not rel.parts:
+        return False
+
+    top = rel.parts[0]
+    if top in {"cron", "cronjobs"}:
+        return rel.parts == ("cron", "output")
+    if top in _EMPTY_DIR_PROTECTED_TOP_LEVEL:
+        return False
+    if _is_durable_script_path(parent):
+        return False
+    return True
+
+
+def _retention_days(category: str) -> Optional[int]:
+    if category == "test":
+        return 0
+    if category == "temp":
+        return 7
+    if category == "cron-output":
+        return 14
+    return None
+
+
+def _wildcard_policy_parent(item: Dict[str, Any]) -> Optional[Path]:
+    parent = _wildcard_parent(str(item.get("path", "")))
+    if parent is None:
+        return None
+    if _retention_days(str(item.get("category", ""))) is None:
+        return None
+    if not _is_safe_wildcard_policy_parent(parent):
+        return None
+    try:
+        return parent.resolve()
+    except OSError:
+        return None
+
+
+def _valid_wildcard_policy_roots(tracked: Iterable[Dict[str, Any]]) -> set[Path]:
+    roots: set[Path] = set()
+    for item in tracked:
+        parent = _wildcard_policy_parent(item)
+        if parent is not None:
+            roots.add(parent)
+    return roots
+
+
+def _is_at_or_below_valid_wildcard_root(path: Path, roots: set[Path]) -> bool:
+    if not roots:
+        return False
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _iter_safe_wildcard_files(
+    parent: Path,
+    category: str,
+    now: datetime,
+) -> Iterable[Dict[str, Any]]:
+    threshold = _retention_days(category)
+    if threshold is None:
+        return
+
+    for child in parent.rglob("*"):
+        if child.is_symlink() or not child.is_file():
+            continue
+        try:
+            resolved = child.resolve()
+            resolved.relative_to(parent)
+        except (ValueError, OSError):
+            continue
+        if (
+            not is_safe_path(resolved)
+            or _is_durable_script_path(resolved)
+            or _is_protected_cron_path(resolved)
+        ):
+            continue
+        try:
+            st = child.stat()
+        except OSError:
+            continue
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+        age = (now - mtime).days
+        if category == "test" or age > threshold:
+            yield {
+                "path": str(resolved),
+                "timestamp": mtime.isoformat(),
+                "category": category,
+                "size": st.st_size,
+            }
+
+
+def _remove_empty_wildcard_dirs(parent: Path) -> int:
+    removed = 0
+    dirs = [
+        p for p in parent.rglob("*")
+        if p.is_dir() and not p.is_symlink() and not _is_durable_script_path(p)
+    ]
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            d.resolve().relative_to(parent)
+            if not any(d.iterdir()):
+                d.rmdir()
+                removed += 1
+                _log(f"DELETED: {d} (empty dir via wildcard)")
+        except (ValueError, OSError):
+            continue
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -228,46 +380,73 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         _log(f"WARN: unknown category '{category}', using 'other'")
         category = "other"
 
-    path = Path(path_str).resolve()
+    wildcard_parent = _wildcard_parent(path_str)
+    if wildcard_parent is not None:
+        policy_parent = _wildcard_policy_parent({
+            "path": path_str,
+            "category": category,
+        })
+        if policy_parent is None:
+            _log(f"REJECT: {path_str} (unsafe wildcard policy)")
+            return False
+        path = policy_parent
+        stored_path = f"{policy_parent}/*"
+    elif _has_wildcard_syntax(path_str):
+        _log(f"REJECT: {path_str} (unsupported wildcard policy)")
+        return False
+    else:
+        path = Path(path_str).resolve()
+        stored_path = str(path)
 
     if not path.exists():
-        _log(f"SKIP: {path} (does not exist)")
+        _log(f"SKIP: {stored_path} (does not exist)")
         return False
 
     if not is_safe_path(path):
-        _log(f"REJECT: {path} (outside HERMES_HOME)")
+        _log(f"REJECT: {stored_path} (outside HERMES_HOME)")
         return False
 
-    size = path.stat().st_size if path.is_file() else 0
+    size = (
+        path.stat().st_size
+        if path.is_file() and wildcard_parent is None
+        else 0
+    )
     tracked = load_tracked()
 
     # Deduplicate
-    if any(item["path"] == str(path) for item in tracked):
+    if any(item["path"] == stored_path for item in tracked):
         return False
 
     tracked.append({
-        "path": str(path),
+        "path": stored_path,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "category": category,
         "size": size,
     })
     save_tracked(tracked)
-    _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
+    _log(f"TRACKED: {stored_path} ({category}, {fmt_size(size)})")
     if not silent:
-        print(f"Tracked: {path} ({category}, {fmt_size(size)})")
+        print(f"Tracked: {stored_path} ({category}, {fmt_size(size)})")
     return True
 
 
 def forget(path_str: str) -> int:
     """Remove a path from tracking without deleting the file."""
-    p = Path(path_str).resolve()
+    wildcard_parent = _wildcard_parent(path_str)
+    if wildcard_parent is not None:
+        stored_path = f"{wildcard_parent}/*"
+    elif _has_wildcard_syntax(path_str):
+        stored_path = path_str
+    else:
+        p = Path(path_str).resolve()
+        stored_path = str(p)
     tracked = load_tracked()
     before = len(tracked)
-    tracked = [i for i in tracked if Path(i["path"]).resolve() != p]
+    tracked = [i for i in tracked if i["path"] != stored_path]
     removed = before - len(tracked)
     if removed:
         save_tracked(tracked)
-        _log(f"FORGOT: {p} ({removed} entries)")
+        _log(f"FORGOT: {stored_path} ({removed} entries)")
     return removed
 
 
@@ -279,13 +458,28 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
     """Return (auto_delete_list, needs_prompt_list) without touching files."""
     tracked = load_tracked()
     now = datetime.now(timezone.utc)
+    wildcard_roots = _valid_wildcard_policy_roots(tracked)
 
     auto: List[Dict] = []
     prompt: List[Dict] = []
 
     for item in tracked:
-        p = Path(item["path"])
+        path_str = str(item.get("path", ""))
+        wildcard_parent = _wildcard_policy_parent(item)
+        if wildcard_parent is not None:
+            auto.extend(
+                _iter_safe_wildcard_files(
+                    wildcard_parent, item["category"], now
+                )
+            )
+            continue
+        if _has_wildcard_syntax(path_str):
+            continue
+
+        p = Path(path_str)
         if not p.exists():
+            continue
+        if _is_at_or_below_valid_wildcard_root(p, wildcard_roots):
             continue
         if _is_durable_script_path(p):
             continue
@@ -333,13 +527,46 @@ def quick() -> Dict[str, Any]:
     freed = 0
     new_tracked: List[Dict] = []
     errors: List[str] = []
+    wildcard_sweep_roots = _valid_wildcard_policy_roots(tracked)
+    empty_removed = 0
 
     for item in tracked:
-        p = Path(item["path"])
+        path_str = str(item.get("path", ""))
+        wildcard_parent = _wildcard_policy_parent(item)
+        if wildcard_parent is not None:
+            for file_item in _iter_safe_wildcard_files(
+                wildcard_parent, item["category"], now
+            ):
+                p = Path(file_item["path"])
+                try:
+                    p.unlink()
+                    freed += file_item["size"]
+                    deleted += 1
+                    _log(
+                        f"DELETED: {p} ({item['category']}, "
+                        f"{fmt_size(file_item['size'])}) via wildcard "
+                        f"{item['path']}"
+                    )
+                except OSError as e:
+                    _log(f"ERROR deleting {p}: {e}")
+                    errors.append(f"{p}: {e}")
+            empty_removed += _remove_empty_wildcard_dirs(wildcard_parent)
+            new_tracked.append(item)
+            continue
+
+        if _has_wildcard_syntax(path_str):
+            _log(f"DROP invalid wildcard policy: {path_str}")
+            continue
+
+        p = Path(path_str)
         cat = item["category"]
 
         if not p.exists():
             _log(f"STALE: {p} (removed from tracking)")
+            continue
+
+        if _is_at_or_below_valid_wildcard_root(p, wildcard_sweep_roots):
+            _log(f"SKIP wildcard-managed path: {p} (removed from tracking)")
             continue
 
         if _is_durable_script_path(p):
@@ -412,7 +639,6 @@ def quick() -> Dict[str, Any]:
     # and desktop build under HERMES_HOME; a full rglob over that tree can
     # stall the gateway event loop for minutes.
     hermes_home = get_hermes_home()
-    empty_removed = 0
     sweep_stack: List[Tuple[Path, bool]] = []
     try:
         for top in hermes_home.iterdir():
@@ -430,7 +656,10 @@ def quick() -> Dict[str, Any]:
         dirpath, visited = sweep_stack.pop()
         if visited:
             try:
-                if not any(dirpath.iterdir()):
+                if (
+                    dirpath not in wildcard_sweep_roots
+                    and not any(dirpath.iterdir())
+                ):
                     dirpath.rmdir()
                     empty_removed += 1
                     _log(f"DELETED: {dirpath} (empty dir)")
@@ -550,7 +779,14 @@ def status() -> Dict[str, Any]:
 
     existing = [
         (i["path"], i["size"], i["category"])
-        for i in tracked if Path(i["path"]).exists()
+        for i in tracked
+        if (
+            _wildcard_policy_parent(i) is not None
+            or (
+                not _has_wildcard_syntax(str(i.get("path", "")))
+                and Path(i["path"]).exists()
+            )
+        )
     ]
     existing.sort(key=lambda x: x[1], reverse=True)
 
