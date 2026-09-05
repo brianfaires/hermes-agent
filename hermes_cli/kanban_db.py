@@ -6287,9 +6287,9 @@ def decompose_triage_task(
       - The root task is not in ``triage``
       - A cycle would result (caller built a bad graph)
 
-    Validation of titles/assignees happens inside the same write_txn as
-    the inserts so a malformed entry aborts the whole decomposition
-    cleanly (no orphan children).
+    Validation of titles/assignees/workspaces happens inside the same
+    write_txn as the inserts so a malformed entry aborts the whole
+    decomposition cleanly (no orphan children).
     """
     if not children:
         return None
@@ -6360,12 +6360,27 @@ def decompose_triage_task(
         if root_row["status"] != "triage":
             return None
         tenant = root_row["tenant"]
-        # Children inherit the root's workspace by default so a fan-out
-        # of a code-gen task lands in the parent's project dir/worktree
-        # rather than throwaway scratch tmp dirs. A child dict can still
-        # override with its own 'workspace_kind' / 'workspace_path'.
+        # Children inherit the root's workspace kind by default. Worktree
+        # inheritance is normalized to a repo-root anchor so each child gets its
+        # own linked checkout; scratch children stay per-task; implicit dir
+        # inheritance is rejected because it would share one persistent path.
+        # A child dict can still override with its own safe workspace metadata.
         root_ws_kind = root_row["workspace_kind"] or "scratch"
         root_ws_path = root_row["workspace_path"]
+        board_slug = _board_slug_for_connection(conn)
+        concrete_workspace_paths: list[tuple[str, Path]] = []
+        root_concrete_workspace = _decompose_effective_workspace_path(
+            task_id, root_ws_kind, root_ws_path, board=board_slug
+        )
+        concrete_workspace_paths.append(("root", root_concrete_workspace))
+        root_parent_ids = [
+            row["parent_id"]
+            for row in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ? "
+                "ORDER BY parent_id",
+                (task_id,),
+            ).fetchall()
+        ]
 
         # Create children. Status is 'todo' regardless of parents — we
         # link them under the root AFTER creation so the dispatcher
@@ -6376,23 +6391,62 @@ def decompose_triage_task(
             title = child["title"].strip()
             body = child.get("body")
             assignee = _canonical_assignee(child.get("assignee"))
-            # Per-child override wins; otherwise inherit the root's
-            # workspace. A child that sets workspace_kind without a path
-            # falls back to the root path only when kinds match (so a
-            # child can't accidentally point a 'dir' at the root's
-            # worktree path or vice versa).
-            child_ws_kind = child.get("workspace_kind") or root_ws_kind
-            if child.get("workspace_path"):
-                child_ws_path = child.get("workspace_path")
+            # Per-child override wins; otherwise inherit the root's workspace
+            # kind and derive the safest path for that kind.
+            if "workspace_kind" in child:
+                raw_ws_kind = child["workspace_kind"]
+                if not isinstance(raw_ws_kind, str) or not raw_ws_kind.strip():
+                    raise ValueError(f"child[{idx}].workspace_kind must be a non-empty string")
+                child_ws_kind = raw_ws_kind.strip()
+            else:
+                child_ws_kind = root_ws_kind
+            if "workspace_path" in child:
+                raw_ws_path = child["workspace_path"]
+                if not isinstance(raw_ws_path, str) or not raw_ws_path.strip():
+                    raise ValueError(f"child[{idx}].workspace_path must be a non-empty string")
+                child_ws_path = raw_ws_path.strip()
+            elif child_ws_kind == "scratch":
+                # Scratch workspaces are per-task. Inheriting a materialized
+                # root scratch path would collapse children into one ephemeral
+                # directory and confuse completion cleanup.
+                child_ws_path = None
+            elif child_ws_kind == "dir" and child_ws_kind == root_ws_kind:
+                raise ValueError(
+                    f"child[{idx}] cannot inherit dir workspace {root_ws_path!r}; "
+                    "set an explicit per-child workspace_path or use worktree"
+                )
+            elif child_ws_kind == "worktree" and child_ws_kind == root_ws_kind:
+                child_ws_path = _decompose_inherited_worktree_path(root_ws_path)
             elif child_ws_kind == root_ws_kind:
                 child_ws_path = root_ws_path
             else:
                 child_ws_path = None
+            child_branch_name = child.get("branch_name")
+            if child_branch_name is not None and not isinstance(child_branch_name, str):
+                raise ValueError(f"child[{idx}].branch_name must be a string")
+            child_ws_kind, child_ws_path, child_branch_name = normalize_workspace_metadata(
+                workspace_kind=child_ws_kind,
+                workspace_path=child_ws_path,
+                branch_name=child_branch_name,
+                require_dir_path=True,
+            )
+            concrete_workspace = _decompose_effective_workspace_path(
+                new_id, child_ws_kind, child_ws_path, board=board_slug
+            )
+            for owner, claimed_path in concrete_workspace_paths:
+                if _decompose_paths_overlap(concrete_workspace, claimed_path):
+                    raise ValueError(
+                        f"child[{idx}] workspace {concrete_workspace} "
+                        f"collides with {owner} workspace {claimed_path}"
+                    )
+            concrete_workspace_paths.append(
+                (f"child[{idx}]", concrete_workspace)
+            )
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, branch_name, tenant, created_at, created_by) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -6400,6 +6454,7 @@ def decompose_triage_task(
                     assignee,
                     child_ws_kind,
                     child_ws_path,
+                    child_branch_name,
                     tenant,
                     now,
                     (author or "decomposer"),
@@ -6425,6 +6480,33 @@ def decompose_triage_task(
                     conn, child_id, "linked",
                     {"parent": parent_id, "child": child_id},
                 )
+
+        # Preserve the root's external prerequisites on entrypoint children.
+        # Without these persisted links, a triage root parked behind an
+        # unfinished parent can fan out runnable workers before the prerequisite
+        # has completed. Sibling-dependent children inherit the gate transitively
+        # through their local parents.
+        for idx, child in enumerate(children):
+            if child.get("parents") or not root_parent_ids:
+                continue
+            child_id = child_ids[idx]
+            for parent_id in root_parent_ids:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
+                    "VALUES (?, ?)",
+                    (parent_id, child_id),
+                )
+                if cur.rowcount:
+                    _append_event(
+                        conn,
+                        child_id,
+                        "linked",
+                        {
+                            "parent": parent_id,
+                            "child": child_id,
+                            "propagated_from": task_id,
+                        },
+                    )
 
         # Link the ROOT task as a child of every leaf child — i.e. the
         # root waits for the whole graph. Simpler than computing leaves:
@@ -6468,6 +6550,7 @@ def decompose_triage_task(
             {
                 "child_ids": child_ids,
                 "root_assignee": root_assignee,
+                "propagated_parents": root_parent_ids or None,
             },
         )
 
@@ -6479,6 +6562,156 @@ def decompose_triage_task(
     if auto_promote:
         recompute_ready(conn)
     return child_ids
+
+
+def _decompose_paths_overlap(left: Path, right: Path) -> bool:
+    return (
+        left == right
+        or left.is_relative_to(right)
+        or right.is_relative_to(left)
+    )
+
+
+def _decompose_effective_workspace_path(
+    task_id: str,
+    workspace_kind: Optional[str],
+    workspace_path: Optional[str],
+    *,
+    board: Optional[str] = None,
+) -> Path:
+    """Return the mutable path decomposition must reserve for ``task_id``.
+
+    This mirrors the destination choices in ``resolve_workspace`` without
+    creating scratch dirs or materializing git worktrees.
+    """
+    kind = workspace_kind or "scratch"
+    if not workspace_path:
+        if kind == "scratch":
+            return (workspaces_root(board=board) / task_id).resolve(strict=False)
+        if kind == "worktree":
+            board_slug = board if board else get_current_board()
+            board_default = (read_board_metadata(board_slug).get("default_workdir") or "").strip()
+            if not board_default:
+                raise ValueError(
+                    f"task {task_id} has workspace_kind=worktree but no workspace_path, "
+                    f"and board {board_slug!r} has no default_workdir set"
+                )
+            anchor = Path(board_default).expanduser()
+            if not anchor.is_absolute():
+                raise ValueError(
+                    f"board {board_slug!r} default_workdir {board_default!r} is not absolute"
+                )
+            repo_root = _git_toplevel(anchor)
+            if repo_root is None:
+                raise ValueError(
+                    f"task {task_id} has workspace_kind=worktree but board "
+                    f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
+                )
+            return (repo_root / ".worktrees" / task_id).resolve(strict=False)
+        raise ValueError(
+            f"task {task_id} has workspace_kind={kind!r} but no workspace_path"
+        )
+
+    path = Path(str(workspace_path).strip()).expanduser()
+    if not path.is_absolute():
+        raise ValueError("workspace_path must be absolute")
+    resolved = path.resolve(strict=False)
+    if kind in {"dir", "scratch"}:
+        return resolved
+    if kind != "worktree":
+        raise ValueError(f"unknown workspace_kind: {kind}")
+    if path.exists() and _is_linked_worktree_checkout(path):
+        return resolved
+    repo_root = _git_toplevel(path)
+    if repo_root is not None and resolved == repo_root.resolve(strict=False):
+        return (repo_root / ".worktrees" / task_id).resolve(strict=False)
+    if _repo_root_for_worktree_target(path.parent) is not None:
+        return resolved
+    raise ValueError(
+        f"task {task_id} worktree path {workspace_path!r} is not inside a git repo "
+        "and does not point at a git repo root"
+    )
+
+
+def _connection_main_db_path(conn: sqlite3.Connection) -> Optional[Path]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except Exception:
+        return None
+    for row in rows:
+        try:
+            name = row["name"]
+            path_str = row["file"]
+        except (KeyError, TypeError, IndexError):
+            try:
+                name = row[1]
+                path_str = row[2]
+            except (TypeError, IndexError):
+                continue
+        if name != "main" or not path_str:
+            continue
+        return Path(path_str).expanduser().resolve(strict=False)
+    return None
+
+
+def _board_slug_for_connection(conn: sqlite3.Connection) -> Optional[str]:
+    """Infer the board whose DB backs ``conn``, when it is unambiguous.
+
+    ``decompose_triage_task`` receives only a SQLite connection, while callers
+    may have opened that connection with ``connect(board=...)``. Matching the
+    connection's main DB file against known board DB paths preserves that
+    explicit board for board-relative destination prediction. Legacy/temp
+    explicit ``db_path`` connections are not identifiable; returning ``None``
+    keeps their historical current-board fallback.
+    """
+    db_path = _connection_main_db_path(conn)
+    if db_path is None:
+        return None
+
+    matches: list[str] = []
+    for meta in list_boards(include_archived=True):
+        slug = meta.get("slug")
+        if not isinstance(slug, str) or not slug:
+            continue
+        try:
+            candidate = board_db_path(slug).expanduser().resolve(strict=False)
+        except Exception:
+            continue
+        if candidate == db_path:
+            matches.append(slug)
+
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _decompose_inherited_worktree_path(root_ws_path: Optional[str]) -> Optional[str]:
+    """Return a safe per-child worktree anchor for inherited root metadata.
+
+    ``resolve_workspace`` treats an existing repo root as an anchor and creates
+    ``<repo>/.worktrees/<task-id>``. It treats an existing linked checkout or a
+    non-existing path inside a repo as a concrete target. Reusing those concrete
+    targets for children would collapse multiple workers into the root checkout,
+    so decomposition stores the repo-root anchor instead.
+    """
+    if not root_ws_path:
+        return None
+    path = Path(str(root_ws_path).strip()).expanduser()
+    if not path.is_absolute():
+        return str(path)
+    if path.exists() and _is_linked_worktree_checkout(path):
+        common = _git_common_dir(path)
+        if common is not None and common.name == ".git":
+            return str(common.parent)
+    repo_root = _repo_root_for_worktree_target(path)
+    if repo_root is None:
+        repo_root = _repo_root_for_worktree_target(path.parent)
+    if repo_root is None:
+        raise ValueError(
+            f"cannot inherit worktree workspace {root_ws_path!r}: "
+            "path is not inside a git repo"
+        )
+    return str(repo_root)
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
