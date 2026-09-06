@@ -87,12 +87,6 @@ def _active_profile_name() -> str:
         return os.getenv("HERMES_PROFILE", "") or "unknown"
 
 
-def _hermes_home() -> Path:
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home()
-
-
 def _coerce_int(value: Any, default: int, *, minimum: int = 0) -> int:
     try:
         parsed = int(value)
@@ -112,9 +106,11 @@ def _resolve_runner() -> Any | None:
 
 
 def _restart_storage_home() -> Path:
-    runner = _resolve_runner()
-    owner_home = getattr(runner, "_gateway_profile_home", None)
-    return Path(owner_home) if owner_home is not None else _hermes_home()
+    # Multiplex turns override get_hermes_home() per task. Restart state belongs
+    # to the process owner, whose environment is unchanged by profile scopes.
+    from hermes_constants import get_process_hermes_home
+
+    return get_process_hermes_home()
 
 
 def _audit_path() -> Path:

@@ -33,7 +33,6 @@ async def test_worker_thread_requests_real_gateway_drain_before_stop(configured,
     from gateway.session_context import set_session_vars, clear_session_vars
     module = load_plugin()
     runner = object.__new__(gateway_run.GatewayRunner)
-    runner._gateway_profile_home = configured
     runner._gateway_loop = asyncio.get_running_loop()
     runner._restart_task_started = False
     runner._restart_requested = False
@@ -85,7 +84,6 @@ async def test_operator_drain_wins_queued_restart(configured, monkeypatch, drain
 
     module = load_plugin()
     runner = object.__new__(gateway_run.GatewayRunner)
-    runner._gateway_profile_home = configured
     runner._gateway_loop = asyncio.get_running_loop()
     runner._restart_task_started = False
     runner._restart_requested = False
@@ -135,7 +133,7 @@ async def test_restart_guards_leave_gateway_running(configured, monkeypatch, cas
     module = load_plugin()
     calls = []
     runner = SimpleNamespace(
-        _gateway_profile_home=configured, _gateway_loop=asyncio.get_running_loop(),
+        _gateway_loop=asyncio.get_running_loop(),
         _restart_requested=False, _draining=case == "operator_drain",
         _external_drain_active=case == "external_drain",
         _running_agents={"caller": object()},
@@ -169,7 +167,7 @@ async def test_concurrent_profiles_share_owner_cooldown(configured, monkeypatch)
     from gateway.session_context import set_session_vars, clear_session_vars
     module = load_plugin()
     calls=[]
-    runner = SimpleNamespace(_gateway_profile_home=configured, _gateway_loop=asyncio.get_running_loop(),
+    runner = SimpleNamespace(_gateway_loop=asyncio.get_running_loop(),
         _restart_requested=False, _draining=False, _running_agents={"caller": object()},
         _running_agent_count=lambda:1, _active_work_count=lambda:1,
         request_restart=lambda **kw: calls.append(kw) or True)
@@ -183,6 +181,57 @@ async def test_concurrent_profiles_share_owner_cooldown(configured, monkeypatch)
         assert len(calls)==1
         assert sum(json.loads(result)["ok"] for result in results)==1
     finally:clear_session_vars(tokens)
+
+
+@pytest.mark.asyncio
+async def test_real_profile_scopes_share_process_audit_and_cooldown(configured, monkeypatch):
+    """Real runners have no _gateway_profile_home; profile overrides must not split state."""
+    import gateway.run as gateway_run
+    from gateway.config import GatewayConfig
+    from gateway.session_context import set_session_vars, clear_session_vars
+
+    module = load_plugin()
+    monkeypatch.setattr(module, "_restart_modes", lambda: (False, True))
+    profiles = [configured / "profiles" / name for name in ("alpha", "beta")]
+    results = []
+    for profile in profiles:
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text("plugins:\n  enabled: [gateway-restart-tool]\n")
+        # A fresh runner represents the next process after a successful restart;
+        # the persisted cooldown must still cover another enabled profile.
+        runner = gateway_run.GatewayRunner(GatewayConfig())
+        runner._gateway_loop = asyncio.get_running_loop()
+        runner._running_agents = {"caller": SimpleNamespace()}
+        runner.stop = AsyncMock()
+        monkeypatch.setattr(gateway_run, "_gateway_runner_ref", lambda: runner)
+        with gateway_run._profile_runtime_scope(profile):
+            tokens = set_session_vars(platform="telegram", session_key="caller")
+            try:
+                result = json.loads(await asyncio.wait_for(asyncio.to_thread(
+                    module._handle_request_gateway_restart,
+                    {"reason": profile.name, "confirm": "restart gateway"},
+                ), timeout=5))
+                results.append(result)
+                runner._running_agents.clear()
+                task = getattr(runner, "_restart_task", None)
+                if task is not None:
+                    await asyncio.wait_for(task, timeout=3)
+            finally:
+                clear_session_vars(tokens)
+                task = getattr(runner, "_restart_task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    assert results[0]["ok"]
+    assert not results[1]["ok"] and results[1]["error"] == "cooldown_active"
+    assert Path(results[0]["audit_log"]) == configured / "logs/gateway-restart-tool.jsonl"
+    audit = [json.loads(line) for line in (configured / "logs/gateway-restart-tool.jsonl").read_text().splitlines()]
+    assert {row["reason"] for row in audit} == {"alpha", "beta"}
+    assert (configured / ".gateway_restart_tool_state.json").exists()
+    for profile in profiles:
+        assert not (profile / ".gateway_restart_tool_state.json").exists()
+        assert not (profile / "logs/gateway-restart-tool.jsonl").exists()
 
 
 import multiprocessing
