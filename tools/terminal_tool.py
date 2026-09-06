@@ -1136,7 +1136,7 @@ Do NOT use cat/head/tail (use read_file), grep/rg/find/ls (use search_files), se
 Environment state persists: activate a virtualenv or export variables once per session, not before every command.
 
 Foreground (default): returns INSTANTLY when the command finishes, even with a high timeout — set timeout generously for long builds.
-Background: set background=true (returns a session_id); add notify=true for bounded tasks, leave silent only for servers/daemons that never exit. After starting a server, verify readiness with a health check in a separate call (no blind sleep loops); manage with process(action="poll"/"wait").
+Background: set background=true (returns a session_id). User-facing notifications are opt-in: set notify=true only when the user wants an out-of-band completion update; otherwise use process(action="poll"/"wait"). After starting a server, verify readiness with a health check in a separate call (no blind sleep loops); manage with process(action="poll"/"wait").
 Working directory: use 'workdir' for per-command cwd; when a command changes the session cwd (cd, pushd), trust the result's "cwd" field instead of prefixing every command with 'cd'.
 PTY: pty=true + background=true for interactive CLIs (they hang without a terminal); drive them with process(action="write"/"submit"). Local backend only.
 """
@@ -2735,7 +2735,7 @@ def _foreground_background_guidance(command: str) -> str | None:
         return (
             "Foreground command uses '&' backgrounding. Re-send WITHOUT the '&' as "
             "terminal(command=\"<cmd>\", background=true) — add notify_on_complete=true "
-            "for bounded jobs — then run health checks and tests in follow-up terminal calls."
+            "only if the user wants a completion update — then run health checks and tests in follow-up terminal calls."
         )
 
     for pattern in _LONG_LIVED_FOREGROUND_PATTERNS:
@@ -2841,7 +2841,7 @@ def terminal_tool(
         force: If True, skip dangerous command check (use after user confirms)
         workdir: Working directory for this command (optional, uses session cwd if not set)
         pty: If True, use pseudo-terminal for interactive CLI tools (local backend only)
-        notify_on_complete: If True and background=True, you'll be notified exactly once when the process exits. The right choice for almost every long task. MUTUALLY EXCLUSIVE with watch_patterns.
+        notify_on_complete: If True and background=True, you'll be notified exactly once when the process exits. Opt in only when the user wants a completion update. MUTUALLY EXCLUSIVE with watch_patterns.
         watch_patterns: List of strings to watch for in background output. HARD rate limit: 1 notification per 15s per process. After 3 strike windows in a row — or after a small lifetime cap of delivered matches, however cleanly spaced — watch_patterns is disabled and the session is auto-promoted to notify_on_complete. Use ONLY for rare, one-shot mid-process signals on long-lived processes (server readiness, migration-done markers). NEVER use in loops/batch jobs — error patterns there will hit the strike limit and get disabled. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both.
 
     Returns:
@@ -3340,30 +3340,15 @@ def terminal_tool(
                 if pty_disabled_reason:
                     result_data["pty_note"] = pty_disabled_reason
 
-                # Nudge: background=True without notify_on_complete=True OR
-                # watch_patterns is a silent process. The agent has NO way to
-                # learn it finished short of calling process(action="poll"/"wait")
-                # explicitly. That's correct only for genuine long-lived
-                # processes that never exit (servers, watchers). For every
-                # bounded task (tests, builds, CI pollers, deploys, batch
-                # jobs) the agent almost certainly wanted notification and
-                # forgot the flag. May 2026 PR #31231 incident: bg CI poller
-                # ran fine, exited green, agent never noticed — user had to
-                # surface the result. Cheap nudge here costs ~one read for
-                # server cases (false positive) and prevents silent
-                # blindness for bounded-task cases (false negative).
+                # Silent background work is tracked through the process tool;
+                # user-facing completion delivery requires explicit opt-in.
                 if background and not notify_on_complete and not watch_patterns:
                     result_data["hint"] = (
-                        "background=true without notify_on_complete=true means "
-                        "this process runs SILENTLY — you will not be told when "
-                        "it exits. If this is a bounded task (test suite, build, "
-                        "CI poller, deploy, anything with a defined end), you "
-                        "almost certainly wanted notify_on_complete=true so the "
-                        "system pings you on exit. Re-launch with "
-                        "notify_on_complete=true, or call process(action='poll') "
-                        "/ process(action='wait') yourself to learn the outcome. "
-                        "Only ignore this hint for genuine long-lived processes "
-                        "that never exit (servers, watchers, daemons)."
+                        "This background process runs silently. Track it with "
+                        "process(action='poll') or process(action='wait'). "
+                        "notify_on_complete=true (notify=true) is an opt-in "
+                        "user-facing update; use it only when the user wants "
+                        "an out-of-band completion message."
                     )
 
                 # Nudge: homebrewed CI watcher built from `gh pr view`
@@ -4120,7 +4105,7 @@ TERMINAL_SCHEMA = {
             },
             "background": {
                 "type": "boolean",
-                "description": "Run in the background, returning a session_id. Pair with notify=true for anything with a defined end (tests, builds, deploys) — without it the process runs silently. Only servers/watchers/daemons that never exit should stay silent. Short commands: prefer foreground with a generous timeout.",
+                "description": "Run in the background, returning a session_id. User-facing notifications are opt-in. Use notify=true only when the user wants an out-of-band completion update; otherwise track the result with process poll/wait. Short commands: prefer foreground with a generous timeout.",
                 "default": False
             },
             "timeout": {
@@ -4138,7 +4123,7 @@ TERMINAL_SCHEMA = {
                 "default": False
             },
             "notify": {
-                "description": "With background=true: notify=true fires exactly one notification when the process exits (the right choice for nearly every bounded task — builds, tests, deploys). notify=['pattern', ...] instead notifies when a line matches a pattern — ONLY for one-shot readiness signals on processes that never exit (e.g. ['Application startup complete']); rate-limited and auto-disabled if it over-fires. Omit for silent daemons.",
+                "description": "Opt-in user-facing notification with background=true: notify=true requests one completion update when the process exits. Use only when the user wants that update; otherwise use process poll/wait. notify=['pattern', ...] instead notifies when a line matches a pattern — ONLY for one-shot readiness signals on processes that never exit (e.g. ['Application startup complete']); rate-limited and auto-disabled if it over-fires. Omit for silent execution.",
                 "anyOf": [
                     {"type": "boolean"},
                     {"type": "array", "items": {"type": "string"}}

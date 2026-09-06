@@ -10491,12 +10491,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Load background process notification mode from config or env var.
 
         Modes:
-          - ``concise`` — one-line status message on completion (default);
+          - ``concise`` — one-line status message on completion;
             failures append a short output tail
           - ``all``    — running-output updates *and* the final raw-output message
           - ``result`` — only the final raw-output completion message
           - ``error``  — only the final raw-output message when exit code is non-zero
-          - ``off``    — no watcher messages at all
+          - ``off``    — no implicit watcher messages (default)
         """
         mode = os.getenv("HERMES_BACKGROUND_NOTIFICATIONS", "")
         if not mode:
@@ -10506,14 +10506,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 mode = "off"
             elif raw not in {None, ""}:
                 mode = str(raw)
-        mode = (mode or "concise").strip().lower()
+        mode = (mode or "off").strip().lower()
         valid = {"concise", "all", "result", "error", "off"}
         if mode not in valid:
             logger.warning(
-                "Unknown background_process_notifications '%s', defaulting to 'concise'",
+                "Unknown background_process_notifications '%s', defaulting to 'off'",
                 mode,
             )
-            return "concise"
+            return "off"
         return mode
 
     @staticmethod
@@ -27884,12 +27884,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Auto-removes when the process exits or is killed.
 
         Notification mode (from ``display.background_process_notifications``):
-          - ``concise`` — one-line status message on completion (default);
+          - ``concise`` — one-line status message on completion;
             failures append a short output tail
           - ``all``    — running-output updates + final raw-output message
           - ``result`` — final raw-output completion message only
           - ``error``  — final raw-output message only when exit code != 0
-          - ``off``    — no messages at all
+          - ``off``    — no implicit messages (default)
         """
         from tools.process_registry import process_registry
 
