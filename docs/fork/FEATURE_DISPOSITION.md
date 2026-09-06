@@ -23,20 +23,20 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 10 |
+| `KEEP` | 11 |
 | `REWRITE` | 2 |
 | `DROP_UPSTREAM` | 20 |
-| `DROP_LOW_VALUE` | 6 |
+| `DROP_LOW_VALUE` | 7 |
 | `DROP_OUT_OF_SCOPE` | 3 |
 | `DEFER_HUMAN_VALUE` | 5 |
-| `DEFER_REPRODUCTION` | 5 |
+| `DEFER_REPRODUCTION` | 3 |
 | **Total** | **51** |
 
 ## Complete behavior-cluster disposition
 
 | ID | Behavior | Source inventory | Decision | v0.21/current value evidence | Placement / gate |
 |---|---|---|---|---|---|
-| FC-01 | Concurrency-safe structural `hermes config patch` mutations | I001 | `DEFER_REPRODUCTION` | v0.21 has fail-closed atomic `config set/unset` and literal-dot handling, but no structural patch command or retained behavior test; live configs contain no evidence that the JSON-Pointer batch interface is still used. | Reproduce against the existing config CLI; extend that CLI only if an atomic multi-mutation need remains. |
+| FC-01 | Concurrency-safe structural `hermes config patch` mutations | I001 | `DROP_LOW_VALUE` | Reproduced on recovery tip `7dcbf52d30`: current CLI has atomic fail-closed `config set/unset`, literal-dot handling, and `atomic_yaml_write`, but no `config patch` / JSON-Pointer surface. Live Default/Ang/Ops configs show no structural-patch consumer; no docs/history consumer found outside the ledger. Legacy value was cross-process write locking + JSON Pointer add/replace/remove, which is unused. | Do not port. Reopen only with a real multi-mutation consumer and fresh placement review. |
 | FC-02 | Installer refuses to replace the canonical launcher from a Git worktree | I002 | `KEEP` | Live gap confirmed: doctor `--fix` and setup/install path setup could repoint `~/.local/bin/hermes` from a linked worktree (`.git` file). Guarded doctor repair, `setup-hermes.sh`, and `scripts/install.sh` `setup_path`; focused doctor + setup script regressions pass. | Installer/doctor only; no core tool surface. |
 | FC-03 | Browser connector tolerates an unavailable IPv4/IPv6 loopback family | I003 | `KEEP` | Live RED on this intentionally IPv4-only host: pre-fix `find_free_debug_port` required both families, so every candidate failed the missing IPv6 bind and returned occupied `preferred+1`. Fixed to probe available loopback families first; dual-stack discovery tests plus new unavailable-family regression remain green. | Existing `hermes_cli/browser_connect.py` only; checkpoint after this slice. |
 | FC-04 | Configurable TTS provider controls and OpenAI-compatible display fallback | I004, I042 | `DROP_UPSTREAM` | v0.21 `tools/tts_tool.py` already has bounded provider settings, xAI/OpenAI-compatible handling, and non-premium fallbacks; live Discord voice remains configured without the legacy patch stack. | Use current TTS configuration and provider adapter behavior. |
@@ -61,7 +61,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-22 | Kanban operator holds stay non-ready and live workers are not reclaimed at max runtime | I130, I137 | `KEEP` | The two preserved post-v0.21 side branches contain focused fixes for active Kanban behavior. Current code still owns blocked-state promotion and max-runtime reclaim, while the legacy regression tests are absent. | Migrate as one isolated Kanban state/lifecycle boundary with fresh RED/GREEN proof and explicit approval. |
 | FC-23 | Durable Discord Kanban mirror, reply routing, cancellation, and reconciliation | I025, I055, I056, I081, I082, I083, I084, I085, I086, I087, I088, I090, I091, I092, I093, I094, I095, I111, I114, I115, I116, I117, I118, I119, I122 | `DROP_LOW_VALUE` | The legacy subsystem spans schema, daemon, platform plugin, reactions, thread lifecycle, and recovery. Its plugin is absent and read-only config explicitly has `kanban.discord_mirror.enabled: false`. | Do not recreate cross-platform core coupling; a future need should be an external/platform plugin. |
 | FC-24 | Discord voice STT aliases, acknowledgements, mixer, stop, and profile routing | I018, I027, I048, I049, I050, I051, I053, I059, I077 | `DROP_UPSTREAM` | Current Discord plugin contains `voice_mixer`, installs it on connect, loads profile-scoped `discord.voice_fx`, and supports acknowledgement/voice orchestration. Read-only live config has auto-voice and voice FX enabled. | Current Discord platform plugin and TTS/STT adapters. |
-| FC-25 | Voice-aware and atomic conversation compression/rotation | I029, I030, I031 | `DEFER_REPRODUCTION` | Peer audit corrected false DROP_UPSTREAM: spoken-TTS preservation helpers are absent on recon/clean. Current compaction has transactional leases/dedupe but not the legacy voice-spoken summary path Discord voice still values. | Reproduce against current `context_compressor` before deciding KEEP vs architecture-conflict drop. |
+| FC-25 | Voice-aware and atomic conversation compression/rotation | I029, I030, I031 | `KEEP` | Reproduced Discord voice gap on recovery tip: spoken helpers absent; `_serialize_for_summary` truncated long TTS args and fallback dropped spoken-only replies while retaining MEDIA delivery noise. Live Default/Ang/Ops Discord voice is configured. Ported I029 spoken-TTS preservation into current compressor (serialize/fallback/prune) with focused regressions. I030 protected-handoff replacement already covered by current continuity tests; I031 atomic rotation already present via current lease/commit compressor path — not replayed. | Existing `agent/context_compressor.py` only; checkpoint `brian-rebuild-v0.21.0-voice-compression`. |
 | FC-26 | External skill cache invalidation and bounded/full skill descriptions | I032, I103, I104, I112 | `DROP_UPSTREAM` | Current skill discovery and slash catalogs rescan external skills and current schema/prompt paths own description budgets; legacy literal limits no longer define the contract. | Current skill discovery and command catalogs. |
 | FC-27 | Model-specific bounded execution guidance | I036 | `DROP_UPSTREAM` | Current system/developer prompt policy already supplies model-agnostic execution discipline, mandatory tool use, prerequisite checks, and verification without per-model prompt forks. | Current stable system/developer prompt. |
 | FC-28 | Historical dependency/CVE pin stack | I042, I043, I061, I067, I073, I074, I075, I076, I077, I097, I109, I131, I151, I154 | `DROP_UPSTREAM` | v0.21 has a regenerated `uv.lock`/npm lock graph and an explicit upper-bound/SHA pin policy. Historical lock resolutions and one-off CVE pins must not be replayed across the new graph. | Regenerate from current manifests only. |
