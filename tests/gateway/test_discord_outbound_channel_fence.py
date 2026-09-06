@@ -121,3 +121,13 @@ async def test_denied_forum_cannot_create_post():
     result = await adapter.send("123", "secret")
     assert not result.success
     channel.create_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uncached_thread_parent_name_cannot_bypass_deny():
+    channel = SimpleNamespace(id=123, name="thread", parent_id=456, parent=None, send=AsyncMock(return_value=SimpleNamespace(id=77)))
+    adapter = adapter_for({"allowed_channels":"*", "ignored_channels":"#private"}, channel)
+    adapter._client.fetch_channel = AsyncMock(return_value=SimpleNamespace(id=456, name="private"))
+    result = await adapter.send("123", "secret")
+    assert not result.success
+    channel.send.assert_not_awaited()

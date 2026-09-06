@@ -3499,7 +3499,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not channel:
                     return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -3767,7 +3767,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(chat_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -4000,7 +4000,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not channel:
             return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-        allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+        allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
         if not allowed:
             return SendResult(success=False, error=deny_reason)
 
@@ -4087,7 +4087,7 @@ class DiscordAdapter(BasePlatformAdapter):
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
             return
 
-        allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+        allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
         if not allowed:
             return
 
@@ -4217,7 +4217,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -5442,7 +5442,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -5528,7 +5528,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -6705,16 +6705,26 @@ class DiscordAdapter(BasePlatformAdapter):
         """This adapter's DISCORD_IGNORED_CHANNELS gate (per-profile)."""
         return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS"))
 
-    def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
+    async def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
         """Apply this adapter's profile policy to the resolved outbound target."""
         if DISCORD_AVAILABLE and isinstance(channel, discord.DMChannel):
             return True, "allowed"
-        keys = self._discord_channel_keys_from_channel(
-            channel, self._get_parent_channel_id(channel)
-        )
-        return _discord_outbound_scope_allowed(
-            keys, self._get_allowed_channels(), self._get_ignored_channels()
-        )
+        allowed, ignored = self._get_allowed_channels(), self._get_ignored_channels()
+        parent_id = self._get_parent_channel_id(channel)
+        keys = self._discord_channel_keys_from_channel(channel, parent_id)
+        # Threads can arrive through fetch_channel without a cached parent.
+        # Name-based policy needs that parent's actual name as well as its ID.
+        if parent_id and not getattr(channel, "parent", None) and any(
+            value != "*" and not value.isdigit() for value in allowed | ignored
+        ):
+            try:
+                parent = await self._client.fetch_channel(int(parent_id))
+                if str(parent.id) != str(parent_id):
+                    raise ValueError("parent identity mismatch")
+                keys.update(self._discord_channel_keys_from_channel(parent))
+            except Exception:
+                return False, "Discord outbound policy could not verify the thread parent"
+        return _discord_outbound_scope_allowed(keys, allowed, ignored)
 
     def _get_no_thread_channels(self) -> set:
         """This adapter's DISCORD_NO_THREAD_CHANNELS list (per-profile)."""
@@ -7554,7 +7564,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -7651,7 +7661,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -7723,7 +7733,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -7833,7 +7843,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -7890,7 +7900,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -7956,7 +7966,7 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            allowed, deny_reason = await self._discord_outbound_channel_allowed(channel)
             if not allowed:
                 return SendResult(success=False, error=deny_reason)
 
@@ -10117,6 +10127,8 @@ async def _standalone_outbound_policy(pconfig, target_id, headers, sess_kw, req_
                     return data
 
             target = await info(target_id)
+            if not isinstance(target.get("type"), int):
+                raise ValueError("channel type missing")
             if target.get("type") == 1:  # DMs retain existing channel-policy semantics.
                 return True, "allowed"
             parent_id = target.get("parent_id") if target.get("type") in {10, 11, 12} else None
