@@ -76,6 +76,49 @@ def test_outside_gateway_session_cannot_restart(configured):
     assert not result["ok"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drain_flag", ["_draining", "_external_drain_active"])
+async def test_operator_drain_wins_queued_restart(configured, monkeypatch, drain_flag):
+    """An operator can begin draining after model-thread preflight has passed."""
+    import gateway.run as gateway_run
+    from gateway.session_context import set_session_vars, clear_session_vars
+
+    module = load_plugin()
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner._gateway_profile_home = configured
+    runner._gateway_loop = asyncio.get_running_loop()
+    runner._restart_task_started = False
+    runner._restart_requested = False
+    runner._draining = False
+    runner._external_drain_active = False
+    runner._running_agents = {"caller": SimpleNamespace()}
+    runner._active_cron_job_count = lambda: 0
+    runner._active_api_run_count = lambda: 0
+    monkeypatch.setattr(gateway_run, "_gateway_runner_ref", lambda: runner)
+    monkeypatch.setattr(module, "_restart_modes", lambda: (False, True))
+    append_audit = module._append_audit
+
+    def begin_operator_drain(record):
+        append_audit(record)
+        if record["decision"] == "reserved":
+            # FIFO callback executes before the queued request on the real loop.
+            runner._gateway_loop.call_soon_threadsafe(setattr, runner, drain_flag, True)
+
+    monkeypatch.setattr(module, "_append_audit", begin_operator_drain)
+    tokens = set_session_vars(platform="telegram", session_key="caller")
+    try:
+        result = json.loads(await asyncio.wait_for(asyncio.to_thread(
+            module._handle_request_gateway_restart,
+            {"reason": "test operator race", "confirm": "restart gateway"},
+        ), timeout=5))
+        assert not result["ok"]
+        assert "gateway_already_draining" in result["error"]
+        assert not runner._restart_requested
+        assert not runner._restart_task_started
+    finally:
+        clear_session_vars(tokens)
+
+
 def test_legacy_cooldown_state_is_read_without_migration(configured, monkeypatch):
     module=load_plugin()
     monkeypatch.setattr(module,"_resolve_runner",lambda:None)

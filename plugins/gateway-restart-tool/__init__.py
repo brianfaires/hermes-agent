@@ -240,19 +240,29 @@ def _schedule_restart(runner: Any) -> bool:
     if loop is None or not loop.is_running():
         raise RuntimeError("gateway event loop unavailable")
     detached, via_service = _restart_modes()
+
+    def request_on_loop():
+        # The worker's preflight can precede an operator drain. Recheck on the
+        # owning loop, without yielding before request_restart changes state.
+        if runner._restart_requested:
+            return False
+        if runner._draining or getattr(runner, "_external_drain_active", False):
+            raise RuntimeError("gateway_already_draining")
+        return runner.request_restart(detached=detached, via_service=via_service)
+
     try:
         current = asyncio.get_running_loop()
     except RuntimeError:
         current = None
     if current is loop:
-        return runner.request_restart(detached=detached, via_service=via_service)
+        return request_on_loop()
     result = Future()
 
     def request():
         if not result.set_running_or_notify_cancel():
             return
         try:
-            result.set_result(runner.request_restart(detached=detached, via_service=via_service))
+            result.set_result(request_on_loop())
         except Exception as exc:
             result.set_exception(exc)
 
