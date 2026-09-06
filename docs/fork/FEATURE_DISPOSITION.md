@@ -23,13 +23,13 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 11 |
+| `KEEP` | 12 |
 | `REWRITE` | 2 |
 | `DROP_UPSTREAM` | 20 |
 | `DROP_LOW_VALUE` | 7 |
 | `DROP_OUT_OF_SCOPE` | 3 |
 | `DEFER_HUMAN_VALUE` | 5 |
-| `DEFER_REPRODUCTION` | 3 |
+| `DEFER_REPRODUCTION` | 2 |
 | **Total** | **51** |
 
 ## Complete behavior-cluster disposition
@@ -315,7 +315,7 @@ Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baselin
 - Inventory rows: `157`; unique SHAs: `157`; merges: `2`.
 - Covered ordinals: `1..157`; missing: `[]`; duplicate inventory rows: `[]`.
 - Intentional mixed-commit splits: I042 → FC-04, FC-28; I043 → FC-28, FC-32; I077 → FC-24, FC-28.
-- Cluster rows: `51`; disposition total: `51` (KEEP 10 after FC-02/FC-03/FC-07/FC-05/FC-13 migrations, REWRITE 2, DROP_UPSTREAM 20, DROP_LOW_VALUE 6, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 5).
+- Cluster rows: `51`; disposition total: `51` (KEEP 12 including pending FC-22 and migrated FC-02/03/05/07/08/08B/13/25/40/45/47, REWRITE 2, DROP_UPSTREAM 20, DROP_LOW_VALUE 7 including FC-01, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 2 remaining FC-16/FC-28B).
 - Inventory clusters ↔ matrix clusters: exact bijection; omission index and Brian-UAT index point only at matrix IDs.
 - Manifest tip SHAs match live `refs/backup/hermes-v0.21.0-precleanup-20260903/*` with zero mismatches.
 - Prior historical “Codex PASS” claim is **not** relied on. Native second-pass review sampled DROP/KEEP premises against current tree paths (examples: FC-05 provider toolset split was missing on tip (now KEEP/migrated); FC-13 `prompt_path` absent on recon/clean (corrected to DEFER_REPRODUCTION); FC-17 multiplex/profile adapters present; FC-48 Tavily backend removed with generic rescue retained; FC-49 `notify_on_complete` defaults false; FC-07 Langfuse lacks legacy multiline absolute-path neutralization; FC-02 worktree launcher guard absent from current doctor/install; FC-03 `find_free_debug_port` still requires both loopback families and RED-reproduces on this IPv4-only host by returning an occupied `preferred+1`).
