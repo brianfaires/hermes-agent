@@ -109,8 +109,9 @@ jobs:
         # Generate once and pass every discovered file to exactly one slice.
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
+          scripts/run_tests.sh --files "$SLICE_FILES"
         env:
+          SLICE_FILES: ${{ matrix.slice.files }}
           # Bound subprocess concurrency for standard hosted runner capacity.
           HERMES_TEST_WORKERS: 4
           # Ensure tests don't accidentally call real APIs
