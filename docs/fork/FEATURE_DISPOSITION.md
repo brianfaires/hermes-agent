@@ -23,7 +23,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 8 |
+| `KEEP` | 9 |
 | `REWRITE` | 2 |
 | `DROP_UPSTREAM` | 24 |
 | `DROP_LOW_VALUE` | 5 |
@@ -42,7 +42,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-04 | Configurable TTS provider controls and OpenAI-compatible display fallback | I004, I042 | `DROP_UPSTREAM` | v0.21 `tools/tts_tool.py` already has bounded provider settings, xAI/OpenAI-compatible handling, and non-premium fallbacks; live Discord voice remains configured without the legacy patch stack. | Use current TTS configuration and provider adapter behavior. |
 | FC-05 | Hindsight availability is independent of the file-memory toolset | I005 | `DROP_UPSTREAM` | v0.21 exposes memory through provider plugins and service-gated memory tools rather than the legacy file-memory bundle, including `plugins/memory/hindsight`. | Current memory-provider plugin/tool gating. |
 | FC-06 | Tool-search platform pinning keeps required tools visible | I006 | `DROP_UPSTREAM` | Current tool search keeps core tools visible and honors enabled toolsets before deferring plugin/MCP schemas. Read-only config evidence shows `pinned_toolsets` exists but is empty, so the legacy special-case has no current consumer. | Current `tools/tool_search.py` visibility contract. |
-| FC-07 | Langfuse neutralizes multiline path-like text payloads | I007 | `KEEP` | The observability plugin is enabled in read-only live config. v0.21 redacts data URIs and structured content, but it lacks the legacy multiline absolute-path guard and its behavior test, so the SDK can still misclassify tool text as a local file path. | Port only the plugin-local guard and behavior test; privacy/observability review required, no core change. |
+| FC-07 | Langfuse neutralizes multiline path-like text payloads | I007 | `KEEP` | Plugin-local gap confirmed: v0.21 redacted data URIs but still passed multiline absolute-path tool text to the SDK path/media path. Ported neutralization + behavior test; no enablement/config change. | Bundled observability/langfuse plugin only. |
 | FC-08 | Disk-cleanup recursively enforces wildcard policies | I008 | `KEEP` | Retained and verified in the first reconstruction batch; the current live plugin has tracked wildcard policies. | Bundled disk-cleanup plugin; checkpoint `brian-rebuild-v0.21.0-disk-cleanup-wildcards`. |
 | FC-08B | Disk-cleanup protects durable scripts for active and named profiles | I134 | `KEEP` | Retained and verified in the first reconstruction batch; the plugin is enabled in read-only live config evidence. | Bundled disk-cleanup plugin; checkpoint `brian-rebuild-v0.21.0-disk-cleanup-scripts`. |
 | FC-09 | Google Pub/Sub OIDC authentication in the generic webhook adapter | I009 | `DROP_LOW_VALUE` | No webhook routes are configured in read-only current config evidence. v0.21 has scoped JWT verification for its current Chronos endpoint, while the legacy change couples Google-specific auth to the generic adapter. | If demand returns, ship a service-gated webhook/platform plugin, not generic core. |
@@ -315,7 +315,7 @@ Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baselin
 - Inventory rows: `157`; unique SHAs: `157`; merges: `2`.
 - Covered ordinals: `1..157`; missing: `[]`; duplicate inventory rows: `[]`.
 - Intentional mixed-commit splits: I042 → FC-04, FC-28; I043 → FC-28, FC-32; I077 → FC-24, FC-28.
-- Cluster rows: `51`; disposition total: `51` (KEEP 8 after FC-02/FC-03 migrations, REWRITE 2, DROP_UPSTREAM 24, DROP_LOW_VALUE 5, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 4).
+- Cluster rows: `51`; disposition total: `51` (KEEP 9 after FC-02/FC-03/FC-07 migrations, REWRITE 2, DROP_UPSTREAM 24, DROP_LOW_VALUE 5, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 4).
 - Inventory clusters ↔ matrix clusters: exact bijection; omission index and Brian-UAT index point only at matrix IDs.
 - Manifest tip SHAs match live `refs/backup/hermes-v0.21.0-precleanup-20260903/*` with zero mismatches.
 - Prior historical “Codex PASS” claim is **not** relied on. Native second-pass review sampled DROP/KEEP premises against current tree paths (examples: FC-05 Hindsight plugin present; FC-13 `prompt_path` present in cron tool/jobs; FC-17 multiplex/profile adapters present; FC-48 Tavily backend removed with generic rescue retained; FC-49 `notify_on_complete` defaults false; FC-07 Langfuse lacks legacy multiline absolute-path neutralization; FC-02 worktree launcher guard absent from current doctor/install; FC-03 `find_free_debug_port` still requires both loopback families and RED-reproduces on this IPv4-only host by returning an occupied `preferred+1`).
