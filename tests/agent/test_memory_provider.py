@@ -1191,6 +1191,47 @@ class TestMemoryToolToolsetGate:
         tools, names = self._run_memory_injection(None, mgr)
         assert names == {"fact_store", "memory_search", "memory_add"}
 
+    def test_provider_named_toolset_injects_without_memory(self):
+        """A provider's own toolset name opts its tools in without file memory."""
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider(
+            "hindsight",
+            tools=[{"name": "hindsight_recall", "description": "r", "parameters": {}}],
+        ))
+        tools, names = self._run_memory_injection(
+            ["terminal", "hindsight"],
+            mgr,
+            disabled_toolsets=["memory"],
+        )
+        assert "hindsight_recall" in names
+        assert any(t["function"]["name"] == "hindsight_recall" for t in tools)
+
+    def test_provider_name_absent_still_blocks(self):
+        """Without 'memory' or the provider's own name enabled, no injection."""
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider(
+            "hindsight",
+            tools=[{"name": "hindsight_recall", "description": "r", "parameters": {}}],
+        ))
+        tools, names = self._run_memory_injection(["terminal", "web"], mgr)
+        assert tools == []
+        assert names == set()
+
+    def test_provider_toolset_explicit_disable_blocks(self):
+        """Explicit disable of the provider toolset wins over enablement."""
+        mgr = MemoryManager()
+        mgr.add_provider(FakeMemoryProvider(
+            "hindsight",
+            tools=[{"name": "hindsight_recall", "description": "r", "parameters": {}}],
+        ))
+        tools, names = self._run_memory_injection(
+            ["terminal", "hindsight"],
+            mgr,
+            disabled_toolsets=["hindsight"],
+        )
+        assert tools == []
+        assert names == set()
+
 
 class TestContextEngineToolsetGate:
     """Issue #5544 (sibling): context engine tools follow the same gate.
@@ -1428,6 +1469,14 @@ class TestSystemPromptGateParity:
         from agent.memory_manager import memory_provider_tools_exposed
         agent, _mgr, _p = self._agent_with_provider(disabled_toolsets=["memory"])
         assert memory_provider_tools_exposed(agent) is False
+
+    def test_tools_exposed_when_provider_toolset_enabled_without_memory(self):
+        from agent.memory_manager import memory_provider_tools_exposed
+        agent, _mgr, _p = self._agent_with_provider(
+            enabled_toolsets=["mnemosyne"],
+            disabled_toolsets=["memory"],
+        )
+        assert memory_provider_tools_exposed(agent) is True
 
     def test_tools_hidden_when_memory_not_in_enabled_toolsets(self):
         from agent.memory_manager import memory_provider_tools_exposed

@@ -112,7 +112,8 @@ CONFIGURABLE_TOOLSETS = [
     ("stt",             "🎙️ Speech-to-Text",           "voice transcription (gateway voice messages + voice mode)"),
     ("skills",          "📚 Skills",                    "list, view, manage"),
     ("todo",            "📋 Task Planning",             "todo"),
-    ("memory",          "💾 Memory",                    "persistent memory across sessions"),
+    ("memory",          "💾 Memory",                    "built-in file-backed memory tool"),
+    ("hindsight",       "🧠 Hindsight Memory",           "provider-backed retain, recall, reflect; requires memory.provider=hindsight"),
     ("context_engine",  "🧩 Context Engine",            "runtime tools from the active context engine"),
     ("session_search",  "🔎 Session Search",            "search past conversations"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
@@ -2906,6 +2907,17 @@ def _get_platform_tools(
             enabled_toolsets.update(enabled_mcp_servers)
     else:
         enabled_toolsets.update(explicit_mcp_servers)
+
+    # Auto-enable the configured external memory provider's own capability
+    # token so provider-backed memory tools surface even when the
+    # file-backed `memory` toolset is disabled. Mirrors the x_search /
+    # homeassistant auto-enable carve-outs above. The user can still suppress
+    # it via disabled_toolsets, which is applied immediately below.
+    mem_cfg = config.get("memory") or {}
+    if isinstance(mem_cfg, dict):
+        _mem_provider = str(mem_cfg.get("provider") or "").strip()
+        if _mem_provider and _mem_provider not in ("builtin", "memory"):
+            enabled_toolsets.add(_mem_provider)
 
     # Honor agent.disabled_toolsets from config.yaml — allows users to
     # globally suppress specific toolsets (e.g. "memory") across all

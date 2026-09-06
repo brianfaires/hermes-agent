@@ -148,6 +148,12 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
     ``system_prompt_block()`` and its tool schemas are presented to the
     model together — otherwise the system prompt would advertise tools
     that don't exist in the tool surface (#81014).
+
+    A provider's own toolset name (e.g. ``hindsight``) may opt the provider
+    tools in independently of the file-backed ``memory`` toolset. That lets a
+    user run Hindsight as the durable memory provider while
+    ``disabled_toolsets: [memory]`` without losing retain/recall/reflect.
+    Explicit disable of the provider toolset still wins.
     """
     tools = getattr(agent, "tools", None)
     if isinstance(tools, (list, tuple)):
@@ -157,9 +163,29 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
         )
     else:
         memory_tool_present = False
+
+    enabled_toolsets = getattr(agent, "enabled_toolsets", None)
+    disabled_toolsets = getattr(agent, "disabled_toolsets", None)
+    memory_manager = getattr(agent, "_memory_manager", None)
+
+    if enabled_toolsets and memory_manager is not None:
+        try:
+            disabled = set(disabled_toolsets or ())
+            for provider in getattr(memory_manager, "providers", None) or []:
+                name = getattr(provider, "name", "") or ""
+                if not name or name == "builtin":
+                    continue
+                if name in enabled_toolsets and name not in disabled:
+                    return True
+        except Exception:
+            logger.debug(
+                "Failed to check provider-named toolsets for memory tools",
+                exc_info=True,
+            )
+
     return memory_provider_tools_enabled(
-        getattr(agent, "enabled_toolsets", None),
-        getattr(agent, "disabled_toolsets", None),
+        enabled_toolsets,
+        disabled_toolsets,
         memory_tool_present=memory_tool_present,
     )
 
@@ -177,20 +203,21 @@ def inject_memory_provider_tools(agent: Any) -> int:
         if isinstance(tool, dict)
     }
     if not memory_provider_tools_exposed(agent):
-        # A provider is configured but the memory toolset is gated off
-        # (platform_toolsets / disabled_toolsets). Say so once — a silent
-        # return 0 here made #81014 undiagnosable: the provider looked
-        # "half on" with no clue which config key suppressed its tools.
+        # A provider is configured but neither the file-backed ``memory``
+        # toolset nor the provider's own toolset name is enabled for this
+        # session. Say so once — a silent return 0 here made #81014
+        # undiagnosable: the provider looked "half on" with no clue which
+        # config key suppressed its tools.
         _providers = [
             p for p in (getattr(memory_manager, "providers", None) or [])
             if getattr(p, "name", "") != "builtin"
         ]
         if _providers:
             logger.info(
-                "Memory provider(s) %s configured but the 'memory' toolset is "
-                "gated off for this session (platform_toolsets / "
-                "agent.disabled_toolsets) — provider tools and system-prompt "
-                "block are both withheld.",
+                "Memory provider(s) %s configured but neither the 'memory' "
+                "toolset nor the provider-named toolset is enabled for this "
+                "session (platform_toolsets / agent.disabled_toolsets) — "
+                "provider tools and system-prompt block are both withheld.",
                 [getattr(p, "name", type(p).__name__) for p in _providers],
             )
         return 0

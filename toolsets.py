@@ -217,8 +217,17 @@ TOOLSETS = {
     },
     
     "memory": {
-        "description": "Persistent memory across sessions (personal notes + user profile)",
+        "description": "Built-in file-backed memory tool (MEMORY.md / USER.md)",
         "tools": ["memory"],
+        "includes": []
+    },
+
+    # Provider tools are injected at runtime by MemoryManager; the static
+    # list stays empty so enabling this toolset does not also force the
+    # file-backed ``memory`` tool.
+    "hindsight": {
+        "description": "Provider-backed memory: retain, recall, reflect (requires memory.provider=hindsight)",
+        "tools": [],
         "includes": []
     },
 
