@@ -85,7 +85,7 @@ def test_legacy_cooldown_state_is_read_without_migration(configured, monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["dry_run", "disabled", "wrong_confirm", "no_reason", "operator_drain", "audit_failure", "cooldown"])
+@pytest.mark.parametrize("case", ["dry_run", "disabled", "wrong_confirm", "no_reason", "operator_drain", "external_drain", "audit_failure", "cooldown"])
 async def test_restart_guards_leave_gateway_running(configured, monkeypatch, case):
     import gateway.run as gateway_run
     from gateway.session_context import set_session_vars, clear_session_vars
@@ -94,6 +94,7 @@ async def test_restart_guards_leave_gateway_running(configured, monkeypatch, cas
     runner = SimpleNamespace(
         _gateway_profile_home=configured, _gateway_loop=asyncio.get_running_loop(),
         _restart_requested=False, _draining=case == "operator_drain",
+        _external_drain_active=case == "external_drain",
         _running_agents={"caller": object()},
         _running_agent_count=lambda: 1, _active_work_count=lambda: 1,
         request_restart=lambda **kwargs: calls.append(kwargs) or True,

@@ -322,7 +322,7 @@ def _handle_request_gateway_restart(args: dict[str, Any], **_: Any) -> str:
             return _json({**result, "dry_run": True, "runner_available": True})
         if runner._restart_requested:
             return _json({**result, "status": "already_in_progress"})
-        if runner._draining:
+        if runner._draining or getattr(runner, "_external_drain_active", False):
             # An operator's stop/update drain is not permission to restart it.
             return deny("gateway_already_draining")
         now = record["ts"]
