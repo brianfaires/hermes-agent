@@ -101,6 +101,25 @@ class CLIAgentSetupMixin:
                             _primary_exc, _fb_provider, _fb_model,
                         )
                         _cprint(f"⚠️  Primary auth failed — switching to fallback: {_fb_provider} / {_fb_model}")
+                        try:
+                            from agent.fallback_events import emit_fallback_activated
+
+                            emit_fallback_activated(
+                                old_provider=self.requested_provider or self.provider,
+                                old_model=self.model,
+                                new_provider=_fb_provider,
+                                new_model=_fb_model,
+                                stage="cli_runtime",
+                                reason="auth",
+                                session_id=getattr(self, "session_id", ""),
+                                platform="cli",
+                                api_mode=runtime.get("api_mode"),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "CLI runtime fallback event emission failed",
+                                exc_info=True,
+                            )
                         self.requested_provider = _fb_provider
                         self.model = _fb_model
                         _primary_exc = None

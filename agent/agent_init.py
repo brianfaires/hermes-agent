@@ -1432,6 +1432,8 @@ def init_agent(
                             )
                             continue
                         if _fb_client is not None:
+                            _old_provider = agent.provider
+                            _old_model = agent.model
                             agent.provider = _fb["provider"]
                             agent.model = _fb_model or _fb["model"]
                             agent._fallback_activated = True
@@ -1442,6 +1444,25 @@ def init_agent(
                             if _provider_timeout is not None:
                                 client_kwargs["timeout"] = _provider_timeout
                             _fb_headers = getattr(_fb_client, "_custom_headers", None)
+                            try:
+                                from agent.fallback_events import emit_fallback_activated
+
+                                emit_fallback_activated(
+                                    old_provider=_old_provider,
+                                    old_model=_old_model,
+                                    new_provider=agent.provider,
+                                    new_model=agent.model,
+                                    stage="agent_init",
+                                    reason="provider_resolution",
+                                    session_id=session_id,
+                                    platform=platform,
+                                    api_mode=api_mode,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "init-time fallback event emission failed",
+                                    exc_info=True,
+                                )
                             if not _fb_headers:
                                 _fb_headers = getattr(_fb_client, "default_headers", None)
                             if not _fb_headers:

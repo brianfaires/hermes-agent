@@ -3439,6 +3439,24 @@ def _try_resolve_fallback_provider() -> dict | None:
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
                 )
+                try:
+                    from agent.fallback_events import emit_fallback_activated
+
+                    emit_fallback_activated(
+                        old_provider="primary",
+                        old_model="",
+                        new_provider=entry.get("provider") or runtime.get("provider"),
+                        new_model=entry.get("model"),
+                        stage="gateway_runtime",
+                        reason="auth",
+                        platform="gateway",
+                        api_mode=runtime.get("api_mode"),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Gateway runtime fallback event emission failed",
+                        exc_info=True,
+                    )
                 return {
                     "api_key": runtime.get("api_key"),
                     "base_url": runtime.get("base_url"),

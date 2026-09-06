@@ -192,6 +192,7 @@ VALID_HOOKS: Set[str] = {
     "pre_api_request",
     "post_api_request",
     "api_request_error",
+    "fallback_activated",
     # API-error classification override. Fired once per failed API call at
     # the top of ``agent/error_classifier.classify_api_error()``, BEFORE the
     # built-in pipeline, so provider plugins can own their provider's error
@@ -433,6 +434,7 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "pre_api_request",
     "post_api_request",
     "api_request_error",
+    "fallback_activated",
     "pre_verify",
     "on_session_start",
     "on_session_end",

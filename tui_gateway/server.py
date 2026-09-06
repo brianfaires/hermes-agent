@@ -8931,6 +8931,24 @@ def _resolve_runtime_with_fallback(
                     fb_provider,
                     fb_model,
                 )
+                try:
+                    from agent.fallback_events import emit_fallback_activated
+
+                    emit_fallback_activated(
+                        old_provider=kwargs.get("requested"),
+                        old_model=kwargs.get("target_model"),
+                        new_provider=fb_provider,
+                        new_model=fb_model,
+                        stage="tui_runtime",
+                        reason="auth",
+                        platform="tui",
+                        api_mode=runtime.get("api_mode"),
+                    )
+                except Exception:
+                    logging.getLogger(__name__).debug(
+                        "TUI runtime fallback event emission failed",
+                        exc_info=True,
+                    )
                 return _RuntimeFallbackResolution(runtime, fb_model, True)
             except Exception:
                 continue
