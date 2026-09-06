@@ -3499,6 +3499,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not channel:
                     return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
                 result = await self._send_to_forum(channel, content)
@@ -3762,6 +3766,11 @@ class DiscordAdapter(BasePlatformAdapter):
             channel = self._client.get_channel(int(chat_id))
             if not channel:
                 channel = await self._client.fetch_channel(int(chat_id))
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
             msg = channel.get_partial_message(int(message_id))
             formatted = self.format_message(content)
 
@@ -3991,6 +4000,10 @@ class DiscordAdapter(BasePlatformAdapter):
         if not channel:
             return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+        allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed:
+            return SendResult(success=False, error=deny_reason)
+
         filename = file_name or os.path.basename(file_path)
         logger.info(
             "[%s] Sending file attachment %s (%s) to %s",
@@ -4072,6 +4085,10 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to resolve channel for multi-image send: %s", self.name, e)
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
+            return
+
+        allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+        if not allowed:
             return
 
         CHUNK = 10
@@ -4199,6 +4216,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
 
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=f"Audio file not found: {audio_path}")
@@ -5421,6 +5442,10 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
 
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
             # Download the image and send as a Discord file attachment
             # (Discord renders attachments inline, unlike plain URLs)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
@@ -5502,6 +5527,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
                 return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
 
             # Download the GIF and send as a Discord file attachment
             # (Discord renders .gif attachments as auto-playing animations inline)
@@ -6676,6 +6705,17 @@ class DiscordAdapter(BasePlatformAdapter):
         """This adapter's DISCORD_IGNORED_CHANNELS gate (per-profile)."""
         return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS"))
 
+    def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
+        """Apply this adapter's profile policy to the resolved outbound target."""
+        if DISCORD_AVAILABLE and isinstance(channel, discord.DMChannel):
+            return True, "allowed"
+        keys = self._discord_channel_keys_from_channel(
+            channel, self._get_parent_channel_id(channel)
+        )
+        return _discord_outbound_scope_allowed(
+            keys, self._get_allowed_channels(), self._get_ignored_channels()
+        )
+
     def _get_no_thread_channels(self) -> set:
         """This adapter's DISCORD_NO_THREAD_CHANNELS list (per-profile)."""
         return self._gate_csv_set(self._gate_raw("no_thread_channels", "DISCORD_NO_THREAD_CHANNELS"))
@@ -7514,6 +7554,11 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
+
             # Keep the approval request self-contained in plain message content.
             # Discord embeds can be invisible or visually separated from the
             # component row on some clients (notably web/mobile), so the actual
@@ -7606,6 +7651,11 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
+
             # Embed description limit is 4096; message usually fits easily.
             max_desc = 4088
             body = message if len(message) <= max_desc else message[: max_desc - 3] + "..."
@@ -7672,6 +7722,11 @@ class DiscordAdapter(BasePlatformAdapter):
             channel = self._client.get_channel(int(target_id))
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
 
             # Discord embed description limit is 4096; trim conservatively.
             max_desc = 4088
@@ -7778,6 +7833,11 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
+
             default_hint = f" (default: {default})" if default else ""
             embed = discord.Embed(
                 title="⚕ Update Needs Your Input",
@@ -7829,6 +7889,11 @@ class DiscordAdapter(BasePlatformAdapter):
             channel = self._client.get_channel(int(target_id))
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
 
             try:
                 from hermes_cli.providers import get_label
@@ -7890,6 +7955,11 @@ class DiscordAdapter(BasePlatformAdapter):
             channel = self._client.get_channel(int(target_id))
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
+
+            allowed, deny_reason = self._discord_outbound_channel_allowed(channel)
+            if not allowed:
+                return SendResult(success=False, error=deny_reason)
+
 
             embed = discord.Embed(
                 title="⚙ " + (title.splitlines()[0] if title else "Choose an option"),
@@ -10011,6 +10081,57 @@ async def _standalone_read_json_limited(resp: Any, limit_bytes: int) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _discord_outbound_scope_allowed(keys: set[str], allowed: set[str], ignored: set[str]) -> Tuple[bool, str]:
+    if "*" in ignored or keys & ignored:
+        return False, "channel in DISCORD_IGNORED_CHANNELS"
+    if allowed and "*" not in allowed and not keys & allowed:
+        return False, "channel not in DISCORD_ALLOWED_CHANNELS"
+    return True, "allowed"
+
+
+async def _standalone_outbound_policy(pconfig, target_id, headers, sess_kw, req_kw):
+    """Prove scope through Discord, never trust a caller-supplied parent ID.
+
+    Policy-bearing REST sends also probe ordinary chat_id targets: these can
+    themselves be threads. Directory/type caches are not authorization evidence.
+    """
+    import aiohttp
+    from types import SimpleNamespace
+
+    policy = object.__new__(DiscordAdapter)
+    policy.config = pconfig
+    allowed, ignored = policy._get_allowed_channels(), policy._get_ignored_channels()
+    if not allowed and not ignored:
+        return True, "allowed"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), **sess_kw) as session:
+            async def info(channel_id):
+                async with session.get(
+                    f"https://discord.com/api/v10/channels/{channel_id}", headers=headers, **req_kw
+                ) as resp:
+                    if resp.status != 200:
+                        raise ValueError("channel lookup failed")
+                    data = await _standalone_read_json_limited(resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES)
+                    if str(data.get("id")) != str(channel_id):
+                        raise ValueError("channel identity mismatch")
+                    return data
+
+            target = await info(target_id)
+            if target.get("type") == 1:  # DMs retain existing channel-policy semantics.
+                return True, "allowed"
+            parent_id = target.get("parent_id") if target.get("type") in {10, 11, 12} else None
+            if target.get("type") in {10, 11, 12} and not parent_id:
+                raise ValueError("thread parent missing")
+            parent = await info(parent_id) if parent_id else None
+            channel = SimpleNamespace(id=target_id, name=target.get("name", ""),
+                                      parent_id=parent_id,
+                                      parent=SimpleNamespace(**parent) if parent else None)
+            keys = policy._discord_channel_keys_from_channel(channel, parent_id)
+            return _discord_outbound_scope_allowed(keys, allowed, ignored)
+    except Exception:
+        return False, "Discord outbound policy could not verify the channel scope"
+
+
 async def _standalone_send(
     pconfig,
     chat_id: str,
@@ -10063,6 +10184,12 @@ async def _standalone_send(
         media_files = media_files or []
         last_data = None
         warnings = []
+
+        allowed, deny_reason = await _standalone_outbound_policy(
+            pconfig, thread_id or chat_id, json_headers, _sess_kw, _req_kw
+        )
+        if not allowed:
+            return {"error": deny_reason}
 
         # Thread endpoint: Discord threads are channels; send directly to the thread ID.
         if thread_id:
