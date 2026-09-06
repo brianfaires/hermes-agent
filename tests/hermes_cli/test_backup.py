@@ -910,7 +910,9 @@ class TestBackupEdgeCases:
         args = Namespace(output=str(out_zip))
 
         from hermes_cli.backup import run_backup
-        run_backup(args)
+        with pytest.raises(SystemExit) as excinfo:
+            run_backup(args)
+        assert excinfo.value.code == 1
 
         # Zip should still be created with the valid files
         assert out_zip.exists()
