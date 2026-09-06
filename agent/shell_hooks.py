@@ -93,6 +93,21 @@ emitted by each built-in hook site.
     model           – model name
     platform        – platform identifier
 
+``fallback_activated`` (emitted from fallback activation call sites)::
+
+    old_provider    – provider before fallback, when known
+    old_model       – model before fallback, when known
+    provider        – selected fallback provider
+    model           – selected fallback model
+    fallback_provider – same as provider, for explicit consumers
+    fallback_model  – same as model, for explicit consumers
+    stage           – "agent_init" | "cli_runtime" | "tui_runtime" |
+                      "gateway_runtime" | "mid_turn"
+    reason          – non-sensitive reason category, not raw exception text
+    platform        – current surface/platform, when known
+    api_mode        – selected runtime API mode, when known
+    profile_name    – active Hermes profile name
+
 ``subagent_stop`` (emitted from ``tools/delegate_tool.py``)::
 
     parent_turn_id  – parent agent's current turn id

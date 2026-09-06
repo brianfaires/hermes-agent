@@ -157,6 +157,10 @@ VALID_HOOKS: Set[str] = {
     "pre_api_request",
     "post_api_request",
     "api_request_error",
+    # Fired only after a provider/model fallback has actually been selected
+    # and applied. This is distinct from ordinary API calls and deliberate
+    # /model switches, which must not be inferred as fallback activation.
+    "fallback_activated",
     "on_session_start",
     "on_session_end",
     "on_session_finalize",

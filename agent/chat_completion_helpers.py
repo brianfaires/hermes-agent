@@ -1903,6 +1903,22 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             f"🔄 Switched to fallback model: {old_model} via {old_provider} "
             f"→ {fb_model} via {fb_provider}"
         )
+        try:
+            from agent.fallback_events import emit_fallback_activated
+
+            emit_fallback_activated(
+                old_provider=old_provider,
+                old_model=old_model,
+                new_provider=fb_provider,
+                new_model=fb_model,
+                stage="mid_turn",
+                reason=reason,
+                session_id=getattr(agent, "session_id", ""),
+                platform=getattr(agent, "platform", ""),
+                api_mode=fb_api_mode,
+            )
+        except Exception:
+            logger.debug("fallback activation event emission failed", exc_info=True)
         logger.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
