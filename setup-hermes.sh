@@ -29,6 +29,15 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# A linked worktree has a .git *file* rather than the primary checkout's
+# .git directory. Worktree-local setup is valid, but it must not replace the
+# user's global `hermes` launcher or alter shell PATH configuration.
+IS_GIT_WORKTREE=false
+if [ -f "$SCRIPT_DIR/.git" ]; then
+    IS_GIT_WORKTREE=true
+    echo -e "${YELLOW}⚠${NC} Git worktree detected; setup will remain local to $SCRIPT_DIR"
+fi
+
 # Prevent uv from discovering config files (uv.toml, pyproject.toml) from the
 # wrong user's home directory when running under sudo -u <user>.  See #21269.
 export UV_NO_CONFIG=1
@@ -369,52 +378,57 @@ fi
 # PATH setup — symlink hermes into a user-facing bin dir
 # ============================================================================
 
-echo -e "${CYAN}→${NC} Setting up hermes command..."
-
-HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
-COMMAND_LINK_DIR="$(get_command_link_dir)"
-COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
-mkdir -p "$COMMAND_LINK_DIR"
-ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/hermes"
-echo -e "${GREEN}✓${NC} Symlinked hermes → $COMMAND_LINK_DISPLAY_DIR/hermes"
-
-if is_termux; then
-    export PATH="$COMMAND_LINK_DIR:$PATH"
-    echo -e "${GREEN}✓${NC} $COMMAND_LINK_DISPLAY_DIR is already on PATH in Termux"
-else
-    # Determine the appropriate shell config file
+if [ "$IS_GIT_WORKTREE" = true ]; then
     SHELL_CONFIG=""
-    if [[ "$SHELL" == *"zsh"* ]]; then
-        SHELL_CONFIG="$HOME/.zshrc"
-    elif [[ "$SHELL" == *"bash"* ]]; then
-        SHELL_CONFIG="$HOME/.bashrc"
-        [ ! -f "$SHELL_CONFIG" ] && SHELL_CONFIG="$HOME/.bash_profile"
+    echo -e "${YELLOW}⚠${NC} Skipping global hermes launcher and shell PATH changes for Git worktree"
+else
+    echo -e "${CYAN}→${NC} Setting up hermes command..."
+
+    HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
+    COMMAND_LINK_DIR="$(get_command_link_dir)"
+    COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
+    mkdir -p "$COMMAND_LINK_DIR"
+    ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/hermes"
+    echo -e "${GREEN}✓${NC} Symlinked hermes → $COMMAND_LINK_DISPLAY_DIR/hermes"
+
+    if is_termux; then
+        export PATH="$COMMAND_LINK_DIR:$PATH"
+        echo -e "${GREEN}✓${NC} $COMMAND_LINK_DISPLAY_DIR is already on PATH in Termux"
     else
-        # Fallback to checking existing files
-        if [ -f "$HOME/.zshrc" ]; then
+        # Determine the appropriate shell config file
+        SHELL_CONFIG=""
+        if [[ "$SHELL" == *"zsh"* ]]; then
             SHELL_CONFIG="$HOME/.zshrc"
-        elif [ -f "$HOME/.bashrc" ]; then
+        elif [[ "$SHELL" == *"bash"* ]]; then
             SHELL_CONFIG="$HOME/.bashrc"
-        elif [ -f "$HOME/.bash_profile" ]; then
-            SHELL_CONFIG="$HOME/.bash_profile"
-        fi
-    fi
-
-    if [ -n "$SHELL_CONFIG" ]; then
-        # Touch the file just in case it doesn't exist yet but was selected
-        touch "$SHELL_CONFIG" 2>/dev/null || true
-
-        if ! echo "$PATH" | tr ':' '\n' | grep -q "^$HOME/.local/bin$"; then
-            if ! grep -q '\.local/bin' "$SHELL_CONFIG" 2>/dev/null; then
-                echo "" >> "$SHELL_CONFIG"
-                echo "# Hermes Agent — ensure ~/.local/bin is on PATH" >> "$SHELL_CONFIG"
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
-                echo -e "${GREEN}✓${NC} Added ~/.local/bin to PATH in $SHELL_CONFIG"
-            else
-                echo -e "${GREEN}✓${NC} ~/.local/bin already in $SHELL_CONFIG"
-            fi
+            [ ! -f "$SHELL_CONFIG" ] && SHELL_CONFIG="$HOME/.bash_profile"
         else
-            echo -e "${GREEN}✓${NC} ~/.local/bin already on PATH"
+            # Fallback to checking existing files
+            if [ -f "$HOME/.zshrc" ]; then
+                SHELL_CONFIG="$HOME/.zshrc"
+            elif [ -f "$HOME/.bashrc" ]; then
+                SHELL_CONFIG="$HOME/.bashrc"
+            elif [ -f "$HOME/.bash_profile" ]; then
+                SHELL_CONFIG="$HOME/.bash_profile"
+            fi
+        fi
+
+        if [ -n "$SHELL_CONFIG" ]; then
+            # Touch the file just in case it doesn't exist yet but was selected
+            touch "$SHELL_CONFIG" 2>/dev/null || true
+
+            if ! echo "$PATH" | tr ':' '\n' | grep -q "^$HOME/.local/bin$"; then
+                if ! grep -q '\.local/bin' "$SHELL_CONFIG" 2>/dev/null; then
+                    echo "" >> "$SHELL_CONFIG"
+                    echo "# Hermes Agent — ensure ~/.local/bin is on PATH" >> "$SHELL_CONFIG"
+                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_CONFIG"
+                    echo -e "${GREEN}✓${NC} Added ~/.local/bin to PATH in $SHELL_CONFIG"
+                else
+                    echo -e "${GREEN}✓${NC} ~/.local/bin already in $SHELL_CONFIG"
+                fi
+            else
+                echo -e "${GREEN}✓${NC} ~/.local/bin already on PATH"
+            fi
         fi
     fi
 fi
@@ -447,7 +461,14 @@ echo -e "${GREEN}✓ Setup complete!${NC}"
 echo ""
 echo "Next steps:"
 echo ""
-if is_termux; then
+if [ "$IS_GIT_WORKTREE" = true ]; then
+    echo "  1. Run the worktree-local setup wizard:"
+    echo "     $SCRIPT_DIR/venv/bin/hermes setup"
+    echo ""
+    echo "  2. Start the worktree-local CLI:"
+    echo "     $SCRIPT_DIR/venv/bin/hermes"
+    echo ""
+elif is_termux; then
     echo "  1. Run the setup wizard to configure API keys:"
     echo "     hermes setup"
     echo ""
@@ -466,7 +487,11 @@ else
     echo ""
 fi
 echo "Other commands:"
-echo "  hermes status        # Check configuration"
+if [ "$IS_GIT_WORKTREE" = true ]; then
+    echo "  $SCRIPT_DIR/venv/bin/hermes status"
+else
+    echo "  hermes status        # Check configuration"
+fi
 if is_termux; then
     echo "  hermes gateway       # Run gateway in foreground"
 else

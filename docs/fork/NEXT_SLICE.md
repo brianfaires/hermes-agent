@@ -13,8 +13,8 @@ Inventory baseline HEAD before this milestone commit: `495b851fbc0b8b3531e56db53
 
 ## Immediate non-Critical migration order
 
-1. **FC-03** — DONE on this branch: unavailable loopback family in `find_free_debug_port`.
-2. **FC-02** — installer/doctor refuse global launcher repair from a linked Git worktree.
+1. **FC-03** — DONE: unavailable loopback family in `find_free_debug_port`.
+2. **FC-02** — DONE: installer/doctor refuse global launcher repair from a linked Git worktree.
 3. **FC-07** — Langfuse multiline path-like payload neutralization (plugin-local; privacy/observability review, no enablement change).
 4. **FC-01 / FC-40** — reproduce value before any implementation.
 5. **FC-16 / FC-22 / FC-28B / FC-36 / FC-37** — Critical or product gates; freeze design only until Brian approval.

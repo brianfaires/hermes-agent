@@ -2003,6 +2003,15 @@ PY
 setup_path() {
     log_info "Setting up hermes command..."
 
+    # Linked Git worktrees use a .git *file*. Never repoint the global launcher
+    # or shell PATH at a disposable development checkout.
+    if [ -f "${INSTALL_DIR:-}/.git" ]; then
+        log_warn "Git worktree detected at $INSTALL_DIR"
+        log_info "Skipping global hermes launcher and shell PATH changes for Git worktree"
+        log_info "Use the worktree-local entrypoint: $INSTALL_DIR/venv/bin/hermes (or .venv)"
+        return 0
+    fi
+
     if [ "$USE_VENV" = true ]; then
         HERMES_BIN="$INSTALL_DIR/venv/bin/python"
         HERMES_ENTRYPOINT="$INSTALL_DIR/hermes"

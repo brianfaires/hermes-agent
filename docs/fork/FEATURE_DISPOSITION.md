@@ -23,13 +23,13 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 7 |
+| `KEEP` | 8 |
 | `REWRITE` | 2 |
 | `DROP_UPSTREAM` | 24 |
 | `DROP_LOW_VALUE` | 5 |
 | `DROP_OUT_OF_SCOPE` | 3 |
 | `DEFER_HUMAN_VALUE` | 5 |
-| `DEFER_REPRODUCTION` | 5 |
+| `DEFER_REPRODUCTION` | 4 |
 | **Total** | **51** |
 
 ## Complete behavior-cluster disposition
@@ -37,7 +37,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | ID | Behavior | Source inventory | Decision | v0.21/current value evidence | Placement / gate |
 |---|---|---|---|---|---|
 | FC-01 | Concurrency-safe structural `hermes config patch` mutations | I001 | `DEFER_REPRODUCTION` | v0.21 has fail-closed atomic `config set/unset` and literal-dot handling, but no structural patch command or retained behavior test; live configs contain no evidence that the JSON-Pointer batch interface is still used. | Reproduce against the existing config CLI; extend that CLI only if an atomic multi-mutation need remains. |
-| FC-02 | Installer refuses to replace the canonical launcher from a Git worktree | I002 | `DEFER_REPRODUCTION` | The current install path and launcher generation moved into `scripts/install.sh`; the legacy `setup-hermes.sh` regression is absent, and current preflight shows the canonical launcher still resolves to the canonical checkout. | Reproduce in the installer E2E sandbox; keep any fix inside installer code. |
+| FC-02 | Installer refuses to replace the canonical launcher from a Git worktree | I002 | `KEEP` | Live gap confirmed: doctor `--fix` and setup/install path setup could repoint `~/.local/bin/hermes` from a linked worktree (`.git` file). Guarded doctor repair, `setup-hermes.sh`, and `scripts/install.sh` `setup_path`; focused doctor + setup script regressions pass. | Installer/doctor only; no core tool surface. |
 | FC-03 | Browser connector tolerates an unavailable IPv4/IPv6 loopback family | I003 | `KEEP` | Live RED on this intentionally IPv4-only host: pre-fix `find_free_debug_port` required both families, so every candidate failed the missing IPv6 bind and returned occupied `preferred+1`. Fixed to probe available loopback families first; dual-stack discovery tests plus new unavailable-family regression remain green. | Existing `hermes_cli/browser_connect.py` only; checkpoint after this slice. |
 | FC-04 | Configurable TTS provider controls and OpenAI-compatible display fallback | I004, I042 | `DROP_UPSTREAM` | v0.21 `tools/tts_tool.py` already has bounded provider settings, xAI/OpenAI-compatible handling, and non-premium fallbacks; live Discord voice remains configured without the legacy patch stack. | Use current TTS configuration and provider adapter behavior. |
 | FC-05 | Hindsight availability is independent of the file-memory toolset | I005 | `DROP_UPSTREAM` | v0.21 exposes memory through provider plugins and service-gated memory tools rather than the legacy file-memory bundle, including `plugins/memory/hindsight`. | Current memory-provider plugin/tool gating. |
@@ -315,7 +315,7 @@ Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baselin
 - Inventory rows: `157`; unique SHAs: `157`; merges: `2`.
 - Covered ordinals: `1..157`; missing: `[]`; duplicate inventory rows: `[]`.
 - Intentional mixed-commit splits: I042 → FC-04, FC-28; I043 → FC-28, FC-32; I077 → FC-24, FC-28.
-- Cluster rows: `51`; disposition total: `51` (KEEP 7 after FC-03 migration, REWRITE 2, DROP_UPSTREAM 24, DROP_LOW_VALUE 5, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 5).
+- Cluster rows: `51`; disposition total: `51` (KEEP 8 after FC-02/FC-03 migrations, REWRITE 2, DROP_UPSTREAM 24, DROP_LOW_VALUE 5, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 4).
 - Inventory clusters ↔ matrix clusters: exact bijection; omission index and Brian-UAT index point only at matrix IDs.
 - Manifest tip SHAs match live `refs/backup/hermes-v0.21.0-precleanup-20260903/*` with zero mismatches.
 - Prior historical “Codex PASS” claim is **not** relied on. Native second-pass review sampled DROP/KEEP premises against current tree paths (examples: FC-05 Hindsight plugin present; FC-13 `prompt_path` present in cron tool/jobs; FC-17 multiplex/profile adapters present; FC-48 Tavily backend removed with generic rescue retained; FC-49 `notify_on_complete` defaults false; FC-07 Langfuse lacks legacy multiline absolute-path neutralization; FC-02 worktree launcher guard absent from current doctor/install; FC-03 `find_free_debug_port` still requires both loopback families and RED-reproduces on this IPv4-only host by returning an occupied `preferred+1`).
