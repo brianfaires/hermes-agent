@@ -107,3 +107,52 @@ class TestFindFreeDebugPort:
             pytest.skip("successor port unavailable to bind in this environment")
         finally:
             blocker.close()
+
+    def test_skips_unavailable_loopback_family(self, monkeypatch):
+        """IPv4-only hosts must not treat missing IPv6 as every port occupied.
+
+        Regression: requiring both AF_INET and AF_INET6 made every candidate
+        fail on kernels without IPv6 loopback, so the helper returned the
+        known-occupied preferred+1 fallback even when later IPv4 ports were free.
+        """
+        import hermes_cli.browser_connect as bc
+
+        preferred = _free_port()
+        occupied = preferred + 1
+        real_socket = socket.socket
+
+        class _IPv4OnlySocket:
+            def __init__(self, family, sock_type, *args, **kwargs):
+                if family == socket.AF_INET6:
+                    raise OSError(97, "Address family not supported by protocol")
+                self._sock = real_socket(family, sock_type, *args, **kwargs)
+
+            def setsockopt(self, *args, **kwargs):
+                return self._sock.setsockopt(*args, **kwargs)
+
+            def bind(self, address):
+                return self._sock.bind(address)
+
+            def close(self):
+                return self._sock.close()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        blocker = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            blocker.bind(("127.0.0.1", occupied))
+            blocker.listen(1)
+            monkeypatch.setattr(socket, "socket", _IPv4OnlySocket)
+            port = bc.find_free_debug_port(preferred, attempts=5)
+            assert port != occupied
+            assert port > preferred
+        except OSError:
+            pytest.skip("successor port unavailable to bind in this environment")
+        finally:
+            monkeypatch.undo()
+            blocker.close()

@@ -10,7 +10,7 @@ This is a compact omission index. The authoritative behavior, source commits/ref
 |---|---|---|
 | `KEEP` (pending migration) | FC-07, FC-22 | Value and placement passed, but implementation is intentionally deferred to isolated follow-up cards. |
 | `REWRITE` | FC-36, FC-37 | Current value is proved, but the legacy implementation must be rebuilt at a current boundary. |
-| `DEFER_REPRODUCTION` | FC-01, FC-02, FC-03, FC-16, FC-28B, FC-40 | Run the bounded v0.21 reproduction card before deciding whether to migrate. |
+| `DEFER_REPRODUCTION` | FC-01, FC-02, FC-16, FC-28B, FC-40 | Run the bounded v0.21 reproduction card before deciding whether to migrate. |
 | `DEFER_HUMAN_VALUE` | FC-11, FC-41, FC-42, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
 
 ## Explicit drops
@@ -23,6 +23,6 @@ This is a compact omission index. The authoritative behavior, source commits/ref
 
 ## Retained elsewhere
 
-The only clusters not listed above are the four `KEEP` clusters already reconstructed and verified: FC-08, FC-08B, FC-45, and FC-47.
+Already reconstructed/verified on this branch: FC-08, FC-08B, FC-03, FC-45, and FC-47.
 
-Coverage check: `47` omitted/deferred/pending cluster IDs + `4` retained cluster IDs = `51` total authoritative clusters.
+Coverage check: remaining omitted/deferred/pending cluster IDs + retained cluster IDs = `51` total authoritative clusters.

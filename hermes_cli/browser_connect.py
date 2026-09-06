@@ -1258,19 +1258,34 @@ def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
 
 
 def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: int = 10) -> int:
-    """Return the first port after ``preferred`` bindable on both loopbacks.
+    """Return the first port after ``preferred`` bindable on available loopbacks.
 
     Used when ``preferred`` is occupied by a non-CDP application: rather
     than launching a browser into a bind conflict, pick a nearby free
-    port. Falls back to ``preferred + 1`` if nothing binds (the launch
-    will then fail with a clear browser-side error instead of silently
-    doing nothing).
+    port. Only loopback families the host can actually bind are required
+    — IPv4-only kernels must not exhaust every candidate on a missing
+    IPv6 bind and then fall back to a known-occupied ``preferred + 1``.
+    Falls back to ``preferred + 1`` only when no candidate binds on the
+    available families (the launch will then fail with a clear
+    browser-side error instead of silently doing nothing).
     """
     import socket
 
+    bind_targets: list[tuple[int, str]] = []
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.bind((host, 0))
+        except OSError:
+            continue
+        bind_targets.append((family, host))
+
+    if not bind_targets:
+        return preferred + 1
+
     for port in range(preferred + 1, preferred + 1 + attempts):
         bindable = True
-        for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        for family, host in bind_targets:
             try:
                 with socket.socket(family, socket.SOCK_STREAM) as sock:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
