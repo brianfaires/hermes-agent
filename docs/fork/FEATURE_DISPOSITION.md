@@ -23,13 +23,13 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 9 |
+| `KEEP` | 10 |
 | `REWRITE` | 2 |
 | `DROP_UPSTREAM` | 20 |
 | `DROP_LOW_VALUE` | 6 |
 | `DROP_OUT_OF_SCOPE` | 3 |
 | `DEFER_HUMAN_VALUE` | 5 |
-| `DEFER_REPRODUCTION` | 6 |
+| `DEFER_REPRODUCTION` | 5 |
 | **Total** | **51** |
 
 ## Complete behavior-cluster disposition
@@ -49,7 +49,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-10 | Guarded local webhook script triggers and process-tree cleanup | I010, I034, I035, I071 | `DROP_LOW_VALUE` | No current webhook route uses script execution. The legacy feature creates an unattended local-code-execution surface plus multiplex state, serialization, and tree-kill obligations without a current consumer. | A future consumer belongs in a narrowly permissioned plugin/service, not the base webhook adapter. |
 | FC-11 | Google Calendar cron synchronization and lifecycle reconciliation | I011, I014, I046, I057, I058, I110, I124, I133 | `DEFER_HUMAN_VALUE` | The legacy plugin and its cron hook/event-bus seam are absent; v0.21 instead has `plugins/cron_providers`. Read-only config enables the old plugin id but explicitly sets `cron.calendar_sync.enabled: false`, so current intent is ambiguous. | Brian must choose retirement or a fresh provider/standalone-plugin rewrite; do not restore speculative core hooks. |
 | FC-12 | Cron delivery alerts and thread diagnostics | I012 | `DROP_UPSTREAM` | v0.21 has current cron doctor, delivery preflight, profile-aware routing diagnostics, and relay-fronted delivery errors; the legacy warning patch targets an obsolete execution/delivery shape. | Current cron CLI/runtime diagnostics. |
-| FC-13 | File-backed cron prompts across tool and API | I013 | `DEFER_REPRODUCTION` | Peer audit corrected a false DROP_UPSTREAM: `prompt_path` is present on live main but **absent** on clean v0.21.0 and this recon tip (0 cron hits). High-value production feature; do not drop. Reproduce against current cron job/tool/API schema before porting. | Bounded cron-only port after RED proof; not a silent drop. |
+| FC-13 | File-backed cron prompts across tool and API | I013 | `KEEP` | Live gap confirmed on recon tip/clean (0 cron hits). Ported absolute `prompt_path` through jobs create/update/normalize, scheduler fire-time load, cronjob tool schema/handler, and API create/update allowlist. Focused prompt_path + empty-payload + schema tests green. | Existing cron jobs/tool/scheduler/API only. |
 | FC-14 | Discord markdown, MEDIA-directive, and compact tool-output rendering | I015, I020, I021, I078 | `DROP_UPSTREAM` | Current gateway/Discord delivery has structured media handling, directive validation, platform markdown rendering, and bounded tool activity output. The old source-regex-shaped tests are not the current contract. | Current gateway rendering and Discord adapter. |
 | FC-15 | Discord free-response threading and slash-sync retry fingerprints | I016, I017 | `DROP_UPSTREAM` | Current Discord adapter persists responded-thread participation and owns current native command synchronization/retry behavior. | Current Discord platform adapter. |
 | FC-16 | Discord outbound sends obey configured channel policy | I019 | `DEFER_REPRODUCTION` | Read-only live config confirms Discord channel policy is configured, but the legacy outbound-fence test is absent and current evidence proves profile-scoped inbound policy, not every outbound path. | Reproduce at the Discord adapter boundary; authorization/external-send change requires explicit Critical approval before implementation. |
@@ -315,7 +315,7 @@ Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baselin
 - Inventory rows: `157`; unique SHAs: `157`; merges: `2`.
 - Covered ordinals: `1..157`; missing: `[]`; duplicate inventory rows: `[]`.
 - Intentional mixed-commit splits: I042 → FC-04, FC-28; I043 → FC-28, FC-32; I077 → FC-24, FC-28.
-- Cluster rows: `51`; disposition total: `51` (KEEP 9 after FC-02/FC-03/FC-07/FC-05 migrations, REWRITE 2, DROP_UPSTREAM 20, DROP_LOW_VALUE 6, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 6).
+- Cluster rows: `51`; disposition total: `51` (KEEP 10 after FC-02/FC-03/FC-07/FC-05/FC-13 migrations, REWRITE 2, DROP_UPSTREAM 20, DROP_LOW_VALUE 6, DROP_OUT_OF_SCOPE 3, DEFER_HUMAN_VALUE 5, DEFER_REPRODUCTION 5).
 - Inventory clusters ↔ matrix clusters: exact bijection; omission index and Brian-UAT index point only at matrix IDs.
 - Manifest tip SHAs match live `refs/backup/hermes-v0.21.0-precleanup-20260903/*` with zero mismatches.
 - Prior historical “Codex PASS” claim is **not** relied on. Native second-pass review sampled DROP/KEEP premises against current tree paths (examples: FC-05 provider toolset split was missing on tip (now KEEP/migrated); FC-13 `prompt_path` absent on recon/clean (corrected to DEFER_REPRODUCTION); FC-17 multiplex/profile adapters present; FC-48 Tavily backend removed with generic rescue retained; FC-49 `notify_on_complete` defaults false; FC-07 Langfuse lacks legacy multiline absolute-path neutralization; FC-02 worktree launcher guard absent from current doctor/install; FC-03 `find_free_debug_port` still requires both loopback families and RED-reproduces on this IPv4-only host by returning an occupied `preferred+1`).

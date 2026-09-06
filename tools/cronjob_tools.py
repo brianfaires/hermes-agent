@@ -751,15 +751,25 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(job.get("prompt") or "")
+    prompt_path = str(job.get("prompt_path") or "").strip()
     skills = _canonical_skills(job.get("skill"), job.get("skills"))
     job_id = str(job.get("id") or "unknown")
-    name = str(job.get("name") or prompt[:50] or (skills[0] if skills else "") or job_id or "cron job")
+    name = str(
+        job.get("name")
+        or prompt[:50]
+        or (Path(prompt_path).stem if prompt_path else "")
+        or (skills[0] if skills else "")
+        or job_id
+        or "cron job"
+    )
+    preview_src = prompt or (f"@{prompt_path}" if prompt_path else "")
     result = {
         "job_id": job_id,
         "name": name,
         "skill": skills[0] if skills else None,
         "skills": skills,
-        "prompt_preview": prompt[:100] + "..." if len(prompt) > 100 else prompt,
+        "prompt_preview": preview_src[:100] + "..." if len(preview_src) > 100 else preview_src,
+        "prompt_path": prompt_path or None,
         "model": job.get("model"),
         "provider": job.get("provider"),
         "base_url": job.get("base_url"),
@@ -1461,6 +1471,7 @@ def cronjob(
     action: str,
     job_id: Optional[str] = None,
     prompt: Optional[str] = None,
+    prompt_path: Optional[str] = None,
     schedule: Optional[str] = None,
     name: Optional[str] = None,
     repeat: Optional[int] = None,
@@ -1512,8 +1523,23 @@ def cronjob(
                         "exit or timeout sends an error alert.",
                         success=False,
                     )
-            elif not prompt and not canonical_skills:
-                return tool_error("create requires either prompt or at least one skill", success=False)
+            elif not prompt and not prompt_path and not canonical_skills:
+                return tool_error(
+                    "create requires a prompt, prompt_path, or at least one skill",
+                    success=False,
+                )
+            prompt_path_text = _normalize_optional_job_value(prompt_path) if prompt_path else None
+            if prompt_path_text:
+                try:
+                    from cron.jobs import read_prompt_file
+
+                    file_prompt = read_prompt_file(prompt_path_text)
+                except ValueError as exc:
+                    return tool_error(str(exc), success=False)
+                if file_prompt:
+                    scan_error = _scan_cron_prompt(file_prompt)
+                    if scan_error:
+                        return tool_error(scan_error, success=False)
             if prompt:
                 scan_error = _scan_cron_prompt(prompt)
                 if scan_error:
@@ -1592,6 +1618,7 @@ def cronjob(
                     attach_to_session=attach_to_session,
                     monitor_script=_normalize_optional_job_value(monitor_script),
                     monitor_url=_normalize_optional_job_value(monitor_url),
+                    prompt_path=prompt_path_text,
                     # reasoning_effort reaches here from the CLI
                     # (hermes cron create --reasoning-effort) ONLY — it is
                     # deliberately absent from CRONJOB_SCHEMA and the model
@@ -1787,6 +1814,22 @@ def cronjob(
                 if scan_error:
                     return tool_error(scan_error, success=False)
                 updates["prompt"] = prompt
+            if prompt_path is not None:
+                # Empty string clears the path; non-empty must be absolute and readable.
+                if prompt_path == "":
+                    updates["prompt_path"] = None
+                else:
+                    try:
+                        from cron.jobs import read_prompt_file
+
+                        file_prompt = read_prompt_file(prompt_path)
+                    except ValueError as exc:
+                        return tool_error(str(exc), success=False)
+                    if file_prompt:
+                        scan_error = _scan_cron_prompt(file_prompt)
+                        if scan_error:
+                            return tool_error(scan_error, success=False)
+                    updates["prompt_path"] = prompt_path
             if name is not None and name.strip():
                 # Blank name is a no-op, not a clear. The `is not None` sentinel
                 # treats every supplied field as an explicit edit, and a model
@@ -1962,7 +2005,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
         "properties": {
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, 'schedule' is REQUIRED and you must provide 'prompt', 'prompt_path', or at least one skill. If both prompt and prompt_path are provided, the effective prompt is prompt + newline + file contents."
             },
             "job_id": {
                 "type": "string",
@@ -1970,7 +2013,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             },
             "prompt": {
                 "type": "string",
-                "description": "For create: the full self-contained prompt (paired with any skills as the task instruction). For run: optional transient context for that single fire (never persisted)."
+                "description": "For create: optional inline prompt text (paired with skills as the task instruction). If prompt_path is also set, effective prompt is prompt + newline + file contents. For run: optional transient context for that single fire (never persisted)."
+            },
+            "prompt_path": {
+                "type": "string",
+                "description": "Optional absolute file path whose contents are loaded as the cron prompt at execution time. Relative paths are rejected. On update, empty string clears."
             },
             "schedule": {
                 "type": "string",
@@ -2075,6 +2122,7 @@ def _cronjob_handler(args, **kw):
         action=args.get("action", ""),
         job_id=args.get("job_id"),
         prompt=args.get("prompt"),
+        prompt_path=args.get("prompt_path"),
         schedule=args.get("schedule"),
         name=args.get("name"),
         repeat=args.get("repeat"),

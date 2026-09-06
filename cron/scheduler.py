@@ -4580,6 +4580,15 @@ def _build_job_prompt(
             fire only — never persisted to the job definition.
     """
     user_prompt = str(job.get("prompt") or "")
+    prompt_path = str(job.get("prompt_path") or "").strip()
+    if prompt_path:
+        from cron.jobs import read_prompt_file
+
+        file_prompt = read_prompt_file(prompt_path)
+        if user_prompt and file_prompt:
+            user_prompt = f"{user_prompt}\n{file_prompt}"
+        elif file_prompt:
+            user_prompt = file_prompt
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
     prompt = user_prompt

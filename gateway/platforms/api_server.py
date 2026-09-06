@@ -6586,7 +6586,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     _JOB_ID_RE = __import__("re").compile(r"[a-f0-9]{12}")
     # Allowed fields for update — prevents clients injecting arbitrary keys
-    _UPDATE_ALLOWED_FIELDS = {"name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
+    _UPDATE_ALLOWED_FIELDS = { "prompt_path","name", "schedule", "prompt", "deliver", "skills", "skill", "repeat", "enabled"}
     _MAX_NAME_LENGTH = 200
     _MAX_PROMPT_LENGTH = 5000
 
@@ -6641,6 +6641,7 @@ class APIServerAdapter(BasePlatformAdapter):
             name = (body.get("name") or "").strip()
             schedule = (body.get("schedule") or "").strip()
             prompt = body.get("prompt", "")
+            prompt_path = body.get("prompt_path")
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
             repeat = body.get("repeat")
@@ -6661,6 +6662,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 scan_error = _scan_cron_prompt(prompt)
                 if scan_error:
                     return web.json_response({"error": scan_error}, status=400)
+            if prompt_path:
+                try:
+                    from cron.jobs import read_prompt_file
+                    file_prompt = read_prompt_file(prompt_path)
+                except ValueError as e:
+                    return web.json_response({"error": str(e)}, status=400)
+                if file_prompt and _scan_cron_prompt is not None:
+                    scan_error = _scan_cron_prompt(file_prompt)
+                    if scan_error:
+                        return web.json_response({"error": scan_error}, status=400)
             if repeat is not None and (not isinstance(repeat, int) or repeat < 1):
                 return web.json_response({"error": "Repeat must be a positive integer"}, status=400)
 
@@ -6671,6 +6682,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "deliver": deliver,
                 "origin": self._cron_origin_from_request(request),
             }
+            if prompt_path:
+                kwargs["prompt_path"] = prompt_path
             if skills:
                 kwargs["skills"] = skills
             if repeat is not None:

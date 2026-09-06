@@ -530,12 +530,74 @@ def _coerce_job_text(value: Any, fallback: str = "") -> str:
     return str(value)
 
 
+
+_MAX_PROMPT_FILE_BYTES = 1024 * 1024
+
+
+def _normalize_prompt_path(prompt_path: Optional[str]) -> Optional[str]:
+    """Normalize and validate an absolute prompt file path."""
+    if prompt_path is None:
+        return None
+    raw = str(prompt_path).strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ValueError(f"Prompt path must be an absolute path. Got: {raw!r}")
+    return str(path.resolve())
+
+
+def resolve_prompt_path(prompt_path: Optional[str]) -> Optional[Path]:
+    """Resolve a stored cron prompt path to its concrete file path."""
+    normalized = _normalize_prompt_path(prompt_path)
+    if normalized is None:
+        return None
+    return Path(normalized)
+
+
+def read_prompt_file(prompt_path: Optional[str]) -> str:
+    """Read a bounded cron prompt file, normalizing errors for callers."""
+    resolved = resolve_prompt_path(prompt_path)
+    if resolved is None:
+        return ""
+    if not resolved.exists():
+        raise ValueError(f"Cron prompt file does not exist: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"Cron prompt path is not a file: {resolved}")
+    try:
+        with resolved.open("rb") as handle:
+            data = handle.read(_MAX_PROMPT_FILE_BYTES + 1)
+        if len(data) > _MAX_PROMPT_FILE_BYTES:
+            raise ValueError(
+                f"Cron prompt file exceeds {_MAX_PROMPT_FILE_BYTES} bytes: {resolved}"
+            )
+        return data.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"Cron prompt file cannot be read: {resolved}: {exc}") from exc
+
+
+def combine_prompt_sources(
+    prompt: Optional[str] = None,
+    prompt_path: Optional[str] = None,
+    *,
+    read_file: bool = True,
+) -> str:
+    """Combine inline prompt text with optional file-backed prompt contents."""
+    inline = _coerce_job_text(prompt).strip()
+    file_text = ""
+    if read_file and prompt_path:
+        file_text = read_prompt_file(prompt_path).strip()
+    if inline and file_text:
+        return f"{inline}\n{file_text}"
+    return inline or file_text
+
+
 # Fields whose presence in an update can turn a runnable job into an empty one.
-_PAYLOAD_FIELDS = frozenset({"prompt", "script", "skill", "skills", "no_agent"})
+_PAYLOAD_FIELDS = frozenset({"prompt", "prompt_path", "script", "skill", "skills", "no_agent"})
 
 EMPTY_PAYLOAD_ERROR = (
     "Cron job has nothing to run: the prompt is blank and no script or "
-    "skill(s) are set. Provide a prompt, a script, or at least one skill."
+    "skill(s) are set. Provide a prompt, prompt_path, a script, or at least one skill."
 )
 
 NO_AGENT_WITHOUT_SCRIPT_ERROR = (
@@ -553,12 +615,14 @@ def job_payload_is_empty(job: Dict[str, Any]) -> bool:
     """
     if _coerce_job_text(job.get("prompt")).strip():
         return False
+    if _coerce_job_text(job.get("prompt_path")).strip():
+        return False
     if _coerce_job_text(job.get("script")).strip():
         return False
     if _normalize_skill_list(job.get("skill"), job.get("skills")):
         return False
     # Only flag if at least one payload field is explicitly present in the record
-    if "prompt" in job or "script" in job or "skill" in job or "skills" in job:
+    if any(k in job for k in ("prompt", "prompt_path", "script", "skill", "skills")):
         return True
     return False
 
@@ -590,14 +654,21 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized = _apply_skill_fields(job)
     job_id = _coerce_job_text(normalized.get("id"), "unknown")
     prompt = _coerce_job_text(normalized.get("prompt"))
+    raw_prompt_path = _coerce_job_text(normalized.get("prompt_path")).strip()
+    try:
+        prompt_path = _normalize_prompt_path(raw_prompt_path) if raw_prompt_path else None
+    except ValueError:
+        prompt_path = None
     normalized["id"] = job_id
     normalized["prompt"] = prompt
+    normalized["prompt_path"] = prompt_path
 
     name = _coerce_job_text(normalized.get("name")).strip()
     if not name:
         script = _coerce_job_text(normalized.get("script")).strip()
         label_source = (
             prompt
+            or (Path(prompt_path).stem if prompt_path else "")
             or (normalized["skills"][0] if normalized.get("skills") else "")
             or script
             or job_id
@@ -2225,6 +2296,7 @@ def create_job(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    prompt_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2292,6 +2364,9 @@ def create_job(
                 exactly like config-set effort. Inert with ``no_agent=True``
                 (no LLM call to configure). None/empty = unset (job follows
                 config resolution, pre-existing behavior).
+        prompt_path: Optional absolute file path whose contents are loaded as
+                the prompt (or appended after inline prompt) at execution time
+                instead of duplicating long prompts in the job record.
 
     Returns:
         The created job dict
@@ -2354,9 +2429,23 @@ def create_job(
         context_from = None
 
     prompt_text = _coerce_job_text(prompt).strip()
+    normalized_prompt_path = _normalize_prompt_path(prompt_path)
+    # Validate the file exists and is readable at create time; content is
+    # re-loaded at fire time so maintained prompts stay current.
+    if normalized_prompt_path:
+        read_prompt_file(normalized_prompt_path)
 
-    if not prompt_text and not normalized_script and not normalized_skills:
+    if (
+        not prompt_text
+        and not normalized_prompt_path
+        and not normalized_script
+        and not normalized_skills
+    ):
         raise ValueError(EMPTY_PAYLOAD_ERROR)
+
+    combined_prompt = combine_prompt_sources(
+        prompt_text, normalized_prompt_path, read_file=bool(normalized_prompt_path)
+    )
 
     # Reject cron jobs that schedule gateway-lifecycle commands. Prevents
     # agent-driven SIGTERM-respawn loops under launchd/systemd KeepAlive
@@ -2364,9 +2453,14 @@ def create_job(
     # `cronjob` model tool — which calls create_job directly — is also
     # covered, not just `hermes cron create`.
     from cron.lifecycle_guard import check_gateway_lifecycle
-    check_gateway_lifecycle(prompt_text, normalized_script)
+    check_gateway_lifecycle(combined_prompt or prompt_text, normalized_script)
 
-    label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
+    label_source = (
+        prompt_text
+        or (Path(normalized_prompt_path).stem if normalized_prompt_path else None)
+        or (normalized_skills[0] if normalized_skills else None)
+        or (normalized_script if normalized_no_agent else None)
+    ) or "cron job"
 
     provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
         provider=normalized_provider,
@@ -2393,6 +2487,7 @@ def create_job(
         "id": job_id,
         "name": name or label_source[:50].strip(),
         "prompt": prompt_text,
+        "prompt_path": normalized_prompt_path,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
@@ -2540,6 +2635,15 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+
+            if "prompt_path" in updates:
+                _pp = updates["prompt_path"]
+                if _pp in {None, "", False}:
+                    updates["prompt_path"] = None
+                else:
+                    updates["prompt_path"] = _normalize_prompt_path(_pp)
+                    # Fail closed at update time if the path is unreadable.
+                    read_prompt_file(updates["prompt_path"])
 
             # Normalize monitor fields the same way create_job does (empty
             # string clears the field).
