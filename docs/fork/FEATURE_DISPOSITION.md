@@ -1,6 +1,6 @@
 # Feature disposition ledger — Hermes v0.21.0 reconstruction
 
-INVENTORY MILESTONE (accepted map-only checkpoint). Mechanical coverage and a native second-pass semantic review were completed on recovery worktree `t_99b38c75` / task `t_5d084747` without Codex (local Codex task quota exhausted until 2026-09-07 17:45; CLI also stale on models-catalog `max` effort). This ledger authorizes disposition accounting and bounded non-Critical migration planning only. It does **not** authorize Critical/product implementation, live config changes, deploy/restart, or retirement of any still-running behavior beyond what current v0.21 already does.
+RELEASE PREPARATION UPDATE (2026-09-06). Brian explicitly approved implementation and qualified release of FC-16, FC-22, FC-28B and FC-36; this supersedes their historical freezes below. FC-37 and FC-11/41–44 remain deferred. The protected inventory remains immutable; current main/staging reconciliation is recorded separately below. Exact candidate/review/test status lives in the external `evidence-20260906/handoff.json`, not in historical review claims.
 
 This is the authoritative feature-cluster map for the preserved pre-cleanup fork. Absence from the reconstruction branch is never an implicit drop.
 
@@ -23,13 +23,13 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 | Decision | Clusters |
 |---|---:|
-| `KEEP` | 12 |
+| `KEEP` | 15 |
 | `REWRITE` | 2 |
-| `DROP_UPSTREAM` | 20 |
+| `DROP_UPSTREAM` | 19 |
 | `DROP_LOW_VALUE` | 7 |
 | `DROP_OUT_OF_SCOPE` | 3 |
 | `DEFER_HUMAN_VALUE` | 5 |
-| `DEFER_REPRODUCTION` | 2 |
+| `DEFER_REPRODUCTION` | 0 |
 | **Total** | **51** |
 
 ## Complete behavior-cluster disposition
@@ -52,20 +52,20 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-13 | File-backed cron prompts across tool and API | I013 | `KEEP` | Live gap confirmed on recon tip/clean (0 cron hits). Ported absolute `prompt_path` through jobs create/update/normalize, scheduler fire-time load, cronjob tool schema/handler, and API create/update allowlist. Focused prompt_path + empty-payload + schema tests green. | Existing cron jobs/tool/scheduler/API only. |
 | FC-14 | Discord markdown, MEDIA-directive, and compact tool-output rendering | I015, I020, I021, I078 | `DROP_UPSTREAM` | Current gateway/Discord delivery has structured media handling, directive validation, platform markdown rendering, and bounded tool activity output. The old source-regex-shaped tests are not the current contract. | Current gateway rendering and Discord adapter. |
 | FC-15 | Discord free-response threading and slash-sync retry fingerprints | I016, I017 | `DROP_UPSTREAM` | Current Discord adapter persists responded-thread participation and owns current native command synchronization/retry behavior. | Current Discord platform adapter. |
-| FC-16 | Discord outbound sends obey configured channel policy | I019 | `DEFER_REPRODUCTION` | Read-only live config confirms Discord channel policy is configured, but the legacy outbound-fence test is absent and current evidence proves profile-scoped inbound policy, not every outbound path. | Reproduce at the Discord adapter boundary; authorization/external-send change requires explicit Critical approval before implementation. |
+| FC-16 | Discord outbound sends obey configured channel policy | I019 | `KEEP` | Reproduced 15 failing adapter/REST cases. Ported to v0.21 profile-scoped readers across text, edits, files, voice, image batches, forums and control prompts. REST verifies actual ancestry; uncached parent names are resolved before delivery. 27 policy cases pass. | Approved 2026-09-06; existing Discord plugin only. |
 | FC-17 | Profile-scoped gateway/Discord multiplex routing and standalone delivery mirrors | I022, I028, I052, I065, I068, I069, I070, I079, I096, I098, I099, I100, I101, I121, I126, I140 | `DROP_UPSTREAM` | v0.21 has a larger session-scoped multiplex architecture, profile secret scopes, per-profile adapters, route provenance, pairing isolation, and profile-aware cron/delivery. Read-only live config has multiplexing enabled. | Current gateway session/profile routing and platform adapters. |
 | FC-18 | Kanban board paths plus workspace/branch metadata | I023, I024, I060 | `DROP_UPSTREAM` | Current Kanban DB/tools expose board identity, workspace kinds/paths, deterministic branches, artifacts, parents, and project worktrees with schema validation. | Current Kanban DB and tools. |
 | FC-19 | Kanban notification routing policy and fail-closed validation | I026, I033, I080, I113 | `DROP_UPSTREAM` | Current Kanban tooling/watcher paths own notification delivery, run status, and malformed-policy handling; background delivery is opt-in by current tool contract. | Current Kanban watcher/notifier boundary. |
 | FC-20 | Kanban worker-only guidance and delegated-child lifecycle isolation | I045, I125 | `DROP_UPSTREAM` | Current `model_tools.py`, `tools/kanban_tools.py`, and `agent/turn_finalizer.py` gate lifecycle tools by dispatcher ownership; `tests/tools/test_delegate_kanban_isolation.py` is present. | Current dispatcher-owned worker lifecycle. |
 | FC-21 | Dedicated Human Action Brian Queue | I123 | `DROP_UPSTREAM` | Current Kanban has typed `needs_input` blockers, task comments, triage, subscriptions, and durable run handoffs; a second queue would duplicate the human-action state model. | Use current blocked/triage/comment workflow. |
-| FC-22 | Kanban operator holds stay non-ready and live workers are not reclaimed at max runtime | I130, I137 | `KEEP` | The two preserved post-v0.21 side branches contain focused fixes for active Kanban behavior. Current code still owns blocked-state promotion and max-runtime reclaim, while the legacy regression tests are absent. | Migrate as one isolated Kanban state/lifecycle boundary with fresh RED/GREEN proof and explicit approval. |
+| FC-22 | Kanban operator holds stay non-ready and live workers are not reclaimed at max runtime | I130, I137 | `KEEP` | Reproduced creation-hold promotion and replacement of a surviving worker. Durable events honor old creation holds without migration; explicit releases remain supported. Reclaim reuses existing termination/defer helpers and preserves v0.21 retry phases. Real subprocess/DB tests pass. Staging decomposition safeguards are covered in SD-01 below. | Approved 2026-09-06; DB/lifecycle boundary only, no live graph changes. |
 | FC-23 | Durable Discord Kanban mirror, reply routing, cancellation, and reconciliation | I025, I055, I056, I081, I082, I083, I084, I085, I086, I087, I088, I090, I091, I092, I093, I094, I095, I111, I114, I115, I116, I117, I118, I119, I122 | `DROP_LOW_VALUE` | The legacy subsystem spans schema, daemon, platform plugin, reactions, thread lifecycle, and recovery. Its plugin is absent and read-only config explicitly has `kanban.discord_mirror.enabled: false`. | Do not recreate cross-platform core coupling; a future need should be an external/platform plugin. |
 | FC-24 | Discord voice STT aliases, acknowledgements, mixer, stop, and profile routing | I018, I027, I048, I049, I050, I051, I053, I059, I077 | `DROP_UPSTREAM` | Current Discord plugin contains `voice_mixer`, installs it on connect, loads profile-scoped `discord.voice_fx`, and supports acknowledgement/voice orchestration. Read-only live config has auto-voice and voice FX enabled. | Current Discord platform plugin and TTS/STT adapters. |
 | FC-25 | Voice-aware and atomic conversation compression/rotation | I029, I030, I031 | `KEEP` | Reproduced Discord voice gap on recovery tip: spoken helpers absent; `_serialize_for_summary` truncated long TTS args and fallback dropped spoken-only replies while retaining MEDIA delivery noise. Live Default/Ang/Ops Discord voice is configured. Ported I029 spoken-TTS preservation into current compressor (serialize/fallback/prune) with focused regressions. I030 protected-handoff replacement already covered by current continuity tests; I031 atomic rotation already present via current lease/commit compressor path — not replayed. | Existing `agent/context_compressor.py` only; checkpoint `brian-rebuild-v0.21.0-voice-compression`. |
 | FC-26 | External skill cache invalidation and bounded/full skill descriptions | I032, I103, I104, I112 | `DROP_UPSTREAM` | Current skill discovery and slash catalogs rescan external skills and current schema/prompt paths own description budgets; legacy literal limits no longer define the contract. | Current skill discovery and command catalogs. |
 | FC-27 | Model-specific bounded execution guidance | I036 | `DROP_UPSTREAM` | Current system/developer prompt policy already supplies model-agnostic execution discipline, mandatory tool use, prerequisite checks, and verification without per-model prompt forks. | Current stable system/developer prompt. |
 | FC-28 | Historical dependency/CVE pin stack | I042, I043, I061, I067, I073, I074, I075, I076, I077, I097, I109, I131, I151, I154 | `DROP_UPSTREAM` | v0.21 has a regenerated `uv.lock`/npm lock graph and an explicit upper-bound/SHA pin policy. Historical lock resolutions and one-off CVE pins must not be replayed across the new graph. | Regenerate from current manifests only. |
-| FC-28B | Tornado 6.5.8 security bump | I155 | `DEFER_REPRODUCTION` | The preserved staging tip moves Tornado from 6.5.7 to 6.5.8 for two named advisories, while the reconstructed v0.21 lock still resolves 6.5.7. The old lock hunk cannot be replayed without fresh advisory and resolver evidence. | Run a current advisory/resolver qualification, then regenerate `uv.lock`; Critical dependency approval required before migration. |
+| FC-28B | Tornado security dependency qualification | I155 | `KEEP` | Current GitHub advisories identify 6.5.8 as the fix for GHSA-8423-8fgw-73vq and GHSA-wwv5-g3v4-889x. Isolated 6.5.7/6.5.8 probes reproduce/close cookie injection and multipart allocation amplification. Resolver changed only Tornado; uv lock --check passes. | Approved 2026-09-06; regenerated lock only, no live venv mutation. |
 | FC-29 | Disable scheduled Dependabot updates for GitHub Actions | I037 | `DROP_UPSTREAM` | Current `.github/dependabot.yml` deliberately enables weekly SHA-pinned Actions updates while keeping source dependency bumps manual; this intentionally supersedes the fork-local opposite policy. | Current repository security policy. |
 | FC-30 | Fork OSV/process-killer CI and main-baseline checks | I038, I041, I127 | `DROP_UPSTREAM` | Current v0.21 CI/security workflows and classifiers have evolved substantially; the only fork-specific hosted gate still required—staging push coverage—is retained separately as FC-45. | Current CI workflows plus FC-45; do not replay stale workflow files. |
 | FC-31 | Fork author attribution mapping in release notes | I039 | `DROP_LOW_VALUE` | No current reconstruction or release workflow depends on the private author mapping; current contributor audit derives authorship and salvaged credit from Git/PR evidence. | Use current contributor audit; add mappings only when a real release attribution fails. |
@@ -73,7 +73,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-33 | Package-similarity/Tirith finding filtering | I063, I064, I066 | `DROP_UPSTREAM` | Current skills-guard and security-audit paths have since been redesigned and hardened; old warning-string suppressions are not the current behavior contract. | Current security audit/skills guard. |
 | FC-34 | Legacy `FORK_FEATURES.md` inventory | I062 | `DROP_UPSTREAM` | The reconstruction now has source-ref preservation plus this complete v0.21 disposition ledger; restoring the old snapshot would create a second, stale authority. | `docs/fork/*` ledgers. |
 | FC-35 | Request-dump/capture artifacts and human-review formatting | I044, I089, I102, I105, I106, I107, I108 | `DROP_LOW_VALUE` | The plugin/core patch stack is absent and read-only config has `request_capture.enabled: false`; it duplicates current observability/diagnostics while increasing prompt/PII retention surface. | Use current observability and explicit debug tooling; any future capture must be opt-in and external. |
-| FC-36 | Audited multi-profile gateway restart model tool | I047, I072, I120, I128 | `REWRITE` | The legacy plugin is absent, but read-only config enables `gateway-restart-tool` for both Default and Ang. v0.21 now has a more capable drain/restart core, so the old implementation cannot be replayed unchanged. | Rewrite as a profile/session-gated plugin using the supported restart seam; Critical lifecycle approval required before implementation or release. |
+| FC-36 | Audited multi-profile gateway restart model tool | I047, I072, I120, I128 | `REWRITE` | Implemented plugin rewrite using current request_restart on the owning gateway loop. Retains shared owner-home cooldown/audit filenames and legacy state reading. Existing profile opt-in plus live messaging-session identity gates use; durable audit precedes scheduling. Upstream owns after-turn drain, cron/API accounting, supervisor mode and teardown. | Approved 2026-09-06; gateway-restart-tool plugin, no core tool or FC-44 controller. |
 | FC-37 | Hindsight history reconstruction command | I054 | `REWRITE` | Read-only config uses Hindsight as the memory provider and enables `hindsight-history`, but the legacy plugin is absent. Current provider/plugin interfaces differ from the old code. | Rewrite as a standalone profile plugin/CLI against the current memory-provider API; privacy approval required. |
 | FC-38 | Cron Calendar lifecycle relay to Ops | I135 | `DROP_OUT_OF_SCOPE` | The relay targets external operational coordination and inherits the disabled Calendar consumer; Ops owns operational tooling and status relays. | Ops-owned automation outside Hermes source. |
 | FC-39 | Google Workspace capability broker | I136 | `DROP_OUT_OF_SCOPE` | This is a user-specific external SaaS broker with its own policy/process surface and no current repo consumer; third-party products do not belong in Hermes core or bundled plugins. | Standalone external plugin/service owned outside this repo. |
@@ -86,7 +86,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-46 | Recovered incident-evidence closure utility | I156 | `DROP_OUT_OF_SCOPE` | Hermes does not create or own incident-evidence directories; prior focused review assigned lifecycle tooling to Ops. | Ops-owned incident tooling. |
 | FC-47 | Backup scan banner reports the actual archived root | I157 | `KEEP` | Retained and verified in the first reconstruction batch; behavior changes display only, not archive scope. | Existing backup CLI display path; checkpoint `brian-rebuild-v0.21.0-backup-scope-display`. |
 | FC-48 | Tavily-specific quota fallback | I132 | `DROP_UPSTREAM` | v0.21 has generic one-shot keyed-backend rescue and deliberately removed Tavily; restoring the provider-specific arm would revive deleted coupling. | Current generic web-search rescue. |
-| FC-49 | Background process completion notifications are opt-in | I129 | `DROP_UPSTREAM` | Current terminal/process tool contract defaults user-facing completion notifications off and requires explicit `notify_on_complete=true`. | Current terminal/process tool schema and runtime. |
+| FC-49 | Background completion notifications are opt-in | I129 | `KEEP` | Corrected prior DROP_UPSTREAM: notify_on_complete default was false, but the gateway still defaulted implicit notifications to concise and tool guidance pressured opt-in. Reproduced two failing defaults; restored current main policy while retaining v0.21 notify schema and explicit delivery. 40 watcher/terminal tests pass. | Existing main 2945588a0145 behavior; no new notification or privacy policy. |
 
 ## Ordered follow-up backlog
 
@@ -306,7 +306,7 @@ A commit may name multiple clusters only when its diff was split by behavior. No
 | I156 | `0fb8e78acfa88cd462adcc9cab6f9785b3e319cf` | `refs/backup/hermes-v0.21.0-precleanup-20260903/recovered-wt__t_0c4486a1` | FC-46 | wip: preserve recovered incident-evidence closure utility |
 | I157 | `2581b9cd8c0f504a4ff10a4207504b98e25af7db` | `refs/backup/hermes-v0.21.0-precleanup-20260903/recovered-wt__t_817455a6` | FC-47 | wip: preserve recovered backup scope display fix |
 
-## Mechanical coverage proof
+## Historical mechanical coverage proof (inventory milestone)
 
 Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baseline `495b851fbc0b8b3531e56db5373b4bf4446ff288`:
 
@@ -320,3 +320,23 @@ Regenerated 2026-09-06 on branch `brian/reconstruct-v0.21.0-recovery` at baselin
 - Manifest tip SHAs match live `refs/backup/hermes-v0.21.0-precleanup-20260903/*` with zero mismatches.
 - Prior historical “Codex PASS” claim is **not** relied on. Native second-pass review sampled DROP/KEEP premises against current tree paths (examples: FC-05 provider toolset split was missing on tip (now KEEP/migrated); FC-13 `prompt_path` absent on recon/clean (corrected to DEFER_REPRODUCTION); FC-17 multiplex/profile adapters present; FC-48 Tavily backend removed with generic rescue retained; FC-49 `notify_on_complete` defaults false; FC-07 Langfuse lacks legacy multiline absolute-path neutralization; FC-02 worktree launcher guard absent from current doctor/install; FC-03 `find_free_debug_port` still requires both loopback families and RED-reproduces on this IPv4-only host by returning an occupied `preferred+1`).
 - Protected refs remain the durable source of truth; `/tmp/t_6d9a0f05-inventory.json` and `/tmp/t_99b38c75-recovery/` are supporting artifacts only.
+
+## Current main/staging reconciliation (2026-09-06)
+
+Current local main `2945588a014543d47c9e5e4a0d92ba6e361387c1` exactly equals
+protected inventory main: zero additional main commits. Its I129 behavior was
+rechecked, found incompletely represented, and corrected under FC-49 above.
+Current staging `9ff6594cc9227ef15fe0d586349e2793ab10c6a3` adds exactly two
+commits beyond protected staging `07677f36f5f005f2521dadc926b7e7d572acd760`:
+
+| Supplement | Commit/source | Disposition | Qualification |
+|---|---|---|---|
+| SD-01 | `2fc51e16757dc0983e1c16b0fe7739d6674a3902`, identical affected-file diff to guard source `83fa9a9184658b6df9bbad9a77a8b70ddb3c8966` | `KEEP`, within FC-22 | Preserve external prerequisites through nested decomposition/retries; reject shared/overlapping workspaces atomically. Adapt board lookup to current kanban_db_path and retain notification inheritance. 28 RED failures; 43 GREEN DB/real-Git tests. |
+| SD-02 | `9ff6594cc9227ef15fe0d586349e2793ab10c6a3` | `KEEP` | Real fallback activation event plus existing opt-in shell alert consumer. Preserve shell consent, default identity and global cooldown. Adapt current bounded-hook taxonomy. 16 RED failures; 17 GREEN tests. No live hook enablement. |
+
+The 157 protected inventory rows and 51 protected clusters are unchanged in
+identity; the disposition counts above reflect the new decisions. SD-01/02 are
+a supplemental current-branch delta, not retroactive additions to that frozen
+inventory. Nothing was merged wholesale. FC-37 and FC-11/41–44 remain omitted;
+no new speculative/privacy/auth redesign was carried. Historical tables naming
+held follow-up cards are lineage only, not instructions to dispatch them.

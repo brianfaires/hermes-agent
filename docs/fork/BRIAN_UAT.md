@@ -1,8 +1,8 @@
 # Brian-only functional verification and product-decision log
 
-INVENTORY MILESTONE product gate. This is not a current approval request and does not authorize implementation or retirement; see `NEXT_SLICE.md`.
+The 2026-09-06 release approval covers FC-16, FC-22, FC-28B and FC-36, now implemented. The rows below remain deferred; no question or live approval is requested during preparation. FC-37 is also explicitly deferred because Hindsight history privacy was not among the four approved features.
 
-Only irreducible product, privacy, or operational decisions belong here. The authoritative source/evidence/disposition remains the single row for each ID in [`FEATURE_DISPOSITION.md`](FEATURE_DISPOSITION.md). None of these decisions is needed for the inventory checkpoint; they gate only future migration of the named clusters.
+Only irreducible product, privacy, or operational decisions belong here. The authoritative source/evidence/disposition remains the single row for each ID in [`FEATURE_DISPOSITION.md`](FEATURE_DISPOSITION.md). These decisions gate only future migration of the named clusters.
 
 | Cluster | Decision Brian must make | Why delegation cannot settle it | Gate state |
 |---|---|---|---|
@@ -12,4 +12,4 @@ Only irreducible product, privacy, or operational decisions belong here. The aut
 | FC-43 | Should a Personal History category be blocked from Hindsight, and how is the boundary identified? | A name-based block is policy, not a universal memory invariant. | Privacy gate; isolate from FC-42 and require explicit approval. |
 | FC-44 | Does Brian want a separate release-switch controller beyond current update/drain/restart procedures? | A human must judge the production approval/recovery UX and whether the extra controller reduces or adds risk. | Critical lifecycle/release gate; no implementation authorized. |
 
-All other non-KEEP clusters are settled by automated evidence, an independent engineering review, or a future bounded reproduction. Brian is **not needed now** for this documentation-only checkpoint; a decision is needed only before reviving one of the five rows above.
+FC-37 also remains deferred with no history import, retention change, or stored-data migration. Brian is not needed for the approved local release preparation. Hosted exact-SHA CI and the parent-owned live cutover remain separate operational gates.

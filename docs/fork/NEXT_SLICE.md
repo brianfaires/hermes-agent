@@ -1,24 +1,32 @@
-# Reconstruction continuation after FC-25
+# v0.21 release preparation — 2026-09-06
 
-Task lineage: recovery `t_99b38c75` / continue card `t_21b82a07`.
-Worktree: `/home/brian/.hermes/hermes-agent/.worktrees/t_99b38c75`
-Branch: `brian/reconstruct-v0.21.0-recovery`
+Worktree: `/home/brian/.hermes/hermes-agent/.worktrees/t_99b38c75`.
+Branch: `brian/reconstruct-v0.21.0-recovery`.
 
-## Milestone status
+Brian's 2026-09-06 approval explicitly supersedes the old freezes for FC-16,
+FC-22, FC-28B and FC-36. Those four are implemented with executable RED/GREEN
+qualification. Current staging's decomposition guards and fallback alerts are
+ported surgically. Current main's FC-49 notification opt-in policy is restored;
+the earlier `DROP_UPSTREAM` claim was incomplete.
 
-- Inventory + FC-03/02/07/05/13/40 migrated earlier.
-- **FC-01** reproduced and **DROP_LOW_VALUE** (no live multi-mutation consumer; current atomic set/unset sufficient).
-- **FC-25** reproduced and **KEEP** (spoken-TTS preservation ported; atomic rotation already present).
-- Codex local quota until **2026-09-07 17:45**; native path continued.
-- No main/staging/deploy/runtime mutation.
+The actual upstream ancestor is stable `v2026.8.31`, peeled
+`29112bef099274229cadff79cdff7bf7b99c4b77` (package version `0.21.0`). The external
+CONTROLLER.md statement that reconstruction is based on v0.19 is superseded by
+this verified graph fact.
 
-## Immediate non-Critical order
+Local preparation is separate from release. The exact committed candidate,
+independent blocker-review binding, fresh-materialization results, commands,
+logs and parent-owned deployment route are recorded in
+`/home/brian/.hermes/profiles/ang/profiles/ang/projects/hermes-v021-rebuild/evidence-20260906/handoff.json`.
+Do not infer reviewed, CI-qualified, or live status from this document alone.
 
-1. FC-03/02/07/05/13/40/01/25 — DONE for executable non-Critical set on this card.
-2. Remaining program: Critical/product freeze only (FC-16/22/28B/36/37 and FC-11/41–44) + candidate handoff.
-3. Do **not** claim full rebuild complete.
+Next owner: Ang. Qualify the exact staging SHA in hosted CI, then perform the
+supported drain/stop/update/start procedure only within the release window
+(expiry `2026-09-06T21:20:29-07:00`) and with rollback time remaining. The older
+live gateway has no v0.21 control socket; do not assume the new pause API is
+available before upgrade or call a Git checkout byte-atomic.
 
-## Boundaries
-
-- Old `t_6d9a0f05` graph remains held.
-- Branch/tag pushes only to `brianfaires/hermes-agent` reconstruction refs.
+FC-37 (Hindsight history privacy), FC-11, FC-41/42/43/44 remain deferred. No new
+privacy/auth policy or release controller is included. Old worktrees, refs and
+the held `t_6d9a0f05` graph are preserved. No Kanban action, live mutation,
+service restart, main/staging move or push was performed during preparation.
