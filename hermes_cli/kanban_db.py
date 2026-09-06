@@ -3565,6 +3565,12 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if initial_status == "blocked":
+                    # Creation-time operator holds use the same durable event as
+                    # block_task; readiness recomputation must not release them.
+                    _append_event(conn, task_id, "blocked", {
+                        "reason": "created blocked", "source": "initial_status",
+                    })
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
@@ -4470,7 +4476,8 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       finish, transient infra error clears).
 
     The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
+    ``"blocked"`` / release event (``"unblocked"`` or
+    ``"promoted_manual"``) for the task. If the most
     recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
     no ``"unblocked"`` event has fired since), the task is sticky and
     ``recompute_ready`` must *not* auto-promote it.
@@ -4482,7 +4489,7 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked', 'promoted_manual') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
@@ -8438,7 +8445,8 @@ def enforce_max_runtime(
 ) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
-    Sends SIGTERM, waits a short grace window, then SIGKILL. Emits a
+    Sends SIGTERM, waits a short grace window, then SIGKILL. Retains the claim
+    and emits ``reclaim_deferred`` if the worker survives. Otherwise emits a
     ``timed_out`` event and restores the task's source phase so the next
     dispatcher tick re-spawns the same kind of worker — unless the circuit
     breaker has already given up, in which case the task stays blocked
@@ -8448,7 +8456,6 @@ def enforce_max_runtime(
     (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a
     test hook; defaults to ``os.kill`` on POSIX.
     """
-    import signal
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
@@ -8476,31 +8483,17 @@ def enforce_max_runtime(
 
         pid = int(row["worker_pid"])
         tid = row["id"]
-        # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
-        # want a cleaner shutdown can install their own SIGTERM handler
-        # before the grace expires.
-        killed = False
-        kill = signal_fn if signal_fn is not None else (
-            os.kill if hasattr(os, "kill") else None
+        termination = _terminate_reclaimed_worker(
+            pid, row["claim_lock"], signal_fn=signal_fn,
         )
-        if kill is not None:
-            try:
-                kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-            # Short polling wait — no time.sleep on the write txn.
-            for _ in range(10):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.5)
-            if _pid_alive(pid):
-                try:
-                    # signal.SIGKILL doesn't exist on Windows.
-                    _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    kill(pid, _sigkill)
-                    killed = True
-                except (ProcessLookupError, OSError):
-                    pass
+        # Retain ownership until termination is confirmed, so dispatch cannot
+        # create a second writer beside the surviving worker.
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn, tid, row["claim_lock"], now, termination,
+                reason="max_runtime_worker_alive",
+            )
+            continue
 
         with write_txn(conn):
             retry_status = _retry_status_for_run(conn, tid)
@@ -8517,9 +8510,10 @@ def enforce_max_runtime(
                     "pid": pid,
                     "elapsed_seconds": int(elapsed),
                     "limit_seconds": int(row["max_runtime_seconds"]),
-                    "sigkill": killed,
+                    "sigkill": bool(termination.get("sigkill")),
                     "retry_status": retry_status,
                 }
+                payload.update(termination)
                 run_id = _end_run(
                     conn, tid,
                     outcome="timed_out", status="timed_out",
@@ -8544,7 +8538,7 @@ def enforce_max_runtime(
                 end_run=False,
                 event_payload_extra={
                     "pid": pid,
-                    "sigkill": killed,
+                    "sigkill": bool(termination.get("sigkill")),
                     "retry_status": retry_status,
                 },
             )

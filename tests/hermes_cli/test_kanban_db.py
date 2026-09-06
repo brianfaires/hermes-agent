@@ -1647,3 +1647,172 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+def test_max_runtime_defers_when_live_worker_survives_termination(
+    kanban_home, monkeypatch,
+):
+    """A max-runtime worker that survives SIGTERM/SIGKILL keeps ownership."""
+    import json
+    import signal
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+    signals: list[int] = []
+
+    def _signal(_pid, sig):
+        signals.append(sig)
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="wedged", assignee="worker", max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        timed_out = kb.enforce_max_runtime(conn, signal_fn=_signal)
+
+        assert timed_out == []
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
+        assert task.claim_lock is not None
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'reclaim_deferred'",
+            (t,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload"])
+        assert payload["reason"] == "max_runtime_worker_alive"
+        assert payload["termination_attempted"] is True
+        assert payload["host_local"] is True
+        assert payload["terminated"] is False
+
+
+def test_max_runtime_later_tick_times_out_after_deferred_worker_dies(
+    kanban_home, monkeypatch,
+):
+    """A deferred max-runtime reclaim retries, then times out normally once dead."""
+    alive = {"value": True}
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: alive["value"])
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="eventually-dead", assignee="worker",
+            max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        first = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
+        assert first == []
+        assert kb.get_task(conn, t).status == "running"
+
+        alive["value"] = False
+        second = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
+
+        assert second == [t]
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert task.worker_pid is None
+        assert task.consecutive_failures == 1
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+        assert "reclaim_deferred" in kinds
+        assert "timed_out" in kinds
+
+
+def test_dispatch_does_not_spawn_replacement_for_live_max_runtime_worker(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """dispatch_once must not create a second writer while old PID is alive."""
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(kb.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(kb.os, "kill", lambda _pid, _sig: None)
+    spawned: list[str] = []
+
+    def _spawn(task, _workspace):
+        spawned.append(task.id)
+        return 67890
+
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="do-not-duplicate", assignee="worker",
+            max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, t)
+        run_id = kb.latest_run(conn, t).id
+        old_started = int(time.time()) - 30
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, t),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
+                (old_started, 12345, run_id),
+            )
+
+        result = kb.dispatch_once(conn, spawn_fn=_spawn)
+
+        assert result.timed_out == []
+        assert spawned == []
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
+        assert kb.latest_run(conn, t).id == run_id
+        kinds = [e.kind for e in kb.list_events(conn, t)]
+        assert "reclaim_deferred" in kinds
+        assert "timed_out" not in kinds
+
+
+
+
+def test_max_runtime_retains_real_live_subprocess(kanban_home, monkeypatch):
+    """Real PID liveness + DB path, without ever signalling a non-test worker."""
+    import subprocess
+    import sys
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setattr(kb.time, "sleep", lambda _: None)
+        with kb.connect() as conn:
+            tid = kb.create_task(conn, title="real worker", assignee="worker", max_runtime_seconds=1)
+            kb.claim_task(conn, tid)
+            run = kb.latest_run(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (worker.pid, tid))
+                conn.execute("UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?", (int(time.time())-10, worker.pid, run.id))
+            assert kb.enforce_max_runtime(conn, signal_fn=lambda *_: None) == []
+            assert worker.poll() is None
+            assert kb.get_task(conn, tid).claim_lock
+            assert kb.get_task(conn, tid).status == "running"
+            worker.terminate()
+            worker.wait(timeout=5)
+            assert kb.enforce_max_runtime(conn, signal_fn=lambda *_: None) == [tid]
+            assert kb.get_task(conn, tid).worker_pid is None
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+        worker.wait(timeout=5)
