@@ -22,7 +22,7 @@ import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple, cast
 
 from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
 from utils import (
@@ -351,7 +351,12 @@ def _should_exclude(rel_path: Path) -> bool:
     return False
 
 
-def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> bool:
+def _should_skip_backup_file(
+    abs_path: Path,
+    rel_path: Path,
+    out_path: Optional[Path],
+    stream_file_id: Optional[Tuple[int, int]] = None,
+) -> bool:
     """Return True when a candidate file should not be written to a backup zip."""
     if _should_exclude(rel_path):
         return True
@@ -362,9 +367,21 @@ def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> 
         return True
 
     try:
-        return abs_path.resolve() == out_path.resolve()
+        if out_path is not None and abs_path.resolve() == out_path.resolve():
+            return True
     except (OSError, ValueError):
-        return False
+        pass
+
+    # Stream mode may redirect stdout to a regular file under HERMES_HOME.
+    # Exclude that inode so the archive does not try to read its own output.
+    if stream_file_id is not None:
+        try:
+            st = abs_path.stat()
+            if (st.st_dev, st.st_ino) == stream_file_id:
+                return True
+        except OSError:
+            return False
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -790,31 +807,77 @@ def _safe_restore_db(src: Path, dst: Path) -> bool:
 # Backup
 # ---------------------------------------------------------------------------
 
+
+class _CountingWriter:
+    """Minimal binary stream wrapper that tracks bytes written by zipfile."""
+
+    def __init__(self, raw: BinaryIO):
+        self.raw = raw
+        self.bytes_written = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: bytes) -> int:
+        view = memoryview(data)
+        total = 0
+        while total < len(view):
+            written = self.raw.write(view[total:])
+            if written is None:
+                written = len(view) - total
+            if written <= 0:
+                raise OSError("backup output stream stopped accepting data")
+            total += written
+        self.bytes_written += total
+        return total
+
+    def flush(self) -> None:
+        self.raw.flush()
+
+
 def run_backup(args) -> None:
     """Create a zip backup of the Hermes home directory."""
     hermes_root = get_default_hermes_root()
+    stream_output = getattr(args, "output", None) == "-"
+    log_stream = sys.stderr if stream_output else sys.stdout
 
     if not hermes_root.is_dir():
-        print(f"Error: Hermes home directory not found at {hermes_root}")
+        print(f"Error: Hermes home directory not found at {hermes_root}", file=log_stream)
         sys.exit(1)
 
     try:
         with _backup_operation_lock(hermes_root):
             _run_backup_locked(args, hermes_root)
     except BackupInProgressError as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=log_stream)
         raise SystemExit(2) from exc
 
 
 def _run_backup_locked(args, hermes_root: Path) -> None:
     """Write a full backup while the cross-process backup slot is held."""
+    stream_output = getattr(args, "output", None) == "-"
+    log_stream = sys.stderr if stream_output else sys.stdout
+    stream_file_id: Optional[Tuple[int, int]] = None
+    if stream_output:
+        try:
+            stdout_stat = os.fstat(sys.stdout.buffer.fileno())
+            if stat.S_ISREG(stdout_stat.st_mode):
+                stream_file_id = (stdout_stat.st_dev, stdout_stat.st_ino)
+        except (AttributeError, OSError, ValueError):
+            pass
 
-    # Determine output path
-    out_path = None
+    out_path: Optional[Path] = None
+    staging_dir = hermes_root / "backups"
     try:
-        if args.output:
+        if stream_output:
+            staging_arg = getattr(args, "staging_dir", None)
+            if staging_arg:
+                staging_dir = Path(staging_arg).expanduser().resolve()
+            else:
+                staging_dir = hermes_root / "backups"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+        elif args.output:
             out_path = Path(args.output).expanduser().resolve()
-            # If user gave a directory, put the zip inside it
             if out_path.is_dir():
                 stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
                 out_path = out_path / f"hermes-backup-{stamp}.zip"
@@ -822,33 +885,28 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
             stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
             out_path = Path.home() / f"hermes-backup-{stamp}.zip"
 
-        # Ensure the suffix is .zip
-        if out_path.suffix.lower() != ".zip":
-            out_path = out_path.with_suffix(out_path.suffix + ".zip")
-
-        # Ensure parent directory exists
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if not stream_output:
+            assert out_path is not None
+            if out_path.suffix.lower() != ".zip":
+                out_path = out_path.with_suffix(out_path.suffix + ".zip")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            # File-mode keeps SQLite snapshots beside the zip so large DBs
+            # stay on the destination filesystem. --staging-dir is stream-only.
+            staging_dir = out_path.parent
     except OSError as exc:
-        # A bad/unwritable output path (permission denied, unreadable parent,
-        # etc.) should give a clean one-line error, not a raw traceback
-        # (round-3 QA SUB-01). is_dir() and mkdir() both hit the filesystem.
-        print(f"Error: cannot write backup to {args.output or out_path}: {exc}")
+        label = args.output if getattr(args, "output", None) else out_path
+        print(f"Error: cannot write backup to {label}: {exc}", file=log_stream)
         raise SystemExit(1) from exc
 
-    # Collect files
     scan_started = time.monotonic()
     logger.info("backup phase=scan status=started")
-    print(f"Scanning {display_hermes_home(hermes_root)} ...")
-    files_to_add: list[tuple[Path, Path]] = []  # (absolute, relative)
+    print(f"Scanning {display_hermes_home(hermes_root)} ...", file=log_stream)
+    files_to_add: list[tuple[Path, Path]] = []
     skipped_dirs = set()
 
     for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
         dp = Path(dirpath)
         rel_dir = dp.relative_to(hermes_root)
-
-        # Prune excluded directories in-place so os.walk doesn't descend
-        # ``hermes-agent`` is only pruned at the root level; nested dirs
-        # with the same name (e.g. in skills/) must be preserved.
         is_root = rel_dir == Path(".")
         orig_dirnames = dirnames[:]
         dirnames[:] = [
@@ -861,20 +919,12 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
         for fname in filenames:
             fpath = dp / fname
             rel = fpath.relative_to(hermes_root)
-
-            if _should_skip_backup_file(fpath, rel, out_path):
+            if _should_skip_backup_file(fpath, rel, out_path, stream_file_id):
                 continue
-
             files_to_add.append((fpath, rel))
 
-    # External memory-provider state (e.g. ~/.honcho, ~/.hindsight) lives
-    # outside HERMES_HOME, so the walk above never sees it. Ask the active
-    # provider for its declared paths and stage them under the reserved
-    # ``_external/`` arc prefix, encoded relative to the user's home dir.
-    # Only paths under home are captured (security + portability); anything
-    # else is skipped with a note.
     home_dir = Path.home().resolve()
-    external_to_add: list[tuple[Path, str]] = []  # (absolute, arcname)
+    external_to_add: list[tuple[Path, str]] = []
     skipped_external: list[str] = []
     for base in _collect_memory_provider_external_paths():
         try:
@@ -896,10 +946,11 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
             "backup phase=scan status=empty duration_ms=%.1f",
             (time.monotonic() - scan_started) * 1000,
         )
-        print("No files to back up.")
+        print("No files to back up.", file=log_stream)
+        if stream_output:
+            raise SystemExit(1)
         return
 
-    # Create the zip
     file_count = len(files_to_add) + len(external_to_add)
     logger.info(
         "backup phase=scan status=complete duration_ms=%.1f files=%d",
@@ -907,35 +958,31 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
         file_count,
     )
     logger.info("backup phase=archive status=started files=%d", file_count)
-    print(f"Backing up {file_count} files ...")
+    print(f"Backing up {file_count} files ...", file=log_stream)
 
     total_bytes = 0
     errors = []
     t0 = time.monotonic()
+    stream_writer: Optional[_CountingWriter] = None
 
-    with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
-        archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6
-    ) as zf:
+    def _write_archive(zf: zipfile.ZipFile) -> None:
+        nonlocal total_bytes
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
-                # Safe copy for SQLite databases (handles WAL mode)
                 if abs_path.suffix == ".db":
-                    # Stage the snapshot alongside the output zip so that the
-                    # temp file lives on the same filesystem.  The system
-                    # default (/tmp) may be a small tmpfs that cannot hold
-                    # large databases, causing silent backup incompleteness.
                     with tempfile.NamedTemporaryFile(
-                        suffix=".db", delete=False, dir=str(out_path.parent)
+                        suffix=".db", delete=False, dir=str(staging_dir)
                     ) as tmp:
                         tmp_db = Path(tmp.name)
-                    if _safe_copy_db(abs_path, tmp_db):
-                        zf.write(tmp_db, arcname=str(rel_path))
-                        total_bytes += tmp_db.stat().st_size
+                    try:
+                        if _safe_copy_db(abs_path, tmp_db):
+                            zf.write(tmp_db, arcname=str(rel_path))
+                            total_bytes += tmp_db.stat().st_size
+                        else:
+                            errors.append(f"  {rel_path}: SQLite safe copy failed")
+                            continue
+                    finally:
                         tmp_db.unlink(missing_ok=True)
-                    else:
-                        tmp_db.unlink(missing_ok=True)
-                        errors.append(f"  {rel_path}: SQLite safe copy failed")
-                        continue
                 else:
                     zf.write(abs_path, arcname=str(rel_path))
                     total_bytes += abs_path.stat().st_size
@@ -943,18 +990,14 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
                 errors.append(f"  {rel_path}: {exc}")
                 continue
 
-            # Progress every 500 files
             if i % 500 == 0:
-                print(f"  {i}/{file_count} files ...")
+                print(f"  {i}/{file_count} files ...", file=log_stream)
                 logger.info(
                     "backup phase=archive status=progress completed=%d total=%d",
                     i,
                     file_count,
                 )
 
-        # External memory-provider state, stored under the ``_external/`` arc
-        # prefix. These never include ``.db`` files in practice (config/env
-        # blobs), so a straight zf.write is fine.
         for abs_path, arcname in external_to_add:
             try:
                 zf.write(abs_path, arcname=arcname)
@@ -963,8 +1006,29 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
                 errors.append(f"  {arcname}: {exc}")
                 continue
 
+    try:
+        if stream_output:
+            stream_writer = _CountingWriter(sys.stdout.buffer)
+            with zipfile.ZipFile(
+                cast(Any, stream_writer), "w", zipfile.ZIP_DEFLATED, compresslevel=6
+            ) as zf:
+                _write_archive(zf)
+        else:
+            assert out_path is not None
+            with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
+                archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+            ) as zf:
+                _write_archive(zf)
+    except (PermissionError, OSError, ValueError) as exc:
+        print(f"Error: backup write failed: {exc}", file=log_stream)
+        raise SystemExit(1) from exc
+
     elapsed = time.monotonic() - t0
-    zip_size = out_path.stat().st_size
+    if stream_writer is not None:
+        zip_size = stream_writer.bytes_written
+    else:
+        assert out_path is not None
+        zip_size = out_path.stat().st_size
     logger.info(
         "backup phase=archive status=complete duration_ms=%.1f files=%d errors=%d bytes=%d",
         elapsed * 1000,
@@ -973,50 +1037,56 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
         zip_size,
     )
 
-    # Summary
-    print()
+    target_label = "stdout" if stream_output else str(out_path)
+    print(file=log_stream)
     if errors:
-        print(f"Backup incomplete: {out_path}")
+        print(f"Backup incomplete: {target_label}", file=log_stream)
     else:
-        print(f"Backup complete: {out_path}")
-    print(f"  Files:       {file_count}")
-    print(f"  Original:    {_format_size(total_bytes)}")
-    print(f"  Compressed:  {_format_size(zip_size)}")
-    print(f"  Time:        {elapsed:.1f}s")
+        print(f"Backup complete: {target_label}", file=log_stream)
+    print(f"  Files:       {file_count}", file=log_stream)
+    print(f"  Original:    {_format_size(total_bytes)}", file=log_stream)
+    print(f"  Compressed:  {_format_size(zip_size)}", file=log_stream)
+    print(f"  Time:        {elapsed:.1f}s", file=log_stream)
 
     if external_to_add:
         print(
             f"\n  Included {len(external_to_add)} memory-provider file(s) "
-            f"stored outside {display_hermes_home()}."
+            f"stored outside {display_hermes_home()}.",
+            file=log_stream,
         )
 
     if skipped_external:
         print(
             f"\n  Skipped {len(skipped_external)} memory-provider path(s) "
-            f"outside your home directory (not portable):"
+            f"outside your home directory (not portable):",
+            file=log_stream,
         )
-        for p in sorted(skipped_external)[:10]:
-            print(f"    {p}")
+        for path in sorted(skipped_external)[:10]:
+            print(f"    {path}", file=log_stream)
 
     if skipped_dirs:
-        print("\n  Excluded directories:")
+        print("\n  Excluded directories:", file=log_stream)
         for d in sorted(skipped_dirs):
-            print(f"    {d}/")
+            print(f"    {d}/", file=log_stream)
 
     if errors:
-        print(f"\n  Warnings ({len(errors)} files skipped):")
-        for e in errors[:10]:
-            print(e)
+        print(f"\n  Warnings ({len(errors)} files skipped):", file=log_stream)
+        for err in errors[:10]:
+            print(err, file=log_stream)
         if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more")
+            print(f"  ... and {len(errors) - 10} more", file=log_stream)
+        raise SystemExit(1)
 
-    if not errors:
-        print(f"\nRestore with: hermes import {out_path.name}")
+    if stream_output:
+        print(
+            "\nRestore by saving the stream to a zip, then run: hermes import <backup.zip>",
+            file=log_stream,
+        )
+    else:
+        assert out_path is not None
+        print(f"\nRestore with: hermes import {out_path.name}", file=log_stream)
 
 
-# ---------------------------------------------------------------------------
-# Import
-# ---------------------------------------------------------------------------
 
 def _validate_backup_zip(zf: zipfile.ZipFile) -> tuple[bool, str]:
     """Check that a zip looks like a Hermes backup.

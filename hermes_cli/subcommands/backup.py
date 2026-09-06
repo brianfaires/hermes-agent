@@ -11,20 +11,30 @@ from typing import Callable
 
 def build_backup_parser(subparsers, *, cmd_backup: Callable) -> None:
     """Attach the ``backup`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # backup command
-    # =========================================================================
     backup_parser = subparsers.add_parser(
         "backup",
         help="Back up Hermes home directory to a zip file",
-        description="Create a zip archive of your entire Hermes configuration, "
-        "skills, sessions, and data (excludes the hermes-agent codebase). "
-        "Use --quick for a fast snapshot of just critical state files.",
+        description=(
+            "Create a zip archive of your entire Hermes configuration, "
+            "skills, sessions, and data (excludes the hermes-agent codebase). "
+            "Use --quick for a fast snapshot of just critical state files. "
+            "Pass -o - to stream a full archive to stdout (status on stderr)."
+        ),
     )
     backup_parser.add_argument(
         "-o",
         "--output",
-        help="Output path for the zip file (default: ~/hermes-backup-<timestamp>.zip)",
+        help=(
+            "Output path for the zip file (default: ~/hermes-backup-<timestamp>.zip). "
+            "Use '-' to stream ZIP bytes to stdout while status goes to stderr."
+        ),
+    )
+    backup_parser.add_argument(
+        "--staging-dir",
+        help=(
+            "Directory for temporary SQLite snapshots when streaming with -o - "
+            "(default: HERMES_HOME/backups). File output always stages beside the zip."
+        ),
     )
     backup_parser.add_argument(
         "-q",
