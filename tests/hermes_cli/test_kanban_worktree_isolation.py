@@ -7,8 +7,8 @@ on whatever branch was there, letting sibling workers run concurrently in
 one directory on one branch (cross-task provenance corruption, no lock).
 
 Two-part fix under test:
-- ``decompose_triage_task`` leaves worktree children's ``workspace_path``
-  unset so each child materializes its own ``<repo>/.worktrees/<child-id>``.
+- ``decompose_triage_task`` gives worktree children a repository anchor
+  so each child materializes its own ``<repo>/.worktrees/<child-id>``.
 - ``_resolve_worktree_workspace`` falls back to a fresh per-task worktree
   when the requested path is occupied by another task's branch (heals
   pre-existing rows that still carry a shared path).
@@ -66,13 +66,17 @@ def _add_worktree(repo: Path, target: Path, branch: str) -> Path:
     return target
 
 
-def test_decompose_worktree_children_get_own_workspace(kanban_home):
+def test_decompose_worktree_children_get_own_workspace(kanban_home, tmp_path):
+    repo = _make_repo(tmp_path)
     with kb.connect() as conn:
         root = kb.create_task(conn, title="build the feature", triage=True)
+        root_workspace = _add_worktree(
+            repo, repo / ".worktrees" / root, f"wt/{root}"
+        )
         conn.execute(
             "UPDATE tasks SET workspace_kind='worktree', "
-            "workspace_path='/repo/.worktrees/root' WHERE id = ?",
-            (root,),
+            "workspace_path=? WHERE id = ?",
+            (str(root_workspace), root),
         )
         conn.commit()
 
@@ -88,15 +92,27 @@ def test_decompose_worktree_children_get_own_workspace(kanban_home):
         )
         assert child_ids is not None and len(child_ids) == 2
 
+        workspaces = {root_workspace.resolve()}
         for cid in child_ids:
             row = conn.execute(
                 "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
                 (cid,),
             ).fetchone()
             assert row["workspace_kind"] == "worktree"
-            # Each child resolves its own <repo>/.worktrees/<child-id> at
-            # dispatch; the root's literal path must never be shared.
-            assert row["workspace_path"] is None
+            # Exercise dispatch's resolver: stored metadata must produce a
+            # distinct real checkout, never the root's or a sibling's path.
+            workspace, branch = kb._resolve_worktree_workspace(kb.get_task(conn, cid))
+            assert workspace == (repo / ".worktrees" / cid).resolve()
+            assert workspace not in workspaces
+            assert branch == f"wt/{cid}"
+            assert (workspace / "README.md").read_text(encoding="utf-8") == "base\n"
+            workspaces.add(workspace)
+
+        root_branch = subprocess.run(
+            ["git", "-C", str(root_workspace), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert root_branch == f"wt/{root}"
 
 
 
@@ -124,7 +140,6 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert head == "wt/sibling"
-
 
 
 
