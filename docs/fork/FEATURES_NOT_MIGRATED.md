@@ -1,14 +1,28 @@
 # Features not included in the v0.21.0 fork
 
-This is the durable omission log. A dropped feature remains recoverable through its source branch and backup ref unless explicitly noted otherwise.
+INVENTORY MILESTONE index into [`FEATURE_DISPOSITION.md`](FEATURE_DISPOSITION.md). Decisions below are accepted for reconstruction accounting only. Old follow-up cards under `t_6d9a0f05` remain incident-held; execution continues only via the recovery writer lane. See `NEXT_SLICE.md`.
 
-| Feature | Source | Decision | Why it does not make the cut | Recovery |
-|---|---|---|---|---|
-| Incident-evidence closure lifecycle inside Hermes Agent | `wt/t_0c4486a1` / `0fb8e78acf` | `DROP_OUT_OF_SCOPE` | Hermes does not create or own incident-evidence directories. The utility is operational tooling and belongs with Ops, not in upstream core or the fork. Its focused tests pass, but usefulness does not justify repository coupling. | Remote branch pending credential restoration; local backup refs and checksummed patch are preserved. |
-| Empty task worktrees | `wt/t_0086da14`, `wt/t_16cc80ba` | `DROP_LOW_VALUE` | They contain no commit or working-tree delta from `main`; there is no feature to migrate. | Original `main` snapshot is preserved in backup refs. |
-| Redundant Tornado task worktree | `fix/tornado-6.5.8` | `DROP_LOW_VALUE` | Its tip equals `staging`; it contains no independent feature beyond the preserved staging ref. Dependency state will be regenerated from v0.21. | `staging` and `origin/staging` backup refs preserve the exact tree. |
-| Tavily-specific HTTP 429 fallback | `8bedb6fea8b721465cf7068433490ad371ea0c1a` | `DROP_SUPERSEDED` | v0.21.0 already contains the broader one-shot keyed-backend rescue from `d1eefe6accde90d15f7b70293b54100e7de3d99b`, while `d6773cf26fab5457005297fb39bedfd18842ae40` deliberately removed the Tavily backend. Replaying the old fix would restore vendor-specific coupling after its consumer was removed. | Historical commit remains reachable; any future provider-specific quota classification must use the current generic rescue path. |
-| Google Calendar stale cron-output instance recovery | `4d93606e520e6c9755813876a49c4f5c92404df6` | `DROP_SUPERSEDED` | The target `plugins/cron-calendar-sync` plugin is absent from v0.21.0. The current cron-provider extension surface is `plugins/cron_providers`, whose bundled Chronos provider does not mirror output into Google Calendar event descriptions. Carrying this eight-line fix would require resurrecting an obsolete plugin and its wider state model. | Historical commit remains reachable; if Calendar sync returns, reimplement 404/410 stale-instance adoption in a current standalone/provider plugin with fresh tests. |
-| Gateway `/new (<prompt>)` shorthand | `8c2b17a0dc0a6ad8cc5557b6fa834873ea813e71` | `DEFER_HIGHER_RISK` | The capability is not present or superseded, but this task has no evidence of current usage. The candidate changes gateway-core command parsing, destructive confirmation, active-session interruption, platform notice delivery, help, and tests, so it does not clear the value gate as a low/moderate-risk slice. | Reconsider from the historical commit only after a current user need; revalidate idle, active-session, confirmation, title-compatibility, and platform-delivery paths. |
+This is a compact omission index. The authoritative behavior, source commits/refs, value evidence, and placement decision live exactly once in the master ledger. A historical feature is never considered dropped merely because it is absent from the rebuilt branch.
 
-Future omissions must be appended with upstream evidence or an explicit value/ownership rationale; absence from the reconstruction branch is not sufficient documentation.
+## Actionable follow-up
+
+| Decision | Cluster IDs | Meaning |
+|---|---|---|
+| `KEEP` (pending migration) | FC-07, FC-22 | Value and placement passed, but implementation is intentionally deferred to isolated follow-up cards. |
+| `REWRITE` | FC-36, FC-37 | Current value is proved, but the legacy implementation must be rebuilt at a current boundary. |
+| `DEFER_REPRODUCTION` | FC-01, FC-02, FC-03, FC-16, FC-28B, FC-40 | Run the bounded v0.21 reproduction card before deciding whether to migrate. |
+| `DEFER_HUMAN_VALUE` | FC-11, FC-41, FC-42, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
+
+## Explicit drops
+
+| Decision | Cluster IDs | Recovery rule |
+|---|---|---|
+| `DROP_UPSTREAM` | FC-04, FC-05, FC-06, FC-12, FC-13, FC-14, FC-15, FC-17, FC-18, FC-19, FC-20, FC-21, FC-24, FC-25, FC-26, FC-27, FC-28, FC-29, FC-30, FC-32, FC-33, FC-34, FC-48, FC-49 | Use the current v0.21 behavior named in the master ledger; do not replay legacy patches. |
+| `DROP_LOW_VALUE` | FC-09, FC-10, FC-23, FC-31, FC-35 | Recover only after new value evidence and a fresh placement review. |
+| `DROP_OUT_OF_SCOPE` | FC-38, FC-39, FC-46 | Route to the named external/Ops owner; do not add it to this repository. |
+
+## Retained elsewhere
+
+The only clusters not listed above are the four `KEEP` clusters already reconstructed and verified: FC-08, FC-08B, FC-45, and FC-47.
+
+Coverage check: `47` omitted/deferred/pending cluster IDs + `4` retained cluster IDs = `51` total authoritative clusters.
