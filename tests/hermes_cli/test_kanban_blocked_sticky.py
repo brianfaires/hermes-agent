@@ -209,3 +209,15 @@ def test_manual_promotion_clears_creation_hold_for_later_recovery(
 
         assert kb.recompute_ready(conn) == 1
         assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_legacy_creation_hold_remains_blocked_without_data_migration(kanban_home):
+    with kb.connect() as conn:
+        tid=kb.create_task(conn,title="old operator hold", initial_status="blocked")
+        # Older versions recorded status only in the created event.
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='blocked'", (tid,))
+        assert kb.recompute_ready(conn)==0
+        assert kb.get_task(conn,tid).status=="blocked"
+        assert kb.unblock_task(conn,tid)
+        assert kb.get_task(conn,tid).status=="ready"

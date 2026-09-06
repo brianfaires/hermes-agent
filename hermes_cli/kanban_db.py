@@ -3565,7 +3565,7 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
-                if initial_status == "blocked":
+                if task_status == "blocked":
                     # Creation-time operator holds use the same durable event as
                     # block_task; readiness recomputation must not release them.
                     _append_event(conn, task_id, "blocked", {
@@ -4488,11 +4488,19 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     for that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked', 'promoted_manual') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('created', 'blocked', 'unblocked', 'promoted_manual') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
+    if row and row["kind"] == "created":
+        # Pre-port rows already store the initial status in their creation
+        # event. Honor those holds without rewriting existing task data.
+        try:
+            payload = json.loads(row["payload"] or "{}")
+            return isinstance(payload, dict) and payload.get("status") == "blocked"
+        except (TypeError, ValueError):
+            return False
     return bool(row) and row["kind"] == "blocked"
 
 
