@@ -1,0 +1,20 @@
+{
+  "authMethod": "claude.ai",
+  "is_error": false,
+  "modelUsage": {
+    "claude-haiku-4-5-20251001": {
+      "inputTokens": 908,
+      "outputTokens": 11
+    },
+    "claude-sonnet-5": {
+      "inputTokens": 2,
+      "outputTokens": 18
+    }
+  },
+  "models": [
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-5"
+  ],
+  "result": "RELEASE_CONTROLLER_READY",
+  "tools": []
+}
