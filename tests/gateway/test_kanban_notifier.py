@@ -1,14 +1,18 @@
 import asyncio
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 
-from gateway.config import Platform
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
     _release_singleton_lock,
 )
+from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.run import GatewayRunner
+from gateway.session import SessionEntry
 from hermes_cli import kanban_db as kb
 
 
@@ -31,6 +35,43 @@ class DisconnectedAdapters(dict):
         return None
 
 
+class BotIdAdapter(BasePlatformAdapter):
+    def __init__(self, bot_id: str):
+        super().__init__(
+            PlatformConfig(
+                enabled=True,
+                token=f"{bot_id}-token",
+                typing_indicator=False,
+            ),
+            Platform.TELEGRAM,
+        )
+        self.bot_id = bot_id
+        self.sent = []
+
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append(
+            {
+                "bot_id": self.bot_id,
+                "chat_id": chat_id,
+                "content": content,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=f"{self.bot_id}-msg")
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        return None
+
+    async def get_chat_info(self, chat_id: str):
+        return {"id": chat_id}
+
+
 async def _run_one_notifier_tick(monkeypatch, runner):
     real_sleep = asyncio.sleep
 
@@ -44,6 +85,19 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
+async def _run_one_notifier_tick_and_drain(monkeypatch, runner, *adapters):
+    await _run_one_notifier_tick(monkeypatch, runner)
+    pending = []
+    for adapter in adapters:
+        pending.extend(
+            task
+            for task in getattr(adapter, "_background_tasks", set())
+            if not task.done()
+        )
+    if pending:
+        await asyncio.gather(*pending)
+
+
 def _make_runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
@@ -52,6 +106,93 @@ def _make_runner(adapter):
     # Most tests model the default gateway after its dispatcher acquired the
     # singleton lock. Tests for startup or non-owner gateways clear this.
     runner._kanban_dispatcher_lock_handle = object()
+    return runner
+
+
+def _make_real_path_runner(default_adapter, ang_adapter, tmp_path):
+    runner = GatewayRunner(
+        GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(
+                    enabled=True,
+                    token="default-token",
+                    typing_indicator=False,
+                )
+            },
+            multiplex_profiles=True,
+        )
+    )
+    runner._running = True
+    runner.adapters = {Platform.TELEGRAM: default_adapter}
+    runner._profile_adapters = {"ang": {Platform.TELEGRAM: ang_adapter}}
+    runner._kanban_sub_fail_counts = {}
+    runner._kanban_dispatcher_lock_handle = object()
+    runner._kanban_notifier_profile = "ang"
+    runner._active_profile_name = lambda: "ang"
+    runner._resolve_profile_home_for_source = lambda _source: tmp_path
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._set_session_env = lambda _context: []
+    runner._reset_session_env = lambda _tokens: None
+    runner._is_user_authorized_for_source = lambda _source: True
+    runner._external_drain_active = False
+    runner._is_telegram_topic_root_lobby = lambda _source: False
+    runner._cache_session_source = lambda _key, _source: None
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda _key, _generation: True
+    runner._reply_anchor_for_event = lambda _event: None
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+    runner._prepare_profile_scoped_inbound_message_text = AsyncMock(
+        side_effect=lambda *, event, **_kwargs: event.text
+    )
+    runner._refresh_agent_cache_message_count = AsyncMock()
+    runner._run_post_turn_hooks = AsyncMock()
+    runner._clear_durable_active_turn = AsyncMock()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "agent final from ang",
+            "messages": [
+                {"role": "user", "content": "wake"},
+                {"role": "assistant", "content": "agent final from ang"},
+            ],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+            "api_calls": 1,
+            "failed": False,
+        }
+    )
+    runner.hooks = MagicMock()
+    runner.hooks.emit = AsyncMock()
+
+    entry = SessionEntry(
+        session_key="agent:ang:telegram:dm:shared-dm",
+        session_id="sess-ang",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        origin=None,
+    )
+    runner.session_store = MagicMock()
+    runner.session_store._entries = {}
+    runner._async_session_store = MagicMock()
+    runner._async_session_store._store = runner.session_store
+    runner._async_session_store.get_or_create_session = AsyncMock(return_value=entry)
+    runner._async_session_store.load_transcript = AsyncMock(return_value=[])
+    runner._async_session_store.append_to_transcript = AsyncMock()
+    runner._async_session_store.update_session = AsyncMock()
+    runner._async_session_store.clear_resume_pending = AsyncMock()
+    runner._async_session_store.has_any_sessions = AsyncMock(return_value=True)
+    runner._async_session_store.mark_turn_active = AsyncMock(return_value=None)
+
+    for adapter, handler in (
+        (default_adapter, runner._primary_message_handler()),
+        (ang_adapter, runner._make_profile_message_handler("ang")),
+    ):
+        adapter.gateway_runner = runner
+        adapter.set_message_handler(handler)
+        adapter.set_busy_session_handler(runner._handle_active_session_busy_message)
+    ang_adapter._owner_profile = "ang"
     return runner
 
 
@@ -166,6 +307,58 @@ def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
     message = adapter.sent[0]["text"]
     assert tid in message
     assert "blocked" in message
+
+
+def test_multiplex_named_profile_notifier_uses_profile_bot_for_ping_and_wake_final(
+    tmp_path, monkeypatch,
+):
+    """notify+wake must not fall back to the primary Telegram bot.
+
+    This exercises the real notifier -> deliver_wake -> BasePlatformAdapter
+    background final-send path. The active profile is deliberately reported as
+    ``ang`` to match a background task inheriting Ang's profile runtime scope;
+    in multiplex mode the Ang profile adapter still owns the Telegram bot.
+    """
+    db_path = tmp_path / "ang-notify-wake.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="ang-owned completion",
+            assignee="worker",
+            session_id="agent:ang:telegram:dm:shared-dm",
+        )
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="shared-dm",
+            chat_type="dm",
+            notifier_profile="ang",
+            delivery_mode="notify+wake",
+        )
+        kb.complete_task(conn, tid, summary="done")
+    finally:
+        conn.close()
+
+    default_adapter = BotIdAdapter("default-bot")
+    ang_adapter = BotIdAdapter("ang-bot")
+    runner = _make_real_path_runner(default_adapter, ang_adapter, tmp_path)
+
+    asyncio.run(
+        _run_one_notifier_tick_and_drain(
+            monkeypatch, runner, default_adapter, ang_adapter
+        )
+    )
+
+    assert default_adapter.sent == []
+    ang_contents = [item["content"] for item in ang_adapter.sent]
+    assert any(tid in content for content in ang_contents)
+    assert "agent final from ang" in ang_contents
+    assert {item["bot_id"] for item in ang_adapter.sent} == {"ang-bot"}
 
 
 def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
