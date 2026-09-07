@@ -6116,7 +6116,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 auto_cmd = _build_auto_slash_command(
                     cmd_def.name,
                     cmd_def.description,
-                    cmd_def.args_hint,
+                    cmd_def.gateway_args_hint or cmd_def.args_hint,
                 )
                 try:
                     tree.add_command(auto_cmd)
