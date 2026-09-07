@@ -1,0 +1,14 @@
+# Candidate only. Merge through Ang t_ddd2e9dc / Ops; do not replace config.
+plugins:
+  enabled: []  # Add private-journal only when this profile is activated.
+  entries:
+    private-journal:
+      batch_enabled: false
+      provider: openrouter
+      model: null  # Ops chooses an explicit inexpensive model; no automatic fallback.
+      vault_path: null  # Absolute path to authoritative journal vault.
+      schema_root: null # External root containing only the three documented schema files.
+      bank_id: null  # Explicit dedicated bank for this profile; never the general memory bank.
+      hindsight_url: null # Existing Hindsight service; no service/bank creation or auth repair.
+# Existing credential sources supply OPENROUTER_API_KEY and HINDSIGHT_API_KEY.
+# Retention deletion has NO interval and is OFF. No retention setting blocks activation.

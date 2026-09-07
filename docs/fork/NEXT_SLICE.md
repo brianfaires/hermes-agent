@@ -26,7 +26,7 @@ supported drain/stop/update/start procedure only within the release window
 live gateway has no v0.21 control socket; do not assume the new pause API is
 available before upgrade or call a Git checkout byte-atomic.
 
-FC-37 (Hindsight history privacy), FC-11, FC-42/43/44 remain deferred. FC-41
+FC-37 (Hindsight history privacy), FC-11, FC-43/44 remain deferred. FC-42 is an independently reviewed, undeployed candidate (`t_71fd77a3`): integration/hosted CI/release belongs to Ang `t_ddd2e9dc`, configuration to Ops. Its installation packet keeps retention deletion off and does not select a deletion interval. FC-41
 (gateway `/new (<prompt>)`) was resolved by Brian and now has an implemented,
 reviewed-pending candidate that is NOT deployed. No new
 privacy/auth policy or release controller is included. Old worktrees, refs and

@@ -1,3 +1,5 @@
+import { hasPrivateCommandsCatalog, isPrivateCommand } from '../app/privateCommands/state.js'
+import { looksLikeSlashCommand } from '../domain/slash.js'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -50,6 +52,12 @@ export function append(line: string) {
   if (!trimmed) {
     return
   }
+
+  if (!hasPrivateCommandsCatalog() && looksLikeSlashCommand(trimmed)) {
+    return
+  }
+
+  if (isPrivateCommand(trimmed)) return
 
   const items = load()
 

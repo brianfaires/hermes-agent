@@ -9955,6 +9955,12 @@ class TelegramAdapter(BasePlatformAdapter):
         await self._ensure_forum_commands(msg)
 
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
+        from hermes_cli.private_commands import match_private_command
+        from hermes_cli.profiles import get_profile_dir
+        private_home = get_profile_dir(event.source.profile) if event.source.profile else None
+        if match_private_command(event.text, home=private_home):
+            await self.handle_message(event)
+            return
         event.text = self._clean_bot_trigger_text(event.text)
         await self._cache_replied_media(msg, event)
         event = self._apply_telegram_group_observe_attribution(event)

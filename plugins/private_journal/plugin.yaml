@@ -1,0 +1,4 @@
+name: private-journal
+version: 0.1.0
+description: "Private /log capture and nightly one-batch journal processor."
+author: "NousResearch"

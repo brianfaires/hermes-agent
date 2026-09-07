@@ -6284,6 +6284,26 @@ class BasePlatformAdapter(ABC):
             )
             return
 
+        # Private commands use the authorized runner even when cold or busy,
+        # without background processing hooks or session lifecycle bookkeeping.
+        from hermes_cli.private_commands import match_private_command
+        private_home = None
+        if event.get_command() and getattr(event.source, "profile", None):
+            from hermes_cli.profiles import get_profile_dir
+            private_home = get_profile_dir(event.source.profile)
+        if event.get_command() and match_private_command(event.text, home=private_home):
+            try:
+                response = await self._message_handler(event)
+                if response:
+                    await self._send_with_retry(
+                        chat_id=event.source.chat_id, content=str(response),
+                        reply_to=_reply_anchor_for_event(event),
+                        metadata=_thread_metadata_for_source(event.source, _reply_anchor_for_event(event)),
+                    )
+            except Exception:
+                logger.warning("Private command delivery failed")
+            return
+
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
         # cancelled), the lock is stale.  Clear it and fall through to

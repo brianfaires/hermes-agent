@@ -8697,7 +8697,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         loop via the Task callback, so it must be cheap and non-blocking.
         """
         try:
-            text = (getattr(buffer, "text", "") or "").strip()
+            raw_text = getattr(buffer, "text", "") or ""
+            from hermes_cli.private_commands import match_private_command
+            if match_private_command(raw_text.lstrip()):
+                self.process_command(raw_text.lstrip())
+                buffer.reset(append_to_history=False)
+                app = getattr(self, "_app", None)
+                if app is not None:
+                    app.invalidate()
+                return
+            text = raw_text.strip()
         except Exception:
             return
         if not text:
@@ -8778,7 +8787,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def _reset_input_buffer(self, buffer) -> None:
         """Clear an input buffer after a programmatic submit (best-effort)."""
         try:
-            buffer.reset(append_to_history=True)
+            from hermes_cli.private_commands import match_private_command
+            private = match_private_command((getattr(buffer, "text", "") or "").lstrip())
+            buffer.reset(append_to_history=not bool(private))
         except Exception:
             try:
                 buffer.text = ""
@@ -12503,6 +12514,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         """
         # Lowercase only for dispatch matching; preserve original case for arguments
         cmd_lower = command.lower().strip()
+        from hermes_cli.private_commands import match_private_command, invoke_private_command
+        private_match = match_private_command(command.lstrip())
+        if private_match:
+            _cprint(invoke_private_command(private_match, home=get_hermes_home()))
+            return True
+
         cmd_original = command.strip()
 
         # Resolve aliases via central registry so adding an alias is a one-line
@@ -18555,6 +18572,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 event.app.current_buffer.cursor_position = len(continued)
                 event.app.invalidate()
                 return
+            from hermes_cli.private_commands import match_private_command
+            if match_private_command(raw_text.lstrip()):
+                self.process_command(raw_text.lstrip())
+                event.app.current_buffer.reset(append_to_history=False)
+                event.app.invalidate()
+                return
             text = raw_text.strip()
             has_images = bool(self._attached_images)
             if text or has_images:
@@ -19458,7 +19481,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             buf = event.app.current_buffer
             if not (buf.text or cli_ref._attached_images):
                 return
-            buf.reset(append_to_history=bool(buf.text))
+            from hermes_cli.private_commands import match_private_command
+            private = match_private_command((buf.text or "").lstrip())
+            buf.reset(append_to_history=bool(buf.text) and not bool(private))
             cli_ref._attached_images.clear()
             event.app.invalidate()
 

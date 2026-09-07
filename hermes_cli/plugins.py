@@ -2185,6 +2185,8 @@ class PluginContext:
         description: str = "",
         args_hint: str = "",
         argument_mode: str | None = None,
+        *,
+        private: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
@@ -2205,6 +2207,11 @@ class PluginContext:
         ``argument_mode`` tells the desktop composer how text after the command
         name behaves (``options``, ``text``, or ``mixed``). Omit it to infer
         ``text`` whenever ``args_hint`` is set, so ``/myplugin `` stays typeable.
+
+        ``private=True`` opts into session-free dispatch before ordinary hooks,
+        queues and history. The handler receives verbatim text after one command
+        delimiter and an explicit ``home=Path`` runtime profile. Handlers must
+        return only a safe acknowledgement; exceptions are sanitized by dispatch.
 
         Names conflicting with built-in commands are rejected with a warning.
         """
@@ -2241,6 +2248,7 @@ class PluginContext:
             "plugin_key": self.manifest.key or self.manifest.name,
             "args_hint": hint,
             "argument_mode": mode,
+            "private": bool(private),
         }
         self._manager._plugin_commands[clean] = entry
         handle = self._track_replacement(
