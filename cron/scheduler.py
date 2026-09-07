@@ -7222,7 +7222,7 @@ def _run_one_job_body(
 
         # The attempt is claimed durably before executor/provider dispatch and
         # becomes running only immediately before the actual run.
-        mark_execution_running(execution_id)
+        mark_execution_running(execution_id, job=job)
 
         # Run and deliver under the profile's secret scope. get_secret() fails
         # closed outside a scope once profile isolation is active, and cron
@@ -7555,6 +7555,7 @@ def _run_one_job_body(
             success=success,
             error=error,
             delivery_outcome=delivery_outcome,
+            final_response=final_response,
         )
         return True
 

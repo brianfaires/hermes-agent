@@ -1,0 +1,13 @@
+name: cron_calendar_mirror
+version: 1.0.0
+description: >-
+  Deterministic mirror of this profile's cron schedule and run
+  results onto a Hermes-owned secondary Google Calendar. It is an integration,
+  not a cron trigger provider: it never schedules, fires, mutates, or gates any
+  cron job. Each reconcile projects a finite occurrence horizon from the
+  scheduler's own next_run_at plus one event per durable execution-ledger
+  record, writes them under deterministic event ids, and archives only its own
+  stale forecast events. Requires the profile's own google-workspace token; no
+  new OAuth scopes.
+author: brian
+kind: standalone
