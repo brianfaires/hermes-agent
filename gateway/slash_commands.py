@@ -56,6 +56,33 @@ logger = logging.getLogger("gateway.run")
 _RESET_CLEANUP_TIMEOUT_S = 30.0
 
 
+def parse_new_session_args(args: str) -> tuple[str, str]:
+    """Split gateway ``/new`` arguments into ``(title, inline_prompt)``.
+
+    ``/new <name>`` keeps its title semantics.  ``/new (<prompt>)`` resets
+    into a fresh session and delivers ``<prompt>`` as that session's first
+    user message.  The two modes are mutually exclusive: exactly one of the
+    returned strings is ever non-empty.
+
+    Malformed input is resolved deterministically and without losing what
+    the user typed:
+
+    * A leading ``(`` always selects prompt mode, and a single trailing
+      ``)`` is stripped.  A missing closing paren is tolerated so a long
+      prompt is never silently truncated into a session title.
+    * Empty parentheses (``/new ()``, ``/new (``) carry no message, so they
+      degrade to a bare ``/new`` reset with no title.
+    * A ``(`` anywhere other than the start is ordinary title text.
+    """
+    text = str(args or "").strip()
+    if not text.startswith("("):
+        return text, ""
+    inner = text[1:]
+    if inner.endswith(")"):
+        inner = inner[:-1]
+    return "", inner.strip()
+
+
 def _clean_str(value: Any) -> str:
     """Strip and return a non-empty string value, or empty string."""
     return value.strip() if isinstance(value, str) and value.strip() else ""
@@ -292,8 +319,10 @@ class GatewaySlashCommandsMixin:
             new_entry = await self.async_session_store.get_or_create_session(source, force_new=True)
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
-        # Set session title if provided with /new <title>
-        _title_arg = event.get_command_args().strip()
+        # Set session title if provided with /new <title>.  A parenthesized
+        # `/new (<prompt>)` payload is a first message, not a title, so
+        # parse_new_session_args leaves the title empty for it.
+        _title_arg, _ = parse_new_session_args(event.get_command_args())
         _title_note = ""
         if _title_arg and self._session_db and new_entry:
             from hermes_state import SessionDB
@@ -351,6 +380,80 @@ class GatewaySlashCommandsMixin:
         if session_info:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
+
+    def _claim_new_command_event(self, event: MessageEvent) -> bool:
+        """Claim an inbound /new before interruption or confirmation registration.
+
+        This synchronous check has no await: concurrent deliveries on the gateway
+        loop cannot both claim it. Keep the existing bounded, five-minute dedup
+        cache on the runner, outside conversation state cleared by reset. Missing
+        transport IDs retain ordinary behavior; neither text nor session IDs are
+        delivery identities.
+        """
+        if not event.message_id:
+            return True
+        from gateway.platforms.helpers import MessageDeduplicator
+        from hermes_constants import get_hermes_home
+
+        cache = getattr(self, "_new_command_dedup", None)
+        if cache is None:
+            cache = self._new_command_dedup = MessageDeduplicator()
+        source = event.source
+        # Include source identity explicitly even when session policy merges
+        # users/threads into one conversation. A transport ID is only local to
+        # its profile, workspace, chat and thread.
+        identity = (
+            str(get_hermes_home().resolve()), source.profile,
+            source.platform.value, source.scope_id, source.chat_id,
+            source.thread_id, source.user_id, event.message_id,
+        )
+        return not cache.is_duplicate(repr(identity))
+
+    async def _reset_and_deliver_new_prompt(
+        self, event: MessageEvent
+    ) -> Union[str, EphemeralReply, None]:
+        """Run the ``/new`` reset, then deliver a ``/new (<prompt>)`` payload.
+
+        Shared by the idle and busy ``/new`` dispatch paths so the
+        parenthesized prompt becomes the first user turn of the NEW session
+        for the claimed delivery. Without an inline prompt this is plain
+        :meth:`_handle_reset_command`, so bare ``/new`` and ``/new <name>``
+        are unchanged.
+
+        The reset banner is sent out-of-band because this handler's return
+        value has to be the first turn's reply — the dispatcher sends exactly
+        one reply, and swallowing the agent's answer to show the banner
+        instead would lose the response the user actually asked for.
+        """
+        _, inline_prompt = parse_new_session_args(event.get_command_args())
+        reset_result = await self._handle_reset_command(event)
+        if not inline_prompt:
+            return reset_result
+
+        source = event.source
+        if reset_result:
+            try:
+                adapter = self._adapter_for_source(source)
+                if adapter is not None:
+                    await adapter.send(
+                        str(source.chat_id),
+                        str(reset_result),
+                        metadata=self._thread_metadata_for_source(source),
+                    )
+            except Exception:
+                logger.debug(
+                    "/new inline-prompt reset notice send failed", exc_info=True
+                )
+
+        # Re-enter the normal pipeline with the payload as ordinary user text.
+        # The reset above rotated the session and released the running-agent
+        # slot, so this dispatches as the new session's first turn — and it
+        # goes through the same authorization, routing, and busy guards any
+        # other inbound message does.
+        prompt_event = dataclasses.replace(
+            event, text=inline_prompt, allow_gateway_control=False
+        )
+        return await self._handle_message(prompt_event)
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.

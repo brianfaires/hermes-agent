@@ -17926,8 +17926,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             invalidation_reason="new_command",
         )
         # Clean up the running agent entry so the reset handler
-        # doesn't think an agent is still active.
-        return await self._handle_reset_command(event)
+        # doesn't think an agent is still active.  A `/new (<prompt>)`
+        # payload is then delivered as the new session's first turn; the
+        # mid-run interrupt above still happens first, and bare /new keeps
+        # its existing no-confirmation mid-run behavior.
+        return await self._reset_and_deliver_new_prompt(event)
 
     async def _busy_queue_command(self, event: MessageEvent, quick_key: str, source):
         # /queue <prompt> — queue without interrupting.
@@ -18699,6 +18702,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # reject). Unrecognized commands and plain text fall through
             # to the interrupt/queue logic below.
             if _cmd_def_inner:
+                if _cmd_def_inner.name == "new" and not self._claim_new_command_event(event):
+                    return None
                 return await self._dispatch_busy_slash_command(
                     event, _cmd_def_inner, _quick_key, source,
                 )
@@ -19008,10 +19013,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await plain_handler(event)
 
         if canonical == "new":
+            if not self._claim_new_command_event(event):
+                return None
             if await asyncio.to_thread(self._is_telegram_topic_root_lobby, source):
                 return self._telegram_topic_root_new_message()
+            # Native confirmation callbacks resolve outside the inbound task's
+            # context. Capture its resolved home now, across reset AND payload
+            # lookup; keep the event's transport authorization provenance intact.
+            from hermes_constants import get_hermes_home
+            reset_home = get_hermes_home()
+
             async def _do_reset():
-                return await self._handle_reset_command(event)
+                with _profile_runtime_scope(reset_home):
+                    return await self._reset_and_deliver_new_prompt(event)
             return await self._maybe_confirm_destructive_slash(
                 event=event,
                 command="new",

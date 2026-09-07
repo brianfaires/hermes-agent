@@ -92,6 +92,11 @@ class CommandDef:
     category: str                      # "Session", "Configuration", etc.
     aliases: tuple[str, ...] = ()      # alternative names: ("bg",)
     args_hint: str = ""                # argument placeholder: "<prompt>", "[name]"
+    # Argument placeholder for gateway surfaces only (gateway /help, Discord
+    # slash-command option description).  Set it when a command accepts extra
+    # syntax that the CLI REPL does not implement, so CLI help never advertises
+    # a form that only works in chat.  Falls back to ``args_hint``.
+    gateway_args_hint: str = ""
     subcommands: tuple[str, ...] = ()  # tab-completable subcommands
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
@@ -150,6 +155,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, busy_policy="dispatch", busy_handler="start"),
     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
                aliases=("reset",), args_hint="[name]",
+               gateway_args_hint="[name] | (<prompt>)",
                busy_policy="interrupt_then_dispatch", busy_handler="new"),
     CommandDef("topic", "Enable or inspect Telegram DM topic sessions", "Session",
                gateway_only=True, args_hint="[off|help|session-id]"),
@@ -672,7 +678,8 @@ def gateway_help_lines() -> list[str]:
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
-        args = f" {cmd.args_hint}" if cmd.args_hint else ""
+        _hint = cmd.gateway_args_hint or cmd.args_hint
+        args = f" {_hint}" if _hint else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
             # Skip internal aliases like reload_mcp (underscore variant)

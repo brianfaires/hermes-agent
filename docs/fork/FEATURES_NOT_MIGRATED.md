@@ -9,7 +9,7 @@ This is a compact omission index. The authoritative behavior, source commits/ref
 | Decision | Cluster IDs | Meaning |
 |---|---|---|
 | `REWRITE` (deferred) | FC-37 | Hindsight history privacy remains outside this approval; no history/data-policy rewrite. |
-| `DEFER_HUMAN_VALUE` | FC-11, FC-41, FC-42, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
+| `DEFER_HUMAN_VALUE` | FC-11, FC-42, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
 
 ## Explicit drops
 
@@ -21,6 +21,6 @@ This is a compact omission index. The authoritative behavior, source commits/ref
 
 ## Retained elsewhere
 
-Already reconstructed/verified on this branch: FC-08, FC-08B, FC-02, FC-03, FC-05, FC-07, FC-13, FC-25, FC-40, FC-45, FC-47, FC-16, FC-22, FC-28B, FC-36, and FC-49. Current-staging SD-01/02 are also retained; see the master ledger supplemental reconciliation.
+Already reconstructed/verified on this branch: FC-08, FC-08B, FC-02, FC-03, FC-05, FC-07, FC-13, FC-25, FC-40, FC-45, FC-47, FC-16, FC-22, FC-28B, FC-36, and FC-49. FC-41 is an implemented but **undeployed** candidate (Brian resolved its UAT row); it is not part of any qualified release. Current-staging SD-01/02 are also retained; see the master ledger supplemental reconciliation.
 
 Coverage check: remaining omitted/deferred/pending cluster IDs + retained cluster IDs = `51` total authoritative clusters.

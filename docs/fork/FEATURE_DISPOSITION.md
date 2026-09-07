@@ -1,6 +1,6 @@
 # Feature disposition ledger — Hermes v0.21.0 reconstruction
 
-RELEASE PREPARATION UPDATE (2026-09-06). Brian explicitly approved implementation and qualified release of FC-16, FC-22, FC-28B and FC-36; this supersedes their historical freezes below. FC-37 and FC-11/41–44 remain deferred. The protected inventory remains immutable; current main/staging reconciliation is recorded separately below. Exact candidate/review/test status lives in the external `evidence-20260906/handoff.json`, not in historical review claims.
+RELEASE PREPARATION UPDATE (2026-09-06). Brian explicitly approved implementation and qualified release of FC-16, FC-22, FC-28B and FC-36; this supersedes their historical freezes below. FC-37 and FC-11/42–44 remain deferred. FC-41 was subsequently resolved by Brian (see `BRIAN_UAT.md`) and now carries an implemented, undeployed candidate. The protected inventory remains immutable; current main/staging reconciliation is recorded separately below. Exact candidate/review/test status lives in the external `evidence-20260906/handoff.json`, not in historical review claims.
 
 This is the authoritative feature-cluster map for the preserved pre-cleanup fork. Absence from the reconstruction branch is never an implicit drop.
 
@@ -24,11 +24,11 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | Decision | Clusters |
 |---|---:|
 | `KEEP` | 15 |
-| `REWRITE` | 2 |
+| `REWRITE` | 3 |
 | `DROP_UPSTREAM` | 19 |
 | `DROP_LOW_VALUE` | 7 |
 | `DROP_OUT_OF_SCOPE` | 3 |
-| `DEFER_HUMAN_VALUE` | 5 |
+| `DEFER_HUMAN_VALUE` | 4 |
 | `DEFER_REPRODUCTION` | 0 |
 | **Total** | **51** |
 
@@ -78,7 +78,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 | FC-38 | Cron Calendar lifecycle relay to Ops | I135 | `DROP_OUT_OF_SCOPE` | The relay targets external operational coordination and inherits the disabled Calendar consumer; Ops owns operational tooling and status relays. | Ops-owned automation outside Hermes source. |
 | FC-39 | Google Workspace capability broker | I136 | `DROP_OUT_OF_SCOPE` | This is a user-specific external SaaS broker with its own policy/process surface and no current repo consumer; third-party products do not belong in Hermes core or bundled plugins. | Standalone external plugin/service owned outside this repo. |
 | FC-40 | Stream full backup archives to stdout | I138 | `KEEP` | Reproduced and migrated on recovery tip: `hermes backup -o -` streams ZIP bytes to stdout, status on stderr, optional `--staging-dir` for SQLite snapshots, incomplete/empty streams exit nonzero, redirected self-output excluded by inode. File-mode still stages beside the zip. | `hermes_cli/backup.py` + `hermes_cli/subcommands/backup.py`; checkpoint `brian-rebuild-v0.21.0-backup-stdout-stream`. |
-| FC-41 | Gateway `/new (<prompt>)` shorthand | I139 | `DEFER_HUMAN_VALUE` | No current usage evidence establishes value, while the change spans destructive confirmation, active-session interruption, command parsing, title compatibility, and platform delivery. | Brian must confirm the interaction is wanted before any gateway-core design. |
+| FC-41 | Gateway `/new (<prompt>)` shorthand | I139 | `REWRITE` | Reviewed implemented candidate, **NOT deployed**, task `t_95dca466`, branch `ang/t_95dca466-new-prompt`, base `9ccb53e3d15730fcae88b086ea954dfc377574aa`. Brian resolved the product hold. I139 informed a rewrite against the current lifecycle, not a wholesale replay. Prompt delivery is literal user text after reset; bare/title behavior, idle confirmation/cancellation and busy interruption remain. Deferred confirmation retains the source home. Scoped inbound duplicate suppression reuses the existing process-local 300-second/2,000-entry cache and requires a transport ID; it is not crash-durable exactly-once delivery. Real per-profile store regressions prove new-session/history isolation. Focused RED at base, then **111 passed** in final parent pytest; one independent blocker review and targeted closure resolved three P1s. | Gateway-only surface; `gateway/run.py` hotspot (idle/busy dispatch, scoped confirmation and pre-dispatch dedupe), with helpers in `gateway/slash_commands.py`. Candidate is review-qualified, not on staging/main or live. Exact SHA/tree, remote preservation and test/review evidence belong to the task handoff; integration/release remains parent-owned. |
 | FC-42 | Private `/log` journal capture and nightly batch | I141, I153 | `DEFER_HUMAN_VALUE` | The plugin is absent and not enabled in read-only config. Privacy, retention, and usefulness are subjective; the duplicated branch commits do not create independent value evidence. | Brian decision first; if approved, isolated profile plugin plus cron skill/job, never core. |
 | FC-43 | Block Personal History Log retains in Hindsight | I142 | `DEFER_HUMAN_VALUE` | The target journal/history workflow is not active, and a content-name-based retain gate is privacy policy rather than a generic memory invariant. | Brian must define the data boundary; then implement in a profile memory-policy plugin, isolated from FC-42. |
 | FC-44 | Inactive release-switch controller | I143, I144, I145, I146, I147, I148, I149, I150 | `DEFER_HUMAN_VALUE` | The controller was explicitly inactive and v0.21 now has richer update, drain, restart, and recovery machinery. Whether Brian wants a separate human-authorized staging-to-main controller remains a product/operations decision. | Brian decision first; if retained, isolated Critical release-control service with explicit approval and rollback proofs. |
@@ -90,7 +90,7 @@ Sole-writer preflight found the reconstruction worktree clean on `brian/reconstr
 
 ## Ordered follow-up backlog
 
-Historical reference only: these ten boundaries were created in `triage` by the old lane and remain incident-held with t_6d9a0f05 and all generated descendants. Do not release, execute, or auto-decompose them. Recovery task t_99b38c75 is the sole new writer in its own linked worktree. Human-value-deferred clusters FC-11 and FC-41–FC-44 require Brian's decision, not automatic migration.
+Historical reference only: these ten boundaries were created in `triage` by the old lane and remain incident-held with t_6d9a0f05 and all generated descendants. Do not release, execute, or auto-decompose them. Recovery task t_99b38c75 is the sole new writer in its own linked worktree. Human-value-deferred clusters FC-11 and FC-42–FC-44 require Brian's decision, not automatic migration; FC-41 has been decided and is no longer held.
 
 | Order | Card | Cluster | Gate |
 |---:|---|---|---|
