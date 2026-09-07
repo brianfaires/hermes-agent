@@ -13,4 +13,4 @@ Retained source (`KEEP` or implemented `REWRITE`): FC-02, FC-03, FC-05, FC-07, F
 
 Programmatically computed accounting: 21 retained + 29 explicit drops + 1 superseded = 51 clusters; 0 deferred. The 157 individual historical items remain unchanged, once each in the master appendix.
 
-Release owner `t_ddd2e9dc`; Ops prerequisite `t_907703d2`. Old incident/reconstruction graphs remain held. Other features unchanged. See [NEXT_SLICE.md](NEXT_SLICE.md) for the fixed original release window and remaining parent-owned gates.
+Release owner `t_ddd2e9dc`; Ops prerequisite `t_907703d2`. Old incident/reconstruction graphs remain held. Other features unchanged. See [NEXT_SLICE.md](NEXT_SLICE.md) for the renewed one-batch authorization and remaining parent-owned gates.
