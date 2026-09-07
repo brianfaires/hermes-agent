@@ -73,9 +73,11 @@ A configured `bank_id_template` must contain exactly one plain `{profile}` and
 otherwise only literal ASCII letters, digits, dashes, or underscores. Its profile
 name and rendered bank must survive the provider's normalization unchanged.
 When the template is absent or empty, the CLI accepts only an explicit static
-`bank_id` or the existing legacy `banks.hermes.bankId`. Static/shared banks,
-missing/unknown placeholders, format conversions, and sanitization ambiguity
-fail closed **before SDK construction**. Malformed templates never fall back to
+`bank_id` or the existing legacy `banks.hermes.bankId`. Missing/unknown
+placeholders, format conversions, and sanitization ambiguity fail closed
+**before SDK construction**. A static/shared bank is routing configuration,
+not a per-profile ACL: the OS-owner authorization and complete-response
+session/profile provenance checks below remain mandatory. Malformed templates never fall back to
 a static bank. Bank identifiers are validated as safe backend IDs: no URLs, dot
 segments, or path traversal. For example, `hermes-{profile}` binds profile
 `alpha` to `hermes-alpha`. Cloud and existing external services are supported;
