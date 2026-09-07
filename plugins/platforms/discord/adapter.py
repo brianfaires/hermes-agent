@@ -397,6 +397,9 @@ def _metadata_marks_nonconversational(metadata: Optional[Dict[str, Any]]) -> boo
 def _looks_like_nonconversational_history_message(content: str) -> bool:
     """Fallback recognizer for legacy status bumps missing persisted IDs."""
     text = content or ""
+    from hermes_cli.private_commands import match_private_command
+    if match_private_command(text):
+        return True
     return any(pattern.match(text) for pattern in _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS)
 
 
@@ -5823,6 +5826,8 @@ class DiscordAdapter(BasePlatformAdapter):
         the "thinking..." indicator is replaced with that text; otherwise it
         is deleted so the channel isn't cluttered.
         """
+        # Never include plugin arguments in generic logging or auth alerts.
+        command_label = command_text.split(maxsplit=1)[0]
         # Log the invoker so ghost-command reports can be triaged.  Discord
         # native slash invocations are always user-initiated (no bot can fire
         # them), but mobile autocomplete / keyboard shortcuts / other users
@@ -5832,7 +5837,7 @@ class DiscordAdapter(BasePlatformAdapter):
             _chan_id = getattr(interaction.channel, "id", None) or getattr(interaction, "channel_id", None)
             logger.info(
                 "[Discord] slash '%s' invoked by user=%s id=%s channel=%s guild=%s",
-                command_text,
+                command_label,
                 getattr(_user, "name", "?"),
                 getattr(_user, "id", "?"),
                 _chan_id,
@@ -5843,7 +5848,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Auth gate — must run before defer() so an ephemeral rejection can
         # be delivered on the still-unresponded interaction.
-        if not await self._check_slash_authorization(interaction, command_text):
+        if not await self._check_slash_authorization(interaction, command_label):
             return
 
         deferred_response = False
@@ -5856,7 +5861,7 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning(
                 "[Discord] slash %s: interaction expired before defer. "
                 "Executing command anyway, skipping interaction followup.",
-                command_text,
+                command_label,
             )
         event = self._build_slash_event(interaction, command_text)
         await self.handle_message(event)
@@ -6066,7 +6071,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
                     async def _handler(interaction: discord.Interaction, args: str = ""):
                         await self._run_simple_slash(
-                            interaction, f"/{__name} {args}".strip()
+                            interaction, f"/{__name} {args}"
                         )
                     _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
                     return _handler
@@ -8205,6 +8210,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Save mention-stripped text before auto-threading since create_thread()
         # can clobber message.content, breaking /command detection in channels.
+        delivered_content = message.content
         raw_content = message.content.strip()
         normalized_content = raw_content
         mention_prefix = False
@@ -8400,6 +8406,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 or self._derive_auto_thread_name(message.content or "")
             ) if auto_threaded_channel is not None else None,
         )
+
+        from hermes_cli.private_commands import match_private_command
+        from hermes_cli.profiles import get_profile_dir
+        private_home = get_profile_dir(source.profile) if source.profile else None
+        if match_private_command(delivered_content, home=private_home):
+            event = MessageEvent(text=delivered_content, message_type=MessageType.COMMAND,
+                                 source=source, message_id=str(message.id), timestamp=message.created_at)
+            await self.handle_message(event)
+            return True
 
         # Build media URLs -- download image attachments to local cache so the
         # vision tool can access them reliably (Discord CDN URLs can expire).

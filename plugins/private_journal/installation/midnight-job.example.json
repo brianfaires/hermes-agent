@@ -1,0 +1,9 @@
+{
+  "prompt": "",
+  "schedule": "0 0 * * *",
+  "name": "Private journal midnight batch",
+  "no_agent": true,
+  "script": "private-journal-midnight.py",
+  "deliver": "local",
+  "attach_to_session": false
+}

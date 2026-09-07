@@ -1,3 +1,4 @@
+import { resetPrivateCommands, setPrivateCommands } from './privateCommands/state.js'
 import { execFile } from 'child_process'
 
 import { forceRedraw, onTerminalBackground, onTerminalForeground } from '@hermes/ink'
@@ -655,6 +656,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       applySkin(skin)
     }
 
+    resetPrivateCommands()
+
     // Kick off the config fetch once the gateway is actually ready. If handler
     // construction does this during React render, a startup transport error can
     // report through sys(), mutate transcript state, and trip React's
@@ -675,6 +678,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
+        setPrivateCommands(r.private_commands ?? [])
         setCatalog({
           canon: (r.canon ?? {}) as Record<string, string>,
           categories: r.categories ?? [],

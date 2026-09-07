@@ -1,0 +1,11 @@
+# Install under the explicitly selected profile's HERMES_HOME/scripts/.
+# Replace these three placeholders during parent-owned configuration handoff.
+import os
+import sys
+import runpy
+SOURCE = '/ABSOLUTE/REVIEWED/SOURCE'
+PROFILE_HOME = '/ABSOLUTE/PROFILE/HOME'
+sys.path.insert(0, SOURCE)
+os.environ['HERMES_HOME'] = PROFILE_HOME
+sys.argv = ['process_private_journal.py', '--home', PROFILE_HOME]
+runpy.run_path(SOURCE + '/plugins/private_journal/scripts/process_private_journal.py', run_name='__main__')

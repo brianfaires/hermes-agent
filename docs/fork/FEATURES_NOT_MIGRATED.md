@@ -9,7 +9,9 @@ This is a compact omission index. The authoritative behavior, source commits/ref
 | Decision | Cluster IDs | Meaning |
 |---|---|---|
 | `REWRITE` (deferred) | FC-37 | Hindsight history privacy remains outside this approval; no history/data-policy rewrite. |
-| `DEFER_HUMAN_VALUE` | FC-11, FC-42, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
+| `DEFER_HUMAN_VALUE` | FC-11, FC-43, FC-44 | Do not implement until Brian resolves the product/privacy/lifecycle decision recorded in `BRIAN_UAT.md`. |
+
+FC-42 is an authorized, independently reviewed but **undeployed candidate** in `t_71fd77a3`; Ang-owned integration/CI and Ang/Ops activation remain outstanding. It is not a qualified release. See the current FC-42 ledger, task handoff and installation packet.
 
 ## Explicit drops
 

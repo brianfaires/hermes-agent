@@ -1,3 +1,4 @@
+import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
 import { TYPING_IDLE_MS } from '../config/timing.js'
@@ -232,8 +233,26 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const dispatchSubmission = useCallback(
-    (full: string) => {
+    (full: string, privateChecked = false) => {
       if (!full.trim()) {
+        return
+      }
+
+      // Ask the plugin dispatcher before transcript/history or busy queues.
+      // A failed privacy preflight must never fall through with the raw input.
+      if (looksLikeSlashCommand(full) && !privateChecked) {
+        void checkPrivateCommand(
+          prepareSubmission(full, [...composerRefs.tokensRef.current]).text,
+          command => gw.request<PrivateCommandResult>('command.private', {
+            command, session_id: getUiState().sid
+          }).then(raw => asRpcResult<PrivateCommandResult>(raw)),
+          output => {
+            composerActions.clearIn()
+            sys(output)
+          }
+        ).then(handled => {
+          if (!handled) dispatchSubmission(full, true)
+        })
         return
       }
 

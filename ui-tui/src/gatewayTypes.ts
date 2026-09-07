@@ -28,6 +28,7 @@ export interface GatewayTranscriptMessage {
 // ── Commands / completion ────────────────────────────────────────────
 
 export interface CommandsCatalogResponse {
+  private_commands?: string[]
   canon?: Record<string, string>
   categories?: SlashCategory[]
   pairs?: [string, string][]

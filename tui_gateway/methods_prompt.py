@@ -286,6 +286,11 @@ def _pending_reaction_notes(session: dict) -> str:
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    from tui_gateway import server
+    from tui_gateway.private_commands import dispatch
+    private_result = dispatch(server, rid, params, params.get("text", ""))
+    if private_result is not None:
+        return private_result
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
 
     sid = params.get("session_id", "")

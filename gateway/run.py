@@ -18133,6 +18133,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return None
 
+        # Private plugin commands never enter startup queues, observer hooks,
+        # session dispatch or busy steering. Authorize the live transport first;
+        # resolve storage from the routed runtime, preserving those two scopes.
+        from hermes_cli.private_commands import match_private_command, invoke_private_command
+        private_match = None
+        if event.get_command():
+            from hermes_cli.profiles import get_profile_dir
+            from hermes_constants import get_hermes_home as _private_runtime_home
+            private_home = get_profile_dir(source.profile) if source.profile else _private_runtime_home()
+            private_match = match_private_command(event.text, home=private_home)
+        if private_match:
+            try:
+                if is_internal or not self._is_user_authorized_for_source(source):
+                    return None
+                denied = self._check_slash_access(source, private_match[0])
+                if denied is not None:
+                    return denied
+                home = self._resolve_profile_home_for_source(source)
+                with _profile_runtime_scope(home):
+                    return invoke_private_command(private_match, home=home)
+            except Exception:
+                return "Private command failed; no conversation was started."
+
         if (
             getattr(self, "_startup_restore_in_progress", False)
             and not is_internal

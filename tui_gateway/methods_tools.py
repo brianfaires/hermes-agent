@@ -359,7 +359,7 @@ def _(rid, params: dict) -> dict:
                     mode = info.get("argument_mode")
                     if mode not in {"options", "text", "mixed"}:
                         mode = "text" if hint else None
-                    commands[key] = {"argument_mode": mode, "desktop": None}
+                    commands[key] = {"argument_mode": mode, "desktop": None, "private": bool(info.get("private"))}
         except Exception as e:
             if not warning:
                 warning = f"plugin command discovery unavailable: {e}"
@@ -395,6 +395,7 @@ def _(rid, params: dict) -> dict:
                 "sub": sub,
                 "canon": canon,
                 "commands": commands,
+                "private_commands": [key for key, info in commands.items() if info.get("private")],
                 "categories": categories,
                 "skills": skills,
                 "skill_count": skill_count,
@@ -466,9 +467,21 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5012, str(e))
 
 
+@method("command.private")
+def _(rid, params: dict) -> dict:
+    from tui_gateway import server
+    from tui_gateway.private_commands import dispatch
+    return dispatch(server, rid, params, params.get("command", "")) or _ok(rid, {"handled": False})
+
+
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
+    from tui_gateway import server
+    from tui_gateway.private_commands import dispatch
+    private_result = dispatch(server, rid, params, "/" + name + " " + arg)
+    if private_result is not None:
+        return private_result
     resolved = _resolve_name(name)
     if resolved != name:
         name = resolved
@@ -1165,6 +1178,11 @@ def _(rid, params: dict) -> dict:
 
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
+    from tui_gateway import server
+    from tui_gateway.private_commands import dispatch
+    private_result = dispatch(server, rid, params, "/" + params.get("command", "").lstrip("/"))
+    if private_result is not None:
+        return private_result
     session, err = _sess_nowait(params, rid)
     if err:
         return err
