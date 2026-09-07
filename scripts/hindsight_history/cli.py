@@ -1,4 +1,8 @@
-"""Scoped local evidence and explicit current-memory recovery. No provider setup."""
+"""Scoped local evidence and explicit current-memory recovery. No provider setup.
+
+The inline windows-footgun suppressions are limited to POSIX ownership and mode
+checks used to fail closed before reading private local history.
+"""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +24,7 @@ class Refused(Exception):
 
 def private_stat(info: os.stat_result, *, directory: bool = False) -> None:
     expected = stat.S_ISDIR if directory else stat.S_ISREG
-    if (not expected(info.st_mode) or info.st_uid != os.geteuid()
+    if (not expected(info.st_mode) or info.st_uid != os.geteuid()  # windows-footgun: ok
             or info.st_mode & 0o077 or (not directory and info.st_nlink != 1)):
         raise Refused("authorization-denied")
 
@@ -35,14 +39,14 @@ def open_directory(path: str) -> int:
     root_owner = Path("/").lstat().st_uid
     for ancestor in reversed([target, *target.parents]):
         info = ancestor.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (root_owner, os.geteuid()):
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (root_owner, os.geteuid()):  # windows-footgun: ok
             raise Refused("authorization-denied")
         # A private owner directory above a group-writable child already keeps
         # other users out. Sticky system temp roots also protect owned children.
         if not protected and info.st_mode & 0o022:
             if not (info.st_uid == root_owner and info.st_mode & stat.S_ISVTX):
                 raise Refused("authorization-denied")
-        if info.st_uid == os.geteuid() and not info.st_mode & 0o077:
+        if info.st_uid == os.geteuid() and not info.st_mode & 0o077:  # windows-footgun: ok
             protected = True
     private_stat(info, directory=True)
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -58,7 +62,7 @@ def open_directory(path: str) -> int:
 
 
 def authorize(profile: str) -> int:
-    if os.name != "posix" or os.getuid() != os.geteuid() or os.geteuid() == 0:
+    if os.name != "posix" or os.getuid() != os.geteuid() or os.geteuid() == 0:  # windows-footgun: ok
         raise Refused("authorization-denied")
     context = os.environ.get("HERMES_HOME", "")
     if not context or profile != context:
@@ -339,7 +343,7 @@ def reconstruct(directory: int, session: str, profile: str) -> dict:
     previous = logging.root.manager.disable
     try:
         logging.disable(sys.maxsize)
-        with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
+        with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
             try:
                 bank, url, key = reconstruction_config(directory, profile)
             except Refused:

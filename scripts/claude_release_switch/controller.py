@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Finite release executor with externally frozen authority and independent recovery."""
+"""Finite release executor with externally frozen authority and independent recovery.
+
+The inline windows-footgun suppressions in this Linux-only controller are
+limited to deliberate POSIX ownership, mode, UID, process, and user-systemd
+checks that enforce the release safety boundary.
+"""
 from __future__ import annotations
 
 import argparse
@@ -50,7 +55,7 @@ def encoded(value):
 def private(path, directory=False):
     path = Path(path)
     s = path.lstat()
-    require(not path.is_symlink() and s.st_uid == os.getuid(), 'unsafe owner/symlink')
+    require(not path.is_symlink() and s.st_uid == os.getuid(), 'unsafe owner/symlink')  # windows-footgun: ok
     require(stat.S_IMODE(s.st_mode) == (0o700 if directory else 0o600), 'unsafe permissions')
     require(stat.S_ISDIR(s.st_mode) if directory else stat.S_ISREG(s.st_mode), 'unsafe file type')
     return path
@@ -157,9 +162,9 @@ def git(repo, *args):
 
 def proc(pid):
     root = Path('/proc') / str(pid)
-    text = (root / 'stat').read_text()
+    text = (root / 'stat').read_text(encoding='utf-8')
     return {'pid': pid, 'starttime': text[text.rindex(')') + 2:].split()[19],
-            'cgroup': (root / 'cgroup').read_text().strip().removeprefix('0::'),
+            'cgroup': (root / 'cgroup').read_text(encoding='utf-8').strip().removeprefix('0::'),
             'argv': (root / 'cmdline').read_bytes().decode().rstrip('\0').split('\0')}
 
 
@@ -176,8 +181,8 @@ def show(unit):
 
 
 def system_env():
-    uid = os.getuid()
-    return {**BASE_ENV, 'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'XDG_RUNTIME_DIR': f'/run/user/{uid}',
+    uid = os.getuid()  # windows-footgun: ok
+    return {**BASE_ENV, 'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'XDG_RUNTIME_DIR': f'/run/user/{uid}',  # windows-footgun: ok
             'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus'}
 
 
@@ -186,7 +191,7 @@ def cg_pids(cgroup):
     root = Path('/sys/fs/cgroup') / cgroup.lstrip('/')
     if not root.exists():
         return set()
-    return {int(x) for file in root.rglob('cgroup.procs') for x in file.read_text().split()}
+    return {int(x) for file in root.rglob('cgroup.procs') for x in file.read_text(encoding='utf-8').split()}
 
 
 def revision(repo, sha, branch):
@@ -532,7 +537,7 @@ class Run:
                 require(not any(x in lines for x in ('branch refs/heads/main', 'branch refs/heads/staging', 'branch refs/heads/rollback')), 'target branch in another worktree')
         require(not (Path(repo) / '.git/index.lock').exists(), 'index lock present')
         for path in (Path(repo), Path(repo) / '.git'):
-            require(path.stat().st_uid == os.getuid() and not path.is_symlink() and path.stat().st_mode & 0o022 == 0, 'unsafe repository permissions')
+            require(path.stat().st_uid == os.getuid() and not path.is_symlink() and path.stat().st_mode & 0o022 == 0, 'unsafe repository permissions')  # windows-footgun: ok
 
     def refs(self, promoted=False, staged=False):
         p, repo = self.p, self.p['repo']
@@ -564,7 +569,7 @@ class Run:
         self.clean()
         repo = self.p['repo']
         require(git(repo, 'rev-parse', 'HEAD') == rev['sha'], 'HEAD mismatch')
-        actual = git(repo, 'symbolic-ref', '-q', '--short', 'HEAD') if (Path(repo) / '.git/HEAD').read_text().startswith('ref:') else ''
+        actual = git(repo, 'symbolic-ref', '-q', '--short', 'HEAD') if (Path(repo) / '.git/HEAD').read_text(encoding='utf-8').startswith('ref:') else ''
         require(actual == (rev['branch'] if branch is None else branch), 'branch mismatch')
         require(git(repo, 'write-tree') == rev['tree'] == git(repo, 'rev-parse', 'HEAD^{tree}'), 'index/tree mismatch')
         require(revision(repo, rev['sha'], rev['branch']) == rev, 'frozen critical inventory mismatch')
@@ -668,8 +673,8 @@ class Run:
                       'Choose exactly the next approved op ID or abort. Each choice drives one operation; '
                       'completed IDs are durable execution receipts. Return JSON {"op":"ID"} only.\n'
                       + encoded(self.model_plan()).decode() + '\nFrozen runbook (read in full):\n'
-                      + private(self.p['runbook']['path']).read_text() + '\nCompleted journal:\n'
-                      + (self.state / 'journal.jsonl').read_text() + '\nNext operation: ' + cmd['id'])
+                      + private(self.p['runbook']['path']).read_text(encoding='utf-8') + '\nCompleted journal:\n'
+                      + (self.state / 'journal.jsonl').read_text(encoding='utf-8') + '\nNext operation: ' + cmd['id'])
             output = raw(claude_argv(prompt), self.state, self.p['model']['timeout'], claude_env())
             result = loads(output)
             inference_accounting(result, self.p['model']['name'])

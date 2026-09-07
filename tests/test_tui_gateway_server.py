@@ -11188,6 +11188,7 @@ def test_commands_catalog_includes_plugin_commands(monkeypatch):
     assert resp["result"]["commands"]["/lcm"] == {
         "argument_mode": "text",
         "desktop": None,
+        "private": False,
     }
     pairs = dict(resp["result"]["pairs"])
     assert "/lcm" in pairs

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Disposable Git + user-systemd application, never a real gateway adapter."""
+"""Disposable Git + user-systemd application, never a real gateway adapter.
+
+The inline windows-footgun suppressions in this Linux/systemd fixture mark
+deliberate POSIX UID, session, signal, and user-service behavior.
+"""
 from __future__ import annotations
 
 import argparse
@@ -41,13 +45,13 @@ def new(root, operation='stage', model='fake', fault_point='', fault_kind=''):
     git(remote, 'init', '--bare', '-b', 'main')
     git(repo, 'config', 'user.name', 'Disposable test')
     git(repo, 'config', 'user.email', 'sandbox@example.invalid')
-    (Path(repo) / 'app.txt').write_text('known-good\n')
+    (Path(repo) / 'app.txt').write_text('known-good\n', encoding='utf-8')
     git(repo, 'add', 'app.txt')
     git(repo, 'commit', '-m', 'known-good fixture')
     old = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'branch', 'rollback')
     git(repo, 'switch', '-c', 'staging')
-    (Path(repo) / 'app.txt').write_text('candidate\n')
+    (Path(repo) / 'app.txt').write_text('candidate\n', encoding='utf-8')
     git(repo, 'commit', '-am', 'candidate fixture')
     candidate = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'push', remote, 'main', 'staging')
@@ -123,14 +127,15 @@ def new(root, operation='stage', model='fake', fault_point='', fault_kind=''):
 
 def start_service(root):
     unit = root.name + '-gateway.service'
-    unit_path = Path('/run/user') / str(os.getuid()) / 'systemd/user' / unit
+    unit_path = Path('/run/user') / str(os.getuid()) / 'systemd/user' / unit  # windows-footgun: ok
     if not unit_path.exists():
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text('[Unit]\nDescription=Disposable release controller test\n[Service]\n'
                              'Type=exec\nRestart=no\nUMask=0077\nKillMode=control-group\nTimeoutStopSec=3\n'
                              'RuntimeMaxSec=1800\nStandardOutput=null\nStandardError=null\n'
                              'WorkingDirectory=' + str(root / 'runtime') + '\n'
-                             'ExecStart=' + PYTHON + ' ' + str(root / 'runtime/fixture.py') + ' ' + str(root) + ' serve\n')
+                             'ExecStart=' + PYTHON + ' ' + str(root / 'runtime/fixture.py') + ' ' + str(root) + ' serve\n',
+                             encoding='utf-8')
         unit_path.chmod(0o600)
         raw(['/usr/bin/systemctl', '--user', 'daemon-reload'], root, 10, system_env())
     raw(['/usr/bin/systemctl', '--user', 'start', unit], root, 5, system_env())
@@ -160,7 +165,7 @@ def lifecycle(root, action):
     validate_root(root)
     unit = root.name + '-gateway.service'
     if action == 'stall':
-        os.setsid()
+        os.setsid()  # windows-footgun: ok
         time.sleep(120)
     elif action == 'serve':
         repo = str(root / 'repo')
@@ -194,7 +199,7 @@ def lifecycle(root, action):
     elif action in ('offline', 'recover-offline'):
         if action == 'offline':
             inject_fault(root)
-        require((root / 'repo' / 'app.txt').read_text() in ('candidate\n', 'known-good\n'), 'offline contract')
+        require((root / 'repo' / 'app.txt').read_text(encoding='utf-8') in ('candidate\n', 'known-good\n'), 'offline contract')
     elif action in ('smoke', 'recover-smoke'):
         p = loads((root / 'run' / 'packet.json').read_bytes())
         require(not (action == 'smoke' and loads((root / 'fault.json').read_bytes()) == {'point': 'smoke', 'kind': 'smoke'}), 'simulated smoke failure')
@@ -209,7 +214,7 @@ def lifecycle(root, action):
         p = loads((root / 'run' / 'packet.json').read_bytes())
         target = 'main' if p['operation'] == 'promote' else 'staging'
         git(str(root / 'repo'), 'switch', target)
-        child = subprocess.Popen([PYTHON, '-c', 'import os,time; os.setsid(); time.sleep(120)'], env=BASE_ENV)
+        child = subprocess.Popen([PYTHON, '-c', 'import os,time; os.setsid(); time.sleep(120)'], env=BASE_ENV)  # windows-footgun: ok
         durable(root / 'run' / 'descendant.json', {'pid': child.pid})
         time.sleep(120)
     elif action == 'cleanup':
@@ -220,7 +225,7 @@ def lifecycle(root, action):
                 raw(['/usr/bin/systemctl', '--user', 'stop', name], root, 130, system_env())
             subprocess.run(['/usr/bin/systemctl', '--user', 'reset-failed', name], env=system_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-        unit_path = Path('/run/user') / str(os.getuid()) / 'systemd/user' / unit
+        unit_path = Path('/run/user') / str(os.getuid()) / 'systemd/user' / unit  # windows-footgun: ok
         unit_path.unlink(missing_ok=True)
         raw(['/usr/bin/systemctl', '--user', 'daemon-reload'], root, 10, system_env())
     else:
@@ -231,7 +236,7 @@ def inject_fault(root):
     fault = loads((root / 'fault.json').read_bytes())
     kind = fault['kind']
     if kind == 'supervisor-loss':
-        os.kill(os.getppid(), signal.SIGKILL)
+        os.kill(os.getppid(), signal.SIGKILL)  # windows-footgun: ok
         time.sleep(120)
     elif kind == 'model-loss':
         raise RuntimeError('simulated model/startup failure')
@@ -242,7 +247,7 @@ def inject_fault(root):
         durable(root / 'run/descendant.json', {'pid': child.pid})
         time.sleep(120)
     elif kind == 'byte-drift':
-        (root / 'repo/app.txt').write_text('unapproved bytes\n')
+        (root / 'repo/app.txt').write_text('unapproved bytes\n', encoding='utf-8')
         raise RuntimeError('simulated byte drift')
     elif kind == 'ref-drift':
         git(str(root / 'repo'), 'branch', 'unapproved', 'rollback')

@@ -269,7 +269,15 @@ def installed_sdk_python():
     python = os.environ.get("FC37_SDK_PYTHON")
     if python:
         return python
-    return "/home/brian/.hermes/hermes-agent/.venv/bin/python"
+    return sys.executable
+
+
+def test_installed_sdk_python_defaults_to_current_interpreter(monkeypatch):
+    monkeypatch.delenv("FC37_SDK_PYTHON", raising=False)
+    assert installed_sdk_python() == sys.executable
+
+    monkeypatch.setenv("FC37_SDK_PYTHON", "/tmp/explicit-sdk-python")
+    assert installed_sdk_python() == "/tmp/explicit-sdk-python"
 
 
 def installed_sdk_env():

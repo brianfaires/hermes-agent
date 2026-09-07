@@ -124,7 +124,7 @@ def _calendar(api, value: str, *, owner: str, write_action=None):
     if token is None:
         raise WorkerPolicyError("google-workspace credential path unavailable")
     if token is not None:
-        scopes = json.loads(Path(token).read_text()).get("scopes")
+        scopes = json.loads(Path(token).read_text(encoding="utf-8")).get("scopes")
         if not isinstance(scopes, list) or not scopes or not all(isinstance(x, str) for x in scopes):
             raise WorkerPolicyError("granted scope metadata unavailable")
         api.SCOPES = scopes
