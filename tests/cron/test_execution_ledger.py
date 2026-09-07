@@ -221,7 +221,7 @@ def test_run_one_job_records_running_then_terminal(monkeypatch):
     monkeypatch.setattr(
         scheduler,
         "mark_execution_running",
-        lambda execution_id: events.append(("running", execution_id)),
+        lambda execution_id, **kwargs: events.append(("running", execution_id)),
         raising=False,
     )
     monkeypatch.setattr(
@@ -418,3 +418,20 @@ def test_job_listing_exposes_latest_execution(monkeypatch, tmp_path):
     listed = jobs.list_jobs(include_disabled=True)
     assert listed[0]["latest_execution"]["id"] == record["id"]
     assert listed[0]["latest_execution"]["status"] == "running"
+
+
+def test_retained_results_cross_pages_and_survive_status_pruning(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 2)
+    monkeypatch.setattr(executions, "_hermes_now", lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    expected = {}
+    for n in range(505):
+        row = executions.create_execution("same-job", source="direct")
+        expected[row["id"]] = f"answer {n}"
+        executions.finish_execution(row["id"], success=True, final_response=expected[row["id"]])
+    rows = list(executions.iter_execution_results(page_size=200))
+    assert {r["id"]: r["final_response"] for r in rows} == expected
+    assert len(executions.list_executions()) == 2
+    assert all("final_response" not in row for row in executions.list_executions())

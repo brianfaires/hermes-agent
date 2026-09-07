@@ -7,10 +7,12 @@ proved gone. Terminal states are immutable.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
 import uuid
+from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -58,6 +60,13 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
              error TEXT
            )"""
     )
+    # Separate from the bounded status ledger: final answers must survive pruning.
+    # No prompts, transcripts or tool output are stored here. Retained until an
+    # operator explicitly removes the profile's execution database.
+    conn.execute("""CREATE TABLE IF NOT EXISTS execution_results (
+        execution_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL,
+        terminal_record TEXT
+    )""")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_executions_job_claimed "
         "ON executions(job_id, claimed_at DESC, id DESC)"
@@ -160,7 +169,9 @@ def create_execution(job_id: str, *, source: str) -> Dict[str, Any]:
     return record  # type: ignore[return-value]
 
 
-def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
+def mark_execution_running(
+    execution_id: str, *, job: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Transition one claimed attempt to running exactly once."""
     now = _hermes_now().isoformat()
     with _transaction() as conn:
@@ -171,6 +182,21 @@ def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
         )
         if cur.rowcount != 1:
             return None
+        if job is not None:
+            schedule = job.get("schedule")
+            schedule = schedule if isinstance(schedule, dict) else {}
+            snapshot = {
+                "job_name": job.get("name"),
+                "scheduled_at": job.get("next_run_at"),
+                "schedule": {
+                    k: schedule[k] for k in ("kind", "expr", "minutes", "run_at", "display")
+                    if k in schedule
+                },
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO execution_results (execution_id, snapshot) VALUES (?, ?)",
+                (execution_id, json.dumps(snapshot)),
+            )
         record = _record(conn.execute(
             "SELECT * FROM executions WHERE id=?", (execution_id,)
         ).fetchone())
@@ -181,6 +207,7 @@ def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
     delivery_outcome: Optional[str] = None,
+    final_response: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten."""
     now = _hermes_now().isoformat()
@@ -194,10 +221,21 @@ def finish_execution(
         )
         if cur.rowcount != 1:
             return None
-        _prune_unlocked(conn)
         record = _record(conn.execute(
             "SELECT * FROM executions WHERE id=?", (execution_id,)
         ).fetchone())
+        if record is not None:
+            if final_response is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO execution_results (execution_id, snapshot) VALUES (?, '{}')",
+                    (execution_id,),
+                )
+            retained = dict(record, final_response=final_response)
+            conn.execute(
+                "UPDATE execution_results SET terminal_record=? WHERE execution_id=? AND terminal_record IS NULL",
+                (json.dumps(retained), execution_id),
+            )
+        _prune_unlocked(conn)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     return record
 
@@ -231,6 +269,10 @@ def recover_interrupted_executions() -> int:
                     "SELECT * FROM executions WHERE id=?", (row["id"],)
                 ).fetchone())
                 if record is not None:
+                    conn.execute(
+                        "UPDATE execution_results SET terminal_record=? WHERE execution_id=? AND terminal_record IS NULL",
+                        (json.dumps(record), row["id"]),
+                    )
                     recovered.append(record)
         if changed:
             _prune_unlocked(conn)
@@ -284,3 +326,24 @@ def latest_executions(job_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             clean,
         ).fetchall()
     return {row["job_id"]: dict(row) for row in rows}
+
+
+def iter_execution_results(*, page_size: int = 200) -> Iterator[Dict[str, Any]]:
+    """Read all retained results in bounded pages, including tied timestamps.
+
+    No age cutoff or newest-N truncation: a long consumer outage loses nothing.
+    Each page releases the transaction before the consumer performs external I/O.
+    """
+    cursor = 0
+    while True:
+        with _transaction() as conn:
+            rows = conn.execute(
+                "SELECT rowid, snapshot, terminal_record FROM execution_results "
+                "WHERE rowid > ? AND terminal_record IS NOT NULL ORDER BY rowid LIMIT ?",
+                (cursor, max(1, min(int(page_size), 500))),
+            ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield dict(json.loads(row["terminal_record"]), **json.loads(row["snapshot"]))
+        cursor = rows[-1]["rowid"]
