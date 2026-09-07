@@ -1,8 +1,9 @@
-import { hasPrivateCommandsCatalog, isPrivateCommand } from '../app/privateCommands/state.js'
-import { looksLikeSlashCommand } from '../domain/slash.js'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
+import { hasPrivateCommandsCatalog, isPrivateCommand } from '../app/privateCommands/state.js'
+import { looksLikeSlashCommand } from '../domain/slash.js'
 
 const MAX = 1000
 const dir = process.env.HERMES_HOME ?? join(homedir(), '.hermes')
@@ -57,7 +58,9 @@ export function append(line: string) {
     return
   }
 
-  if (isPrivateCommand(trimmed)) return
+  if (isPrivateCommand(trimmed)) {
+    return
+  }
 
   const items = load()
 

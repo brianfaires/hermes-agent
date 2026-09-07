@@ -1,4 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
 import { checkPrivateCommand } from '../app/privateCommands/dispatch.js'
 import { isPrivateCommand, setPrivateCommands } from '../app/privateCommands/state.js'
 

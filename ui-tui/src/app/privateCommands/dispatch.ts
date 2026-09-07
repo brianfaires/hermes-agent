@@ -10,10 +10,14 @@ export async function checkPrivateCommand(
 ): Promise<boolean> {
   try {
     const result = await request(command)
-    if (result?.handled === false) return false
+
+    if (result?.handled === false) {
+      return false
+    }
     acknowledge(result?.handled ? result.output || '(no output)' : 'Private command check failed; input was not submitted.')
   } catch {
     acknowledge('Private command check failed; input was not submitted.')
   }
+
   return true
 }

@@ -1,4 +1,3 @@
-import { resetPrivateCommands, setPrivateCommands } from './privateCommands/state.js'
 import { execFile } from 'child_process'
 
 import { forceRedraw, onTerminalBackground, onTerminalForeground } from '@hermes/ink'
@@ -30,6 +29,7 @@ import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
+import { resetPrivateCommands, setPrivateCommands } from './privateCommands/state.js'
 import { turnController } from './turnController.js'
 import { getTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'

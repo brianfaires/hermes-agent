@@ -1,4 +1,3 @@
-import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
 import { TYPING_IDLE_MS } from '../config/timing.js'
@@ -12,6 +11,7 @@ import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js
 import type { Msg } from '../types.js'
 
 import type { ComposerActions, ComposerRefs, ComposerState, ComposerToken } from './interfaces.js'
+import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { submitPrompt } from './submissionCore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -251,8 +251,11 @@ export function useSubmission(opts: UseSubmissionOptions) {
             sys(output)
           }
         ).then(handled => {
-          if (!handled) dispatchSubmission(full, true)
+          if (!handled) {
+            dispatchSubmission(full, true)
+          }
         })
+
         return
       }
 
