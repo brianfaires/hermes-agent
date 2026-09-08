@@ -51,16 +51,30 @@ def dependency_manifest(tmp_path_factory):
     return path
 
 
+def _actual_gateway_root(tmp_path_factory, rollback=False):
+    return tmp_path_factory.mktemp('r' if rollback else 'c')
+
+
+def test_actual_gateway_root_helper_allocates_unique_short_roots(tmp_path_factory):
+    roots = [_actual_gateway_root(tmp_path_factory) for _ in range(3)]
+    roots.append(_actual_gateway_root(tmp_path_factory, rollback=True))
+
+    assert len(set(roots)) == len(roots)
+    assert len({root.parent for root in roots}) == 1
+    assert all(root.is_dir() for root in roots)
+    assert all(root.name[0] in {'c', 'r'} and len(root.name) <= 4 for root in roots)
+    assert all(len(str(root / 'profiles/secondary/gateway.sock')) < 104 for root in roots)
+
+
 @pytest.fixture
-def actual_gateway(tmp_path, dependency_manifest, request):
+def actual_gateway(tmp_path_factory, dependency_manifest, request):
     if getattr(request, 'param', None):
         available = subprocess.run(['/usr/bin/git', '-C', str(SCRIPTS.parents[1]), 'cat-file', '-e',
                                     request.param + '^{commit}'], capture_output=True, timeout=5)
         if available.returncode:
             pytest.skip('Local rollback qualification requires historical object ' + request.param
                         + '; shallow hosted CI still runs candidate/native/readiness coverage')
-    root = tmp_path.parent / ('r' if getattr(request, 'param', None) else 'c')
-    root.mkdir()
+    root = _actual_gateway_root(tmp_path_factory, rollback=bool(getattr(request, 'param', None)))
     repo = root / 'repo'
     subprocess.run(['/usr/bin/git', 'clone', '--quiet', '--shared', str(SCRIPTS.parents[1]), str(repo)],
                    check=True, timeout=30, capture_output=True)
