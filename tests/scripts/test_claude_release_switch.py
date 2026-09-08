@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+import socket
 
 import pytest
 
@@ -32,10 +33,26 @@ def wait_for(check, timeout=35):
     raise AssertionError('bounded observable condition not reached')
 
 
+def _module_socket_status(home):
+    socket_path = home / 'gateway.sock'
+    if not socket_path.exists():
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.5)
+            client.connect(str(socket_path))
+            client.sendall(b'{"verb":"status","id":1,"protocol":1}\n')
+            raw = client.recv(512 * 1024)
+        response = json.loads(raw.splitlines()[0].decode())
+    except Exception:
+        return None
+    return response.get('result') if response.get('ok') is True else None
+
+
 @pytest.fixture
 def sandbox(tmp_path):
     try:
-        c.raw(['/usr/bin/systemctl', '--user', 'show-environment'], '/', env=c.system_env())
+        c.raw(['/usr/bin/systemctl', '--user', 'show', '--property=Version'], '/', env=c.system_env())
     except Exception:
         pytest.skip('real user-systemd unavailable; production topology not qualified')
     roots = []
@@ -71,9 +88,9 @@ def finished(root, timeout=35):
 def module_service_runtime(root):
     runtime = root / 'runtime'
     runtime.mkdir(mode=0o700, exist_ok=True)
-    for name in ('controller.py', 'health.py'):
+    for name in ('controller.py', 'health.py', 'wire_launcher.py', 'runtime_health.py', 'drain_proof.py'):
         dest = runtime / name
-        dest.write_bytes((SCRIPTS / name).read_bytes())
+        dest.write_bytes(((FIXTURES if name == 'wire_launcher.py' else SCRIPTS) / name).read_bytes())
         dest.chmod(0o600)
     (runtime / 'lifecycle.py').write_text(
         '#!/usr/bin/python3\n'
@@ -84,7 +101,8 @@ def module_service_runtime(root):
         'from pathlib import Path\n'
         '\n'
         'from controller import durable, proc, show\n'
-        'from health import read_health\n'
+        'from drain_proof import COVERAGE, prove as prove_drain\n'
+        'from runtime_health import collect as collect_health\n'
         '\n'
         'def main():\n'
         '    root = Path(sys.argv[1]).resolve()\n'
@@ -93,18 +111,22 @@ def module_service_runtime(root):
         '    if action == "drain":\n'
         '        status = show(unit)\n'
         '        actual = proc(int(status["MainPID"]))\n'
-        '        print(json.dumps({"active_jobs": 0, "unit": unit, "pid": actual["pid"],\n'
-        '                          "starttime": actual["starttime"], "observed": int(time.time())}))\n'
+        '        deadline = json.loads((root / "run/packet.json").read_text())["window"]["recovery_deadline"]\n'
+        '        durable(root / "home" / "control-state.json", {"gateway_state": "draining"})\n'
+        '        durable(root / "home" / ".drain_request.json", {"action": "drain", "requested_at": int(time.time())})\n'
+        '        durable(root / "run" / "hold.json", {"kind": "release-admission-hold", "repo": str(root / "repo"),\n'
+        '                "unit": unit, "pid": actual["pid"], "starttime": actual["starttime"],\n'
+        '                "observed": int(time.time()), "approved": True,\n'
+        '                "valid_until": int(time.time()) + 3600, "recovery_deadline": deadline,\n'
+        '                "owner": "fixture", "recovery_owner": "fixture",\n'
+        '                "coverage": {key: "fixture external hold" for key in COVERAGE}})\n'
+        '        print(json.dumps(prove_drain(root / "home", root / "run" / "hold.json", str(root / "repo"),\n'
+        '                              unit, actual["pid"], actual["starttime"], max_age=30, repeat_delay=0.01, recovery_deadline=deadline)))\n'
         '    elif action in ("offline", "recover-offline"):\n'
         '        return 0\n'
         '    elif action in ("smoke", "recover-smoke"):\n'
-        '        status = show(unit)\n'
-        '        actual = proc(int(status["MainPID"]))\n'
-        '        live = {"pid": actual["pid"], "starttime": actual["starttime"],\n'
-        '                "observed": int(time.time()), "platform": "ok", "scheduler": "ok",\n'
-        '                "persistence": "ok", "sessions": "ok"}\n'
-        '        durable(root / "run" / "live.json", live)\n'
-        '        print(json.dumps(read_health(root / "run" / "startup.json", root / "run" / "live.json", unit)))\n'
+        '        print(json.dumps(collect_health(root / "run" / "startup.json", root / "run" / "live.json",\n'
+        '                                unit, root / "home", 30)))\n'
         '    else:\n'
         '        raise SystemExit(2)\n'
         '\n'
@@ -126,41 +148,107 @@ def module_service_repo(root):
     (pkg / 'main.py').write_text(
         '#!/usr/bin/env python3\n'
         'from __future__ import annotations\n'
-        'import hashlib\n'
         'import json\n'
         'import os\n'
         'import signal\n'
-        'import subprocess\n'
+        'import socket\n'
+        'import sqlite3\n'
         'import sys\n'
+        'import threading\n'
+        'import time\n'
+        'from datetime import datetime, timezone\n'
         'from pathlib import Path\n'
-        '\n'
-        'def _sha256(path):\n'
-        '    return hashlib.sha256(Path(path).read_bytes()).hexdigest()\n'
+        '_started = time.time()\n'
         '\n'
         'def _starttime():\n'
         '    text = Path("/proc/%d/stat" % os.getpid()).read_text()\n'
         '    return text[text.rindex(")") + 2:].split()[19]\n'
         '\n'
-        'def _inventory(repo):\n'
-        '    output = subprocess.check_output(["git", "ls-files", "-z"], cwd=repo)\n'
-        '    files = []\n'
-        '    for rel in sorted(name for name in output.decode().split(chr(0)) if name):\n'
-        '        path = Path(repo) / rel\n'
-        '        files.append({"path": rel, "sha256": _sha256(path),\n'
-        '                      "mode": "100755" if os.access(path, os.X_OK) else "100644"})\n'
-        '    return files\n'
+        'def _atomic_json(path, payload):\n'
+        '    tmp = path.with_name(path.name + ".tmp")\n'
+        '    tmp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + chr(10))\n'
+        '    os.chmod(tmp, 0o600)\n'
+        '    os.replace(tmp, path)\n'
+        '\n'
+        'def _status(home):\n'
+        '    pid = os.getpid()\n'
+        '    start = _starttime()\n'
+        '    now = datetime.now(timezone.utc).isoformat()\n'
+        '    state_file = home / "control-state.json"\n'
+        '    try:\n'
+        '        state_data = json.loads(state_file.read_text())\n'
+        '        gateway_state = state_data.get("gateway_state", "running")\n'
+        '        active_agents = int(state_data.get("active_agents", 0))\n'
+        '    except Exception:\n'
+        '        gateway_state = "running"\n'
+        '        active_agents = 0\n'
+        '    served = state_data.get("served_profiles", ["default"]) if "state_data" in locals() else ["default"]\n'
+        '    platforms = state_data.get("platforms") if "state_data" in locals() else None\n'
+        '    if not isinstance(platforms, dict):\n'
+        '        platforms = {"stub": {"state": "connected", "updated_at": now,\n'
+        '                    "writer_pid": pid, "writer_start_time": int(start),\n'
+        '                    "error_code": None, "error_message": None, "needs_attention": False}}\n'
+        '    profiles = {name: {"home": str(home if name == "default" else home / "profiles" / name),\n'
+        '                       "sessions": True, "platforms": {"stub": True}} for name in served}\n'
+        '    observation = {"observed": time.time(), "started": _started, "profiles": profiles,\n'
+        '                   "running": True, "draining": gateway_state == "draining",\n'
+        '                   "work": {"turns": active_agents, "cron": 0, "api": 0, "background": False}}\n'
+        '    return {"protocol": 1, "release_observation": observation, "pid": pid, "answering_pid": pid, "start_time": int(start),\n'
+        '            "gateway_state": gateway_state, "active_agents": active_agents,\n'
+        '            "served_profiles": served, "session_store": {"status": "ok"},\n'
+        '            "platforms": platforms}\n'
+        '\n'
+        'def _serve_control_socket(home):\n'
+        '    path = home / "gateway.sock"\n'
+        '    try:\n'
+        '        path.unlink()\n'
+        '    except FileNotFoundError:\n'
+        '        pass\n'
+        '    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n'
+        '    sock.bind(str(path))\n'
+        '    os.chmod(path, 0o600)\n'
+        '    sock.listen(5)\n'
+        '    while True:\n'
+        '        conn, _ = sock.accept()\n'
+        '        with conn:\n'
+        '            raw = conn.recv(65536)\n'
+        '            try:\n'
+        '                request = json.loads(raw.splitlines()[0].decode())\n'
+        '                verb = request.get("verb")\n'
+        '                status = _status(home)\n'
+        '                result = {"protocol": 1, "pid": os.getpid(), "start_time": int(_starttime()),\n'
+        '                          "profile": "default", "served_profiles": status.get("served_profiles"),\n'
+        '                          "hermes_home": str(home)} if verb == "identify" else status\n'
+        '                response = {"ok": True, "protocol": 1, "id": request.get("id"), "result": result}\n'
+        '            except Exception as exc:\n'
+        '                response = {"ok": False, "protocol": 1, "error": type(exc).__name__}\n'
+        '            conn.sendall(json.dumps(response).encode() + b"\\n")\n'
+        '\n'
+        'def _prepare_state(home):\n'
+        '    home.mkdir(mode=0o700, parents=True, exist_ok=True)\n'
+        '    cron = home / "cron"\n'
+        '    cron.mkdir(mode=0o700, exist_ok=True)\n'
+        '    now = str(time.time())\n'
+        '    (cron / "ticker_heartbeat").write_text(now)\n'
+        '    (cron / "ticker_last_success").write_text(now)\n'
+        '    conn = sqlite3.connect(home / "state.db")\n'
+        '    try:\n'
+        '        conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY)")\n'
+        '        conn.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY)")\n'
+        '        conn.commit()\n'
+        '    finally:\n'
+        '        conn.close()\n'
+        '    _atomic_json(home / "control-state.json", {"gateway_state": "running"})\n'
         '\n'
         'def main():\n'
         '    if sys.argv[1:] != ["gateway", "run"]:\n'
         '        raise SystemExit(2)\n'
-        '    repo = Path.cwd().resolve()\n'
-        '    run = repo.parent / "run"\n'
-        '    run.mkdir(exist_ok=True)\n'
-        '    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()\n'
-        '    startup = {"pid": os.getpid(), "starttime": _starttime(), "sha": sha,\n'
-        '               "source": str(repo), "bytes": _inventory(repo),\n'
-        '               "executable_sha256": _sha256(sys.executable)}\n'
-        '    (run / "startup.json").write_text(json.dumps(startup, sort_keys=True, separators=(",", ":")) + chr(10))\n'
+        '    home = Path(os.environ["HERMES_HOME"]).resolve()\n'
+        '    _prepare_state(home)\n'
+        '    env_record = {"dont_write_bytecode": os.environ.get("PYTHONDONTWRITEBYTECODE"),\n'
+        '                  "pycache_prefix": os.environ.get("PYTHONPYCACHEPREFIX")}\n'
+        '    _atomic_json(home.parent / "run" / "launcher-env.json", env_record)\n'
+        '    threading.Thread(target=_serve_control_socket, args=(home,), daemon=True).start()\n'
         '    while True:\n'
         '        signal.pause()\n'
         '\n'
@@ -179,14 +267,17 @@ def module_service_start(root, python_exe):
     unit_path.write_text(
         '[Unit]\nDescription=Disposable module-launcher service\n'
         '[Service]\nType=exec\nRestart=no\nUMask=0077\n'
-        'Environment=PYTHONDONTWRITEBYTECODE=1\n'
+        'UnsetEnvironment=PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONPYCACHEPREFIX\n'
+        'Environment=HERMES_HOME=' + str(root / 'home') + ' PYTHONNOUSERSITE=1\n'
         'WorkingDirectory=' + str(root / 'repo') + '\n'
-        'ExecStart=' + str(python_exe) + ' -m hermes_cli.main gateway run\n'
+        'ExecStart=' + str(python_exe) + ' ' + str(root / 'runtime' / 'wire_launcher.py') +
+        ' --repo ' + str(root / 'repo') + ' --startup-json ' + str(root / 'run' / 'startup.json') +
+        ' -- -m hermes_cli.main gateway run\n'
     )
     unit_path.chmod(0o600)
     c.raw(['/usr/bin/systemctl', '--user', 'daemon-reload'], root, 10, c.system_env())
     c.raw(['/usr/bin/systemctl', '--user', 'start', unit], root, 10, c.system_env())
-    wait_for(lambda: (root / 'run' / 'startup.json').exists())
+    wait_for(lambda: (root / 'home/cron/ticker_last_success').exists() and _module_socket_status(root / 'home'))
     return unit, unit_path
 
 
@@ -194,7 +285,7 @@ def module_service_packet(root, operation='stage', python_exe=TEST_PYTHON):
     os.umask(0o077)
     root = Path(root).absolute()
     root.mkdir(mode=0o700)
-    for name in ('runtime', 'run', 'repo', 'remote.git', 'git-home'):
+    for name in ('runtime', 'run', 'repo', 'remote.git', 'git-home', 'home'):
         (root / name).mkdir(mode=0o700)
     c.durable(root / 'sandbox.json', {'task': 't_acd2041b', 'disposable': True}, exclusive=True)
     (root / 'sole-writer.lock').touch(mode=0o600)
@@ -226,7 +317,7 @@ def module_service_packet(root, operation='stage', python_exe=TEST_PYTHON):
     unit, unit_path = module_service_start(root, Path(c.PYTHON))
     now = int(time.time())
     st = repo.stat()
-    launch = c.PYTHON
+    launch = str(root / 'runtime' / 'wire_launcher.py')
     packet = {
         'version': 2, 'command_timeout': 8, 'installation': str(root / 'runtime'), 'lock': str(root / 'sole-writer.lock'),
         'profile': 'simulated-application', 'repo': str(repo), 'remote': str(root / 'remote.git'),
@@ -254,6 +345,9 @@ def module_service_packet(root, operation='stage', python_exe=TEST_PYTHON):
 
             {'path': str(root / 'runtime' / 'controller.py'), 'sha256': c.digest((root / 'runtime' / 'controller.py').read_bytes())},
             {'path': str(root / 'runtime' / 'health.py'), 'sha256': c.digest((root / 'runtime' / 'health.py').read_bytes())},
+            {'path': str(root / 'runtime' / 'wire_launcher.py'), 'sha256': c.digest((root / 'runtime' / 'wire_launcher.py').read_bytes())},
+            {'path': str(root / 'runtime' / 'runtime_health.py'), 'sha256': c.digest((root / 'runtime' / 'runtime_health.py').read_bytes())},
+            {'path': str(root / 'runtime' / 'drain_proof.py'), 'sha256': c.digest((root / 'runtime' / 'drain_proof.py').read_bytes())},
             {'path': str(root / 'runtime' / 'lifecycle.py'), 'sha256': c.digest((root / 'runtime' / 'lifecycle.py').read_bytes())},
             {'path': str(root / 'runtime' / 'runbook.md'), 'sha256': c.digest((root / 'runtime' / 'runbook.md').read_bytes())},
 
@@ -288,7 +382,7 @@ def module_service_packet(root, operation='stage', python_exe=TEST_PYTHON):
         packet['receipts'][kind] = {'path': str(path), 'sha256': c.digest(path.read_bytes())}
     for name in ('drain', 'offline', 'smoke', 'recover-offline', 'recover-smoke'):
         packet['checks'][name] = {'id': name, 'argv': [c.PYTHON, str(root / 'runtime' / 'lifecycle.py'), str(root), name],
-                                  'cwd': str(root / 'runtime'), 'env': c.BASE_ENV.copy(), 'timeout': 8}
+                                  'cwd': str(root / 'runtime'), 'env': {**c.BASE_ENV, 'HERMES_HOME': str(root / 'home')}, 'timeout': 8}
     c.durable(root / 'fault.json', {'point': '', 'kind': ''})
     packet['commands'], packet['recovery'] = c.command_plan(packet)
     c.durable(root / 'run' / 'packet.json', packet, exclusive=True)
@@ -565,8 +659,9 @@ def test_health_uses_startup_evidence_not_mutable_head(sandbox):
     from health import read_health
     sys.path.remove(str(SCRIPTS))
     original = json.loads((root / 'health.json').read_text())
-    c.durable(root / 'startup.json', {k: original[k] for k in ('pid', 'starttime', 'sha', 'source', 'bytes', 'executable_sha256')})
-    live = {**{k: original[k] for k in ('pid', 'starttime', 'platform', 'scheduler', 'persistence', 'sessions')}, 'observed': int(time.time())}
+    c.durable(root / 'startup.json', {k: original[k] for k in ('pid', 'starttime', 'sha', 'source', 'bytes', 'loaded', 'executable_sha256')})
+    live = {**{k: original[k] for k in ('pid', 'starttime', 'platform', 'scheduler', 'persistence', 'sessions')},
+            'served_profile_homes': {'default': p['repo']}, 'observed': int(time.time())}
     c.durable(root / 'live.json', live)
     # Deliberate fixture-only source drift while its toy service lives. No controller
     # is authorized to do this; the health hook must still report what was loaded.
@@ -827,10 +922,10 @@ def cleanup_module_service(root, unit):
 @pytest.fixture
 def module_root(tmp_path):
     try:
-        c.raw(['/usr/bin/systemctl', '--user', 'show-environment'], '/', env=c.system_env())
+        c.raw(['/usr/bin/systemctl', '--user', 'show', '--property=Version'], '/', env=c.system_env())
     except Exception:
         pytest.skip('real user-systemd unavailable; production topology not qualified')
-    root = tmp_path / (f.PREFIX + uuid.uuid4().hex[:12])
+    root = tmp_path.parent / (f.PREFIX + uuid.uuid4().hex[:6])
     try:
         yield root
     finally:
@@ -850,6 +945,14 @@ def test_module_launcher_baseline_stage_success(module_root):
         assert finished(root)['status'] == 'succeeded'
         assert c.git(p['repo'], 'rev-parse', 'HEAD') == p['candidate']['sha']
         assert c.show(p['unit'])['MainPID'] != str(p['baseline']['pid'])
+        startup = c.loads((root / 'run/startup.json').read_bytes())
+        assert startup['sha'] == p['candidate']['sha']
+        assert startup['source'] == p['repo']
+        assert startup['bytes'] == p['candidate']['files']
+        assert any(item['module'] == 'hermes_cli.main' for item in startup['loaded'])
+        env = c.loads((root / 'run/launcher-env.json').read_bytes())
+        assert env['dont_write_bytecode'] == '1'
+        assert Path(env['pycache_prefix']).is_relative_to(root / 'pycache')
     finally:
         cleanup_module_service(root, p['unit'])
 
@@ -889,6 +992,183 @@ def test_module_launcher_nonexecutable_baseline_fails_before_stop(module_root):
         assert c.show(p['unit'])['MainPID'] == str(p['baseline']['pid'])
     finally:
         cleanup_module_service(root, p['unit'])
+
+
+def test_release_launcher_refuses_dirty_source_before_exec(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir(mode=0o700)
+    c.git(repo, 'init', '-b', 'main')
+    c.git(repo, 'config', 'user.name', 'Disposable Test')
+    c.git(repo, 'config', 'user.email', 'test@example.invalid')
+    tracked = repo / 'app.py'
+    tracked.write_text('print("clean")\n')
+    c.git(repo, 'add', 'app.py')
+    c.git(repo, 'commit', '-m', 'clean')
+    tracked.write_text('print("dirty")\n')
+    run = tmp_path / 'run'
+    run.mkdir(mode=0o700)
+    env = {key: value for key, value in os.environ.items() if not key.startswith('PYTHON')}
+    env['PYTHONNOUSERSITE'] = '1'
+    sys.path.insert(0, str(SCRIPTS))
+    import launch_gateway as launcher
+    sys.path.remove(str(SCRIPTS))
+    paths = subprocess.check_output([sys.executable, '-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null', '-c',
+                                    'import sys,json,os; print(json.dumps([p for p in sys.path if os.path.isdir(p)]))'], text=True)
+    paths = [str(Path(p).resolve()) for p in json.loads(paths)]
+    dependencies = run / 'deps.json'
+    venv_config = str(Path(sys.prefix) / 'pyvenv.cfg')
+    c.durable(dependencies, {'paths': paths, 'files': launcher.dependency_files(paths, venv_config),
+                            'observer_sha256': 'unused', 'venv_config': venv_config})
+    check = subprocess.run([sys.executable, '-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null', str(SCRIPTS / 'launch_gateway.py'),
+                            '--dependencies', str(dependencies), '--dependencies-sha256', c.digest(dependencies.read_bytes()),
+                            '--repo', str(repo), '--startup-json', str(run / 'startup.json'),
+                            '--', '-m', 'hermes_cli.main', 'gateway', 'run'],
+                           env=env, capture_output=True, text=True, timeout=10)
+    assert check.returncode == 2
+    assert 'tracked working bytes differ from HEAD' in check.stderr
+    assert not (run / 'startup.json').exists()
+
+
+@pytest.mark.linux_only
+def test_runtime_health_refuses_stale_scheduler(module_root):
+    root = module_root
+    p, _authority = module_service_packet(root, 'stage', TEST_PYTHON)
+    try:
+        (root / 'home/cron/ticker_last_success').write_text(str(time.time() - 120))
+        check = subprocess.run([c.PYTHON, str(root / 'runtime/runtime_health.py'),
+                                str(root / 'run/startup.json'), str(root / 'run/live.json'),
+                                p['unit'], str(root / 'home'), '--max-age', '30', '--startup-timeout', '0'],
+                               capture_output=True, text=True, timeout=10, cwd=root / 'runtime')
+        assert check.returncode == 2
+        assert c.show(p['unit'])['MainPID'] == str(p['baseline']['pid'])
+    finally:
+        cleanup_module_service(root, p['unit'])
+
+
+@pytest.mark.linux_only
+def test_runtime_health_checks_all_served_profile_homes(module_root):
+    root = module_root
+    p, _authority = module_service_packet(root, 'stage', TEST_PYTHON)
+    try:
+        pid = p['baseline']['pid']
+        starttime = p['baseline']['starttime']
+        worker = root / 'home/profiles/worker'
+        (worker / 'cron').mkdir(mode=0o700, parents=True)
+        now = str(time.time() - 120)
+        (worker / 'cron/ticker_heartbeat').write_text(now)
+        (worker / 'cron/ticker_last_success').write_text(now)
+        conn = __import__('sqlite3').connect(worker / 'state.db')
+        try:
+            conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY)')
+            conn.execute('CREATE TABLE messages (id TEXT PRIMARY KEY)')
+            conn.commit()
+        finally:
+            conn.close()
+        fresh = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+        base_platform = {'state': 'connected', 'updated_at': fresh, 'writer_pid': pid,
+                         'writer_start_time': int(starttime), 'error_code': None,
+                         'error_message': None, 'needs_attention': False}
+        c.durable(root / 'home/control-state.json', {
+            'gateway_state': 'running',
+            'served_profiles': ['default', 'worker'],
+            'platforms': {'stub': base_platform, 'worker:stub': base_platform},
+        })
+        check = subprocess.run([c.PYTHON, str(root / 'runtime/runtime_health.py'),
+                                str(root / 'run/startup.json'), str(root / 'run/live.json'),
+                                p['unit'], str(root / 'home'), '--max-age', '30', '--startup-timeout', '0'],
+                               capture_output=True, text=True, timeout=10, cwd=root / 'runtime')
+        assert check.returncode == 2
+        assert c.show(p['unit'])['MainPID'] == str(p['baseline']['pid'])
+    finally:
+        cleanup_module_service(root, p['unit'])
+
+
+def _module_hold(root, p, value='fixture external hold'):
+    coverage = {
+        'gateway_turns', 'cron', 'api', 'background_work', 'kanban_workers',
+        'updater', 'editors', 'source_readers', 'recovery_handoff',
+    }
+    hold = {'kind': 'release-admission-hold', 'repo': p['repo'], 'unit': p['unit'],
+            'pid': p['baseline']['pid'], 'starttime': p['baseline']['starttime'],
+            'observed': int(time.time()), 'approved': True,
+            'valid_until': int(time.time()) + 3600, 'recovery_deadline': p['window']['recovery_deadline'],
+            'owner': 'fixture', 'recovery_owner': 'fixture',
+            'coverage': {key: value for key in coverage}}
+    c.durable(root / 'run/hold.json', hold)
+    return root / 'run/hold.json'
+
+
+@pytest.mark.linux_only
+def test_drain_proof_refuses_unknown_hold_and_busy_gateway(module_root):
+    root = module_root
+    p, _authority = module_service_packet(root, 'stage', TEST_PYTHON)
+    try:
+        c.durable(root / 'home/control-state.json', {'gateway_state': 'draining'})
+        hold = _module_hold(root, p, 'unknown')
+        argv = [c.PYTHON, str(root / 'runtime/drain_proof.py'), str(root / 'home'),
+                str(hold), p['repo'], p['unit'], str(p['baseline']['pid']), p['baseline']['starttime'],
+                '--recovery-deadline', str(p['window']['recovery_deadline'])]
+        assert subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=root / 'runtime').returncode == 2
+        hold = _module_hold(root, p)
+        argv[3] = str(hold)
+        c.durable(root / 'home/control-state.json', {'gateway_state': 'draining', 'active_agents': 1})
+        assert subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=root / 'runtime').returncode == 2
+        assert c.show(p['unit'])['MainPID'] == str(p['baseline']['pid'])
+    finally:
+        cleanup_module_service(root, p['unit'])
+
+
+@pytest.mark.linux_only
+def test_gateway_status_and_sqlite_producer_primitives(tmp_path, monkeypatch):
+    # Narrow persisted-status primitive assertions; not end-to-end health proof.
+    home = tmp_path / 'home'
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setattr('tools.tirith_security.ensure_installed', lambda log_failures=False: None)
+
+    from gateway.config import GatewayConfig
+    from gateway.control_socket import GatewayControlServer, query_gateway_control
+    from gateway.run import GatewayRunner
+    from gateway.status import write_runtime_status
+
+    runner = GatewayRunner(GatewayConfig(sessions_dir=home / 'sessions', loop_watchdog=False))
+    cron = home / 'cron'
+    cron.mkdir(mode=0o700, exist_ok=True)
+    now = str(time.time())
+    (cron / 'ticker_heartbeat').write_text(now)
+    (cron / 'ticker_last_success').write_text(now)
+    runner._running = True
+    runner._update_runtime_status('running')
+    runner._update_platform_runtime_status('local_stub', platform_state='connected', error_code=None, error_message=None)
+    write_runtime_status(served_profiles=['default'], session_store={'status': 'ok'})
+
+    async def scenario():
+        server = GatewayControlServer(home)
+        assert await server.start()
+        try:
+            loop = __import__('asyncio').get_running_loop()
+            identify = await loop.run_in_executor(None, lambda: query_gateway_control(home, 'identify'))
+            status = await loop.run_in_executor(None, lambda: query_gateway_control(home, 'status'))
+            return identify, status
+        finally:
+            await server.stop()
+
+    identify, status = __import__('asyncio').run(scenario())
+    assert identify['pid'] == os.getpid()
+    assert identify['served_profiles'] == ['default']
+    assert status['gateway_state'] == 'running'
+    assert status['session_store'] == {'status': 'ok'}
+    platform = status['platforms']['local_stub']
+    assert platform['state'] == 'connected'
+    assert platform['writer_pid'] == os.getpid()
+    assert (home / 'state.db').exists()
+    conn = __import__('sqlite3').connect(f'file:{home / "state.db"}?mode=ro', uri=True)
+    try:
+        assert conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] >= 0
+        assert conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0] >= 0
+    finally:
+        conn.close()
 
 
 def test_p1_fencing_budget_denied_before_stop(sandbox):
@@ -1289,3 +1569,30 @@ def test_frozen_git_recovery_rejects_illegal_ref_changes(frozen_git_run, case):
         c.git(run.p['remote'], 'update-ref', 'refs/heads/' + branch, candidate if branch == 'main' else old)
     with pytest.raises(c.Refusal):
         run.recovery_refs()
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize('case', ['legacy-baseline', 'missing-dependencies'])
+def test_release_launcher_contract_gate_before_stop(module_root, case):
+    root = module_root
+    p, _ = module_service_packet(root, 'stage', TEST_PYTHON)
+    original_pid = p['baseline']['pid']
+    try:
+        if case == 'legacy-baseline':
+            p['baseline']['argv'] = [str(TEST_PYTHON), '-m', 'hermes_cli.main', 'gateway', 'run']
+            expected = 'separately approved bootstrap installation and restart'
+        else:
+            path = root / 'runtime/launch_gateway.py'
+            path.write_bytes((SCRIPTS / 'launch_gateway.py').read_bytes())
+            path.chmod(0o600)
+            p['launcher'] = str(path)
+            p['launcher_sha256'] = c.digest(path.read_bytes())
+            p['baseline']['argv'] = [str(TEST_PYTHON), '-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null', str(path)]
+            pin_file(p, path)
+            expected = 'dependency pin required'
+        check = cli(root, rewrite(root, p))
+        assert check.returncode != 0 and expected in check.stderr
+        assert c.show(p['unit'])['MainPID'] == str(original_pid)
+        assert not (root / 'run/stopped-intent.json').exists()
+    finally:
+        cleanup_module_service(root, p['unit'])

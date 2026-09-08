@@ -12,13 +12,12 @@ executable qualification uses disposable Git repositories and user-systemd units
 **application, authentication, approval, CI and backup evidence in those tests is
 simulated**. No live gateway stop/start, production source switch, backup,
 credential/config repair, permanent installation, or release was performed here.
-The deployment owner is `t_ddd2e9dc`; parent review precedes deployment.
 
-Brian's approved repeated-qualified-batch window is
-**2026-09-06T20:38:15-07:00 through 2026-09-07T04:38:15-07:00**. It does not activate
-this candidate or waive per-batch qualification. Each batch needs a fresh packet,
-state directory, unique controller unit and external exact-packet approval. The
-runner never schedules another batch or retries one automatically.
+Any dated approval window recorded in prior task notes is historical evidence
+only. It is not operative approval for a future batch. Each batch needs a fresh
+packet, state directory, unique controller unit, external all-consumer hold and
+external exact-packet approval. The runner never schedules another batch or
+retries one automatically.
 
 ## Authority and execution
 
@@ -87,7 +86,11 @@ the source checkout. From the reviewed candidate checkout:
 umask 077
 install -d -m 700 "$RELEASE_INSTALL" "$RELEASE_STATE"
 install -m 600 scripts/claude_release_switch/controller.py \
-  scripts/claude_release_switch/health.py "$RELEASE_INSTALL/"
+  scripts/claude_release_switch/health.py \
+  scripts/claude_release_switch/launch_gateway.py \
+  scripts/claude_release_switch/runtime_health.py \
+  scripts/claude_release_switch/runtime_observation.py \
+  scripts/claude_release_switch/drain_proof.py "$RELEASE_INSTALL/"
 install -m 600 /home/brian/Documents/Runbooks/claude-release-switch-controller.md \
   "$RELEASE_INSTALL/runbook.md"
 ```
@@ -95,9 +98,74 @@ install -m 600 /home/brian/Documents/Runbooks/claude-release-switch-controller.m
 Copy each reviewed standalone offline/drain/health check into the same trusted
 installation, preserving any separately required executable mode. Do not install
 `fixture.py` for deployment. Pin all copies and interpreter/executable identities
-in the packet. No permanent controller unit is required. The existing exact service
-and its startup evidence producer are qualified under the approved lifecycle design;
-this controller neither installs nor changes that service.
+in the packet. No permanent controller unit is required. Service-definition changes
+remain Ops-owned and approval-gated; this source task does not install or change
+the live service.
+
+The reviewed startup producer is `launch_gateway.py`, with the adjacent
+`runtime_observation.py`. Final `ExecStart` must use the existing venv interpreter
+with **`-I -S -B -X pycache_prefix=/dev/null` present before the script**. These flags prevent inherited
+`PYTHONPATH`/`PYTHONHOME`, user-site, venv/system `.pth`, and automatic
+`sitecustomize` execution before the bootstrap. `-B` prevents writes and the non-directory `/dev/null` cache prefix prevents even startup stdlib cache reads. Bytecode-only imports are refused, and source/native imports outside tracked source or explicitly pinned dependencies fail closed. The bootstrap removes inherited
+Python import controls from child environments too. It never calls `site.main()`
+or `addsitedir()` and never recreates the venv.
+
+Ops must prepare and review a private `dependencies.json` containing exactly:
+`paths` (ordered canonical absolute directories for the selected interpreter's
+stdlib, lib-dynload, existing venv site-packages and any executable plugin roots), `files` (absolute path to
+SHA256 for every regular file below those directories except `__pycache__`/`.pyc`),
+and `observer_sha256` (the installed `runtime_observation.py` hash), plus
+`venv_config` (the selected existing venv's canonical `pyvenv.cfg` path, or an empty
+string for a system interpreter). Include that config file in `files`. The installed
+launcher's `dependency_files(paths, venv_config)` implements that inventory; choosing the paths
+is a reviewed installation decision, never inferred by executing `.pth` files.
+The explicit dependency paths may live inside the checkout (the normal `.venv`
+layout), but none may classify any tracked current/candidate/rollback source file
+as a dependency. The loader verifies each dependency source against its separate
+inventory. On Python versions where `-S` disables venv prefix detection, the
+bootstrap restores `sys.prefix`/`sys.exec_prefix` from the pinned config path and
+checks it against the actual selected interpreter; it does not execute the config.
+Pin the manifest, every inventoried dependency, observer, bootstrap, interpreter,
+and service fragment/drop-ins in the packet artifact list. Maintain the external
+source/dependency hold through recovery. Stdlib dependencies are trusted during
+bootstrap startup and must be pinned before service activation.
+
+```bash
+/home/brian/.hermes/hermes-agent/.venv/bin/python -I -S -B -X pycache_prefix=/dev/null "$RELEASE_INSTALL/launch_gateway.py" \
+  --repo /home/brian/.hermes/hermes-agent \
+  --startup-json "$RELEASE_STATE/startup.json" \
+  --dependencies "$RELEASE_INSTALL/dependencies.json" \
+  --dependencies-sha256 "$REVIEWED_DEPENDENCIES_SHA256" \
+  -- -m hermes_cli.main gateway run
+```
+
+The bootstrap inventories clean tracked bytes, then installs a direct source
+compiler before importing `hermes_cli.main` and `gateway.run`. Ordinary and lazy
+`SourceFileLoader` imports compile the verified bytes directly, bypassing pyc.
+Preloaded repository modules, untracked source, repository native modules,
+bytecode-only imports, and candidate-owned modules resolving elsewhere
+are refused. The startup record separates the full **on-disk** `bytes` inventory
+from `loaded`, the modules actually compiled and executed so far. Status readback
+refreshes `loaded` after lazy imports. It does not claim the whole inventory is
+loaded, or defend against malicious same-UID code bypassing Python import loaders.
+The external frozen source hold is required.
+
+**Legacy baseline installation gate:** the reported live baseline still uses
+`python -m hermes_cli.main gateway run`. This controller deliberately refuses it;
+it does not silently compare that process with the new launcher argv. Installing
+and loading the new unit definition alone does not change the running process or
+add the observer. Before a release packet can use this implementation, Ops and
+Brian must separately authorize and execute one **bootstrap installation and
+restart on unchanged known-good source**, under their own qualified all-consumer
+drain, source/dependency hold, backup and recovery order. Verify the new observer,
+exact argv and new PID/starttime, then freeze a new release packet. A later release
+switch is a second stopped transition. Neither bootstrap restart nor a combined
+single-transition migration is authorized or implemented by this preparation.
+If the bootstrap cannot start, the separately approved installation recovery must
+restore the saved original unit definition and start unchanged known-good source;
+this controller cannot recover a bootstrap it never admitted. The old running
+process cannot supply `release_observation`, so its first drain must be qualified
+by that separate installation owner, not by generating a success receipt here.
 
 ## Prepare and qualify one packet
 
@@ -114,7 +182,7 @@ unsafe modes or altered command plans fail closed. All state/receipt files are
 | `local`, `authoritative`, `extra_refs` | Exact main/staging/rollback locals, authoritative main/staging, and every additional ref/SHA. Additional unrelated worktrees are allowed; none may hold main, staging or rollback. |
 | `git_config`, `untracked` | Exact local config lines and every ignored/untracked filename. Each inventory entry has path, mode, classification (`backed-up` or `reproducible`) and reason. Backed-up entries pin SHA256 (symlink target text for symlinks); reproducible entries have empty SHA256. Names/modes remain checked. Backup receipts cover non-reproducible files. No reset/clean to satisfy a denial. |
 | `remote`, `git_route` | Explicit local bare path, credential-free HTTPS URL, or SSH `user@host:path`. Route has isolated private absolute `home`, and one pinned absolute credential `helper` (HTTPS) or `ssh` executable (SSH); unused fields are empty strings. Local bare routes have both empty. |
-| `unit`, `unit_definition_sha256`, `launcher`, `launcher_sha256`, `baseline` | Exact service, hash of `raw([SYSTEMCTL, '--user', 'cat', unit], '/', env=system_env()).encode()`, launcher bytes, actual PID/kernel starttime/cgroup/full argv from `proc(MainPID)`. Unit fragment/drop-ins and baseline interpreter must be artifacts. Reload-needed or definition drift blocks execution. |
+| `unit`, `unit_definition_sha256`, `launcher`, `launcher_sha256`, `baseline` | Exact service, hash of `raw([SYSTEMCTL, '--user', 'cat', unit], '/', env=system_env()).encode()`, installed launcher script bytes, actual PID/kernel starttime/cgroup/full argv from `proc(MainPID)`. The launcher script must be in the baseline service command and artifact manifest, with matching `launcher_sha256`; the legacy-baseline bootstrap gate above applies. Unit fragment/drop-ins and baseline interpreter must be artifacts. Reload-needed or definition drift blocks execution. |
 | `installation`, `controller_unit`, `lock`, `lock_identity` | Installed copy location, unique independent service name, actual existing lock path/device/inode. The same external sole-writer hold must cover all writers and recovery handoff. |
 | `window` | Integer Unix start, abort, expiry, recovery deadline and reserve. Start < abort < expiry <= recovery deadline. Reserve covers frozen recovery command timeouts plus at least 40 seconds for validation/checks. Fencing has a separate allowance of twice reserve (two possible systemd termination waits). Expiry minus abort must cover three times reserve plus 10 seconds dispatch margin; recovery deadline is no earlier than expiry. ExecStopPost has its own full reserve timeout, bounding aggregate commands/checks; slow or stuck validation fails closed rather than extending it. Measure real timings and allow more when required. |
 | `checks`, `command_timeout` | Frozen drain/offline/smoke/recover-offline/recover-smoke command records. Each has `id`, `argv`, `cwd`, closed `env`, integer `timeout` (1–300 seconds). `command_timeout` sets generated Git/service command limits (1–300). Slow qualification runs before outage. |
@@ -177,22 +245,93 @@ stop is not drain evidence. The runner validates it before stop and again before
 source mutation. Quiescent state (`inactive`, or `failed` with MainPID zero), baseline PID disappearance and empty gateway cgroup
 are separately required.
 
+`drain_proof.py HERMES_HOME HOLD_JSON REPO UNIT PID STARTTIME
+--recovery-deadline UNIX_SECONDS` is the evidence producer **after** the existing
+`gateway.drain_control.write_drain_request()` mechanism and the external hold are
+established. The frozen check argv must supply the packet's exact recovery
+deadline. Hold JSON has exactly `kind="release-admission-hold"`, `repo`, `unit`,
+`pid`, `starttime`, integer `observed`, `valid_until`, `recovery_deadline`, nonempty
+`owner`, `recovery_owner`, `approved=true`, and `coverage` with the following keys:
+
+- `gateway_turns`, `cron`, `api`, `background_work`: owner-established admission
+  barriers, with the concrete mechanism and independently observed quiescence.
+- `kanban_workers`, `updater`, `editors`, `source_readers`: exact detached consumer
+  population and the mechanism holding each population stopped or excluded.
+- `recovery_handoff`: named recovery owner, transfer/contact route and release
+  conditions. The owner retains the hold after any failure until recovery is
+  verified or a separately authorized handoff completes.
+
+Coverage text records external evidence; it cannot replace busy observation.
+`valid_until` must cover the frozen `recovery_deadline`. Both hold freshness and
+ownership are checked again after two control observations. The status callback
+must report actual draining state, zero live turn/cron/API counts, and no live
+background tasks, delegates, terminal processes or completion watchers. Unknown
+or unreadable work fails closed even when persisted `active_agents` is zero.
+The observer adds no mutation verb and never establishes/releases a hold.
+
 `health.py STARTUP_JSON LIVE_JSON EXACT_UNIT` is the standalone read-only contract
 hook. It reads private evidence and systemd/proc identity and prints health JSON.
 Startup evidence has `pid`, kernel `starttime`, `sha`, canonical `source`, complete
-loaded `bytes` inventory and `executable_sha256`. The qualified startup producer
-must capture these from the actual starting process/executable and loaded source,
-not from mutable HEAD inspected later. Freeze and qualify that producer with the
-service installation; never invent this record during packet preparation.
+tracked `bytes` inventory, `loaded` module byte attestations and
+`executable_sha256`. The qualified startup producer must capture these from the
+actual final gateway Python process/executable and resolved loaded source, not from
+mutable HEAD inspected later or a pre-exec inventory. Freeze and qualify that
+producer with the service installation; never invent this record during packet
+preparation.
 
-Fresh live evidence has matching `pid`/`starttime`, integer `observed` (at most
-30 seconds old), and `platform`, `scheduler`, `persistence`, `sessions`, each `ok`
-only after its real check passes. Freeze the bounded smoke command that obtains
-those observations and invokes the hook. The hook does not create connectivity,
-scheduler or backup evidence. In the disposable fixture only, their producers are
-mocked; process/systemd checks and the health hook itself execute normally.
+`runtime_health.py STARTUP_JSON LIVE_JSON EXACT_UNIT HERMES_HOME` uses a
+bounded live control answer from the actual runner. Its installed callback
+captures the authoritative profile/home mapping using the existing profile
+resolver and checks each profile's real SessionStore handle when opened. Secondary
+handles open lazily in production: when absent, the observer checks the existing
+profile database read-only, without creating a session or a write-capable handle.
+Missing or unreadable databases still refuse readiness. Collection separately
+opens each exact `state.db` read-only and checks genuine ticker heartbeat/success
+files. Both markers must postdate this launcher generation, so a recent marker
+left by the previous process is insufficient. Startup restoration must finish
+before the runner reports readiness, and unfinished boot warmup remains busy.
+The executable retries incomplete readiness for `--startup-timeout` seconds
+(default 90, allowed 0–240); zero makes one collection attempt. Each collection
+has its own bounded I/O, so freeze an outer smoke/recovery-smoke timeout with
+headroom (120 seconds for the default retry budget), and include that timeout
+in the recovery reserve. The default ticker age allowance is 90 seconds because the built-in ticker
+runs every 60 seconds; live runner observation is newly sampled on each request.
 
-The controller requires a new PID/starttime, exact baseline argv/cgroup, pinned
+Supported local transport observations are Discord's ready/open/heartbeat-ACK
+predicate, Telegram polling's running application/updater plus actual getUpdates
+progress (90 seconds), Slack Socket Mode connection and ping/pong state, and the
+API server's serving listener, plus the webhook adapter's nonempty aiohttp
+runner sites with every listener serving. This proves local listening readiness,
+not external delivery. Telegram webhooks and unknown adapters fail closed.
+Feishu remains unsupported: its WebSocket executor future/thread can stay alive
+during reconnect and the adapter has no native fresh transport/ACK predicate.
+A historical persisted Feishu entry is not an active runner adapter and does not
+participate; if Feishu is active at bootstrap it blocks qualification pending
+separate transport proof (including its distinct HTTP mode).
+These checks inspect existing state and make no credential or provider calls.
+Persisted platform transition timestamps are not refreshed or treated as probes.
+Required endpoints come from the primary runner's loaded config and the secondary
+configs consumed by actual startup/reconnect calls. Unrelated config reads and
+historical persisted status do not change that set. Every required enabled
+platform must be present and currently healthy; current failed-platform queues
+also refuse success. Missing or unreadable required-profile state fails closed.
+Adapter-owned session tasks, active session guards and message-processing
+background tasks remain busy through post-handler TTS/media/final delivery.
+Weak ownership tracking preserves visibility when a failed adapter is removed
+from a live map while its processing task still holds it. No adapter processing
+task is exempted by a watcher tag; the existing runner exclusion remains only
+for its supervised permanent watchers.
+The API adapter's permanent orphan-run sweeper is maintenance rather than message
+processing. Only the native `APIServerAdapter` coroutine code with that exact
+adapter as its bound owner is exempted from the adapter background-task check.
+Task names/tags, other coroutine code and foreign owners cannot qualify. This
+exception does not apply to session tasks, active guards or queued/inflight runs.
+Missing profiles, failed session handles, stale secondary tickers, disconnected
+transport, unreadable work state and nonempty work all block success. The same
+external observer composition uses existing constructor/callback seams on
+candidate and rollback; it does not require patching gateway core.
+
+The controller requires a new PID/starttime, exact baseline argv/cgroup (after the separately approved bootstrap gate), pinned
 interpreter hash, the expected startup SHA/source/bytes, all four health checks,
 and final working-byte/ref verification. A stale receipt, service `active` alone,
 or HEAD read after startup cannot prove success.
@@ -269,7 +408,7 @@ new root under this task's evidence directory:
 
 ```bash
 umask 077
-TASK_ROOT=/home/brian/.hermes/kanban/boards/operations/workspaces/t_acd2041b/evidence/t-acd2041b-demo-UNIQUE
+TASK_ROOT=/home/brian/.hermes/kanban/boards/operations/workspaces/t_8ed10dee/evidence/t-8ed10dee-demo-UNIQUE
 python3 scripts/claude_release_switch/fixture.py "$TASK_ROOT" create --operation promote
 ```
 
@@ -284,12 +423,14 @@ file and retains its repository/evidence:
 python3 scripts/claude_release_switch/fixture.py "$TASK_ROOT" cleanup
 ```
 
-Run the focused suite in the isolated test environment owned by this task:
-
-```bash
-HERMES_PYTHON=/home/brian/.hermes/kanban/boards/operations/workspaces/t_acd2041b/test-venv/bin/python \
-  scripts/run_tests.sh tests/scripts/test_claude_release_switch.py -q --file-retries 0 --file-timeout 900
-```
+Bounded actual-path qualification lives in `tests/scripts/test_release_actual_path.py`.
+It launches the real CLI/runner/control callback/ticker/session store with local
+transport stubs in disposable repositories; only systemd ownership lookup is
+substituted in that subprocess test. Separate controller wire tests retain their
+simulated application producer in `tests/scripts/fixtures/.../wire_launcher.py`;
+that fixture is never a production provenance or runtime health attestation.
+Select explicit test nodes and a short task-local `--basetemp`; do not replay the
+whole controller matrix for this correction. No real model calls are needed.
 
 Git stage/promote/detached rollback, nonforce push/readback, extra refs/worktrees,
 classified files, exact service actions, submitter exit, supervisor SIGKILL,
@@ -297,3 +438,18 @@ timeout/setsid fencing and deadline recovery are real. The isolated fake SSH
 transport runs real Git upload/receive-pack locally; it proves explicit route/env
 propagation, not remote authentication. Linux tests explicitly skip without a user
 manager; a skip is not topology evidence. No actual model is called by the suite.
+
+
+### Hosted and local qualification coverage
+
+The actual-path test module is marked `linux_only`: its `/proc`, Unix sockets,
+fixed system tools and native-extension checks run on Linux, including the
+staging push CI lane. `.github/workflows/ci.yaml` dispatches that lane through
+`tests.yml`, whose hosted checkout is shallow. Candidate/native/readiness tests
+remain enabled there. The retained historical `9ccb53e3` rollback case explicitly
+skips only when that commit object is absent; it is mandatory local release
+qualification with that object available (the existing final12 log records its
+completed run). Do not interpret shallow-CI success as rollback qualification.
+No workflow history expansion or test-side network fetch is performed. Existing
+interpreters without a `pyvenv.cfg` use an empty manifest venv-config entry;
+when present, that file remains pinned and prefix restoration remains asserted.

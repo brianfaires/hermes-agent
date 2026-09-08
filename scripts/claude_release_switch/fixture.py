@@ -176,8 +176,9 @@ def lifecycle(root, action):
             require(not (fault['kind'] == 'startup' and sha != packet['rollback']['sha']), 'simulated startup failure')
         files = revision(repo, sha, '')['files']
         identity = proc(os.getpid())
+        loaded = [{'module': 'fixture_app', 'path': 'app.txt', 'sha256': digest((root / 'repo/app.txt').read_bytes())}]
         durable(root / 'health.json', {'pid': os.getpid(), 'starttime': identity['starttime'],
-                                     'sha': sha, 'source': repo, 'bytes': files, 'healthy': True,
+                                     'sha': sha, 'source': repo, 'bytes': files, 'loaded': loaded, 'healthy': True,
                                      'executable_sha256': digest(Path('/proc/self/exe').read_bytes()),
                                      'platform': 'ok', 'scheduler': 'ok',
                                      'persistence': 'ok', 'sessions': 'ok'})
@@ -207,8 +208,9 @@ def lifecycle(root, action):
         health = loads(private(root / 'health.json').read_bytes())
         require(health['healthy'] is True and show(unit)['MainPID'] == str(health['pid']), 'fixture smoke failure')
         from health import read_health
-        durable(root / 'startup.json', {k: health[k] for k in ('pid', 'starttime', 'sha', 'source', 'bytes', 'executable_sha256')})
-        durable(root / 'live.json', {**{k: health[k] for k in ('pid', 'starttime', 'platform', 'scheduler', 'persistence', 'sessions')}, 'observed': int(time.time())})
+        durable(root / 'startup.json', {k: health[k] for k in ('pid', 'starttime', 'sha', 'source', 'bytes', 'loaded', 'executable_sha256')})
+        durable(root / 'live.json', {**{k: health[k] for k in ('pid', 'starttime', 'platform', 'scheduler', 'persistence', 'sessions')},
+                                    'served_profile_homes': {'default': str(root)}, 'observed': int(time.time())})
         print(json.dumps(read_health(root / 'startup.json', root / 'live.json', unit)))
     elif action == 'switch-timeout':
         p = loads((root / 'run' / 'packet.json').read_bytes())

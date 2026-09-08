@@ -10,15 +10,18 @@ from pathlib import Path
 import sys
 import time
 
-from controller import REV, loads, private, proc, require, shape, show
+from controller import LOADED_SOURCE, REV, loads, private, proc, require, shape, show
 
 
 def read_health(startup, live, unit):
     started = loads(private(startup).read_bytes())
-    shape(started, {'pid': int, 'starttime': str, 'sha': str, 'source': str, 'bytes': REV['files'], 'executable_sha256': str})
+    shape(started, {'pid': int, 'starttime': str, 'sha': str, 'source': str,
+                    'bytes': REV['files'], 'loaded': LOADED_SOURCE,
+                    'executable_sha256': str})
     checked = loads(private(live).read_bytes())
     shape(checked, {'pid': int, 'starttime': str, 'observed': int,
-                    'platform': str, 'scheduler': str, 'persistence': str, 'sessions': str})
+                    'platform': str, 'scheduler': str, 'persistence': str,
+                    'sessions': str, 'served_profile_homes': 'environment'})
     status = show(unit)
     require(status['ActiveState'] == 'active', 'service inactive')
     actual = proc(int(status['MainPID']))

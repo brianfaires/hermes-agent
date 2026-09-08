@@ -121,6 +121,7 @@ def shape(value, template, where='packet'):
 
 REV = {'sha': str, 'tree': str, 'branch': str, 'files': [
     {'path': str, 'sha256': str, 'mode': str}]}
+LOADED_SOURCE = [{'module': str, 'path': str, 'sha256': str}]
 COMMAND = {'id': str, 'argv': [str], 'cwd': str, 'env': BASE_ENV.copy(), 'timeout': int}
 COMMAND['env'] = 'environment'
 SCHEMA = {
@@ -227,11 +228,18 @@ def command_files(argv):
     executable = Path(argv[0])
     executable_access(executable)
     name = executable.resolve().name
-    require(name not in ('sh', 'bash', 'dash', 'zsh', 'fish', 'env', 'sudo', 'su', 'perl', 'ruby', 'node', 'nodejs')
-            and not any(x in ('-c', '--command', '-m', '-e', '--eval', 'eval', 'exec') for x in argv[1:]), 'shell/interpreter escape')
+    require(name not in ('sh', 'bash', 'dash', 'zsh', 'fish', 'env', 'sudo', 'su', 'perl', 'ruby', 'node', 'nodejs'),
+            'shell/interpreter escape')
     files = {str(executable)}
     if name.startswith('python'):
-        require(len(argv) >= 2 and Path(argv[1]).is_absolute() and Path(argv[1]).is_file(), 'pinned Python script required')
+        require(len(argv) >= 2, 'pinned Python script required')
+        if argv[1:6] == ['-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null']:
+            argv = [argv[0], *argv[6:]]
+        elif argv[1:3] == ['-I', '-S']:
+            argv = [argv[0], *argv[3:]]
+        require(argv[1] not in ('-c', '--command', '-m', '-e', '--eval', 'eval', 'exec'),
+                'shell/interpreter escape')
+        require(Path(argv[1]).is_absolute() and Path(argv[1]).is_file(), 'pinned Python script required')
         files.add(argv[1])
     else:
         first = executable.read_bytes().split(b'\n', 1)[0]
@@ -372,6 +380,7 @@ class Run:
         require(installation.is_absolute() and installation.resolve() == installation, 'canonical installation required')
         require(not installation.is_relative_to(repo) and not self.state.is_relative_to(repo), 'control files inside switched source')
         require(Path(__file__).resolve() == installation / 'controller.py', 'run verified installed copy')
+        require(Path(p['launcher']).is_absolute() and Path(p['launcher']).is_file(), 'launcher artifact required')
         require(Path(p['lock']).is_absolute() and not Path(p['lock']).resolve().is_relative_to(repo), 'external lock required')
         for unit in (p['unit'], p['controller_unit']):
             require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.@-]*\.service', unit), 'exact service required')
@@ -484,6 +493,45 @@ class Run:
                 expected.update(command_files([self.p['git_route'][key]]))
         if self.p['model']['kind'] == 'claude':
             expected.update(command_files([CLAUDE]))
+        require(self.p['launcher'] in baseline_files(self.p['baseline']['argv']),
+                'legacy baseline requires separately approved bootstrap installation and restart')
+        if self.p['model']['kind'] == 'claude' or Path(self.p['launcher']).name == 'launch_gateway.py':
+            argv = self.p['baseline']['argv']
+            require(argv[1:6] == ['-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null'], 'isolated launcher argv required')
+            require('--dependencies' in argv and '--dependencies-sha256' in argv, 'dependency pin required')
+            require(len(argv) == 20 and argv[6] == self.p['launcher']
+                    and argv[7:9] == ['--repo', self.p['repo']] and argv[9] == '--startup-json'
+                    and argv[11] == '--dependencies' and argv[13] == '--dependencies-sha256'
+                    and argv[15:] == ['--', '-m', 'hermes_cli.main', 'gateway', 'run'], 'exact launcher argv required')
+            require(Path(argv[10]).is_absolute() and not Path(argv[10]).is_relative_to(Path(self.p['repo'])), 'startup evidence path')
+            dependency_path = Path(argv[argv.index('--dependencies') + 1])
+            dependency_sha = argv[argv.index('--dependencies-sha256') + 1]
+            require(digest(dependency_path.read_bytes()) == dependency_sha, 'dependency manifest drift')
+            dependencies = loads(dependency_path.read_bytes())
+            expected.update({str(dependency_path), str(Path(self.p['launcher']).with_name('runtime_observation.py'))})
+            expected.update(dependencies['files'])
+            expected.update(str(Path(self.p['launcher']).with_name(name))
+                            for name in ('health.py', 'runtime_health.py', 'drain_proof.py'))
+            require(set(dependencies) == {'paths', 'files', 'observer_sha256', 'venv_config'}, 'dependency manifest shape')
+            actual_dependencies = {}
+            for root in dependencies['paths']:
+                root = Path(root)
+                require(root.is_absolute() and root.resolve() == root and root.is_dir(), 'dependency root path')
+                for file in root.rglob('*'):
+                    if '__pycache__' in file.parts or file.suffix == '.pyc':
+                        continue
+                    if file.is_file():
+                        require(not file.is_symlink(), 'dependency symlink unsupported')
+                        actual_dependencies[str(file)] = digest(file.read_bytes())
+            selected_prefix = Path(argv[0]).parent.parent.resolve()
+            venv_config = dependencies['venv_config']
+            require(venv_config == (str(selected_prefix / 'pyvenv.cfg') if (selected_prefix / 'pyvenv.cfg').is_file() else ''), 'venv config does not match interpreter')
+            if venv_config:
+                actual_dependencies[venv_config] = digest(Path(venv_config).read_bytes())
+            for revision_name in ('current', 'candidate', 'rollback'):
+                require(not ({str(Path(self.p['repo']) / item['path']) for item in self.p[revision_name]['files']} & actual_dependencies.keys()), 'tracked source classified as dependency')
+            require(actual_dependencies == dependencies['files'], 'dependency bytes drift')
+            require(dependencies['observer_sha256'] == digest(Path(self.p['launcher']).with_name('runtime_observation.py').read_bytes()), 'observer pin drift')
         manifest = {a['path']: a for a in self.p['artifacts']}
         require(len(manifest) == len(self.p['artifacts']) and expected <= manifest.keys(), 'installation/executable manifest')
         for path, artifact in manifest.items():
@@ -714,7 +762,11 @@ class Run:
         require(actual['argv'] == self.p['baseline']['argv'] and actual['cgroup'] == self.p['baseline']['cgroup'], 'runtime identity mismatch')
         health = loads(private(self.p['health_path']).read_bytes())
         shape(health, {'pid': int, 'starttime': str, 'sha': str, 'source': str, 'bytes': REV['files'],
-                       'executable_sha256': str, 'healthy': bool, 'platform': str, 'scheduler': str, 'persistence': str, 'sessions': str})
+                       'loaded': LOADED_SOURCE, 'executable_sha256': str, 'healthy': bool,
+                       'platform': str, 'scheduler': str, 'persistence': str, 'sessions': str})
+        expected_loaded = {item['path']: item['sha256'] for item in rev['files']}
+        require(health['loaded'] and all(item['path'] in expected_loaded and expected_loaded[item['path']] == item['sha256']
+                for item in health['loaded']), 'loaded source evidence mismatch')
         require(health['pid'] == actual['pid'] and health['starttime'] == actual['starttime']
                 and health['sha'] == rev['sha'] and health['source'] == self.p['repo']
                 and health['bytes'] == rev['files'] and health['healthy'] is True
