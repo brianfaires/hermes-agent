@@ -167,6 +167,77 @@ this controller cannot recover a bootstrap it never admitted. The old running
 process cannot supply `release_observation`, so its first drain must be qualified
 by that separate installation owner, not by generating a success receipt here.
 
+### Bootstrap installation guard
+
+`bootstrap_recovery.py` is the separate, deterministic one-shot guard for that
+legacy-baseline bootstrap installation only. It performs no source release switch
+and makes no model calls. It installs one exact candidate service configuration
+file, runs packet-frozen reload/drain/stop/start/health commands, and writes a
+durable `bootstrap-active` result only after the same service reports the
+approved bootstrap target. On any failure after configuration mutation, the
+transient supervisor's `ExecStopPost` runs `--recover`: it fences controller
+descendants, retains the same lock, proves the gateway unit quiescent, removes
+only the exact candidate bytes, reloads, starts the approved legacy target, and
+requires fresh legacy health. It never restores or overwrites persistent data.
+
+Install the bootstrap guard alongside the release controller only for an
+approved bootstrap packet:
+
+```bash
+umask 077
+install -d -m 700 "$RELEASE_INSTALL" "$RELEASE_STATE"
+install -m 600 scripts/claude_release_switch/controller.py \
+  scripts/claude_release_switch/bootstrap_recovery.py \
+  scripts/claude_release_switch/bootstrap_install_packet_template.py \
+  scripts/claude_release_switch/bootstrap_runtime_bindings.py \
+  scripts/claude_release_switch/runtime_health.py \
+  scripts/claude_release_switch/drain_proof.py \
+  scripts/claude_release_switch/health.py \
+  "$RELEASE_INSTALL/"
+```
+
+Build the production packet from exact reviewed inputs outside the checkout.
+The input must already contain reviewed hashes, service identity, the
+candidate-drop-in source/live paths, lock identity, window, artifacts, and
+`bootstrap_bindings` paths for `hermes_home`, `hold_json`, `repo`,
+`startup_json`, and `live_json`. The helper binds drain and drain clearing to
+the bootstrap legacy producer, bootstrap health to `runtime_health.py`, and recovery health to a
+legacy systemd/proc/control-socket producer that does not require the new
+observer on known-good rollback. For live packets with
+`unit_definition_required=true`, include both `baseline_unit_sha256` and
+`candidate_unit_sha256`, where each is the SHA256 of
+`systemctl --user cat UNIT` in its reviewed phase: before mutation for baseline,
+and after candidate installation plus `daemon-reload` for candidate. The helper
+fills only the exact production lifecycle/evidence command records:
+
+```bash
+/usr/bin/python3 "$RELEASE_INSTALL/bootstrap_install_packet_template.py" \
+  "$RELEASE_STATE/bootstrap-input.json" > "$RELEASE_STATE/bootstrap-packet.json"
+```
+
+The helper prints the packet SHA256 on stderr. That SHA is not authority until
+Ang approves it out of band. After approval names the exact hash:
+
+```bash
+/usr/bin/python3 "$RELEASE_INSTALL/bootstrap_recovery.py" \
+  "$RELEASE_STATE/bootstrap-packet.json" \
+  --authority UNRESOLVED_ANG_APPROVAL_OF_PACKET_SHA256
+/usr/bin/python3 "$RELEASE_INSTALL/bootstrap_recovery.py" \
+  "$RELEASE_STATE/bootstrap-packet.json" \
+  --authority UNRESOLVED_ANG_APPROVAL_OF_PACKET_SHA256 --apply
+```
+
+For a live bootstrap packet, set `unit_definition_required` to `true`. The guard
+checks the baseline definition at preflight and again after recovery reload, then
+checks the candidate definition after candidate install/reload while the original
+process is still draining and after bootstrap health. `candidate_unit_sha256` is
+an additional packet field because the complete rendered systemd definition is
+the reviewed `systemctl cat` output; it cannot be reconstructed safely from the
+candidate drop-in bytes alone. The transient fixture qualification sets
+`unit_definition_required` to `false` because it deliberately avoids persistent
+unit files and user-manager daemon reload; that fixture proves the same-service
+configuration/recovery algorithm, not live service-definition restoration.
+
 ## Prepare and qualify one packet
 
 The strict, executable schema is `SCHEMA` in `controller.py` (version 2). Unknown
