@@ -161,14 +161,30 @@ def write_fixture(root):
         '        while True:\n'
         '            signal.pause()\n'
         '    if action == "reload":\n'
+        '        if fault == "reload-failure" and (root / "dropins/90-bootstrap.conf").exists():\n'
+        '            raise SystemExit(31)\n'
         '        print(json.dumps({"reloaded": True, "candidate_present": (root / "dropins/90-bootstrap.conf").exists()}))\n'
         '        return\n'
         '    if action == "drain":\n'
         '        pid = int((root / "run/service.pid").read_text())\n'
+        '        if fault in ("drain-refusal", "pre-stop-supervisor-loss"):\n'
+        '            _durable(root / "run/drain-marker.json", {"owned": True})\n'
+        '        if fault == "drain-refusal":\n'
+        '            raise SystemExit(32)\n'
+        '        if fault == "pre-stop-supervisor-loss":\n'
+        '            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])\n'
+        '            _durable(root / "run/descendant.json", {"pid": child.pid})\n'
+        '            os.kill(os.getppid(), signal.SIGKILL)\n'
+        '            time.sleep(120)\n'
         '        print(json.dumps({"active_jobs": 0, "unit": root.name + "-gateway.service",\n'
         '                          "pid": pid, "starttime": _starttime(pid), "observed": int(time.time())}))\n'
         '        return\n'
         '    if action == "clear-drain":\n'
+        '        marker = root / "run/drain-marker.json"\n'
+        '        if marker.exists():\n'
+        '            marker.unlink()\n'
+        '            print(json.dumps({"cleared": True}))\n'
+        '            return\n'
         '        print(json.dumps({"cleared": False, "reason": "fixture-no-marker"}))\n'
         '        return\n'
         '    if action in ("stop", "recover-stop"):\n'
@@ -330,6 +346,14 @@ def db_modes(root):
         return [row[0] for row in conn.execute('SELECT mode FROM events ORDER BY rowid')]
     finally:
         conn.close()
+
+
+def journal_rows(root):
+    return [json.loads(line) for line in (root / 'run/journal.jsonl').read_text().splitlines()]
+
+
+def completed(argv, returncode=0, stdout='', stderr=''):
+    return subprocess.CompletedProcess(argv, returncode, stdout.encode(), stderr.encode())
 
 
 def base_template_input(tmp_path):
@@ -632,6 +656,85 @@ def test_unit_definition_required_rejects_candidate_drift(tmp_path, monkeypatch)
         run.candidate_unit_definition()
 
 
+def manager_reload_run(tmp_path):
+    root = tmp_path / 'reload-precheck'
+    root.mkdir(mode=0o700)
+    run = object.__new__(b.BootstrapRun)
+    run.state = root
+    run.p = {'unit': 'target.service', 'controller_unit': 'controller.service'}
+    return run
+
+
+def test_manager_reload_precheck_refuses_missing_load_state(tmp_path, monkeypatch):
+    run = manager_reload_run(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        assert argv[2] == 'list-units'
+        return completed(argv, stdout='ready.service loaded active running Ready\n')
+
+    monkeypatch.setattr(b.subprocess, 'run', fake_run)
+    monkeypatch.setattr(b, 'systemctl_show_props',
+                        lambda unit, props: {'_returncode': '0', 'NeedDaemonReload': 'no'})
+    with pytest.raises(b.Refusal, match='LoadState missing for loaded unit ready.service'):
+        run.manager_reload_safe()
+
+
+def test_manager_reload_precheck_refuses_pending_unrelated_loaded_unit(tmp_path, monkeypatch):
+    run = manager_reload_run(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        return completed(argv, stdout='target.service loaded active running Target\n'
+                                      'needs-reload.service loaded active running Other\n')
+
+    monkeypatch.setattr(b.subprocess, 'run', fake_run)
+
+    def fake_show(unit, props):
+        assert unit == 'needs-reload.service'
+        return {'_returncode': '0', 'LoadState': 'loaded', 'NeedDaemonReload': 'yes'}
+
+    monkeypatch.setattr(b, 'systemctl_show_props', fake_show)
+    with pytest.raises(b.Refusal, match='unrelated loaded units need reload: needs-reload.service'):
+        run.manager_reload_safe()
+
+
+def test_pre_stop_recovery_retry_continues_after_candidate_removed(tmp_path):
+    root = tmp_path / 'retry-pre-stop'
+    root.mkdir(mode=0o700)
+    live = root / '90-bootstrap.conf'
+    journal = root / 'journal.jsonl'
+    journal.write_text(
+        json.dumps({'event': 'candidate-removed'}) + '\n'
+        + json.dumps({'event': 'intent', 'op': 'drain'}) + '\n'
+    )
+    journal.chmod(0o600)
+    run = object.__new__(b.BootstrapRun)
+    run.state = root
+    run.authority = 'a' * 64
+    run.p = {
+        'candidate': {'live': str(live), 'sha256': 'b' * 64},
+        'unit_definition_required': True,
+        'baseline_unit_sha256': 'c' * 64,
+        'checks': {},
+    }
+    for name in ('reload', 'clear-drain', 'recover-health'):
+        run.p['checks'][name] = {'id': name, 'kind': 'command', 'argv': ['/usr/bin/true'],
+                                 'cwd': '/', 'env': c.system_env(), 'timeout': 1}
+    calls = []
+    results = []
+    run.baseline_process_active = lambda: calls.append('baseline')
+    run.validate_unit_definition = lambda expected, reason: calls.append(('definition', expected, reason))
+    run.run_recovery_command_while_baseline_active = lambda command: calls.append(command['id'])
+    run.result = lambda status, reason: results.append((status, reason))
+
+    run.recover_before_stop()
+
+    assert 'reload' in calls
+    assert 'clear-drain' in calls
+    assert 'recover-health' in calls
+    assert results == [('preflight-blocked',
+                        'bootstrap candidate removed before stop; legacy left running')]
+
+
 @pytest.mark.linux_only
 def test_same_service_bootstrap_success(bootstrap_sandbox):
     root, packet, authority = bootstrap_sandbox()
@@ -693,6 +796,30 @@ def test_bootstrap_install_open_failure_does_not_stop_legacy(bootstrap_sandbox):
     assert c.show(packet['unit'])['MainPID'] == str(packet['baseline']['pid'])
     rows = [json.loads(line) for line in (root / 'run/journal.jsonl').read_text().splitlines()]
     assert not any(row.get('op') == 'stop' for row in rows)
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize('fault', ['reload-failure', 'drain-refusal', 'pre-stop-supervisor-loss'])
+def test_bootstrap_pre_stop_recovery_does_not_stop_legacy(bootstrap_sandbox, fault):
+    root, packet, authority = bootstrap_sandbox(fault)
+    assert cli(root, authority, '--apply').returncode == 0
+    outcome = finished(root, 60)
+    assert outcome['status'] == 'preflight-blocked', outcome
+    assert outcome['reason'] == 'bootstrap candidate removed before stop; legacy left running'
+    assert not (root / 'dropins/90-bootstrap.conf').exists()
+    assert c.show(packet['unit'])['ActiveState'] == 'active'
+    assert c.show(packet['unit'])['MainPID'] == str(packet['baseline']['pid'])
+    assert db_modes(root) == ['legacy']
+    rows = journal_rows(root)
+    ops = [row.get('op') for row in rows if row['event'] == 'intent']
+    assert 'stop' not in ops
+    assert 'recover-stop' not in ops
+    assert any(row['event'] == 'recovery-begin' and row.get('pre_stop') is True for row in rows)
+    if fault in ('drain-refusal', 'pre-stop-supervisor-loss'):
+        assert 'clear-drain' in ops
+        assert not (root / 'run/drain-marker.json').exists()
+    if fault == 'pre-stop-supervisor-loss':
+        assert any(row['event'] == 'fenced' for row in rows)
 
 
 @pytest.mark.linux_only

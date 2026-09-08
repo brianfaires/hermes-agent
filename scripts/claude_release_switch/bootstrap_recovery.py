@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import time
 
@@ -90,6 +91,20 @@ def cgroup_empty(cgroup):
     if not cgroup:
         return True
     return not cg_pids(cgroup)
+
+
+def systemctl_show_props(unit, props):
+    require(re.fullmatch(r'[a-zA-Z0-9_.@:\\-]+\.[a-zA-Z0-9]+', unit),
+            'exact unit required')
+    argv = [SYSTEMCTL, '--user', 'show', '--all']
+    for prop in props:
+        argv += ['-p', prop]
+    argv += ['--', unit]
+    p = subprocess.run(argv, cwd='/', env=system_env(), stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    values = dict(line.split('=', 1) for line in p.stdout.decode().splitlines() if '=' in line)
+    values['_returncode'] = str(p.returncode)
+    return values
 
 
 class BootstrapRun:
@@ -240,6 +255,40 @@ class BootstrapRun:
             actual = digest(raw([SYSTEMCTL, '--user', 'cat', self.p['unit']], '/', env=system_env()).encode())
             require(actual == expected_sha256, reason)
 
+    def manager_reload_safe(self):
+        command = [SYSTEMCTL, '--user', 'list-units', '--all', '--plain', '--no-legend', '--no-pager']
+        p = subprocess.run(command, cwd='/', env=system_env(), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        require(p.returncode == 0, 'refusing daemon-reload; list-units failed')
+        excluded = {self.p['unit'], self.p['controller_unit']}
+        unit_names = []
+        for line in p.stdout.decode().splitlines():
+            fields = line.split()
+            if fields:
+                unit_names.append(fields[0])
+
+        checked = 0
+        pending = []
+        for unit in sorted(set(unit_names)):
+            if unit in excluded:
+                continue
+            snap = systemctl_show_props(unit, ['LoadState', 'NeedDaemonReload',
+                                               'FragmentPath', 'DropInPaths'])
+            if snap.get('_returncode') != '0':
+                raise Refusal('refusing daemon-reload; show failed for loaded unit ' + unit)
+            load_state = snap.get('LoadState')
+            if not isinstance(load_state, str) or not load_state:
+                raise Refusal('refusing daemon-reload; LoadState missing for loaded unit ' + unit)
+            if load_state == 'loaded':
+                need_reload = snap.get('NeedDaemonReload')
+                if not isinstance(need_reload, str) or not need_reload:
+                    raise Refusal('refusing daemon-reload; NeedDaemonReload missing for loaded unit ' + unit)
+                checked += 1
+                if need_reload != 'no':
+                    pending.append(unit)
+        require(not pending, 'refusing daemon-reload; unrelated loaded units need reload: ' + ', '.join(pending))
+        self.log('reload-precheck', checked_loaded_units=checked)
+
     def baseline_process_active(self):
         status = show(self.p['unit'])
         require(status['ActiveState'] == 'active' and status['MainPID'] == str(self.p['baseline']['pid']),
@@ -328,6 +377,65 @@ class BootstrapRun:
                 and self.p['window']['start'] <= proof['observed'] <= time.time(), 'runtime health mismatch')
         durable(self.state / ('legacy-health.json' if recovered else 'bootstrap-health.json'), proof)
 
+    def command_started(self, op):
+        return self.journal_has(lambda row: row.get('event') == 'intent' and row.get('op') == op)
+
+    def journal_has(self, predicate):
+        journal = self.state / 'journal.jsonl'
+        if not journal.exists():
+            return False
+        for line in private(journal).read_text(encoding='utf-8').splitlines():
+            try:
+                row = loads(line.encode())
+            except Exception:
+                continue
+            if predicate(row):
+                return True
+        return False
+
+    def run_recovery_command_while_baseline_active(self, command):
+        require(command['kind'] == 'command', 'recovery command shape')
+        self.gate(command['timeout'])
+        self.locked()
+        self.baseline_process_active()
+        self.log('intent', op=command['id'])
+        if command['id'] == 'reload':
+            self.manager_reload_safe()
+        output = raw(command['argv'], command['cwd'], command['timeout'], command['env'])
+        if command['id'] == 'recover-health':
+            self.validate_health(output, recovered=True)
+        self.log('done', op=command['id'])
+        self.baseline_process_active()
+        self.gate()
+        return output
+
+    def recover_before_stop(self):
+        self.baseline_process_active()
+        live = Path(self.p['candidate']['live'])
+        if not live.exists():
+            restore_started = self.journal_has(
+                lambda row: row.get('event') == 'candidate-removed'
+                or (row.get('event') == 'intent' and row.get('op') in ('reload', 'clear-drain', 'recover-health')))
+            if not restore_started:
+                self.result('preflight-blocked', 'bootstrap candidate was not installed; legacy left running')
+                return
+        elif digest(private(live).read_bytes()) != self.p['candidate']['sha256']:
+            self.result('recovery-required', 'candidate live bytes changed before stop; legacy left running')
+            return
+        else:
+            self.log('recovery-begin', model_used=False, pre_stop=True)
+            self.remove_candidate()
+
+        self.baseline_process_active()
+        self.run_recovery_command_while_baseline_active(check('reload', self.p))
+        self.validate_unit_definition(self.p['baseline_unit_sha256'],
+                                      'baseline service definition not restored')
+        if self.command_started('drain') or (self.state / 'drain-proof.json').exists():
+            self.run_recovery_command_while_baseline_active(check('clear-drain', self.p))
+        self.run_recovery_command_while_baseline_active(check('recover-health', self.p))
+        self.result('preflight-blocked',
+                    'bootstrap candidate removed before stop; legacy left running')
+
     def execute(self, command):
         self.gate(command['timeout'])
         self.locked()
@@ -343,6 +451,8 @@ class BootstrapRun:
             self.quiescent()
             self.remove_candidate()
         else:
+            if command['id'] == 'reload':
+                self.manager_reload_safe()
             output = raw(command['argv'], command['cwd'], command['timeout'], command['env'])
             if command['id'] == 'drain':
                 self.validate_drain(output)
@@ -390,11 +500,8 @@ class BootstrapRun:
             self.topology(recovery=True)
             stop_may_have_begun = self.marker('stop-intent.json')
             live = Path(self.p['candidate']['live'])
-            if live.exists() and digest(private(live).read_bytes()) != self.p['candidate']['sha256'] and not stop_may_have_begun:
-                self.result('recovery-required', 'candidate live bytes changed before stop; legacy left running')
-                return
-            if not live.exists() and not stop_may_have_begun:
-                self.result('preflight-blocked', 'bootstrap candidate was not installed; legacy left running')
+            if not stop_may_have_begun:
+                self.recover_before_stop()
                 return
             self.log('recovery-begin', model_used=False)
             for command in self.p['recovery']:
