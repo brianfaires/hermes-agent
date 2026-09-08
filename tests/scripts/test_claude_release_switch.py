@@ -20,6 +20,7 @@ TEST_PYTHON = Path('/usr/bin/python3')
 sys.path.insert(0, str(SCRIPTS))
 import controller as c
 import fixture as f
+import launch_gateway as launcher
 sys.path.remove(str(SCRIPTS))
 
 
@@ -733,11 +734,80 @@ def replace_artifact(p, path):
     raise AssertionError(f'missing artifact entry: {target}')
 
 
+def pin_claude_isolated_launcher_fixture(root, p):
+    launch_path = root / 'runtime' / 'fixture.py'
+    observer_path = root / 'runtime' / 'runtime_observation.py'
+    launch_path.write_text(
+        '#!/usr/bin/python3\n'
+        'import json, os, signal, sys\n'
+        'from pathlib import Path\n'
+        'def main():\n'
+        '    startup = Path(sys.argv[sys.argv.index("--startup-json") + 1]).resolve()\n'
+        '    root = startup.parents[1]\n'
+        '    stat = Path(f"/proc/{os.getpid()}/stat").read_text()\n'
+        '    starttime = stat[stat.rindex(")") + 2:].split()[19]\n'
+        '    (root / "health.json").write_text(json.dumps({"pid": os.getpid(), "starttime": starttime}) + "\\n")\n'
+        '    while True:\n'
+        '        signal.pause()\n'
+        'if __name__ == "__main__":\n'
+        '    main()\n',
+        encoding='utf-8',
+    )
+    launch_path.chmod(0o600)
+    replace_artifact(p, launch_path)
+    for source, dest in ((SCRIPTS / 'runtime_observation.py', observer_path),
+                         (SCRIPTS / 'runtime_health.py', root / 'runtime' / 'runtime_health.py'),
+                         (SCRIPTS / 'drain_proof.py', root / 'runtime' / 'drain_proof.py')):
+        dest.write_bytes(source.read_bytes())
+        dest.chmod(0o600)
+        pin_file(p, dest)
+    dependency_root = root / 'runtime' / 'dependency-root'
+    dependency_root.mkdir(mode=0o700)
+    dependency_marker = dependency_root / 'fixture-dependency.txt'
+    dependency_marker.write_text('pinned fixture dependency\n')
+    dependency_marker.chmod(0o600)
+    dependency_paths = [str(dependency_root)]
+    selected_prefix = Path(c.PYTHON).parent.parent.resolve()
+    venv_config = str(selected_prefix / 'pyvenv.cfg') if (selected_prefix / 'pyvenv.cfg').is_file() else ''
+    dependencies = root / 'run' / 'launcher-dependencies.json'
+    c.durable(dependencies, {'paths': dependency_paths, 'files': launcher.dependency_files(dependency_paths, venv_config),
+                             'observer_sha256': c.digest(observer_path.read_bytes()), 'venv_config': venv_config})
+    pin_file(p, dependencies)
+    for path in c.loads(dependencies.read_bytes())['files']:
+        pin_file(p, Path(path))
+    p['launcher'] = str(launch_path)
+    p['launcher_sha256'] = c.digest(launch_path.read_bytes())
+    argv = [c.PYTHON, '-I', '-S', '-B', '-X', 'pycache_prefix=/dev/null',
+            str(launch_path), '--repo', p['repo'],
+            '--startup-json', str(root / 'run' / 'startup.json'),
+            '--dependencies', str(dependencies),
+            '--dependencies-sha256', c.digest(dependencies.read_bytes()),
+            '--', '-m', 'hermes_cli.main', 'gateway', 'run']
+    unit_path = Path(c.show(p['unit'])['FragmentPath'])
+    c.raw(['/usr/bin/systemctl', '--user', 'stop', p['unit']], root, 5, c.system_env())
+    (root / 'health.json').unlink(missing_ok=True)
+    unit_path.write_text('[Unit]\nDescription=Disposable release controller test\n[Service]\n'
+                         'Type=exec\nRestart=no\nUMask=0077\nKillMode=control-group\nTimeoutStopSec=3\n'
+                         'RuntimeMaxSec=1800\nStandardOutput=null\nStandardError=null\n'
+                         'WorkingDirectory=' + str(root / 'runtime') + '\n'
+                         'ExecStart=' + c.shlex.join(argv) + '\n',
+                         encoding='utf-8')
+    unit_path.chmod(0o600)
+    c.raw(['/usr/bin/systemctl', '--user', 'daemon-reload'], root, 10, c.system_env())
+    c.raw(['/usr/bin/systemctl', '--user', 'start', p['unit']], root, 5, c.system_env())
+    f.wait_health(root)
+    p['unit_definition_sha256'] = c.digest(c.raw(['/usr/bin/systemctl', '--user', 'cat', p['unit']],
+                                                 '/', env=c.system_env()).encode())
+    replace_artifact(p, unit_path)
+    p['baseline'] = c.proc(int(c.show(p['unit'])['MainPID']))
+
+
 def test_p1_preserved_readiness(sandbox):
     root, p, authority = sandbox()
     probe_fixture = FIXTURES / 'claude-probe.json'
     probe = c.loads(probe_fixture.read_bytes())
     p['model']['kind'] = 'claude'
+    pin_claude_isolated_launcher_fixture(root, p)
     path = root / 'run/readiness.json'
     receipt = c.loads(path.read_bytes())
     probe_path = root / 'run' / 'probe.json'
