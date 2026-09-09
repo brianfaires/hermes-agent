@@ -358,6 +358,47 @@ def test_profile_scoped_registration_and_raw_isolation(registered, tmp_path, mon
     assert match_private_command('/log secret', home=disabled) is None
 
 
+def _write_enabled_log_config(home, *, retention):
+    home.mkdir(exist_ok=True)
+    home.joinpath('config.yaml').write_text(
+        "plugins:\n"
+        "  enabled: [private-journal]\n"
+        "  entries:\n"
+        "    private-journal:\n"
+        f"      memory_retention_enabled: {'true' if retention else 'false'}\n"
+        "      memory_provider: hindsight\n"
+        "      bank_id: fixture\n",
+        encoding='utf-8',
+    )
+
+
+@pytest.mark.parametrize('process_retention, explicit_retention', [(True, False), (False, True)])
+def test_private_handler_records_explicit_home_retention_policy(
+    registered, tmp_path, monkeypatch, process_retention, explicit_retention
+):
+    from hermes_cli.private_commands import match_private_command, invoke_private_command
+
+    _write_enabled_log_config(registered, retention=process_retention)
+    explicit = tmp_path / 'explicit'
+    _write_enabled_log_config(explicit, retention=explicit_retention)
+    monkeypatch.setenv('HERMES_HOME', str(registered))
+
+    match = match_private_command('/log policy fixture', home=explicit)
+    assert match
+    invoke_private_command(match, home=explicit)
+
+    policy = raw_records(explicit)[0]['memory_retention']
+    if explicit_retention:
+        assert policy == {
+            'schema_version': 1,
+            'enabled': True,
+            'provider': 'hindsight',
+            'bank_id': 'fixture',
+        }
+    else:
+        assert policy == {'schema_version': 1, 'enabled': False}
+
+
 def test_exact_bang_log_uses_existing_shell_path(registered, monkeypatch):
     from cli import HermesCLI
     import hermes_cli.bang_shell as bang

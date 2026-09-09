@@ -23,15 +23,17 @@ separate). Use CLI, TUI, or authorized Telegram/Discord direct messages for roll
 1. Ship the reviewed source and the generic command seam together. Plugin code is
    in `plugins/private_journal/`; there are no model tools or lifecycle hooks.
 2. Merge `installation/config.example.yaml` into one explicit profile. Choose a
-   dedicated vault, external schema root, inexpensive **OpenRouter** model and
-   profile-specific Hindsight bank/URL. Existing credential resolution supplies
-   secrets. There is no paid fallback, subscription lane, auto-install or auth
-   repair. Do not enable ordinary Hindsight auto-retain for processing.
+   dedicated vault, external schema root, and inexpensive **OpenRouter** model.
+   Existing credential resolution supplies secrets. There is no paid fallback,
+   subscription lane, auto-install or auth repair. Optional raw `/log` memory
+   retention additionally requires `memory_retention_enabled: true`,
+   `memory_provider: hindsight`, a profile-specific Hindsight bank/URL, and the
+   existing Hindsight secret. Do not enable ordinary Hindsight auto-retain for
+   processing.
 3. Set `plugins.enabled` to include `private-journal` and `batch_enabled: true`
    only during parent-owned activation. Supply the three external schema files:
    `personal-history-log.md`, `data-dictionary.md`, `templates/entry-template.md`.
-   Their content is not shipped here. Brian's explicit finalized-entry ingestion
-   decision supersedes the historical schema's blanket memory prohibition.
+   Their content is not shipped here.
 4. Render `installation/private-journal-midnight.py.example` under the selected
    profile's `scripts/`. The existing scheduler only executes scripts there.
    Use the JSON packet as arguments to existing `cron.jobs.create_job` in that
@@ -82,13 +84,24 @@ is selected. No archive/final/manifest/receipt pruning exists. Failed or pending
 records stay. A cleanup retry reads archived originals for completed manifests.
 Do not schedule or run production cleanup as part of activation.
 
-## Intentional finalized-entry Hindsight ingestion
+## Optional raw Hindsight memory retention
 
-Only committed FINALIZED entry documents are retained. The full authoritative
-entry (raw section plus labeled extraction in a **single** document) is sent once;
-no separate raw retain, extraction retain or processing-chat retain. Metadata
-carries stable entry/source/profile identity, capture date and final hash. Context
-explicitly distinguishes capture/event time and attribution/uncertainty.
+Raw memory retention is off by default, including when config is omitted or
+malformed. When `memory_retention_enabled` is exactly `true` and
+`memory_provider: hindsight`, each new capture stores an immutable opt-in policy
+inside the holding JSON. Legacy records and records captured while retention is
+off fail closed and are never uploaded later just because the profile is toggled
+on. Toggling off stops Hindsight initialization/calls, preserves queued opted-in
+records and existing remote memories, and deletes nothing.
+
+When enabled, the scheduler sends the **full verbatim original `/log` text** as
+the retained document. It is independent of structured extraction: raw retention
+can succeed when the model extraction fails, and extraction can succeed when
+retention is off or the Hindsight bank/provider settings are missing. Metadata
+carries stable entry/source/profile identity, capture date, retention kind, and
+raw hash. Context explicitly distinguishes capture/event time and
+attribution/uncertainty. Arbitrary journal content beyond diet and sleep is
+retained exactly as typed.
 
 The existing `hindsight_client.Hindsight.retain` accepts `bank_id`, `document_id`,
 `timestamp`, `context`, `metadata`, and `retain_async=False`; its documented
@@ -97,16 +110,17 @@ prove transaction-level exactly-once delivery. This implementation does not retr
 an unresolved intent. It fsyncs an identity/hash-bound intent before the real SDK
 call and writes a receipt only after explicit synchronous success. Timeout,
 negative/async result, or remote-success/local-receipt crash leaves an uncertain
-intent. Journal completion is preserved and future journal batches can continue.
+intent. Journal extraction output is preserved and future journal batches can continue.
 Changing bank/profile/content with an existing receipt fails closed.
 
 For an uncertain entry, Ops must inspect that exact bank/document and any pending
 remote operation. Then explicitly run the script with `--reconcile-entry <id>` and
-`--confirmed-remote-outcome present` (certify matching stored final) or `absent`
+`--confirmed-remote-outcome present` (certify matching stored raw document) or `absent`
 (certify no stored document and no operation still capable of succeeding). Absent
 archives the old intent before permitting one new attempt. Never use absent merely
 because a request timed out. No automatic remote search/backfill is performed.
 
-Rollback: disable the profile plugin and pause its midnight job. Retain all data.
-Also keep journal channels excluded from history/backfill when disabled; disabling
-a plugin removes its runtime metadata and cannot retract messages at the provider.
+Rollback: disable `memory_retention_enabled`, or disable the profile plugin and
+pause its midnight job. Retain all data. Also keep journal channels excluded from
+history/backfill when disabled; disabling a plugin removes its runtime metadata
+and cannot retract messages at the provider.

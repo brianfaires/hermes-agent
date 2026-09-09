@@ -380,6 +380,16 @@ def test_diet_sleep_nap_wakeups_missing_values_and_corrections_render(
     assert "Use basis self_report only when the narrator reports themself" in prompt
     assert "use reported for third-party information" in prompt
     assert "retain stated wake-up times/durations in interruptions as text" in prompt
+    assert "allowed keys below override all reference templates" in prompt
+    assert "Never copy example people, authors, dates" in prompt
+    assert "Correction author and corrected_at are null unless stated" in prompt
+    assert "Every stated nap belongs in the sleep array" in prompt
+    assert "Diet and sleep items must not contain confidence" in prompt
+    payload = json.loads(prompt[prompt.rfind('\n') + 1:])
+    assert all('captured_at' not in record for record in payload['records'])
+    system = calls[0]['messages'][0]['content']
+    assert 'IDs are opaque' in system
+    assert 'Third-person accounts use basis reported' in system
     rendered_by_raw = {}
     for path in (vault / "entries").glob("*/*/*/*.md"):
         rendered = path.read_text(encoding="utf-8")

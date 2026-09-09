@@ -362,7 +362,8 @@ def _build_prompt(records: Sequence[Mapping[str, Any]]) -> str:
     payload = [
         {
             "id": r["id"],
-            "captured_at": r["captured_at"],
+            # Capture provenance stays in immutable local records/rendering;
+            # withholding it prevents it being mistaken for an event date.
             "text": r["text"],
             "source": r.get("source") or {},
         }
@@ -381,7 +382,14 @@ def _build_prompt(records: Sequence[Mapping[str, Any]]) -> str:
                 raise ProcessorError("unsafe schema path")
             schema += storage.read(path, private=False).decode("utf-8") + "\n"
     return (
-        schema + "\nExtract structured personal-history-log fields for each entry. "
+        "BACKGROUND REFERENCE DOCUMENTS (examples are not facts and do not define the JSON wire format):\n"
+        + schema
+        + "\nEND BACKGROUND REFERENCE DOCUMENTS.\n"
+        "AUTHORITATIVE OUTPUT CONTRACT: the allowed keys below override all reference templates. "
+        "Do not output tags, template frontmatter, or any other unlisted key. "
+        "Never copy example people, authors, dates, or other template values into extracted facts. "
+        "Correction author and corrected_at are null unless stated in the raw entry; capture time is not correction event time. "
+        "Extract structured personal-history-log fields for each entry. "
         "Return bare JSON only, with no Markdown fences or surrounding prose, using an `entries` array. Preserve uncertainty; never invent "
         "precision. Use conservative per-section structured objects and basis labels for direct observations, reported information, "
         "inference/concern, exact/approximate/paraphrase quotes, unknowns, corrections, "
@@ -390,6 +398,8 @@ def _build_prompt(records: Sequence[Mapping[str, Any]]) -> str:
         "Use basis self_report only when the narrator reports themself; use reported for third-party information stated by the narrator. "
         "For diet, extract only stated foods/drinks and stated amounts/units; use null for unknowns and do not infer nutrition or medical meaning. "
         "For sleep, set kind to sleep or nap only when stated, and retain stated wake-up times/durations in interruptions as text rather than reducing them to a count. "
+        "Every stated nap belongs in the sleep array with kind nap, even if also mentioned in reported_information. "
+        "Diet and sleep items must not contain confidence; use only their explicitly listed fields. "
         "Attribute structured items to their source by keeping them under the matching entry id; represent corrections as append-only context that targets existing ids/raw sections without rewriting originals. "
         "Each output entry must use the exact input id and must not include raw input text.\n\n"
         + "\nAllowed output fields: " + json.dumps(sorted(ALLOWED_EXTRACTION_KEYS))
@@ -891,7 +901,14 @@ def process_pending(
             response = caller(
                 task=TASK_NAME,
                 messages=[
-                    {"role": "system", "content": "Return strict bare JSON only."},
+                    {"role": "system", "content": (
+                        "Return strict bare JSON only. Extract facts only from each record's text. "
+                        "Reference documents describe categories, not facts about the narrator. "
+                        "IDs are opaque: never derive event/correction times or authors from IDs, metadata, or examples. "
+                        "Unstated fields stay null. Third-person accounts use basis reported, not self_report; "
+                        "self_report requires explicit first-person wording about the narrator. "
+                        "Honor the authoritative allowed fields exactly, including dedicated diet and sleep/nap arrays."
+                    )},
                     {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},

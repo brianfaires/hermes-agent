@@ -5,15 +5,49 @@ from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
-from hermes_cli.config import load_config
 
 
 def settings():
+    # Batch-only import: config initialization creates a home skeleton. Raw
+    # capture must never trigger it before descriptor-safe storage validation.
+    from hermes_cli.config import load_config
+
     cfg = load_config()
     result = (cfg.get('plugins', {}).get('entries', {}).get('private-journal') or {})
     if not isinstance(result, dict):
         raise ValueError('invalid journal configuration')
     return result
+
+
+def _settings_from_home_config(home):
+    """Read only the selected profile config; used during raw capture."""
+    try:
+        import yaml
+
+        path = Path(home) / 'config.yaml'
+        if path.is_symlink() or not path.exists():
+            return {}
+        data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result = (data.get('plugins', {}).get('entries', {}).get('private-journal') or {})
+    return result if isinstance(result, dict) else {}
+
+
+def memory_retention_policy(*, home=None):
+    cfg = _settings_from_home_config(home) if home is not None else settings()
+    enabled = cfg.get('memory_retention_enabled') is True
+    provider = cfg.get('memory_provider')
+    if not enabled or provider != 'hindsight':
+        return {'schema_version': 1, 'enabled': False}
+    return {
+        'schema_version': 1,
+        'enabled': True,
+        'provider': provider,
+        'bank_id': cfg.get('bank_id') if isinstance(cfg.get('bank_id'), str) else None,
+    }
 
 
 @contextmanager
@@ -62,7 +96,9 @@ def call_model(*, messages, max_tokens, timeout, task, response_format=None, rea
             client.close()
 
 
-def retain_finalized(**kwargs):
+def retain_memory(*, provider, **kwargs):
+    if provider != 'hindsight':
+        raise ValueError('unsupported private journal memory provider')
     cfg = settings()
     url = cfg.get('hindsight_url')
     if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
@@ -79,14 +115,35 @@ def retain_finalized(**kwargs):
             client.close()
 
 
+def retain_finalized(**kwargs):
+    return retain_memory(provider='hindsight', **kwargs)
+
+
 def run_batch():
     from .processor import process_pending, _process_lock, _resolve_vault_path
-    from .memory import ingest_finalized
+    from .memory import ingest_opted_in_raw
     cfg = settings()
     if cfg.get('batch_enabled') is not True:
         raise ValueError('batch is disabled')
-    if not cfg.get('model') or not cfg.get('bank_id') or not cfg.get('vault_path') or not cfg.get('schema_root'):
+    if not cfg.get('model') or not cfg.get('vault_path') or not cfg.get('schema_root'):
         raise ValueError('activation settings missing')
-    process_pending(vault_path=cfg['vault_path'])
+    retention_policy = memory_retention_policy()
+    if retention_policy.get('enabled') is True and not cfg.get('bank_id'):
+        retention_error = ValueError('memory retention bank missing')
+    else:
+        retention_error = None
+    extraction_error = None
+    try:
+        process_pending(vault_path=cfg['vault_path'])
+    except Exception as exc:
+        extraction_error = exc
     with _process_lock():
-        ingest_finalized(_resolve_vault_path(cfg['vault_path']), cfg['bank_id'])
+        if retention_policy.get('enabled') is True and retention_error is None:
+            try:
+                ingest_opted_in_raw(_resolve_vault_path(cfg['vault_path']), cfg['bank_id'])
+            except Exception as exc:
+                retention_error = exc
+    if extraction_error is not None:
+        raise extraction_error
+    if retention_error is not None:
+        raise retention_error

@@ -57,7 +57,7 @@ def validate_entry_id(entry_id: str) -> str:
     return entry_id
 
 
-def capture_record(raw_text: str, source: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def capture_record(raw_text: str, source: Mapping[str, Any] | None = None, *, home=None) -> dict[str, Any]:
     captured_at = datetime.now().astimezone()
     entry_id = _new_id(captured_at)
     return {
@@ -67,6 +67,7 @@ def capture_record(raw_text: str, source: Mapping[str, Any] | None = None) -> di
         "timezone": str(captured_at.tzinfo),
         "text": raw_text,
         "source": _safe_source(source),
+        "memory_retention": _memory_retention_policy(home=home),
     }
 
 
@@ -79,12 +80,22 @@ def publish_record(record: Mapping[str, Any], *, home=None) -> Path:
     return path
 
 
+def _memory_retention_policy(*, home=None) -> dict[str, Any]:
+    """Capture the immutable opt-in state without touching any provider."""
+    try:
+        from .runtime import memory_retention_policy
+
+        return memory_retention_policy(home=home if home is not None else get_hermes_home())
+    except Exception:
+        return {"schema_version": 1, "enabled": False}
+
+
 def capture_log(raw_text: str, source: Mapping[str, Any] | None = None, *, home=None) -> str:
     if raw_text is None:
         raw_text = ""
     if not str(raw_text).strip():
         return USAGE
-    record = capture_record(str(raw_text), source=source)
+    record = capture_record(str(raw_text), source=source, home=home)
     try:
         publish_record(record, home=home)
     except Exception as exc:

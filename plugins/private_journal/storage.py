@@ -25,7 +25,17 @@ def directory(path, create=False):
                         os.close(sync_fd)
                 except FileExistsError:
                     pass
+            try:
+                st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                raise
+            if not stat.S_ISDIR(st.st_mode):
+                raise NotADirectoryError('unsafe directory component')
             nxt = os.open(part, getattr(os, 'O_PATH', os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            nxt_st = os.fstat(nxt)
+            if not stat.S_ISDIR(nxt_st.st_mode):
+                os.close(nxt)
+                raise NotADirectoryError('unsafe directory component')
             os.close(fd)
             fd = nxt
         readable = os.open('.', os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)

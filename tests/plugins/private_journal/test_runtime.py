@@ -163,7 +163,7 @@ def test_real_hindsight_sdk_boundary(monkeypatch):
     client.close.assert_called_once()
 
 
-def test_runtime_run_reaches_finalized_memory_transport(tmp_path, monkeypatch):
+def test_runtime_run_extracts_without_default_memory_transport(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     monkeypatch.setenv('HERMES_HOME', str(home))
     entry_id = capture.capture_log('fixture only').split()[1]
@@ -175,12 +175,226 @@ def test_runtime_run_reaches_finalized_memory_transport(tmp_path, monkeypatch):
     llm = Mock(return_value=json.dumps({'entries': [{'id': entry_id}]}))
     retain = Mock(return_value=SimpleNamespace(success=True, operation_id=None))
     monkeypatch.setattr(runtime, 'call_model', llm)
-    monkeypatch.setattr(runtime, 'retain_finalized', retain)
+    monkeypatch.setattr(runtime, 'retain_memory', retain)
     runtime.run_batch()
     runtime.run_batch()
     llm.assert_called_once()
-    retain.assert_called_once()
+    retain.assert_not_called()
     assert 'fixture schema' in llm.call_args.kwargs['messages'][1]['content']
+
+
+def _write_config(path, *, retention=False, bank='fixture'):
+    path.write_text(
+        "plugins:\n"
+        "  entries:\n"
+        "    private-journal:\n"
+        "      batch_enabled: true\n"
+        "      provider: openrouter\n"
+        "      model: fixture/model\n"
+        f"      vault_path: {path.parent / 'vault'}\n"
+        f"      schema_root: {path.parent / 'schema'}\n"
+        f"      bank_id: {bank if bank is not None else 'null'}\n"
+        "      hindsight_url: http://fixture.invalid\n"
+        f"      memory_retention_enabled: {'true' if retention else 'false'}\n"
+        "      memory_provider: hindsight\n",
+        encoding='utf-8',
+    )
+
+
+def _schema(root):
+    (root / 'templates').mkdir(parents=True)
+    for relative in ('personal-history-log.md', 'data-dictionary.md', 'templates/entry-template.md'):
+        (root / relative).write_text('fixture schema', encoding='utf-8')
+
+
+def test_capture_records_retention_policy_default_off_and_malformed_safe(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    capture.capture_log('default off')
+    record = json.loads(next((home / 'journal' / 'holding').glob('*.json')).read_text())
+    assert record['memory_retention'] == {'schema_version': 1, 'enabled': False}
+
+    bad = tmp_path / 'bad'
+    bad.mkdir()
+    (bad / 'config.yaml').write_text('plugins:\n  entries:\n    private-journal: nope\n', encoding='utf-8')
+    monkeypatch.setenv('HERMES_HOME', str(bad))
+    capture.capture_log('malformed off')
+    record = json.loads(next((bad / 'journal' / 'holding').glob('*.json')).read_text())
+    assert record['memory_retention'] == {'schema_version': 1, 'enabled': False}
+
+    loose = tmp_path / 'loose'
+    loose.mkdir()
+    (loose / 'config.yaml').write_text(
+        "plugins:\n  entries:\n    private-journal:\n      memory_retention_enabled: 'true'\n      memory_provider: hindsight\n",
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('HERMES_HOME', str(loose))
+    capture.capture_log('non boolean off')
+    record = json.loads(next((loose / 'journal' / 'holding').glob('*.json')).read_text())
+    assert record['memory_retention'] == {'schema_version': 1, 'enabled': False}
+
+
+def test_explicit_off_does_not_require_bank_or_call_provider(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    _schema(home / 'schema')
+    _write_config(home / 'config.yaml', retention=False, bank=None)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    entry_id = capture.capture_log('extract without memory bank').split()[1]
+    llm = Mock(return_value=json.dumps({'entries': [{'id': entry_id}]}))
+    retain = Mock()
+    monkeypatch.setattr(runtime, 'call_model', llm)
+    monkeypatch.setattr(runtime, 'retain_memory', retain)
+
+    runtime.run_batch()
+
+    llm.assert_called_once()
+    retain.assert_not_called()
+    assert list((home / 'vault').glob('entries/*/*/*/*.md'))
+
+
+def test_opted_in_raw_retention_sends_verbatim_original_and_provenance(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    _schema(home / 'schema')
+    _write_config(home / 'config.yaml', retention=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    raw = '  ate soup and arbitrary note beyond diet/sleep\nsecond line  '
+    entry_id = capture.capture_log(raw, source={'platform': 'telegram', 'chat_type': 'dm'}).split()[1]
+    record = json.loads(next((home / 'journal' / 'holding').glob('*.json')).read_text())
+    assert record['memory_retention'] == {
+        'schema_version': 1,
+        'enabled': True,
+        'provider': 'hindsight',
+        'bank_id': 'fixture',
+    }
+    llm = Mock(return_value=json.dumps({'entries': [{'id': entry_id}]}))
+    retain = Mock(return_value=SimpleNamespace(success=True, operation_id=None))
+    monkeypatch.setattr(runtime, 'call_model', llm)
+    monkeypatch.setattr(runtime, 'retain_memory', retain)
+
+    runtime.run_batch()
+    runtime.run_batch()
+
+    retain.assert_called_once()
+    kw = retain.call_args.kwargs
+    assert kw['provider'] == 'hindsight'
+    assert kw['content'] == raw
+    assert kw['document_id'] == memory.identity('fixture', entry_id, scope='raw')
+    assert kw['metadata']['capture_source'] == '{"chat_type":"dm","platform":"telegram"}'
+    assert kw['metadata']['retention_kind'] == 'raw'
+    assert kw['metadata']['captured_at'] == record['captured_at']
+    assert kw['retain_async'] is False
+    assert isinstance(kw['timestamp'], datetime)
+
+
+def test_real_sdk_builds_raw_request_with_flat_string_metadata(tmp_path, monkeypatch):
+    from hindsight_client_api.api.memory_api import MemoryApi
+    import agent.secret_scope as secret_scope
+
+    home = tmp_path / 'home'
+    home.mkdir()
+    _write_config(home / 'config.yaml', retention=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    raw = 'raw sdk metadata fixture'
+    entry_id = capture.capture_log(raw, source={'platform': 'telegram', 'chat_type': 'dm'}).split()[1]
+    calls = []
+
+    async def transport(self, bank_id, request, **kwargs):
+        calls.append((bank_id, request, kwargs))
+        return SimpleNamespace(success=True, operation_id=None)
+
+    monkeypatch.setattr(MemoryApi, 'retain_memories', transport)
+    monkeypatch.setattr(secret_scope, 'get_secret', lambda name: 'fictional-sdk-test')
+
+    memory.ingest_opted_in_raw(None, 'fixture', runtime.retain_memory)
+
+    assert len(calls) == 1
+    bank, request, kwargs = calls[0]
+    assert bank == 'fixture' and request.var_async is False
+    assert len(request.items) == 1
+    item = request.items[0]
+    assert item.content == raw
+    assert item.document_id == memory.identity(bank, entry_id, scope='raw')
+    assert item.metadata['source'] == 'private-journal'
+    assert item.metadata['capture_source'] == '{"chat_type":"dm","platform":"telegram"}'
+    assert all(isinstance(value, str) for value in item.metadata.values())
+    assert kwargs['_request_timeout'] == 120
+
+
+def test_extraction_failure_still_attempts_opted_in_raw_retention(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    _schema(home / 'schema')
+    _write_config(home / 'config.yaml', retention=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    capture.capture_log('raw survives extraction failure')
+    llm = Mock(side_effect=RuntimeError('model unavailable'))
+    retain = Mock(return_value=SimpleNamespace(success=True, operation_id=None))
+    monkeypatch.setattr(runtime, 'call_model', llm)
+    monkeypatch.setattr(runtime, 'retain_memory', retain)
+
+    with pytest.raises(processor.ProcessorError, match='auxiliary model call failed'):
+        runtime.run_batch()
+
+    llm.assert_called_once()
+    retain.assert_called_once()
+
+
+def test_raw_retention_uncertain_reconcile_retry_and_toggle(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    _schema(home / 'schema')
+    _write_config(home / 'config.yaml', retention=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    entry_id = capture.capture_log('raw retry fixture').split()[1]
+    monkeypatch.setattr(runtime, 'call_model', Mock(return_value=json.dumps({'entries': [{'id': entry_id}]})))
+    first = Mock(side_effect=TimeoutError('network uncertain'))
+    monkeypatch.setattr(runtime, 'retain_memory', first)
+
+    with pytest.raises(TimeoutError):
+        runtime.run_batch()
+    with pytest.raises(ValueError, match='uncertain'):
+        runtime.run_batch()
+    first.assert_called_once()
+
+    _write_config(home / 'config.yaml', retention=False)
+    runtime.run_batch()
+    first.assert_called_once()
+
+    memory.reconcile(entry_id, bank='fixture', outcome='absent')
+    second = Mock(return_value=SimpleNamespace(success=True, operation_id=None))
+    monkeypatch.setattr(runtime, 'retain_memory', second)
+    _write_config(home / 'config.yaml', retention=True)
+    runtime.run_batch()
+    runtime.run_batch()
+    second.assert_called_once()
+    assert list((home / 'journal' / 'memory' / 'reconciliations').glob('*.json'))
+
+
+def test_legacy_records_are_not_retained_when_toggle_later_enabled(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    _schema(home / 'schema')
+    _write_config(home / 'config.yaml', retention=False)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    old_id = capture.capture_log('old off').split()[1]
+    old_path = next((home / 'journal' / 'holding').glob('*.json'))
+    old_record = json.loads(old_path.read_text(encoding='utf-8'))
+    old_record.pop('memory_retention')
+    old_path.write_text(json.dumps(old_record, sort_keys=True) + '\n', encoding='utf-8')
+    old_path.chmod(0o600)
+    _write_config(home / 'config.yaml', retention=True)
+    new_id = capture.capture_log('new on').split()[1]
+    llm = Mock(return_value=json.dumps({'entries': [{'id': old_id}, {'id': new_id}]}))
+    retain = Mock(return_value=SimpleNamespace(success=True, operation_id=None))
+    monkeypatch.setattr(runtime, 'call_model', llm)
+    monkeypatch.setattr(runtime, 'retain_memory', retain)
+
+    runtime.run_batch()
+
+    retain.assert_called_once()
+    assert retain.call_args.kwargs['content'] == 'new on'
 
 
 def test_symlink_components_and_lock_fail_closed(tmp_path, monkeypatch):
