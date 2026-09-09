@@ -52,6 +52,7 @@ ALLOWED_EXTRACTION_KEYS = {
     "quotes",
     "caregiving_intervals",
     "substance_intervals",
+    "diet",
     "sleep",
     "incidents_commitments_outcomes",
     "unknown_or_disputed",
@@ -65,6 +66,7 @@ LIST_KEYS = {
     "quotes",
     "caregiving_intervals",
     "substance_intervals",
+    "diet",
     "sleep",
     "incidents_commitments_outcomes",
     "unknown_or_disputed",
@@ -93,7 +95,8 @@ SECTION_ITEM_KEYS = {
         "person", "substance", "start", "end", "quantity", "basis",
         "observable_basis", "functional_impact", "confidence",
     },
-    "sleep": {"person", "start", "end", "duration_minutes", "interruptions", "basis"},
+    "diet": {"person", "food_or_drink", "amount", "unit", "event_time", "basis"},
+    "sleep": {"person", "start", "end", "duration_minutes", "interruptions", "basis", "kind"},
     "incidents_commitments_outcomes": {
         "claim_id", "text", "basis", "source_person", "confidence",
         "disputed", "related_people", "timestamp", "outcome",
@@ -379,10 +382,15 @@ def _build_prompt(records: Sequence[Mapping[str, Any]]) -> str:
             schema += storage.read(path, private=False).decode("utf-8") + "\n"
     return (
         schema + "\nExtract structured personal-history-log fields for each entry. "
-        "Return only JSON with an `entries` array. Preserve uncertainty; never invent "
-        "precision. Use basis labels for direct observations, reported information, "
+        "Return bare JSON only, with no Markdown fences or surrounding prose, using an `entries` array. Preserve uncertainty; never invent "
+        "precision. Use conservative per-section structured objects and basis labels for direct observations, reported information, "
         "inference/concern, exact/approximate/paraphrase quotes, unknowns, corrections, "
-        "caregiving intervals, sleep, substances, work/incidents/commitments/timestamps. "
+        "caregiving intervals, diet, sleep, substances, work/incidents/commitments/timestamps. "
+        "Preserve full stated names for named subjects; do not shorten names. "
+        "Use basis self_report only when the narrator reports themself; use reported for third-party information stated by the narrator. "
+        "For diet, extract only stated foods/drinks and stated amounts/units; use null for unknowns and do not infer nutrition or medical meaning. "
+        "For sleep, set kind to sleep or nap only when stated, and retain stated wake-up times/durations in interruptions as text rather than reducing them to a count. "
+        "Attribute structured items to their source by keeping them under the matching entry id; represent corrections as append-only context that targets existing ids/raw sections without rewriting originals. "
         "Each output entry must use the exact input id and must not include raw input text.\n\n"
         + "\nAllowed output fields: " + json.dumps(sorted(ALLOWED_EXTRACTION_KEYS))
         + "\nStructured section fields: " + json.dumps({k: sorted(v) for k, v in SECTION_ITEM_KEYS.items()})
@@ -421,6 +429,8 @@ def _validate_extraction(item: Mapping[str, Any]) -> dict[str, Any]:
         raise ProcessorError("invalid structured extraction")
     out: dict[str, Any] = {"id": entry_id}
     for key in ALLOWED_EXTRACTION_KEYS - {"id"}:
+        if key == "diet" and key not in item:
+            continue
         value = item.get(key)
         if key in LIST_KEYS:
             if value is None:
@@ -435,7 +445,7 @@ def _validate_extraction(item: Mapping[str, Any]) -> dict[str, Any]:
                     if "basis" in allowed_item_keys:
                         basis = list_item.get("basis")
                         allowed_basis = {"direct_observation", "reported", "inference", "unknown"}
-                        if key in {"sleep", "substance_intervals"}:
+                        if key in {"diet", "sleep", "substance_intervals"}:
                             allowed_basis.add("self_report")
                         if basis not in allowed_basis:
                             raise ProcessorError("invalid claim basis")
@@ -450,6 +460,8 @@ def _validate_extraction(item: Mapping[str, Any]) -> dict[str, Any]:
                         raise ProcessorError("invalid quote type")
                     if key == "caregiving_intervals" and list_item.get("role") not in {"sole", "primary_engaged", "shared", "transport", "routine_care", "same_location_only", "unknown"}:
                         raise ProcessorError("invalid caregiving role")
+                    if key == "sleep" and list_item.get("kind") not in {None, "sleep", "nap"}:
+                        raise ProcessorError("invalid sleep kind")
                     for field, field_value in list_item.items():
                         if field_value is None:
                             continue
@@ -459,6 +471,8 @@ def _validate_extraction(item: Mapping[str, Any]) -> dict[str, Any]:
                             valid = isinstance(field_value, list) and all(isinstance(x, str) for x in field_value)
                         elif field in {"duration_minutes", "interruptions"}:
                             valid = isinstance(field_value, (str, int)) and not isinstance(field_value, bool)
+                        elif field == "amount":
+                            valid = isinstance(field_value, (str, int, float)) and not isinstance(field_value, bool)
                         else:
                             valid = isinstance(field_value, str)
                         if not valid:
@@ -541,6 +555,9 @@ def _render_markdown(record: Mapping[str, Any], extracted: Mapping[str, Any]) ->
         "transcript_status": "not_applicable",
         "tags": ["personal-history-log"],
     }
+    diet_section = ""
+    if "diet" in extracted:
+        diet_section = "\n### Diet\n\n" + _list_section(extracted.get("diet"))
     return (
         "---\n"
         + "\n".join(f"{k}: {_json_line(v)}" for k, v in front.items())
@@ -563,6 +580,7 @@ def _render_markdown(record: Mapping[str, Any], extracted: Mapping[str, Any]) ->
         + _list_section(extracted.get("caregiving_intervals"))
         + "\n### Substance intervals\n\n"
         + _list_section(extracted.get("substance_intervals"))
+        + diet_section
         + "\n### Sleep\n\n"
         + _list_section(extracted.get("sleep"))
         + "\n### Incidents, commitments, and outcomes\n\n"
@@ -873,9 +891,11 @@ def process_pending(
             response = caller(
                 task=TASK_NAME,
                 messages=[
-                    {"role": "system", "content": "Return strict JSON only."},
+                    {"role": "system", "content": "Return strict bare JSON only."},
                     {"role": "user", "content": prompt},
                 ],
+                response_format={"type": "json_object"},
+                reasoning={"effort": "low", "exclude": True},
                 max_tokens=DEFAULT_MAX_TOKENS,
                 timeout=DEFAULT_TIMEOUT_SECONDS,
             )

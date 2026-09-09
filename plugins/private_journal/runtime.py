@@ -2,6 +2,7 @@
 import logging
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from hermes_constants import get_hermes_home
 from hermes_cli.config import load_config
@@ -27,7 +28,7 @@ def quiet_transport():
         logging.disable(old)
 
 
-def call_model(*, messages, max_tokens, timeout, task):
+def call_model(*, messages, max_tokens, timeout, task, response_format=None, reasoning=None):
     cfg = settings()
     model = cfg.get('model')
     provider = cfg.get('provider')
@@ -45,10 +46,18 @@ def call_model(*, messages, max_tokens, timeout, task):
         try:
             # SDK transport retries disabled. Bypass call_llm's automatic paid
             # fallback/auth-repair chain, but reuse its actual credential router.
-            return client.with_options(max_retries=0, timeout=timeout).chat.completions.create(
-                model=model, messages=messages, max_tokens=max_tokens,
-                temperature=0, stream=False,
+            request: dict[str, Any] = dict(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0,
+                stream=False,
             )
+            if response_format is not None:
+                request["response_format"] = response_format
+            if reasoning is not None:
+                request["extra_body"] = {"reasoning": reasoning}
+            return client.with_options(max_retries=0, timeout=timeout).chat.completions.create(**request)
         finally:
             client.close()
 

@@ -99,12 +99,57 @@ def test_real_model_resolver_transport_boundary(monkeypatch):
     monkeypatch.setenv('OPENROUTER_API_KEY', 'fixture-not-a-real-key')
     factory = Mock(return_value=client)
     monkeypatch.setattr(auxiliary, '_create_openai_client', factory)
-    assert runtime.call_model(messages=[{'role': 'user', 'content': 'fixture'}], max_tokens=20, timeout=2, task='private_journal_batch') == 'response'
+    assert runtime.call_model(
+        messages=[{'role': 'user', 'content': 'fixture'}],
+        max_tokens=20,
+        timeout=2,
+        task='private_journal_batch',
+        response_format={'type': 'json_object'},
+        reasoning={'effort': 'low', 'exclude': True},
+    ) == 'response'
     factory.assert_called_once()
     assert client.chat.completions.create.call_args.kwargs['model'] == 'fixture/inexpensive:free'
+    assert client.chat.completions.create.call_args.kwargs['response_format'] == {'type': 'json_object'}
+    assert client.chat.completions.create.call_args.kwargs['extra_body'] == {'reasoning': {'effort': 'low', 'exclude': True}}
     client.with_options.assert_called_once_with(max_retries=0, timeout=2)
     assert 'tools' not in client.chat.completions.create.call_args.kwargs
     client.close.assert_called_once()
+
+
+def test_openrouter_options_pass_through_real_openai_sdk(monkeypatch):
+    import httpx
+    from openai import OpenAI
+    import agent.auxiliary_client as auxiliary
+
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            'id': 'fictional-sdk-test', 'object': 'chat.completion', 'created': 0,
+            'model': 'openai/gpt-oss-20b',
+            'choices': [{'index': 0, 'finish_reason': 'stop',
+                         'message': {'role': 'assistant', 'content': '{"entries":[]}'}}],
+        })
+
+    client = OpenAI(api_key='fictional-sdk-test', base_url='https://fixture.invalid/v1',
+                    http_client=httpx.Client(transport=httpx.MockTransport(respond)))
+    monkeypatch.setattr(runtime, 'settings', lambda: {
+        'provider': 'openrouter', 'model': 'openai/gpt-oss-20b'})
+    monkeypatch.setattr(auxiliary, 'resolve_provider_client',
+                        lambda **kwargs: (client, 'openai/gpt-oss-20b'))
+    response = runtime.call_model(
+        messages=[{'role': 'user', 'content': 'FICTIONAL JSON serialization test'}],
+        max_tokens=4096, timeout=2, task='private_journal_batch',
+        response_format={'type': 'json_object'},
+        reasoning={'effort': 'low', 'exclude': True},
+    )
+    assert response.choices[0].message.content == '{"entries":[]}'
+    assert len(requests) == 1
+    assert requests[0]['response_format'] == {'type': 'json_object'}
+    assert requests[0]['reasoning'] == {'effort': 'low', 'exclude': True}
+    assert requests[0]['max_tokens'] == 4096
+    assert client.is_closed()
 
 
 def test_real_hindsight_sdk_boundary(monkeypatch):

@@ -32,6 +32,7 @@ def _extract_response(*ids: str) -> str:
                 "quotes": [],
                 "caregiving_intervals": [],
                 "substance_intervals": [],
+                "diet": [],
                 "sleep": [],
                 "incidents_commitments_outcomes": [],
                 "unknown_or_disputed": [],
@@ -50,6 +51,10 @@ def _response_obj(content: str):
             )
         ]
     )
+
+
+def _extract_entries(entries: list[dict]) -> str:
+    return json.dumps({"entries": entries})
 
 
 def _receipt_exists(home: Path, entry_id: str) -> bool:
@@ -212,6 +217,302 @@ def test_processor_passes_explicit_auxiliary_bounds(tmp_path, monkeypatch):
     assert calls[0]["task"] == "private_journal_batch"
     assert calls[0]["max_tokens"] == processor.DEFAULT_MAX_TOKENS
     assert calls[0]["timeout"] == processor.DEFAULT_TIMEOUT_SECONDS
+
+
+def test_diet_sleep_nap_wakeups_missing_values_and_corrections_render(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    vault = tmp_path / "vault"
+    diet = _write_capture(
+        home,
+        monkeypatch,
+        "FICTIONAL Casey ate oatmeal and drank tea at 7:30 a.m.; amount not said.",
+    )
+    sleep = _write_capture(
+        home,
+        monkeypatch,
+        "FICTIONAL Rowan slept from 10:15 p.m. to 6:40 a.m. and woke up twice.",
+    )
+    nap = _write_capture(
+        home,
+        monkeypatch,
+        "FICTIONAL Casey took a nap from 1:00 p.m. to 1:25 p.m. and drank water.",
+    )
+    correction = _write_capture(
+        home,
+        monkeypatch,
+        f"FICTIONAL correction: {diet['id']} was herbal tea, not black tea.",
+    )
+    calls = []
+
+    def fake_llm(**kwargs):
+        calls.append(kwargs)
+        return _extract_entries(
+            [
+                {
+                    "id": diet["id"],
+                    "time_precision": "unknown",
+                    "people": ["FICTIONAL Casey"],
+                    "direct_observations": [
+                        {
+                            "claim_id": "c1",
+                            "text": "FICTIONAL Casey ate oatmeal and drank tea.",
+                            "basis": "direct_observation",
+                            "source_person": None,
+                            "confidence": "high",
+                            "disputed": False,
+                            "related_people": ["FICTIONAL Casey"],
+                        }
+                    ],
+                    "diet": [
+                        {
+                            "person": "FICTIONAL Casey",
+                            "food_or_drink": "oatmeal",
+                            "amount": None,
+                            "unit": None,
+                            "event_time": "7:30 a.m.",
+                            "basis": "direct_observation",
+                        },
+                        {
+                            "person": "FICTIONAL Casey",
+                            "food_or_drink": "tea",
+                            "amount": None,
+                            "unit": None,
+                            "event_time": "7:30 a.m.",
+                            "basis": "direct_observation",
+                        },
+                    ],
+                },
+                {
+                    "id": sleep["id"],
+                    "time_precision": "unknown",
+                    "people": ["FICTIONAL Rowan"],
+                    "sleep": [
+                        {
+                            "person": "FICTIONAL Rowan",
+                            "start": "10:15 p.m.",
+                            "end": "6:40 a.m.",
+                            "duration_minutes": None,
+                            "interruptions": 2,
+                            "basis": "self_report",
+                            "kind": "sleep",
+                        }
+                    ],
+                    "unknown_or_disputed": [
+                        {
+                            "claim_id": "u1",
+                            "text": "The calendar date for the overnight sleep was not stated.",
+                            "basis": "unknown",
+                            "source_person": None,
+                            "confidence": "high",
+                            "disputed": False,
+                            "related_people": ["FICTIONAL Rowan"],
+                        }
+                    ],
+                },
+                {
+                    "id": nap["id"],
+                    "time_precision": "unknown",
+                    "people": ["FICTIONAL Casey"],
+                    "diet": [
+                        {
+                            "person": "FICTIONAL Casey",
+                            "food_or_drink": "water",
+                            "amount": None,
+                            "unit": None,
+                            "event_time": None,
+                            "basis": "direct_observation",
+                        }
+                    ],
+                    "sleep": [
+                        {
+                            "person": "FICTIONAL Casey",
+                            "start": "1:00 p.m.",
+                            "end": "1:25 p.m.",
+                            "duration_minutes": None,
+                            "interruptions": None,
+                            "basis": "direct_observation",
+                            "kind": "nap",
+                        }
+                    ],
+                },
+                {
+                    "id": correction["id"],
+                    "time_precision": "unknown",
+                    "people": ["FICTIONAL Casey"],
+                    "reported_information": [
+                        {
+                            "claim_id": "r1",
+                            "text": "The earlier drink was herbal tea, not black tea.",
+                            "basis": "reported",
+                            "source_person": "FICTIONAL correction author",
+                            "confidence": "medium",
+                            "disputed": False,
+                            "related_people": ["FICTIONAL Casey"],
+                        }
+                    ],
+                    "corrections": [
+                        {
+                            "corrected_at": None,
+                            "author": "FICTIONAL correction author",
+                            "target": diet["id"],
+                            "original": "tea",
+                            "replacement_or_context": "herbal tea, not black tea",
+                            "reason": "later correction",
+                        }
+                    ],
+                },
+            ]
+        )
+
+    result = processor.process_pending(vault_path=vault, llm_call=fake_llm)
+
+    assert result.processed == 4
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["reasoning"] == {"effort": "low", "exclude": True}
+    prompt = calls[0]["messages"][1]["content"]
+    assert "diet" in prompt
+    assert "bare JSON only" in prompt
+    assert "do not infer nutrition or medical meaning" in prompt
+    assert "never derive event time from capture time" in prompt
+    assert "Preserve full stated names" in prompt
+    assert "Use basis self_report only when the narrator reports themself" in prompt
+    assert "use reported for third-party information" in prompt
+    assert "retain stated wake-up times/durations in interruptions as text" in prompt
+    rendered_by_raw = {}
+    for path in (vault / "entries").glob("*/*/*/*.md"):
+        rendered = path.read_text(encoding="utf-8")
+        rendered_by_raw[processor.extract_raw_section(rendered)] = rendered
+    assert diet["text"] in rendered_by_raw
+    assert "### Diet" in rendered_by_raw[diet["text"]]
+    assert '"food_or_drink": "oatmeal"' in rendered_by_raw[diet["text"]]
+    assert '"amount": null' in rendered_by_raw[diet["text"]]
+    assert "### Sleep" in rendered_by_raw[sleep["text"]]
+    assert '"interruptions": 2' in rendered_by_raw[sleep["text"]]
+    assert '"kind": "sleep"' in rendered_by_raw[sleep["text"]]
+    assert '"kind": "nap"' in rendered_by_raw[nap["text"]]
+    assert '"event_time": null' in rendered_by_raw[nap["text"]]
+    assert '"target": "' + diet["id"] + '"' in rendered_by_raw[correction["text"]]
+    assert (home / "journal" / "archive" / f"{diet['id']}.json").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        _recover_raw_bytes(rendered_by_raw[diet["text"]]).decode("utf-8")
+        == diet["text"]
+    )
+
+
+def test_old_extraction_data_accepts_missing_diet_and_sleep_kind():
+    entry_id = capture.capture_record("FICTIONAL old shape")["id"]
+
+    valid = processor._validate_extraction(
+        {
+            "id": entry_id,
+            "sleep": [
+                {
+                    "person": "FICTIONAL Pat",
+                    "start": "10 p.m.",
+                    "end": "6 a.m.",
+                    "duration_minutes": None,
+                    "interruptions": None,
+                    "basis": "self_report",
+                }
+            ],
+        }
+    )
+
+    assert "diet" not in valid
+    assert valid["sleep"][0]["basis"] == "self_report"
+
+
+def test_legacy_manifest_replay_preserves_missing_diet_render_bytes(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    record = {
+        "schema_version": 1,
+        "id": "20400203T071500-abcdef123456",
+        "captured_at": "2040-02-03T07:15:00+00:00",
+        "timezone": "UTC",
+        "text": "FICTIONAL legacy journal entry with no diet facts.",
+        "source": {},
+    }
+    capture.publish_record(record, home=home)
+    old_extraction = {
+        "id": record["id"],
+        "event_time_start": None,
+        "event_time_end": None,
+        "time_precision": "unknown",
+        "location": None,
+        "people": [],
+        "direct_observations": [],
+        "reported_information": [],
+        "interpretations_or_concerns": [],
+        "quotes": [],
+        "caregiving_intervals": [],
+        "substance_intervals": [],
+        "sleep": [],
+        "incidents_commitments_outcomes": [],
+        "unknown_or_disputed": [],
+        "corrections": [],
+    }
+    manifest_id = "20400203T071501-abcdef123457"
+    manifest = {
+        "schema_version": 1,
+        "manifest_id": manifest_id,
+        "ids": [record["id"]],
+        "captured_at": {record["id"]: record["captured_at"]},
+        "extractions": {record["id"]: old_extraction},
+    }
+    manifest_path = processor._manifest_dir() / f"{manifest_id}.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    expected = processor._render_markdown(record, old_extraction).encode("utf-8")
+    assert b"### Diet" not in expected
+
+    def crash_after_output(*args, **kwargs):
+        raise RuntimeError("simulated crash after legacy output")
+
+    with monkeypatch.context() as m:
+        m.setattr(processor, "_write_receipt", crash_after_output)
+        with pytest.raises(RuntimeError):
+            processor.process_pending(vault_path=vault, llm_call=lambda **_: pytest.fail("no model call"))
+
+    output = processor.output_path(vault, record)
+    assert output.read_bytes() == expected
+
+    calls = []
+    result = processor.process_pending(
+        vault_path=vault,
+        llm_call=lambda **kwargs: calls.append(kwargs) or pytest.fail("no second call"),
+    )
+
+    assert result.processed == 1
+    assert calls == []
+    assert output.read_bytes() == expected
+    assert "diet" not in processor._load_manifest(manifest_path)["extractions"][record["id"]]
+
+
+def test_sleep_kind_validation_rejects_unknown_values():
+    entry_id = capture.capture_record("FICTIONAL bad nap shape")["id"]
+
+    with pytest.raises(processor.ProcessorError, match="sleep kind"):
+        processor._validate_extraction(
+            {
+                "id": entry_id,
+                "sleep": [
+                    {
+                        "person": "FICTIONAL Pat",
+                        "start": None,
+                        "end": None,
+                        "duration_minutes": None,
+                        "interruptions": None,
+                        "basis": "self_report",
+                        "kind": "rest",
+                    }
+                ],
+            }
+        )
 
 
 def test_corrupt_receipt_fails_closed_instead_of_skipping_record(tmp_path, monkeypatch):

@@ -59,7 +59,11 @@ request covers **all** pending records (100 records / 96,000 prompt bytes maximu
 no silent subset. Strict JSON/ID/field/basis validation precedes deterministic
 Markdown rendering. Logged time never substitutes for event time. Raw UTF-8 is
 recoverable exactly with a length/hash-delimited section; claims, quotes, unknowns,
-corrections, caregiving, sleep, substance and work/incidents retain their labels.
+corrections, caregiving, diet, sleep, substance and work/incidents retain their labels.
+Diet entries store only stated foods/drinks and stated amounts/units, with unknowns
+left null and no nutrition or medical interpretation. Sleep entries preserve the
+existing fields and may label stated naps with `kind: "nap"`; wake-ups stay in
+`interruptions`.
 Structural checks cannot prove the model's factual fidelity; journal review and
 append-only correction entries remain necessary.
 
