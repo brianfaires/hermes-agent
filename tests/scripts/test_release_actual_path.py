@@ -398,6 +398,177 @@ def test_webhook_observer_uses_real_listener(tmp_path, monkeypatch):
     asyncio.run(exercise())
 
 
+def test_feishu_observer_uses_websocket_transport_primitives(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from gateway.config import PlatformConfig
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+
+    async def exercise():
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={
+            'app_id': 'cli_test',
+            'app_secret': 'secret_test',
+            'connection_mode': 'websocket',
+        }))
+        adapter._mark_connected()
+        with pytest.raises(RuntimeError, match='feishu event handler'):
+            await observation.connected(adapter)
+        adapter._event_handler = object()
+        with pytest.raises(RuntimeError, match='feishu websocket transport'):
+            await observation.connected(adapter)
+
+        ws_loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop():
+            asyncio.set_event_loop(ws_loop)
+            ready.set()
+            ws_loop.run_forever()
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        assert ready.wait(timeout=2.0)
+        ws_future = asyncio.get_running_loop().create_future()
+        adapter._ws_client = SimpleNamespace()
+        adapter._ws_thread_loop = ws_loop
+        adapter._ws_future = ws_future
+        try:
+            await observation.connected(adapter)
+
+            adapter._event_handler = None
+            with pytest.raises(RuntimeError, match='feishu event handler'):
+                await observation.connected(adapter)
+            adapter._event_handler = object()
+
+            adapter._ws_client = None
+            with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                await observation.connected(adapter)
+            adapter._ws_client = SimpleNamespace()
+
+            ws_future.set_result(None)
+            with pytest.raises(RuntimeError, match='feishu websocket transport stale'):
+                await observation.connected(adapter)
+            adapter._ws_future = asyncio.get_running_loop().create_future()
+
+            ws_loop.call_soon_threadsafe(ws_loop.stop)
+            thread.join(timeout=2.0)
+            with pytest.raises(RuntimeError, match='feishu websocket loop'):
+                await observation.connected(adapter)
+            ws_loop.close()
+            with pytest.raises(RuntimeError, match='feishu websocket loop closed'):
+                await observation.connected(adapter)
+        finally:
+            if not ws_future.done():
+                ws_future.cancel()
+            future = getattr(adapter, '_ws_future', None)
+            if future is not None and not future.done():
+                future.cancel()
+            if not ws_loop.is_closed():
+                ws_loop.call_soon_threadsafe(ws_loop.stop)
+                thread.join(timeout=2.0)
+                ws_loop.close()
+
+    asyncio.run(exercise())
+
+
+def test_required_feishu_websocket_collects_and_refuses_stale_transport(observation_runtime, tmp_path):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from gateway.config import Platform, PlatformConfig
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+    runner, homes, started, base, collect = observation_runtime
+    homes.pop('secondary')
+    runner._profile_adapters.clear()
+    base['served_profiles'] = ['default']
+    runner._release_required_platforms = {'default': frozenset({'feishu'})}
+
+    async def exercise():
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={
+            'app_id': 'cli_test',
+            'app_secret': 'secret_test',
+            'connection_mode': 'websocket',
+        }))
+        adapter._mark_connected()
+        ws_loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop():
+            asyncio.set_event_loop(ws_loop)
+            ready.set()
+            ws_loop.run_forever()
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        assert ready.wait(timeout=2.0)
+        adapter._ws_client = SimpleNamespace()
+        adapter._ws_thread_loop = ws_loop
+        adapter._ws_future = asyncio.get_running_loop().create_future()
+        adapter._event_handler = object()
+        runner.adapters[Platform.FEISHU] = adapter
+        try:
+            assert collect(await observation.observe(runner, homes, 'default', started))['healthy']
+            adapter._ws_future.set_result(None)
+            with pytest.raises(c.Refusal, match='transport'):
+                collect(await observation.observe(runner, homes, 'default', started))
+        finally:
+            future = getattr(adapter, '_ws_future', None)
+            if future is not None and not future.done():
+                future.cancel()
+            if not ws_loop.is_closed():
+                ws_loop.call_soon_threadsafe(ws_loop.stop)
+                thread.join(timeout=2.0)
+                ws_loop.close()
+
+    asyncio.run(exercise())
+
+
+def test_feishu_observer_uses_real_webhook_listener(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from gateway.config import PlatformConfig
+    import plugins.platforms.feishu.adapter as feishu_mod
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    if not feishu_mod.FEISHU_WEBHOOK_AVAILABLE or feishu_mod.web is None:
+        pytest.skip('aiohttp unavailable for real Feishu webhook listener')
+
+    async def exercise():
+        adapter = feishu_mod.FeishuAdapter(PlatformConfig(enabled=True, extra={
+            'app_id': 'cli_test',
+            'app_secret': 'secret_test',
+            'connection_mode': 'webhook',
+            'verification_token': 'verify_test',
+            'webhook_host': '127.0.0.1',
+            'webhook_port': 0,
+        }))
+        with pytest.raises(RuntimeError, match='adapter disconnected'):
+            await observation.connected(adapter)
+        with (
+            patch.object(adapter, '_build_lark_client', return_value=SimpleNamespace()),
+            patch.object(adapter, '_build_event_handler', return_value=object()),
+            patch.object(adapter, '_hydrate_bot_identity', new=AsyncMock()),
+        ):
+            try:
+                await adapter._connect_webhook()
+                adapter._mark_connected()
+                await observation.connected(adapter)
+                site = adapter._webhook_site
+                site._server.close()
+                await site._server.wait_closed()
+                assert adapter.is_connected
+                with pytest.raises(RuntimeError, match='feishu webhook listener'):
+                    await observation.connected(adapter)
+            finally:
+                await adapter.disconnect()
+        with pytest.raises(RuntimeError):
+            await observation.connected(adapter)
+
+    asyncio.run(exercise())
+
+
 def test_observer_lazy_sessions_and_pending_warmup(tmp_path, monkeypatch):
     import asyncio
     from types import SimpleNamespace

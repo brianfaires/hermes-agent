@@ -42,6 +42,24 @@ async def connected(adapter):
                                   for site in sites), 'webhook listener unavailable')
     elif kind == 'api_server':
         check(adapter._site is not None and adapter._site._server.is_serving(), 'API listener unavailable')
+    elif kind == 'feishu':
+        mode = getattr(adapter, '_connection_mode', None)
+        check(mode in {'websocket', 'webhook'}, 'feishu transport mode unreadable')
+        check(getattr(adapter, '_event_handler', None) is not None, 'feishu event handler unavailable')
+        if mode == 'websocket':
+            check(getattr(adapter, '_ws_client', None) is not None, 'feishu websocket transport unavailable')
+            future = getattr(adapter, '_ws_future', None)
+            check(future is not None, 'feishu websocket transport unavailable')
+            check(not future.done(), 'feishu websocket transport stale')
+            loop = getattr(adapter, '_ws_thread_loop', None)
+            check(loop is not None, 'feishu websocket loop unavailable')
+            check(not loop.is_closed(), 'feishu websocket loop closed')
+            check(loop.is_running(), 'feishu websocket loop stopped')
+        else:
+            check(getattr(adapter, '_webhook_runner', None) is not None, 'feishu webhook listener unavailable')
+            site = getattr(adapter, '_webhook_site', None)
+            server = getattr(site, '_server', None)
+            check(server is not None and server.is_serving(), 'feishu webhook listener unavailable')
     else:
         raise RuntimeError('unsupported adapter observation: ' + kind)
 
