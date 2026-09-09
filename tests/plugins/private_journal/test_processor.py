@@ -57,6 +57,38 @@ def _extract_entries(entries: list[dict]) -> str:
     return json.dumps({"entries": entries})
 
 
+def _validate_schema_subset(schema: dict, value):
+    if "enum" in schema:
+        assert value in schema["enum"]
+        return
+    schema_type = schema.get("type")
+    allowed = schema_type if isinstance(schema_type, list) else [schema_type]
+    value_type = (
+        "null" if value is None else
+        "boolean" if isinstance(value, bool) else
+        "integer" if isinstance(value, int) else
+        "number" if isinstance(value, float) else
+        "string" if isinstance(value, str) else
+        "array" if isinstance(value, list) else
+        "object" if isinstance(value, dict) else
+        "unknown"
+    )
+    assert value_type in allowed
+    if value_type == "object":
+        properties = schema.get("properties", {})
+        assert set(value) == set(schema.get("required", []))
+        assert schema.get("additionalProperties") is False
+        for key, item in value.items():
+            _validate_schema_subset(properties[key], item)
+    elif value_type == "array":
+        for item in value:
+            _validate_schema_subset(schema["items"], item)
+
+
+def _fresh_response_schema(*entry_ids: str) -> dict:
+    return processor._build_response_format(entry_ids)["json_schema"]["schema"]
+
+
 def _receipt_exists(home: Path, entry_id: str) -> bool:
     return (home / "journal" / "holding" / "receipts" / f"{entry_id}.json").exists()
 
@@ -219,6 +251,130 @@ def test_processor_passes_explicit_auxiliary_bounds(tmp_path, monkeypatch):
     assert calls[0]["timeout"] == processor.DEFAULT_TIMEOUT_SECONDS
 
 
+def test_fresh_response_format_is_strict_and_binds_entry_ids():
+    first = "20400203T071500-abcdef123456"
+    second = "20400203T071501-abcdef123457"
+
+    response_format = processor._build_response_format([first, second])
+    schema = response_format["json_schema"]["schema"]
+    entry_schema = schema["properties"]["entries"]["items"]
+
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert schema["additionalProperties"] is False
+    assert entry_schema["additionalProperties"] is False
+    assert entry_schema["properties"]["id"]["type"] == "string"
+    assert entry_schema["properties"]["id"]["enum"] == [first, second]
+    assert set(entry_schema["required"]) == processor.ALLOWED_EXTRACTION_KEYS
+    assert entry_schema["properties"]["diet"]["items"]["additionalProperties"] is False
+    assert entry_schema["properties"]["sleep"]["items"]["additionalProperties"] is False
+    assert entry_schema["properties"]["sleep"]["items"]["properties"]["kind"]["type"] == [
+        "string",
+        "null",
+    ]
+    assert "confidence" not in entry_schema["properties"]["diet"]["items"]["properties"]
+    assert "confidence" not in entry_schema["properties"]["sleep"]["items"]["properties"]
+
+
+def test_fresh_response_schema_denies_actual_bad_diet_and_sleep_shapes():
+    entry_id = "20400203T071500-abcdef123456"
+    schema = _fresh_response_schema(entry_id)
+    bad_diet = json.loads(_extract_response(entry_id))
+    bad_diet["entries"][0]["diet"] = [
+        {
+            "person": "FICTIONAL Pat",
+            "food_or_drink": "soup",
+            "amount": None,
+            "unit": None,
+            "event_time": None,
+            "basis": None,
+        }
+    ]
+    bad_sleep = json.loads(_extract_response(entry_id))
+    bad_sleep["entries"][0]["sleep"] = [
+        {
+            "person": "FICTIONAL Pat",
+            "start": None,
+            "end": None,
+            "duration_minutes": None,
+            "interruptions": None,
+            "basis": "self_report",
+            "kind": "sleep",
+            "confidence": "high",
+        }
+    ]
+
+    with pytest.raises(AssertionError):
+        _validate_schema_subset(schema, bad_diet)
+    with pytest.raises(AssertionError):
+        _validate_schema_subset(schema, bad_sleep)
+
+
+def test_fresh_response_schema_accepts_canonical_diet_sleep_nulls_and_corrections():
+    entry_id = "20400203T071500-abcdef123456"
+    response = json.loads(_extract_response(entry_id))
+    response["entries"][0]["diet"] = [
+        {
+            "person": "FICTIONAL Pat",
+            "food_or_drink": "soup",
+            "amount": None,
+            "unit": None,
+            "event_time": None,
+            "basis": "self_report",
+        },
+        {
+            "person": "FICTIONAL Pat",
+            "food_or_drink": "tea",
+            "amount": "about 2",
+            "unit": "cups",
+            "event_time": "morning",
+            "basis": "direct_observation",
+        },
+    ]
+    response["entries"][0]["sleep"] = [
+        {
+            "person": "FICTIONAL Pat",
+            "start": None,
+            "end": None,
+            "duration_minutes": "unknown",
+            "interruptions": None,
+            "basis": "self_report",
+            "kind": None,
+        }
+    ]
+    response["entries"][0]["corrections"] = [
+        {
+            "corrected_at": None,
+            "author": None,
+            "target": entry_id,
+            "original": "black tea",
+            "replacement_or_context": "herbal tea",
+            "reason": "later correction",
+        }
+    ]
+
+    _validate_schema_subset(_fresh_response_schema(entry_id), response)
+
+
+def test_diet_prompt_contract_splits_stated_units_and_preserves_unknowns(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    record = _write_capture(
+        home,
+        monkeypatch,
+        "FICTIONAL Aster ate 2 slices of toast, about 2 servings of soup, "
+        "and drank tea; amount not said.",
+    )
+
+    prompt = processor._build_prompt([record])
+
+    assert "do not combine them in amount" in prompt
+    assert "`2 slices of toast` -> amount `2`, unit `slices`" in prompt
+    assert "`about 2 servings` -> amount `about 2`, unit `servings`" in prompt
+    assert "`ate soup` -> amount null, unit null" in prompt
+    assert "amount string/number/null" not in prompt
+
+
 def test_diet_sleep_nap_wakeups_missing_values_and_corrections_render(
     tmp_path, monkeypatch
 ):
@@ -369,7 +525,8 @@ def test_diet_sleep_nap_wakeups_missing_values_and_corrections_render(
     result = processor.process_pending(vault_path=vault, llm_call=fake_llm)
 
     assert result.processed == 4
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["strict"] is True
     assert calls[0]["reasoning"] == {"effort": "low", "exclude": True}
     prompt = calls[0]["messages"][1]["content"]
     assert "diet" in prompt
@@ -379,6 +536,8 @@ def test_diet_sleep_nap_wakeups_missing_values_and_corrections_render(
     assert "Preserve full stated names" in prompt
     assert "Use basis self_report only when the narrator reports themself" in prompt
     assert "use reported for third-party information" in prompt
+    assert "do not combine them in amount" in prompt
+    assert "`2 slices of toast` -> amount `2`, unit `slices`" in prompt
     assert "retain stated wake-up times/durations in interruptions as text" in prompt
     assert "allowed keys below override all reference templates" in prompt
     assert "Never copy example people, authors, dates" in prompt

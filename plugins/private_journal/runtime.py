@@ -99,6 +99,15 @@ def call_model(*, messages, max_tokens, timeout, task, response_format=None, rea
                 request["response_format"] = response_format
             if reasoning is not None:
                 request["extra_body"] = {"reasoning": reasoning}
+            if (
+                isinstance(response_format, dict)
+                and response_format.get("type") == "json_schema"
+            ):
+                extra_body = dict(request.get("extra_body") or {})
+                provider_body = dict(extra_body.get("provider") or {})
+                provider_body["require_parameters"] = True
+                extra_body["provider"] = provider_body
+                request["extra_body"] = extra_body
             return client.with_options(max_retries=0, timeout=timeout).chat.completions.create(**request)
         finally:
             client.close()

@@ -93,6 +93,7 @@ def test_archive_tampering_prevents_cleanup(batch):
 def test_real_model_resolver_transport_boundary(monkeypatch):
     import agent.auxiliary_client as auxiliary
     monkeypatch.setattr(runtime, 'settings', lambda: {'provider': 'openrouter', 'model': 'fixture/inexpensive:free'})
+    response_format = processor._build_response_format(["20400203T071500-abcdef123456"])
     client = Mock()
     client.with_options.return_value = client
     client.chat.completions.create.return_value = 'response'
@@ -104,16 +105,42 @@ def test_real_model_resolver_transport_boundary(monkeypatch):
         max_tokens=20,
         timeout=2,
         task='private_journal_batch',
-        response_format={'type': 'json_object'},
+        response_format=response_format,
         reasoning={'effort': 'low', 'exclude': True},
     ) == 'response'
     factory.assert_called_once()
     assert client.chat.completions.create.call_args.kwargs['model'] == 'fixture/inexpensive:free'
-    assert client.chat.completions.create.call_args.kwargs['response_format'] == {'type': 'json_object'}
-    assert client.chat.completions.create.call_args.kwargs['extra_body'] == {'reasoning': {'effort': 'low', 'exclude': True}}
+    assert client.chat.completions.create.call_args.kwargs['response_format'] == response_format
+    assert client.chat.completions.create.call_args.kwargs['extra_body'] == {
+        'reasoning': {'effort': 'low', 'exclude': True},
+        'provider': {'require_parameters': True},
+    }
     client.with_options.assert_called_once_with(max_retries=0, timeout=2)
     assert 'tools' not in client.chat.completions.create.call_args.kwargs
     client.close.assert_called_once()
+
+
+def test_openrouter_provider_requirement_is_json_schema_only(monkeypatch):
+    import agent.auxiliary_client as auxiliary
+    monkeypatch.setattr(runtime, 'settings', lambda: {'provider': 'openrouter', 'model': 'fixture/inexpensive:free'})
+    client = Mock()
+    client.with_options.return_value = client
+    client.chat.completions.create.return_value = 'response'
+    monkeypatch.setattr(auxiliary, 'resolve_provider_client',
+                        lambda **kwargs: (client, 'fixture/inexpensive:free'))
+
+    runtime.call_model(
+        messages=[{'role': 'user', 'content': 'fixture'}],
+        max_tokens=20,
+        timeout=2,
+        task='private_journal_batch',
+        response_format={'type': 'json_object'},
+        reasoning={'effort': 'low'},
+    )
+
+    assert client.chat.completions.create.call_args.kwargs['extra_body'] == {
+        'reasoning': {'effort': 'low'},
+    }
 
 
 def test_openrouter_options_pass_through_real_openai_sdk(monkeypatch):
@@ -138,16 +165,18 @@ def test_openrouter_options_pass_through_real_openai_sdk(monkeypatch):
         'provider': 'openrouter', 'model': 'openai/gpt-oss-20b'})
     monkeypatch.setattr(auxiliary, 'resolve_provider_client',
                         lambda **kwargs: (client, 'openai/gpt-oss-20b'))
+    response_format = processor._build_response_format(["20400203T071500-abcdef123456"])
     response = runtime.call_model(
         messages=[{'role': 'user', 'content': 'FICTIONAL JSON serialization test'}],
         max_tokens=4096, timeout=2, task='private_journal_batch',
-        response_format={'type': 'json_object'},
+        response_format=response_format,
         reasoning={'effort': 'low', 'exclude': True},
     )
     assert response.choices[0].message.content == '{"entries":[]}'
     assert len(requests) == 1
-    assert requests[0]['response_format'] == {'type': 'json_object'}
+    assert requests[0]['response_format'] == response_format
     assert requests[0]['reasoning'] == {'effort': 'low', 'exclude': True}
+    assert requests[0]['provider'] == {'require_parameters': True}
     assert requests[0]['max_tokens'] == 4096
     assert client.is_closed()
 
