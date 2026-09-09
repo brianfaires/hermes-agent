@@ -243,9 +243,13 @@ export function useSubmission(opts: UseSubmissionOptions) {
       if (looksLikeSlashCommand(full) && !privateChecked) {
         void checkPrivateCommand(
           prepareSubmission(full, [...composerRefs.tokensRef.current]).text,
-          command => gw.request<PrivateCommandResult>('command.private', {
-            command, session_id: getUiState().sid
-          }).then(raw => asRpcResult<PrivateCommandResult>(raw)),
+          command =>
+            gw
+              .request<PrivateCommandResult>('command.private', {
+                command,
+                session_id: getUiState().sid
+              })
+              .then(raw => asRpcResult<PrivateCommandResult>(raw)),
           output => {
             composerActions.clearIn()
             sys(output)

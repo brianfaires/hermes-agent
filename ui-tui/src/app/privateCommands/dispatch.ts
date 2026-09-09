@@ -14,7 +14,10 @@ export async function checkPrivateCommand(
     if (result?.handled === false) {
       return false
     }
-    acknowledge(result?.handled ? result.output || '(no output)' : 'Private command check failed; input was not submitted.')
+
+    acknowledge(
+      result?.handled ? result.output || '(no output)' : 'Private command check failed; input was not submitted.'
+    )
   } catch {
     acknowledge('Private command check failed; input was not submitted.')
   }

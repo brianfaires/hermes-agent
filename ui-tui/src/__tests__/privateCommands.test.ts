@@ -16,7 +16,15 @@ describe('private dispatch before transcript and history', () => {
     const ack = vi.fn()
     expect(await checkPrivateCommand('/status', async () => ({ handled: false }), ack)).toBe(false)
     expect(ack).not.toHaveBeenCalled()
-    expect(await checkPrivateCommand('/log secret', async () => { throw Error('secret') }, ack)).toBe(true)
+    expect(
+      await checkPrivateCommand(
+        '/log secret',
+        async () => {
+          throw Error('secret')
+        },
+        ack
+      )
+    ).toBe(true)
     expect(JSON.stringify(ack.mock.calls)).not.toContain('secret')
     expect(await checkPrivateCommand('/log secret', async () => undefined, ack)).toBe(true)
   })

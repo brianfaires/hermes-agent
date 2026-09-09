@@ -15,6 +15,7 @@ export function resetPrivateCommands() {
 
 export function isPrivateCommand(text: string) {
   const name = text.trimStart().split(/\s/, 1)[0]?.toLowerCase()
+
   return !!name && $privateCommands.get().has(name)
 }
 
