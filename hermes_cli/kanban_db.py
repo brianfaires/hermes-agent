@@ -133,6 +133,21 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # not dispatcher spawn/crash/timeout failures.
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+_CONTROL_HOLD_RELEASE_EVENTS = {
+    "unblocked",
+    "promoted_manual",
+    "specified",
+    "decomposed",
+}
+_CONTROL_HOLD_BLOCK_KINDS = {"needs_input", "capability", "transient"}
+_CONTROL_HOLD_DECISION_EVENTS = (
+    "block_loop_detected",
+    "unblocked",
+    "promoted_manual",
+    "specified",
+    "decomposed",
+    "status",
+)
 
 
 def normalize_reasoning_effort(effort: Optional[str]) -> Optional[str]:
@@ -4504,6 +4519,93 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _event_payload_dict(row: Optional[sqlite3.Row]) -> dict[str, Any]:
+    if row is None or not row["payload"]:
+        return {}
+    try:
+        payload = json.loads(row["payload"])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def has_active_control_hold(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True while a block-loop triage escalation is unreleased.
+
+    ``block_task`` routes repeated same-kind human blocks to ``triage`` via a
+    typed ``block_loop_detected`` event. That triage card is not a rough spec
+    gap: it is the system's durable "stop and get an operator decision" state.
+    Auto-specify, auto-decompose, and worker claims must not treat it as normal
+    work until an explicit release event (currently ``unblock_task`` or manual
+    promotion) occurs.
+
+    The event stream is the primary source of truth so a stale ``block_kind``
+    column does not re-hold a task after release. The row-state fallback covers
+    legacy/current boards that already have a needs-input/capability/transient
+    loop in triage but lack the loop event.
+    """
+    rows = conn.execute(
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ("
+        + ",".join("?" for _ in _CONTROL_HOLD_DECISION_EVENTS)
+        + ") ORDER BY id DESC LIMIT 20",
+        (task_id, *_CONTROL_HOLD_DECISION_EVENTS),
+    ).fetchall()
+    for row in rows:
+        kind = row["kind"]
+        if kind == "block_loop_detected":
+            return True
+        if kind in _CONTROL_HOLD_RELEASE_EVENTS:
+            return False
+        if kind == "status":
+            payload = _event_payload_dict(row)
+            requested = payload.get("status") or payload.get("requested_status")
+            # Dragging a held card to triage is not a release. Other direct
+            # status moves are explicit operator actions and carry the release
+            # decision the claim/spec/decompose gates require.
+            if requested == "triage":
+                continue
+            return False
+
+    task_row = conn.execute(
+        "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if task_row is None or task_row["status"] != "triage":
+        return False
+    try:
+        recurrences = int(task_row["block_recurrences"] or 0)
+    except (TypeError, ValueError):
+        recurrences = 0
+    return (
+        recurrences >= BLOCK_RECURRENCE_LIMIT
+        and (
+            task_row["block_kind"] in _CONTROL_HOLD_BLOCK_KINDS
+            or task_row["block_kind"] is None
+        )
+    )
+
+
+def _reject_control_hold_claim(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    source_status: str,
+) -> None:
+    conn.execute(
+        "UPDATE tasks SET status = 'triage', claim_lock = NULL, "
+        "claim_expires = NULL, worker_pid = NULL "
+        "WHERE id = ? AND status = ?",
+        (task_id, source_status),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "claim_rejected",
+        {"reason": "active_control_hold", "source_status": source_status},
+    )
+
+
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     """Return the durable phase a blocked/dependency-wait task should resume.
 
@@ -4576,6 +4678,8 @@ def recompute_ready(
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            if has_active_control_hold(conn, task_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for explicit human intervention — do not
                 # silently auto-recover.  ``unblock_task`` is the only
@@ -4656,6 +4760,11 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if has_active_control_hold(conn, task_id):
+            _reject_control_hold_claim(
+                conn, task_id, source_status="ready",
+            )
+            return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -4784,6 +4893,11 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        if has_active_control_hold(conn, task_id):
+            _reject_control_hold_claim(
+                conn, task_id, source_status="review",
+            )
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -6914,7 +7028,7 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Transition ``blocked``/``scheduled`` to its safe resumable phase.
+    """Transition ``blocked``/``scheduled``/held-``triage`` to a resumable phase.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
     status. In the common path (``block_task`` closed the run already) this
@@ -6929,13 +7043,17 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             "SELECT status FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
+        if current and current["status"] == "triage" and not has_active_control_hold(
+            conn, task_id,
+        ):
+            return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if current and current["status"] == "blocked"
+            if current and current["status"] in {"blocked", "triage"}
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -6958,7 +7076,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')",
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage')",
             (new_status, task_id),
         )
         if cur.rowcount != 1:
@@ -7247,6 +7365,8 @@ def specify_triage_task(
         ).fetchone()
         if existing is None:
             return False
+        if has_active_control_hold(conn, task_id):
+            return False
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -7403,6 +7523,8 @@ def decompose_triage_task(
         if root_row is None:
             return None
         if root_row["status"] != "triage":
+            return None
+        if has_active_control_hold(conn, task_id):
             return None
         tenant = root_row["tenant"]
         # Children inherit the root's workspace kind by default. Worktree

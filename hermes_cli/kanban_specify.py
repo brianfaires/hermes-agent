@@ -154,11 +154,19 @@ def specify_task(
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        held = kb.has_active_control_hold(conn, task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, "unknown task id")
     if task.status != "triage":
         return SpecifyOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
+        )
+    if held:
+        return SpecifyOutcome(
+            task_id,
+            False,
+            "task is held for explicit human input; run an explicit unblock "
+            "or manual release before specifying it",
         )
 
     try:
@@ -261,4 +269,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             include_archived=False,
         )
-    return [t.id for t in tasks]
+        return [
+            t.id for t in tasks
+            if not kb.has_active_control_hold(conn, t.id)
+        ]

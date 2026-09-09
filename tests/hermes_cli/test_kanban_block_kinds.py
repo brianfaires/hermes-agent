@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_decompose as decomp
+from hermes_cli import kanban_specify as spec
 
 
 @pytest.fixture
@@ -78,6 +80,116 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
+def test_needs_input_loop_hold_is_not_auto_specified_decomposed_or_claimed(
+    kanban_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="needs consent")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+    assert tid not in spec.list_triage_ids()
+    assert tid not in decomp.list_triage_ids()
+
+    specify_outcome = spec.specify_task(tid, author="auto-specifier")
+    decompose_outcome = decomp.decompose_task(tid, author="auto-decomposer")
+    assert specify_outcome.ok is False
+    assert "explicit unblock" in specify_outcome.reason
+    assert decompose_outcome.ok is False
+    assert "explicit unblock" in decompose_outcome.reason
+
+    with kb.connect_closing() as conn:
+        assert kb.specify_triage_task(
+            conn,
+            tid,
+            title="Proceed without consent",
+            body="This must not apply.",
+            author="test",
+        ) is False
+        assert kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="worker",
+            children=[{"title": "child", "assignee": "worker"}],
+            author="test",
+        ) is None
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profile_exists", lambda _profile: True
+        )
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
+                "dispatcher must not spawn a held task"
+            ),
+            max_in_progress=None,
+        )
+        assert result.spawned == []
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "triage"
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+        assert kb.claim_task(conn, tid, claimer="bypass") is None
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "triage"
+
+
+def test_explicit_unblock_releases_needs_input_triage_hold(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="release consent hold")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+
+        assert kb.unblock_task(conn, tid)
+        released = kb.get_task(conn, tid)
+        assert released is not None
+        assert released.status == "ready"
+        assert kb.claim_task(conn, tid, claimer="released") is not None
+
+
+def test_legacy_triage_hold_uses_release_event_not_stale_block_kind(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        held = kb.create_task(conn, title="legacy held", assignee="worker", triage=True)
+        released = kb.create_task(
+            conn, title="legacy released", assignee="worker", triage=True
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET block_kind = 'needs_input', block_recurrences = ? "
+                "WHERE id IN (?, ?)",
+                (kb.BLOCK_RECURRENCE_LIMIT, held, released),
+            )
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, 'unblocked', ?, ?)",
+                (released, '{"status": "ready"}', 1),
+            )
+
+        assert kb.specify_triage_task(
+            conn, held, title="Held", body="must stay held", author="test"
+        ) is False
+        assert kb.specify_triage_task(
+            conn, released, title="Released", body="explicitly released", author="test"
+        ) is True
+        assert kb.get_task(conn, released).status == "ready"
+
+
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
@@ -108,5 +220,3 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-
-
