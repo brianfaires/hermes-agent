@@ -47,7 +47,8 @@ async def connected(adapter):
         check(mode in {'websocket', 'webhook'}, 'feishu transport mode unreadable')
         check(getattr(adapter, '_event_handler', None) is not None, 'feishu event handler unavailable')
         if mode == 'websocket':
-            check(getattr(adapter, '_ws_client', None) is not None, 'feishu websocket transport unavailable')
+            ws_client = getattr(adapter, '_ws_client', None)
+            check(ws_client is not None, 'feishu websocket transport unavailable')
             future = getattr(adapter, '_ws_future', None)
             check(future is not None, 'feishu websocket transport unavailable')
             check(not future.done(), 'feishu websocket transport stale')
@@ -55,6 +56,9 @@ async def connected(adapter):
             check(loop is not None, 'feishu websocket loop unavailable')
             check(not loop.is_closed(), 'feishu websocket loop closed')
             check(loop.is_running(), 'feishu websocket loop stopped')
+            conn = getattr(ws_client, '_conn', None)
+            state = getattr(getattr(conn, 'state', None), 'name', None)
+            check(state == 'OPEN', 'feishu websocket transport unavailable')
         else:
             check(getattr(adapter, '_webhook_runner', None) is not None, 'feishu webhook listener unavailable')
             site = getattr(adapter, '_webhook_site', None)

@@ -23,6 +23,17 @@ import drain_proof as drain
 sys.path.remove(str(SCRIPTS))
 
 
+def _open_feishu_ws_client():
+    websockets = pytest.importorskip('websockets')
+    state = getattr(websockets, 'protocol', None)
+    if state is None:
+        from websockets.protocol import State
+    else:
+        State = state.State
+    from types import SimpleNamespace
+    return SimpleNamespace(_conn=SimpleNamespace(state=State.OPEN))
+
+
 def wait(check, timeout=90):
     end = time.monotonic() + timeout
     error = None
@@ -431,7 +442,7 @@ def test_feishu_observer_uses_websocket_transport_primitives(tmp_path, monkeypat
         thread.start()
         assert ready.wait(timeout=2.0)
         ws_future = asyncio.get_running_loop().create_future()
-        adapter._ws_client = SimpleNamespace()
+        adapter._ws_client = _open_feishu_ws_client()
         adapter._ws_thread_loop = ws_loop
         adapter._ws_future = ws_future
         try:
@@ -445,7 +456,19 @@ def test_feishu_observer_uses_websocket_transport_primitives(tmp_path, monkeypat
             adapter._ws_client = None
             with pytest.raises(RuntimeError, match='feishu websocket transport'):
                 await observation.connected(adapter)
-            adapter._ws_client = SimpleNamespace()
+            adapter._ws_client = SimpleNamespace(_conn=None)
+            with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                await observation.connected(adapter)
+            adapter._ws_client = SimpleNamespace(_conn=SimpleNamespace(state=SimpleNamespace(name='CONNECTING')))
+            with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                await observation.connected(adapter)
+            adapter._ws_client = SimpleNamespace(_conn=SimpleNamespace(state=SimpleNamespace(name='CLOSING')))
+            with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                await observation.connected(adapter)
+            adapter._ws_client = SimpleNamespace(_conn=SimpleNamespace(state=SimpleNamespace(name='UNKNOWN')))
+            with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                await observation.connected(adapter)
+            adapter._ws_client = _open_feishu_ws_client()
 
             ws_future.set_result(None)
             with pytest.raises(RuntimeError, match='feishu websocket transport stale'):
@@ -503,7 +526,7 @@ def test_required_feishu_websocket_collects_and_refuses_stale_transport(observat
         thread = threading.Thread(target=run_loop, daemon=True)
         thread.start()
         assert ready.wait(timeout=2.0)
-        adapter._ws_client = SimpleNamespace()
+        adapter._ws_client = _open_feishu_ws_client()
         adapter._ws_thread_loop = ws_loop
         adapter._ws_future = asyncio.get_running_loop().create_future()
         adapter._event_handler = object()
@@ -521,6 +544,55 @@ def test_required_feishu_websocket_collects_and_refuses_stale_transport(observat
                 ws_loop.call_soon_threadsafe(ws_loop.stop)
                 thread.join(timeout=2.0)
                 ws_loop.close()
+
+    asyncio.run(exercise())
+
+
+def test_feishu_observer_requires_real_websocket_open_handshake(tmp_path, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    websockets = pytest.importorskip('websockets')
+    from gateway.config import PlatformConfig
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+
+    async def handler(websocket):
+        await websocket.wait_closed()
+
+    async def exercise():
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={
+            'app_id': 'cli_test',
+            'app_secret': 'secret_test',
+            'connection_mode': 'websocket',
+        }))
+        adapter._mark_connected()
+        adapter._event_handler = object()
+        adapter._ws_future = asyncio.get_running_loop().create_future()
+        adapter._ws_thread_loop = asyncio.get_running_loop()
+        adapter._ws_client = SimpleNamespace(_conn=None)
+        with pytest.raises(RuntimeError, match='feishu websocket transport'):
+            await observation.connected(adapter)
+
+        server = await websockets.serve(handler, '127.0.0.1', 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            conn = await websockets.connect(f'ws://127.0.0.1:{port}')
+            try:
+                adapter._ws_client = SimpleNamespace(_conn=conn)
+                await observation.connected(adapter)
+                await conn.close()
+                assert conn.state.name == 'CLOSED'
+                assert not adapter._ws_future.done()
+                assert adapter._ws_thread_loop.is_running()
+                with pytest.raises(RuntimeError, match='feishu websocket transport'):
+                    await observation.connected(adapter)
+            finally:
+                if conn.state.name != 'CLOSED':
+                    await conn.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+            adapter._ws_future.cancel()
 
     asyncio.run(exercise())
 
