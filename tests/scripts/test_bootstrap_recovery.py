@@ -412,19 +412,37 @@ def test_template_binds_production_bootstrap_commands(tmp_path):
         c.PYTHON, str(SCRIPTS / 'bootstrap_runtime_bindings.py'), 'legacy-drain']
     assert packet['checks']['drain']['argv'][6:10] == [
         'hermes-gateway.service', '123', '456', '--recovery-deadline']
+    drain_argv = packet['checks']['drain']['argv']
+    assert drain_argv[drain_argv.index('--max-age'):drain_argv.index('--max-age') + 2] == [
+        '--max-age', '44']
+    assert packet['checks']['drain']['timeout'] == 8
     assert packet['checks']['clear-drain']['argv'] == [
         c.PYTHON, str(SCRIPTS / 'bootstrap_runtime_bindings.py'), 'clear-drain',
         str(tmp_path / 'home')]
     assert packet['checks']['health']['argv'][:2] == [c.PYTHON, str(SCRIPTS / 'runtime_health.py')]
+    assert packet['checks']['health']['argv'][-4:] == ['--max-age', '90', '--startup-timeout', '91']
     assert packet['checks']['health']['argv'][-2:] == ['--startup-timeout', '91']
+    assert packet['checks']['health']['timeout'] == 123
     assert packet['checks']['recover-health']['argv'][:3] == [
         c.PYTHON, str(SCRIPTS / 'bootstrap_runtime_bindings.py'), 'legacy-health']
     assert json.loads(packet['checks']['recover-health']['argv'][5]) == [c.PYTHON, 'legacy']
+    assert packet['checks']['recover-health']['argv'][-4:] == [
+        '--max-age', '44', '--startup-timeout', '123']
+    assert packet['checks']['recover-health']['timeout'] == 123
     assert (packet['commands'], packet['recovery']) == b.command_plan(packet)
     artifact_paths = {entry['path'] for entry in packet['artifacts']}
     assert {str(SCRIPTS / name) for name in (
         'bootstrap_runtime_bindings.py', 'runtime_health.py', 'drain_proof.py', 'health.py'
     )} <= artifact_paths
+
+
+def test_template_aligns_recover_health_startup_timeout_above_runtime_bound(tmp_path):
+    data = base_template_input(tmp_path)
+    data['bootstrap_bindings']['health_timeout'] = 241
+    packet = template.build_packet(data)
+    assert packet['checks']['health']['argv'][-2:] == ['--startup-timeout', '91']
+    assert packet['checks']['recover-health']['argv'][-2:] == ['--startup-timeout', '241']
+    assert packet['checks']['recover-health']['timeout'] == 241
 
 
 def test_template_rejects_unbounded_freshness(tmp_path):
@@ -556,6 +574,89 @@ def test_legacy_health_producer_uses_systemd_proc_and_live_status(tmp_path, monk
     assert proof['healthy'] is True
     assert proof['argv'] == actual['argv']
     assert proof['source'] == 'legacy9ccb53e3d15730fcae88b086ea954dfc377574aa'
+
+
+def test_legacy_health_retries_delayed_startup_socket_readiness(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir(mode=0o700)
+    actual = {'pid': 789, 'starttime': '987', 'cgroup': '/user.slice/test.scope',
+              'argv': [c.PYTHON, 'legacy']}
+    monkeypatch.setattr(bindings, 'show',
+                        lambda unit: {'ActiveState': 'active', 'MainPID': str(actual['pid'])})
+    monkeypatch.setattr(bindings, 'proc', lambda pid: actual)
+    attempts = {'count': 0}
+
+    def query(_home, verb):
+        if verb == 'identify':
+            attempts['count'] += 1
+            if attempts['count'] < 3:
+                raise RuntimeError('gateway control socket missing')
+            return {'pid': actual['pid'], 'start_time': actual['starttime']}
+        return {'pid': actual['pid'], 'answering_pid': actual['pid'],
+                'start_time': actual['starttime'], 'gateway_state': 'running',
+                'answered_at': time.time()}
+
+    monkeypatch.setattr(bindings, '_query_socket', query)
+    monkeypatch.setattr(bindings.time, 'sleep', lambda delay: None)
+    proof = bindings.prove_legacy_health(home, 'hermes-gateway.service', actual['argv'],
+                                         'legacy9ccb53e3d15730fcae88b086ea954dfc377574aa',
+                                         'legacy', max_age=30, startup_timeout=2)
+    assert proof['healthy'] is True
+    assert attempts['count'] == 3
+
+
+def test_legacy_health_does_not_retry_wrong_identity(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir(mode=0o700)
+    actual = {'pid': 789, 'starttime': '987', 'cgroup': '/user.slice/test.scope',
+              'argv': [c.PYTHON, 'legacy']}
+    monkeypatch.setattr(bindings, 'show',
+                        lambda unit: {'ActiveState': 'active', 'MainPID': str(actual['pid'])})
+    monkeypatch.setattr(bindings, 'proc', lambda pid: actual)
+    calls = {'count': 0}
+
+    def query(_home, verb):
+        calls['count'] += 1
+        if verb == 'identify':
+            return {'pid': actual['pid'] + 1, 'start_time': actual['starttime']}
+        return {'pid': actual['pid'] + 1, 'answering_pid': actual['pid'] + 1,
+                'start_time': actual['starttime'], 'gateway_state': 'running',
+                'answered_at': time.time()}
+
+    monkeypatch.setattr(bindings, '_query_socket', query)
+    monkeypatch.setattr(bindings.time, 'sleep',
+                        lambda delay: (_ for _ in ()).throw(AssertionError('unexpected retry')))
+    with pytest.raises(c.Refusal, match='gateway process mismatch'):
+        bindings.prove_legacy_health(home, 'hermes-gateway.service', actual['argv'],
+                                     'legacy9ccb53e3d15730fcae88b086ea954dfc377574aa',
+                                     'legacy', max_age=30, startup_timeout=2)
+    assert calls['count'] == 2
+
+
+def test_legacy_health_refuses_permanent_unhealthy_gateway(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir(mode=0o700)
+    actual = {'pid': 789, 'starttime': '987', 'cgroup': '/user.slice/test.scope',
+              'argv': [c.PYTHON, 'legacy']}
+    monkeypatch.setattr(bindings, 'show',
+                        lambda unit: {'ActiveState': 'active', 'MainPID': str(actual['pid'])})
+    monkeypatch.setattr(bindings, 'proc', lambda pid: actual)
+
+    def query(_home, verb):
+        if verb == 'identify':
+            return {'pid': actual['pid'], 'start_time': actual['starttime']}
+        return {'pid': actual['pid'], 'answering_pid': actual['pid'],
+                'start_time': actual['starttime'], 'gateway_state': 'starting',
+                'answered_at': time.time()}
+
+    monotonic = iter([0.0, 0.05, 0.06, 0.2])
+    monkeypatch.setattr(bindings, '_query_socket', query)
+    monkeypatch.setattr(bindings.time, 'monotonic', lambda: next(monotonic))
+    monkeypatch.setattr(bindings.time, 'sleep', lambda delay: None)
+    with pytest.raises(bindings.TransientStartupReadiness, match='gateway not running'):
+        bindings.prove_legacy_health(home, 'hermes-gateway.service', actual['argv'],
+                                     'legacy9ccb53e3d15730fcae88b086ea954dfc377574aa',
+                                     'legacy', max_age=30, startup_timeout=0.1)
 
 
 def write_required_definition_packet(tmp_path, candidate_definition='candidate unit definition\n'):

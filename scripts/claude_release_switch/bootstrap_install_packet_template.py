@@ -51,9 +51,11 @@ def build_packet(data):
     installation = packet['installation']
     unit = packet['unit']
     max_age = int(bindings.get('max_age', 30))
+    runtime_health_max_age = 90
     drain_timeout = int(bindings.get('drain_timeout', timeout))
     health_timeout = int(bindings.get('health_timeout', max(timeout, 120)))
     startup_timeout = int(bindings.get('startup_timeout', 90))
+    recover_health_startup_timeout = health_timeout
     repeat_delay = str(float(bindings.get('repeat_delay', 0.2)))
     require(1 <= max_age <= 90, 'bootstrap max_age out of bounds')
     require(1 <= drain_timeout <= 300, 'bootstrap drain_timeout out of bounds')
@@ -87,7 +89,7 @@ def build_packet(data):
         'start': lifecycle('start', unit, installation, timeout),
         'health': command('health',
                           [PYTHON, runtime_health, startup_json, live_json, unit,
-                           hermes_home, '--max-age', str(max_age),
+                           hermes_home, '--max-age', str(runtime_health_max_age),
                            '--startup-timeout', str(startup_timeout)],
                           installation, health_timeout),
         'recover-stop': lifecycle('recover-stop', unit, installation, timeout, 'stop'),
@@ -97,8 +99,9 @@ def build_packet(data):
                                    unit, json.dumps(packet['legacy']['argv'],
                                                     sort_keys=True, separators=(',', ':')),
                                    packet['legacy']['source'], 'legacy',
-                                   '--max-age', str(max_age)],
-                                  installation, drain_timeout),
+                                   '--max-age', str(max_age),
+                                   '--startup-timeout', str(recover_health_startup_timeout)],
+                                  installation, health_timeout),
     }
     packet['commands'], packet['recovery'] = bootstrap.command_plan(packet)
     _add_artifacts(packet, [runtime_health, health, drain_proof, bootstrap_bindings])

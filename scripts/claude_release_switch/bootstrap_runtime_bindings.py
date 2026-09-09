@@ -15,6 +15,10 @@ from controller import loads, proc, require, shape, show
 from drain_proof import COVERAGE, _read_hold
 
 
+class TransientStartupReadiness(RuntimeError):
+    pass
+
+
 def _query_socket(home: Path, verb: str, timeout: float = 2.0) -> dict:
     request = json.dumps({"verb": verb, "id": 1, "protocol": 1}).encode() + b"\n"
     deadline = time.monotonic() + timeout
@@ -109,27 +113,47 @@ def prove_legacy_drain(home: Path, hold_path: Path, repo: str, unit: str, pid: i
             "observed": int(time.time())}
 
 
-def prove_legacy_health(home: Path, unit: str, expected_argv: list[str],
+def _legacy_health_once(home: Path, unit: str, expected_argv: list[str],
                         expected_source: str, mode: str, *, max_age: int) -> dict:
     home = home.resolve(strict=True)
     require(mode == "legacy", "unsupported bootstrap recovery mode")
     status = show(unit)
-    require(status["ActiveState"] == "active", "service inactive")
+    if status["ActiveState"] != "active":
+        raise TransientStartupReadiness("service inactive")
     actual = proc(int(status["MainPID"]))
     require(actual["argv"] == expected_argv, "runtime argv mismatch")
-    identify = _query_socket(home, "identify")
-    runtime = _query_socket(home, "status")
+    try:
+        identify = _query_socket(home, "identify")
+        runtime = _query_socket(home, "status")
+    except RuntimeError as exc:
+        raise TransientStartupReadiness(str(exc)) from exc
     require(identify.get("pid") == actual["pid"] and runtime.get("pid") == actual["pid"]
             and runtime.get("answering_pid") == actual["pid"], "gateway process mismatch")
     require(str(identify.get("start_time")) == actual["starttime"]
             and str(runtime.get("start_time")) == actual["starttime"], "gateway starttime mismatch")
-    require(runtime.get("gateway_state") == "running", "gateway not running")
+    if runtime.get("gateway_state") != "running":
+        raise TransientStartupReadiness("gateway not running")
     answered = runtime.get("answered_at")
     require(type(answered) in (int, float) and 0 <= time.time() - answered <= max_age,
             "gateway health observation stale")
     return {"healthy": True, "unit": unit, "pid": actual["pid"],
             "starttime": actual["starttime"], "argv": actual["argv"],
             "source": expected_source, "mode": mode, "observed": int(time.time())}
+
+
+def prove_legacy_health(home: Path, unit: str, expected_argv: list[str],
+                        expected_source: str, mode: str, *, max_age: int,
+                        startup_timeout: float = 0.0) -> dict:
+    require(0 <= startup_timeout <= 300, "startup timeout out of bounds")
+    deadline = time.monotonic() + startup_timeout
+    while True:
+        try:
+            return _legacy_health_once(home, unit, expected_argv, expected_source, mode,
+                                       max_age=max_age)
+        except TransientStartupReadiness:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(.25, max(0, deadline - time.monotonic())))
 
 
 def _argv_json(value: str) -> list[str]:
@@ -163,8 +187,11 @@ def main() -> int:
     health.add_argument("source")
     health.add_argument("mode")
     health.add_argument("--max-age", type=int, default=30)
+    health.add_argument("--startup-timeout", type=float, default=0.0)
 
     args = parser.parse_args()
+    if args.command == "legacy-health" and not 0 <= args.startup_timeout <= 300:
+        parser.error("--startup-timeout must be between 0 and 300")
     try:
         if args.command == "legacy-drain":
             result = prove_legacy_drain(args.hermes_home, args.hold_json, args.repo, args.unit,
@@ -176,7 +203,8 @@ def main() -> int:
             result = clear_legacy_drain_request(args.hermes_home)
         else:
             result = prove_legacy_health(args.hermes_home, args.unit, _argv_json(args.argv_json),
-                                         args.source, args.mode, max_age=args.max_age)
+                                         args.source, args.mode, max_age=args.max_age,
+                                         startup_timeout=args.startup_timeout)
         print(json.dumps(result))
         return 0
     except Exception:
