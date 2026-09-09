@@ -467,6 +467,7 @@ def test_legacy_manifest_replay_preserves_missing_diet_render_bytes(tmp_path, mo
     }
     manifest_path = processor._manifest_dir() / f"{manifest_id}.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.chmod(0o600)
     expected = processor._render_markdown(record, old_extraction).encode("utf-8")
     assert b"### Diet" not in expected
 
@@ -475,7 +476,7 @@ def test_legacy_manifest_replay_preserves_missing_diet_render_bytes(tmp_path, mo
 
     with monkeypatch.context() as m:
         m.setattr(processor, "_write_receipt", crash_after_output)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="simulated crash after legacy output"):
             processor.process_pending(vault_path=vault, llm_call=lambda **_: pytest.fail("no model call"))
 
     output = processor.output_path(vault, record)
