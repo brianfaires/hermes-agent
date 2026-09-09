@@ -148,7 +148,7 @@ class TestTitleInHelp:
 
 
 # ---------------------------------------------------------------------------
-# /new with title
+# /reset with title (plain /new arguments are first-turn prompts)
 # ---------------------------------------------------------------------------
 
 
@@ -158,7 +158,7 @@ class TestResetCommandWithTitle:
 
     @pytest.mark.asyncio
     async def test_reset_command_duplicate_title_surfaces_warning(self):
-        """/new <title> with an already-in-use title returns a warning in the reply."""
+        """/reset <title> with an already-in-use title returns a warning in the reply."""
         from datetime import datetime
 
         from gateway.run import GatewayRunner
@@ -209,7 +209,7 @@ class TestResetCommandWithTitle:
         runner._is_user_authorized = lambda _source: True
         runner._format_session_info = lambda: ""
 
-        event = _make_event(text="/new Dup")
+        event = _make_event(text="/reset Dup")
         result = await runner._handle_reset_command(event)
 
         runner._session_db.set_session_title.assert_called_once()
@@ -226,12 +226,12 @@ class TestResetCommandWithTitle:
 
 
 class TestNewInHelp:
-    """Verify /new appears in help text with the [name] args hint."""
+    """Verify /new appears in gateway help with the [prompt] args hint."""
 
     def test_new_command_in_help_output(self):
-        """The gateway help output includes /new with the [name] hint."""
+        """The gateway help output includes /new with the [prompt] hint."""
         from hermes_cli.commands import gateway_help_lines
         lines = gateway_help_lines()
         new_line = next((line for line in lines if line.startswith("`/new ")), None)
         assert new_line is not None
-        assert "[name]" in new_line
+        assert "[prompt]" in new_line
