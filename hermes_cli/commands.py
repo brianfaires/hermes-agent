@@ -155,7 +155,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, busy_policy="dispatch", busy_handler="start"),
     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
                aliases=("reset",), args_hint="[name]",
-               gateway_args_hint="[name] | (<prompt>)",
+               gateway_args_hint="[prompt] | (<prompt>)",
                busy_policy="interrupt_then_dispatch", busy_handler="new"),
     CommandDef("topic", "Enable or inspect Telegram DM topic sessions", "Session",
                gateway_only=True, args_hint="[off|help|session-id]"),

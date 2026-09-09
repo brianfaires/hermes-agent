@@ -209,18 +209,32 @@ async def test_idle_new_with_parenthesized_prompt_delivers_exactly_one_first_tur
 
 
 @pytest.mark.asyncio
-async def test_idle_new_with_name_still_sets_title_and_starts_no_turn():
-    """`/new <name>` keeps its title semantics and starts no agent turn."""
+async def test_idle_new_with_plain_text_prompt_delivers_exactly_one_first_turn():
+    """`/new prompt` resets, then sends `prompt` as ordinary first-turn text."""
+    runner, adapter, source, _key = _make_new_command_runner()
+    turns = _capture_agent_turns(runner)
+
+    result = await runner._handle_message(_new_event("/new say exactly hi", source))
+
+    assert turns == ["say exactly hi"]
+    assert result == "agent reply"
+    assert adapter.send.await_count == 1
+    runner._session_db.set_session_title.assert_not_awaited()
+    runner.session_store.reset_session.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_idle_new_with_short_plain_text_is_prompt_not_title():
+    """Even short `/new text` payloads are first-turn prompts, not titles."""
     runner, adapter, source, _key = _make_new_command_runner()
     turns = _capture_agent_turns(runner)
 
     result = await runner._handle_message(_new_event("/new my-experiment", source))
 
-    assert turns == []
-    runner._session_db.set_session_title.assert_awaited_once()
-    assert runner._session_db.set_session_title.await_args.args[1] == "my-experiment"
-    assert "my-experiment" in str(result)
-    assert adapter.send.await_count == 0
+    assert turns == ["my-experiment"]
+    runner._session_db.set_session_title.assert_not_awaited()
+    assert result == "agent reply"
+    assert adapter.send.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -234,6 +248,20 @@ async def test_bare_new_resets_without_starting_a_turn():
     runner._session_db.set_session_title.assert_not_awaited()
     assert adapter.send.await_count == 0
     assert "✨" in str(result)
+
+
+@pytest.mark.asyncio
+async def test_reset_with_plain_text_keeps_reset_only_semantics():
+    runner, adapter, source, _key = _make_new_command_runner()
+    turns = _capture_agent_turns(runner)
+
+    result = await runner._handle_message(_new_event("/reset say exactly hi", source))
+
+    assert turns == []
+    runner._session_db.set_session_title.assert_awaited_once()
+    assert runner._session_db.set_session_title.await_args.args[1] == "say exactly hi"
+    assert adapter.send.await_count == 0
+    assert "say exactly hi" in str(result)
 
 
 @pytest.mark.asyncio
@@ -390,15 +418,15 @@ async def test_new_prompt_routes_to_the_named_profile_adapter_only():
     "args,expected",
     [
         ("", ("", "")),
-        ("my-experiment", ("my-experiment", "")),
-        ("  spaced name  ", ("spaced name", "")),
+        ("my-experiment", ("", "my-experiment")),
+        ("  spaced prompt  ", ("", "spaced prompt")),
         ("(do the thing)", ("", "do the thing")),
         ("(  padded  )", ("", "padded")),
         ("()", ("", "")),
         ("(", ("", "")),
         ("(unclosed prompt", ("", "unclosed prompt")),
         ("(a) and (b)", ("", "a) and (b")),
-        ("name (not a prompt)", ("name (not a prompt)", "")),
+        ("name (not a prompt)", ("", "name (not a prompt)")),
     ],
 )
 def test_parse_new_session_args(args, expected):
@@ -408,12 +436,21 @@ def test_parse_new_session_args(args, expected):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", ["/new (nested)", "/help"])
-async def test_new_payload_slash_commands_are_literal(payload):
+@pytest.mark.parametrize(
+    "command_text,payload",
+    [
+        ("/new /new (nested)", "/new (nested)"),
+        ("/new /help", "/help"),
+        ("/new (/new (nested))", "/new (nested)"),
+        ("/new (/help)", "/help"),
+        ("/new !echo hi", "!echo hi"),
+    ],
+)
+async def test_new_payload_slash_and_bang_commands_are_literal(command_text, payload):
     runner, _, source, _ = _make_new_command_runner()
     turns = _capture_agent_turns(runner)
     runner._handle_help_command = AsyncMock(return_value="help dispatched")
-    await runner._handle_message(_new_event(f"/new ({payload})", source))
+    await runner._handle_message(_new_event(command_text, source))
     assert turns == [payload]
     runner.session_store.reset_session.assert_called_once()
 

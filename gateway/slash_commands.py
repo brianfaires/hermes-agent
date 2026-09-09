@@ -56,13 +56,13 @@ logger = logging.getLogger("gateway.run")
 _RESET_CLEANUP_TIMEOUT_S = 30.0
 
 
-def parse_new_session_args(args: str) -> tuple[str, str]:
+def parse_new_session_args(args: str, *, plain_text_prompt: bool = True) -> tuple[str, str]:
     """Split gateway ``/new`` arguments into ``(title, inline_prompt)``.
 
-    ``/new <name>`` keeps its title semantics.  ``/new (<prompt>)`` resets
-    into a fresh session and delivers ``<prompt>`` as that session's first
-    user message.  The two modes are mutually exclusive: exactly one of the
-    returned strings is ever non-empty.
+    ``/new <prompt>`` and ``/new (<prompt>)`` reset into a fresh session and
+    deliver ``<prompt>`` as that session's first user message.  The legacy
+    parenthesized spelling remains accepted.  Callers that need reset-only
+    alias behavior can disable plain-text prompt parsing.
 
     Malformed input is resolved deterministically and without losing what
     the user typed:
@@ -76,7 +76,7 @@ def parse_new_session_args(args: str) -> tuple[str, str]:
     """
     text = str(args or "").strip()
     if not text.startswith("("):
-        return text, ""
+        return ("", text) if plain_text_prompt else (text, "")
     inner = text[1:]
     if inner.endswith(")"):
         inner = inner[:-1]
@@ -319,10 +319,12 @@ class GatewaySlashCommandsMixin:
             new_entry = await self.async_session_store.get_or_create_session(source, force_new=True)
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
-        # Set session title if provided with /new <title>.  A parenthesized
-        # `/new (<prompt>)` payload is a first message, not a title, so
-        # parse_new_session_args leaves the title empty for it.
-        _title_arg, _ = parse_new_session_args(event.get_command_args())
+        # `/new <prompt>` and `/new (<prompt>)` payloads are first messages,
+        # not titles.  Naming goes through the existing /title command.
+        _title_arg, _ = parse_new_session_args(
+            event.get_command_args(),
+            plain_text_prompt=(event.get_command() == "new"),
+        )
         _title_note = ""
         if _title_arg and self._session_db and new_entry:
             from hermes_state import SessionDB
@@ -425,7 +427,10 @@ class GatewaySlashCommandsMixin:
         one reply, and swallowing the agent's answer to show the banner
         instead would lose the response the user actually asked for.
         """
-        _, inline_prompt = parse_new_session_args(event.get_command_args())
+        _, inline_prompt = parse_new_session_args(
+            event.get_command_args(),
+            plain_text_prompt=(event.get_command() == "new"),
+        )
         reset_result = await self._handle_reset_command(event)
         if not inline_prompt:
             return reset_result
