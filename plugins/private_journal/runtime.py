@@ -20,20 +20,28 @@ def settings():
 
 
 def _settings_from_home_config(home):
-    """Read only the selected profile config; used during raw capture."""
-    try:
-        import yaml
+    """Read the selected profile through the config owner after safe validation."""
+    from . import storage
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
+    try:
         path = Path(home) / 'config.yaml'
-        if path.is_symlink() or not path.exists():
-            return {}
-        data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        # Validate before importing general config code, whose dependencies may
+        # initialize a home. Missing configs stay OFF without initialization.
+        with storage.directory(path.parent):
+            if path.is_symlink() or not path.is_file():
+                return {}
+        token = set_hermes_home_override(home)
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            data = load_config_readonly()
+        finally:
+            reset_hermes_home_override(token)
+        result = (data.get('plugins', {}).get('entries', {}).get('private-journal') or {})
+        return result if isinstance(result, dict) else {}
     except Exception:
         return {}
-    if not isinstance(data, dict):
-        return {}
-    result = (data.get('plugins', {}).get('entries', {}).get('private-journal') or {})
-    return result if isinstance(result, dict) else {}
 
 
 def memory_retention_policy(*, home=None):
