@@ -700,6 +700,88 @@ def test_health_entrypoint_bounded_refusal(tmp_path, monkeypatch, capsys):
     assert 'runtime health refused' in captured.err
 
 
+def test_health_entrypoint_records_known_refusal_diagnostic(tmp_path, monkeypatch, capsys):
+    def refuse(*_args, **_kwargs):
+        raise c.Refusal('gateway not running')
+
+    monkeypatch.setattr(health, 'collect', refuse)
+    monkeypatch.setattr(sys, 'argv', ['runtime_health.py', str(tmp_path / 'startup.json'),
+                                    str(tmp_path / 'runtime-health.json'), 'disposable.service', str(tmp_path),
+                                    '--startup-timeout', '0'])
+    assert health.main() == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert 'runtime health refused' in captured.err
+    diagnostic = json.loads((tmp_path / 'runtime-health.json.failure.json').read_text())
+    assert diagnostic == {
+        'kind': 'runtime-health-refusal-diagnostic',
+        'version': 1,
+        'observed': diagnostic['observed'],
+        'stage': 'collect',
+        'refusal_code': 'gateway_not_running',
+        'exception_class': 'refusal',
+    }
+    assert type(diagnostic['observed']) is int
+
+
+def test_health_entrypoint_redacts_unknown_exception_diagnostic(tmp_path, monkeypatch, capsys):
+    class SecretBearingFailure(Exception):
+        pass
+
+    secret = 'token=abc123 /home/brian/.hermes/.env'
+
+    def refuse(*_args, **_kwargs):
+        raise SecretBearingFailure(secret)
+
+    monkeypatch.setattr(health, 'collect', refuse)
+    monkeypatch.setattr(sys, 'argv', ['runtime_health.py', str(tmp_path / 'startup.json'),
+                                    str(tmp_path / 'live.json'), 'disposable.service', str(tmp_path),
+                                    '--startup-timeout', '0'])
+    assert health.main() == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert secret not in captured.err
+    diagnostic_text = (tmp_path / 'live.json.failure.json').read_text()
+    assert secret not in diagnostic_text
+    assert 'SecretBearingFailure' not in diagnostic_text
+    diagnostic = json.loads(diagnostic_text)
+    assert diagnostic['refusal_code'] == 'unknown'
+    assert diagnostic['exception_class'] == 'unknown_exception'
+
+
+def test_health_entrypoint_diagnostic_write_failure_still_refuses(tmp_path, monkeypatch, capsys):
+    def refuse(*_args, **_kwargs):
+        raise c.Refusal('gateway not running')
+
+    def fail_durable(*_args, **_kwargs):
+        raise RuntimeError('writer token=abc123')
+
+    monkeypatch.setattr(health, 'collect', refuse)
+    monkeypatch.setattr(health, 'durable', fail_durable)
+    monkeypatch.setattr(sys, 'argv', ['runtime_health.py', str(tmp_path / 'startup.json'),
+                                    str(tmp_path / 'live.json'), 'disposable.service', str(tmp_path),
+                                    '--startup-timeout', '0'])
+    assert health.main() == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert 'runtime health refused' in captured.err
+    assert 'writer token=abc123' not in captured.err
+    assert not (tmp_path / 'live.json.failure.json').exists()
+
+
+def test_health_entrypoint_success_does_not_write_failure_diagnostic(tmp_path, monkeypatch, capsys):
+    result = {'healthy': True}
+    monkeypatch.setattr(health, 'collect', lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(sys, 'argv', ['runtime_health.py', str(tmp_path / 'startup.json'),
+                                    str(tmp_path / 'live.json'), 'disposable.service', str(tmp_path),
+                                    '--startup-timeout', '0'])
+    assert health.main() == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == result
+    assert not captured.err
+    assert not (tmp_path / 'live.json.failure.json').exists()
+
+
 @pytest.fixture
 def observation_runtime(tmp_path, monkeypatch):
     import weakref
