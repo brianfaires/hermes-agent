@@ -283,11 +283,19 @@ def decompose_task(
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        held = kb.has_active_control_hold(conn, task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
     if task.status != "triage":
         return DecomposeOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
+        )
+    if held:
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "task is held for explicit human input; run an explicit unblock "
+            "or manual release before decomposing it",
         )
 
     cfg = _load_config()
@@ -465,4 +473,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
             tenant=tenant,
             limit=1000,
         )
-    return [row.id for row in rows]
+        return [
+            row.id for row in rows
+            if not kb.has_active_control_hold(conn, row.id)
+        ]

@@ -1037,6 +1037,12 @@ def test_decompose_nested_retry_and_completion_under_blocked_parent(kanban_home)
             conn, first_wave[0], reason="needs decomposition", kind="needs_input",
         )
         assert kb.get_task(conn, first_wave[0]).status == "triage"
+        assert kb.unblock_task(conn, first_wave[0])
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'triage' WHERE id = ?",
+                (first_wave[0],),
+            )
         nested = kb.decompose_triage_task(
             conn,
             first_wave[0],
