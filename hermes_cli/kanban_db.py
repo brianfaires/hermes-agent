@@ -136,17 +136,13 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 _CONTROL_HOLD_RELEASE_EVENTS = {
     "unblocked",
     "promoted_manual",
-    "specified",
-    "decomposed",
 }
 _CONTROL_HOLD_BLOCK_KINDS = {"needs_input", "capability", "transient"}
 _CONTROL_HOLD_DECISION_EVENTS = (
+    "blocked",
     "block_loop_detected",
     "unblocked",
     "promoted_manual",
-    "specified",
-    "decomposed",
-    "status",
 )
 
 
@@ -4529,61 +4525,65 @@ def _event_payload_dict(row: Optional[sqlite3.Row]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def has_active_control_hold(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True while a block-loop triage escalation is unreleased.
+def _blocked_event_is_control_hold(row: sqlite3.Row) -> bool:
+    payload = _event_payload_dict(row)
+    if "recurrences" not in payload:
+        return False
+    kind = payload.get("kind")
+    return kind in _CONTROL_HOLD_BLOCK_KINDS or kind is None
 
-    ``block_task`` routes repeated same-kind human blocks to ``triage`` via a
-    typed ``block_loop_detected`` event. That triage card is not a rough spec
-    gap: it is the system's durable "stop and get an operator decision" state.
-    Auto-specify, auto-decompose, and worker claims must not treat it as normal
-    work until an explicit release event (currently ``unblock_task`` or manual
-    promotion) occurs.
+
+def _row_state_is_control_hold(task_row: sqlite3.Row) -> bool:
+    if task_row["status"] not in {"blocked", "triage"}:
+        return False
+    try:
+        recurrences = int(task_row["block_recurrences"] or 0)
+    except (TypeError, ValueError):
+        recurrences = 0
+    if recurrences <= 0:
+        return False
+    return (
+        task_row["block_kind"] in _CONTROL_HOLD_BLOCK_KINDS
+        or task_row["block_kind"] is None
+    )
+
+
+def has_active_control_hold(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return True while a human-control hold is unreleased.
+
+    ``block_task`` writes typed ``blocked`` events for first human-input holds
+    and ``block_loop_detected`` for repeated unblock/re-block loops. Both are
+    durable "stop and get an operator decision" states. Auto-specify,
+    auto-decompose, ordinary status moves, and worker claims must not treat
+    them as normal work until an explicit release event from ``unblock_task`` or
+    manual promotion occurs.
 
     The event stream is the primary source of truth so a stale ``block_kind``
     column does not re-hold a task after release. The row-state fallback covers
-    legacy/current boards that already have a needs-input/capability/transient
-    loop in triage but lack the loop event.
+    legacy/current boards already parked in ``blocked``/``triage`` with
+    ``block_kind``/``block_recurrences`` but without the newer typed event.
     """
     rows = conn.execute(
         "SELECT kind, payload FROM task_events "
         "WHERE task_id = ? AND kind IN ("
         + ",".join("?" for _ in _CONTROL_HOLD_DECISION_EVENTS)
-        + ") ORDER BY id DESC LIMIT 20",
+        + ") ORDER BY id DESC",
         (task_id, *_CONTROL_HOLD_DECISION_EVENTS),
     ).fetchall()
     for row in rows:
         kind = row["kind"]
         if kind == "block_loop_detected":
             return True
+        if kind == "blocked" and _blocked_event_is_control_hold(row):
+            return True
         if kind in _CONTROL_HOLD_RELEASE_EVENTS:
-            return False
-        if kind == "status":
-            payload = _event_payload_dict(row)
-            requested = payload.get("status") or payload.get("requested_status")
-            # Dragging a held card to triage is not a release. Other direct
-            # status moves are explicit operator actions and carry the release
-            # decision the claim/spec/decompose gates require.
-            if requested == "triage":
-                continue
             return False
 
     task_row = conn.execute(
         "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
-    if task_row is None or task_row["status"] != "triage":
-        return False
-    try:
-        recurrences = int(task_row["block_recurrences"] or 0)
-    except (TypeError, ValueError):
-        recurrences = 0
-    return (
-        recurrences >= BLOCK_RECURRENCE_LIMIT
-        and (
-            task_row["block_kind"] in _CONTROL_HOLD_BLOCK_KINDS
-            or task_row["block_kind"] is None
-        )
-    )
+    return bool(task_row) and _row_state_is_control_hold(task_row)
 
 
 def _reject_control_hold_claim(

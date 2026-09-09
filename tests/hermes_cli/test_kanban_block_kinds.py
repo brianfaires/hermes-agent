@@ -17,6 +17,7 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,18 @@ def _make_running_again(conn, tid):
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     assert kb.claim_task(conn, tid, claimer="worker") is not None
+
+
+def _append_raw_event(conn, task_id: str, kind: str, payload: object) -> None:
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, 1)",
+        (
+            task_id,
+            kind,
+            json.dumps(payload) if isinstance(payload, (dict, list)) else payload,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +156,82 @@ def test_needs_input_loop_hold_is_not_auto_specified_decomposed_or_claimed(
         assert task.status == "triage"
 
 
+def test_first_needs_input_hold_survives_drag_to_triage(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="needs first answer")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
+            _append_raw_event(conn, tid, "status", {"status": "triage"})
+
+        assert kb.has_active_control_hold(conn, tid) is True
+        assert kb.specify_triage_task(
+            conn,
+            tid,
+            title="Automated spec must not proceed",
+            body="No human release happened.",
+            author="test",
+        ) is False
+        assert kb.decompose_triage_task(
+            conn,
+            tid,
+            root_assignee="worker",
+            children=[{"title": "child", "assignee": "worker"}],
+            author="test",
+        ) is None
+
+
+def test_specified_and_decomposed_events_do_not_release_control_hold(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="automation is not consent")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        assert kb.get_task(conn, tid).status == "triage"
+        with kb.write_txn(conn):
+            _append_raw_event(conn, tid, "specified", {"changed_fields": ["body"]})
+            _append_raw_event(conn, tid, "decomposed", {"child_ids": ["t_fake"]})
+
+        assert kb.has_active_control_hold(conn, tid) is True
+
+
+def test_status_noise_and_event_volume_do_not_release_control_hold(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="status noise")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
+            for _ in range(25):
+                _append_raw_event(conn, tid, "status", {"status": "triage"})
+            _append_raw_event(conn, tid, "status", "{malformed")
+            _append_raw_event(conn, tid, "status", {"status": "todo"})
+
+        assert kb.has_active_control_hold(conn, tid) is True
+
+
+def test_older_release_event_does_not_bypass_newer_typed_hold(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="newer hold")
+        assert kb.block_task(conn, tid, reason="first question", kind="needs_input")
+        assert kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        assert kb.block_task(conn, tid, reason="new capability wall", kind="capability")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
+            _append_raw_event(conn, tid, "status", {"status": "triage"})
+
+        assert kb.has_active_control_hold(conn, tid) is True
+
+
 def test_explicit_unblock_releases_needs_input_triage_hold(
     kanban_home: Path,
 ) -> None:
@@ -159,6 +248,30 @@ def test_explicit_unblock_releases_needs_input_triage_hold(
         assert released is not None
         assert released.status == "ready"
         assert kb.claim_task(conn, tid, claimer="released") is not None
+
+
+def test_explicit_promote_releases_stale_block_kind_hold(
+    kanban_home: Path,
+) -> None:
+    with kb.connect_closing() as conn:
+        tid = _running_task(conn, title="manual promote release")
+        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
+        promoted, error = kb.promote_task(
+            conn, tid, actor="test-operator", force=True,
+        )
+        assert promoted and error is None
+
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
+
+        assert kb.has_active_control_hold(conn, tid) is False
+        assert kb.specify_triage_task(
+            conn,
+            tid,
+            title="Released stale hold",
+            body="Manual promote released the prior hold.",
+            author="test",
+        ) is True
 
 
 def test_legacy_triage_hold_uses_release_event_not_stale_block_kind(
