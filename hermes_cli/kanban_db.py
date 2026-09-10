@@ -738,6 +738,11 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
+    return board_db_path(board)
+
+
+def board_db_path(board: Optional[str] = None) -> Path:
+    """Return a board's on-disk DB path, ignoring the worker task DB pin."""
     slug = _normalize_board_slug(board)
     if slug is None:
         slug = get_current_board()
@@ -979,7 +984,9 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     seen: set[str] = set()
 
     # Default board is always first.
-    entries.append(read_board_metadata(DEFAULT_BOARD))
+    default = read_board_metadata(DEFAULT_BOARD)
+    default["db_path"] = str(board_db_path(DEFAULT_BOARD))
+    entries.append(default)
     seen.add(DEFAULT_BOARD)
 
     root = boards_root()
@@ -1001,6 +1008,7 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
             if not (has_db or has_meta):
                 continue
             meta = read_board_metadata(normed)
+            meta["db_path"] = str(board_db_path(normed))
             if meta.get("archived") and not include_archived:
                 continue
             entries.append(meta)

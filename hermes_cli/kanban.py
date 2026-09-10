@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import shlex
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -1314,17 +1315,29 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
     return 2
 
 
+def _board_inventory_note() -> str | None:
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    if override:
+        return (
+            f"HERMES_KANBAN_DB is pinned to {override}; board inventory "
+            "below reads the real board DBs on disk."
+        )
+    return None
+
+
 def _board_task_counts(slug: str) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
-        path = kb.kanban_db_path(board=slug)
+        path = kb.board_db_path(slug)
         if not path.exists():
             return {}
-        with kb.connect_closing(board=slug) as conn:
+        with contextlib.closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
             ).fetchall()
-        return {r["status"]: int(r["n"]) for r in rows}
+        return {status: int(n) for status, n in rows}
     except Exception:
         return {}
 
@@ -1345,6 +1358,9 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
     if not boards:
         print("(no boards — create one with `hermes kanban boards create <slug>`)")
         return 0
+    note = _board_inventory_note()
+    if note:
+        print(note)
     print(f"{'':2s}  {'SLUG':24s}  {'NAME':28s}  COUNTS")
     for b in boards:
         marker = "●" if b["is_current"] else " "
@@ -1444,7 +1460,10 @@ def _cmd_boards_show(args: argparse.Namespace) -> int:
     print(f"  Display name: {meta.get('name', '')}")
     if meta.get("description"):
         print(f"  Description:  {meta['description']}")
-    print(f"  DB path:      {meta['db_path']}")
+    print(f"  DB path:      {kb.board_db_path(current)}")
+    note = _board_inventory_note()
+    if note:
+        print(f"  Note:         {note}")
     print(f"  Tasks:        {total} total"
           + (f" ({', '.join(f'{k}={v}' for k, v in sorted(counts.items()))})"
              if counts else ""))
