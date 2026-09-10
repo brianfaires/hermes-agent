@@ -1,8 +1,10 @@
 # v0.21 restoration source handoff
 
-**Partial source restoration; not CI-ready or live-qualified.** Work is local on `ang/v021-restoration-t_4a31a31b`, based on `cf62291dad2cd9c12de80bc5194ff76ef0f6ce55`. Ang owns independent integration and hosted CI. No main/staging/remote writes, live installation, restart, delivery, configuration, credentials or Kanban operations occurred. The canonical launcher remains `/home/brian/.hermes/hermes-agent/.venv/bin/hermes`.
+**Restored safe slice: correction candidate ready for Ang to push fresh staging CI; root initiative remains blocked on precise Critical decisions.** Source candidate is `7abcbc9d82e4216da4242d75d599d43aafbb96fe`, recorded before this documentation commit. The final documentation-bound candidate is the branch HEAD reported at handoff. Branch: `ang/v021-restoration-t_4a31a31b`; base: `cf62291dad2cd9c12de80bc5194ff76ef0f6ce55`.
 
-[The ledger](V021_RESTORATION_LEDGER.json) records all **51 unique audit IDs: 37 old-main and 14 archive-only**, preserving all 239 historical evidence entries and distinguishing mixed subfeatures. It includes old/current source anchors, baseline blob identity, runtime-test paths, limitations and exact owning commit hashes. The September 10 audit and CSV are unchanged. A source anchor alone is not runtime parity; unresolved retained claims remain qualification blockers.
+Ang previously pushed exact reviewed tree `e36f3d76ff7464cf51a0a5881934e005fbbb9ee3` to source-only staging. This correction batch made no staging/main/remote writes, live installation, restart, delivery, configuration, credential or Kanban changes. The canonical launcher remains `/home/brian/.hermes/hermes-agent/.venv/bin/hermes`.
+
+[The ledger](V021_RESTORATION_LEDGER.json) records all **51 unique audit IDs: 37 old-main and 14 archive-only**, preserving all 239 historical evidence entries and distinguishing mixed subfeatures. It includes old/current source anchors, baseline blob identity, runtime-test paths, limitations and exact owning commit hashes. The September 10 audit and CSV are unchanged. A source anchor alone is not runtime parity; unresolved retained claims remain source qualification uncertainty, distinct from Critical approval gates.
 
 ## Implemented safe slices
 
@@ -20,22 +22,17 @@ Runtime checks also cover retained browser family fallback, external memory inje
 
 ## Verification and independent review
 
-The canonical interpreter lacks `pytest`. The attempted prescribed pytest path collected **zero tests**, explicitly recorded as a blocker; no alternate venv or installation was used. Added standard-library unittest tests live under `tests/` for hosted pytest collection, but actual hosted collection/CI remains unrun.
+[Hosted run 34521202771](https://github.com/brianfaires/hermes-agent/actions/runs/34521202771) exercised `e36f3d76ff7464cf51a0a5881934e005fbbb9ee3`. All **17 new test files / 51 tests passed actual pytest collection and execution**. Ang also independently reran those 51 locally. Exact per-file receipts and eight Python slice summaries are preserved in [V021_CI_EVIDENCE.json](V021_CI_EVIDENCE.json). This was a failing run: eight Python-test failures plus one e2e failure, not a green CI attestation.
 
-Focused receipt: 17 new test files / **50 tests passed** at `10081c3099c814c8e5f8c6e0f8f83d2b9881ac40`, then **five restart tests passed** after the final busy-reply fix `a71449a566` (one additional case). No full local suite or live transport/provider tests ran. Test pattern:
+Correction `7abcbc9d82` addresses all nine indexed cases: seven exact restart mocks now require delivery keys/signals while retaining supervisor/drain checks; the fenced progress fixture expects a meaningful shell command and keeps long-line truncation pressure; ElevenLabs lazily imports optional SDK types only when configured values require them. The original historical helper imported eagerly too; this is a concrete no-settings regression against the retained provider path, not blind historical copying. Configured bounds and sync/streaming behavior remain intact.
 
-```sh
-env -i HOME=<task-temp> HERMES_HOME=<task-temp>/hermes PATH=/usr/bin:/bin \
-  PYTHONPATH=<worktree> PYTHONDONTWRITEBYTECODE=1 TZ=UTC LANG=C.UTF-8 \
-  /home/brian/.hermes/hermes-agent/.venv/bin/python -B -m unittest discover \
-  -s <test-directory> -p <test-file> -v
-```
+The new no-settings/no-SDK test failed before the source correction for all three default configurations. After correction, **12 focused unittest tests passed** (TTS 4, compact display 3, restart delivery 5), and a fresh native read-only Codex reviewer independently passed the same 12. The original 51 tests remain, with one added regression. The [correction review](CI_CORRECTION_REVIEW.md) found no blockers; the [original independent review](independent-review.md) is preserved verbatim, including closed R1/R2.
 
-Detailed task-local receipts are `../qualification-final.json`, `../fc36-r2-green.txt` and the slice evidence reports. Native independent Codex review is separately preserved in `../independent-review.md`; its findings are never replaced by the implementation summary. `../implementation-result.md` records final hashes, checks, review outcome and launcher/status readback. `git diff --check` and an added-line security scan are required final handoff checks; their receipts are in the parent evidence folder.
+The canonical interpreter lacks pytest. That is a local host limitation, not an approval blocker. Changed existing pytest fixtures await a fresh hosted run; no installs or broad local test loop were performed. Local tests used the canonical interpreter read-only with bytecode disabled, source PYTHONPATH and fresh temporary HOME/HERMES_HOME/HERMES_BUNDLES_DIR. Task receipts: `../ci-correction-red.txt`, `../ci-correction-tests.json`, `../ci-correction-evidence.md`. Historical qualification receipts retain their original time-bound limitations.
 
 ## Decisions and remaining qualification
 
-Precise unimplemented decisions are in `../critical-gates.md`; they require Brian's explicit approval before affected code changes:
+Precise unimplemented decisions are in [critical-gates.md](critical-gates.md); they require Brian's explicit approval before affected code changes:
 
 - FC17/19: pairing/transport identity, profile credentials/routing/config precedence, durable owner recovery, webhook namespaces, cron registry/shutdown identity and notification recipients/policy.
 - FC18/11: persistent-directory branch/dashboard interface and stricter normal-write/name/toolset validation compatibility.
@@ -44,7 +41,9 @@ Precise unimplemented decisions are in `../critical-gates.md`; they require Bria
 - FC26/27/32: larger default skill descriptions, model execution/cost guidance and unconditional test-thread ceilings.
 - FC28/30/33: pip-compatible voice crypto packaging, CI publication/process-guard policy and Tirith verdict filtering.
 
-FC02 launcher guards, tools-config UI, standalone Discord REST/control/thread ancestry, broader delegation/compression/profile fixtures and other ledger-listed retained paths still need executable qualification under an approved test environment. Missing pytest is a real environment blocker, not evidence of parity. Windows process-tree cleanup remains untested locally.
+Twelve qualification-only entries now cite concrete retained tests and exact hosted per-file outcomes: doctor/setup worktree launcher guards; tools-config memory auto-enable/explicit-disable; Discord profile snapshot/thread ancestry/standalone REST/control egress; delegated child construction, environment lineage and schema exclusion; general spoken-content compression, protected handoff replacement and durable rotation. These attest only to named assertions, not blanket historical equivalence. Related profile scope/lifecycle and restart plugin results are supplemental where they do not cover the full historical claim.
+
+Remaining source-only uncertainty includes install.sh's separate launcher path, full command/profile callback and cron ticker qualification, restart all_profiles preflight and teardown details, and the historical progress/profile fixture contract. Preserved FC17 paths are not automatically new Critical changes: read-only qualification needs no Critical approval. Actual missing identity/trust/routing/compatibility changes stay behind the precise gates. The corrected existing progress/drain fixtures still require fresh hosted results. Windows transform process-tree cleanup remains locally untested.
 
 Discord voice (FC24 and voice-specific FC17) stays deferred; the parked source was not reused. Intentional policy/interface replacements and archive-only features remain excluded. There is no blanket retirement of unintended losses: unfinished subfeatures retain explicit blockers and next steps in the ledger.
 
@@ -52,4 +51,4 @@ Discord voice (FC24 and voice-specific FC17) stays deferred; the parked source w
 
 Use the ledger's exact local commits; do not infer ancestry as behavioral parity. Source slices are independently revertible where indicated, preserving unrelated work. The FC36 callback and busy-reply follow-ups belong with its initial restoration. FC25's final commit also removes one unused webhook-test import due to a disclosed shared-workspace amend race; no source was lost. Dependency rollback includes both manifest and lockfile.
 
-Next: Brian decides gated slices; Ang supplies an approved pytest/CI environment, runs focused existing sibling suites plus hosted checks against the exact integrated candidate, and resolves any concrete failures. Only then prepare candidate-bound human verification. Live activation and main promotion remain separate actions; this handoff authorizes neither.
+Ang may push the final exact candidate to fresh source-only staging CI and verify the four changed pytest files plus the dotenv sibling file. No correction CI pass is claimed yet. Brian's decisions remain prerequisites only for the affected gated changes; the root initiative is not whole-scope human-ready. See the [candidate-bound safe-slice checklist](V021_SAFE_SLICE_CHECKLIST.md). Activation and main promotion each require separate authorization.
