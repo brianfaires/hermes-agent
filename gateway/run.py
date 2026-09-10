@@ -5605,6 +5605,18 @@ class TurnRunner:
         except Exception as _ack_err:
             logger.debug("voice ack schedule failed: %s", _ack_err)
 
+    def voice_progress_start_callback(self, call_id, tool_name, args):
+        """tool_start_callback: arm sparse voice progress for long tools."""
+        speaker = self._ctx.voice_progress_speaker
+        if speaker is not None:
+            speaker.tool_started(call_id, tool_name, args)
+
+    def voice_progress_complete_callback(self, call_id, tool_name, args=None, result=None):
+        """tool_complete_callback: clear sparse voice progress for finished tools."""
+        speaker = self._ctx.voice_progress_speaker
+        if speaker is not None:
+            speaker.tool_completed(call_id, tool_name, args, result)
+
     # ── Slack-native task cards: ID-bearing lifecycle callbacks (#29483) ──
     # These ride agent.tool_start_callback / agent.tool_complete_callback so
     # start/completion events correlate by the REAL tool-call id — the
@@ -5664,8 +5676,18 @@ class TurnRunner:
         ctx = self._ctx
         if ctx._voice_ack_guild[0] is not None:
             self.voice_ack_callback(call_id, tool_name, args)
+        if ctx.voice_progress_speaker is not None:
+            self.voice_progress_start_callback(call_id, tool_name, args)
         if ctx._native_slack_task_cards:
             self.native_tool_start_callback(call_id, tool_name, args)
+
+    def combined_tool_complete_callback(self, call_id, tool_name, args, result=None):
+        """Compose sparse voice progress + native task-card complete consumers."""
+        ctx = self._ctx
+        if ctx.voice_progress_speaker is not None:
+            self.voice_progress_complete_callback(call_id, tool_name, args, result)
+        if ctx._native_slack_task_cards:
+            self.native_tool_complete_callback(call_id, tool_name, args, result)
 
     def _step_callback_sync(self, iteration: int, prev_tools: list) -> None:
         ctx = self._ctx
@@ -5949,6 +5971,12 @@ class TurnRunner:
             if not ctx._run_still_current():
                 return
             display_text = text
+            voice_speaker = getattr(ctx, "voice_progress_speaker", None)
+            if voice_speaker is not None and str(display_text or "").strip():
+                try:
+                    voice_speaker.speak_commentary(display_text)
+                except Exception:
+                    logger.debug("Discord interim voice commentary failed", exc_info=True)
             if _stream_consumer is not None:
                 if already_streamed:
                     _stream_consumer.on_segment_break()
@@ -6276,13 +6304,17 @@ class TurnRunner:
             _combined_start_cb
             if (
                 ctx._voice_ack_guild[0] is not None
+                or ctx.voice_progress_speaker is not None
                 or ctx._native_slack_task_cards
             )
             else None
         )
         agent.tool_complete_callback = (
             ctx.native_tool_complete_callback
-            if ctx._native_slack_task_cards
+            if (
+                ctx.voice_progress_speaker is not None
+                or ctx._native_slack_task_cards
+            )
             and ctx.native_tool_complete_callback is not None
             else None
         )
@@ -7303,6 +7335,255 @@ class TurnRunner:
 # DB-backed commands and is how many suites construct a bare runner).  A plain
 # ``None`` cannot express both.  Mirrors ``gateway.session._DB_UNPINNED``.
 _SESSION_DB_UNPINNED = object()
+
+
+class DiscordVoiceProgressSpeaker:
+    """Sparse spoken progress for one Discord voice turn."""
+
+    DEFAULT_SILENCE_SECONDS = 18.0
+
+    def __init__(
+        self,
+        runner: "GatewayRunner",
+        event: MessageEvent,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        guild_id: int,
+        silence_seconds: Optional[float] = None,
+    ) -> None:
+        self._runner = runner
+        self._event = event
+        self._loop = loop
+        self._guild_id = guild_id
+        self._silence_seconds = (
+            self.DEFAULT_SILENCE_SECONDS
+            if silence_seconds is None
+            else max(0.0, float(silence_seconds))
+        )
+        self._closed = False
+        self._generation = 0
+        self._active_tools: "OrderedDict[str, str]" = OrderedDict()
+        self._timer_task: Optional[asyncio.Task] = None
+        self._speech_task: Optional[asyncio.Task] = None
+        self._silence_anchor = time.monotonic()
+        self._last_spoken_at: Optional[float] = None
+        self._spoken_texts: set[str] = set()
+
+    @staticmethod
+    def _tool_label(tool_name: Optional[str]) -> str:
+        label = re.sub(r"[_\s]+", " ", str(tool_name or "")).strip()
+        return label or "the current step"
+
+    def _run_still_current(self) -> bool:
+        check = getattr(self._event, "_voice_progress_run_still_current", None)
+        if callable(check):
+            try:
+                return bool(check())
+            except Exception:
+                logger.debug("Discord voice progress current-run check failed", exc_info=True)
+                return False
+        return True
+
+    def _voice_still_connected(self) -> bool:
+        if not self._run_still_current():
+            return False
+        adapter = self._runner._adapter_for_source(self._event.source)
+        is_in_voice_channel = getattr(adapter, "is_in_voice_channel", None)
+        if not callable(is_in_voice_channel):
+            return False
+        try:
+            return bool(is_in_voice_channel(self._guild_id))
+        except Exception:
+            logger.debug("Discord voice progress connection check failed", exc_info=True)
+            return False
+
+    @staticmethod
+    def _speech_key(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+
+    def spoken_text_keys(self) -> set[str]:
+        return set(self._spoken_texts)
+
+    def _voice_progress_allowed(self, text: str) -> bool:
+        check = getattr(self._runner, "_should_send_voice_progress_reply", None)
+        if not callable(check):
+            return True
+        try:
+            return bool(check(self._event, text))
+        except Exception:
+            logger.debug("Discord voice progress gate failed", exc_info=True)
+            return False
+
+    async def _speak_once(self, text: str) -> bool:
+        if (
+            self._closed
+            or not str(text or "").strip()
+            or not self._voice_still_connected()
+            or not self._voice_progress_allowed(text)
+            or (
+                self._speech_task is not None
+                and not self._speech_task.done()
+                and asyncio.current_task() is not self._speech_task
+            )
+        ):
+            return False
+        await self._runner._send_voice_reply(self._event, text)
+        self._last_spoken_at = time.monotonic()
+        key = self._speech_key(text)
+        if key:
+            self._spoken_texts.add(key)
+        return True
+
+    async def _speak_commentary(self, text: str) -> None:
+        if self._closed or not str(text or "").strip():
+            return
+        if self._speech_task is not None and not self._speech_task.done():
+            return
+        self._speech_task = asyncio.create_task(self._speak_once(text))
+        try:
+            await self._speech_task
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("Discord interim voice commentary failed", exc_info=True)
+        finally:
+            self._speech_task = None
+        if not self._closed and (self._active_tools or self._last_spoken_at is not None):
+            await self._reset_timer(self._generation)
+
+    def speak_commentary(self, text: str, *, wait_timeout: float = 2.0) -> None:
+        """Speak user-facing interim commentary on the gateway loop."""
+        if self._closed or not str(text or "").strip():
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            asyncio.create_task(self._speak_commentary(text))
+            return
+        future = safe_schedule_threadsafe(
+            self._speak_commentary(text),
+            self._loop,
+            logger=logger,
+            log_message="voice interim commentary scheduling error",
+        )
+        if future is None or wait_timeout <= 0:
+            return
+        try:
+            future.result(timeout=wait_timeout)
+        except concurrent.futures.TimeoutError:
+            return
+        except Exception:
+            logger.debug("Discord interim voice commentary wait failed", exc_info=True)
+
+    def tool_started(self, _call_id, tool_name, _args) -> None:
+        if (
+            self._closed
+            or not tool_name
+            or tool_name in {"_thinking", "clarify"}
+            or not self._voice_still_connected()
+            or not self._voice_progress_allowed("Still working.")
+        ):
+            return
+        call_id = str(_call_id or f"{tool_name}:{time.monotonic_ns()}")
+        self._generation += 1
+        self._active_tools[call_id] = str(tool_name)
+        safe_schedule_threadsafe(
+            self._reset_timer(self._generation),
+            self._loop,
+            logger=logger,
+            log_message="voice progress timer scheduling error",
+        )
+
+    def tool_completed(self, _call_id, tool_name, _args=None, _result=None) -> None:
+        if self._closed or not tool_name:
+            return
+        call_id = str(_call_id or "")
+        if call_id:
+            self._active_tools.pop(call_id, None)
+        self._generation += 1
+        if self._active_tools:
+            safe_schedule_threadsafe(
+                self._reset_timer(self._generation),
+                self._loop,
+                logger=logger,
+                log_message="voice progress timer scheduling error",
+            )
+        else:
+            safe_schedule_threadsafe(
+                self._reset_timer(self._generation),
+                self._loop,
+                logger=logger,
+                log_message="voice progress timer scheduling error",
+            )
+
+    async def _reset_timer(self, generation: int) -> None:
+        if self._timer_task is not None and not self._timer_task.done():
+            self._timer_task.cancel()
+        self._timer_task = asyncio.create_task(self._timer(generation))
+
+    async def _cancel_timer(self) -> None:
+        if self._timer_task is not None and not self._timer_task.done():
+            self._timer_task.cancel()
+
+    async def _timer(self, generation: int) -> None:
+        anchor = self._last_spoken_at if self._last_spoken_at is not None else self._silence_anchor
+        delay = max(0.0, (anchor + self._silence_seconds) - time.monotonic())
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if (
+            self._closed
+            or generation != self._generation
+            or not self._voice_still_connected()
+            or (
+                self._speech_task is not None
+                and not self._speech_task.done()
+            )
+        ):
+            return
+        if self._active_tools:
+            active_tool = next(reversed(self._active_tools.values()))
+            phrase = f"Still working on {self._tool_label(active_tool)}."
+        else:
+            phrase = "Still working on the response."
+        if not self._voice_progress_allowed(phrase):
+            return
+        self._speech_task = asyncio.create_task(self._speak_once(phrase))
+        try:
+            await self._speech_task
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("Discord voice progress speech failed", exc_info=True)
+        finally:
+            self._speech_task = None
+        if (
+            not self._closed
+            and generation == self._generation
+            and self._voice_still_connected()
+        ):
+            self._timer_task = asyncio.create_task(self._timer(generation))
+
+    async def close(self, *, wait: bool = False) -> None:
+        self._closed = True
+        self._active_tools.clear()
+        self._generation += 1
+        if self._timer_task is not None and not self._timer_task.done():
+            self._timer_task.cancel()
+        if self._speech_task is not None and not self._speech_task.done():
+            if not wait:
+                self._speech_task.cancel()
+            try:
+                await asyncio.wait_for(self._speech_task, timeout=2.0 if not wait else 10.0)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                self._speech_task.cancel()
+            except Exception:
+                logger.debug("Discord voice progress close wait failed", exc_info=True)
 
 
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
@@ -22808,8 +23089,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _stts_adapter is not None
                 and bool(getattr(_stts_adapter, "_streaming_tts_turn_completed", lambda *_a, **_k: False)(session_key, run_generation))
             )
+            _voice_interim_spoken = set(agent_result.get("voice_interim_spoken_texts") or [])
+            _final_already_spoken = (
+                bool(response)
+                and DiscordVoiceProgressSpeaker._speech_key(response) in _voice_interim_spoken
+            )
             if (
                 not _streaming_tts_done
+                and not _final_already_spoken
                 and self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent)
             ):
                 await self._send_voice_reply(event, response)
@@ -24368,6 +24655,41 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return False
 
         return True
+
+    def _should_send_voice_progress_reply(self, event: MessageEvent, text: str) -> bool:
+        """Return whether Discord mid-turn progress/commentary may be spoken."""
+        if not text or str(text).startswith("Error:"):
+            return False
+
+        chat_id = event.source.chat_id
+        voice_key = self._voice_key(event.source.platform, chat_id)
+        voice_mode = self._voice_mode.get(voice_key)
+        if voice_mode == "off":
+            return False
+
+        is_voice_input = event.message_type == MessageType.VOICE
+        adapter = self._adapter_for_source(event.source)
+        adapter_auto_tts = False
+        has_adapter_auto_tts = False
+        if adapter and hasattr(adapter, "_should_auto_tts_for_chat"):
+            has_adapter_auto_tts = True
+            try:
+                adapter_auto_tts = bool(adapter._should_auto_tts_for_chat(chat_id))
+            except Exception:
+                adapter_auto_tts = False
+
+        if has_adapter_auto_tts and not adapter_auto_tts:
+            logger.debug(
+                "Discord voice progress skipped: adapter auto-TTS disabled for chat=%s",
+                chat_id,
+            )
+            return False
+
+        return (
+            voice_mode == "all"
+            or (voice_mode == "voice_only" and is_voice_input)
+            or (voice_mode is None and adapter_auto_tts)
+        )
 
     def _should_echo_stt_transcripts(self) -> bool:
         """Return whether inbound voice/STT transcripts should be echoed to chat."""
@@ -30733,7 +31055,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         turn_ctx.voice_ack_callback = turn_runner.voice_ack_callback
         turn_ctx.native_tool_start_callback = turn_runner.combined_tool_start_callback
         turn_ctx.native_tool_complete_callback = (
-            turn_runner.native_tool_complete_callback
+            turn_runner.combined_tool_complete_callback
         )
         
         # Background task to send progress messages
@@ -31024,6 +31346,53 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as _stts_err:
                 logger.debug("Could not set up streaming TTS consumer: %s", _stts_err)
 
+        # Sparse spoken progress for Discord voice-channel turns. This is
+        # intentionally voice-input-only so typed text channels keep their
+        # normal progress behavior.
+        _voice_progress_speaker = None
+        if _stts_adapter is not None and _is_voice_input and source.platform == Platform.DISCORD:
+            try:
+                _guild_raw = getattr(source, "guild_id", None)
+                _guild_id = int(_guild_raw) if _guild_raw is not None else None
+                _is_in_voice = getattr(_stts_adapter, "is_in_voice_channel", None)
+                if _guild_id is not None and callable(_is_in_voice) and _is_in_voice(_guild_id):
+                    _voice_event = MessageEvent(
+                        source=source,
+                        text=message,
+                        message_type=MessageType.VOICE,
+                        raw_message=SimpleNamespace(guild_id=_guild_id, guild=None),
+                        channel_prompt=channel_prompt,
+                    )
+                    setattr(
+                        _voice_event,
+                        "_voice_progress_run_still_current",
+                        _run_still_current,
+                    )
+                    if self._should_send_voice_progress_reply(_voice_event, "Still working."):
+                        _voice_progress_speaker = DiscordVoiceProgressSpeaker(
+                            self,
+                            _voice_event,
+                            loop=asyncio.get_running_loop(),
+                            guild_id=_guild_id,
+                        )
+            except Exception:
+                logger.debug("Could not set up Discord voice progress speaker", exc_info=True)
+        turn_ctx.voice_progress_speaker = _voice_progress_speaker
+
+        async def _close_voice_progress_speaker(*, wait: bool = False) -> None:
+            _speaker = turn_ctx.voice_progress_speaker
+            if _speaker is None:
+                return
+            try:
+                turn_ctx.voice_interim_spoken_texts.update(_speaker.spoken_text_keys())
+            except Exception:
+                pass
+            turn_ctx.voice_progress_speaker = None
+            try:
+                await _speaker.close(wait=wait)
+            except Exception:
+                logger.debug("Discord voice progress speaker cleanup failed", exc_info=True)
+
         # run_sync extracted to TurnRunner.run_sync (bound method; the
         # executor call below is unchanged).  Its closed-over locals travel
         # on turn_ctx; `nonlocal message` rebinds became ctx.message writes.
@@ -31149,6 +31518,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _stts = streaming_tts_consumer_holder[0]
                             if _stts is not None:
                                 _stts.abort("barge-in")
+                            await _close_voice_progress_speaker()
                             break
                 except asyncio.CancelledError:
                     raise
@@ -31436,6 +31806,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _stts = streaming_tts_consumer_holder[0]
                             if _stts is not None:
                                 _stts.abort("barge-in")
+                            await _close_voice_progress_speaker()
 
             else:
                 # Poll loop: check the agent's built-in activity tracker
@@ -31538,6 +31909,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _stts = streaming_tts_consumer_holder[0]
                             if _stts is not None:
                                 _stts.abort("barge-in")
+                            await _close_voice_progress_speaker()
 
             if _inactivity_timeout:
                 # Build a diagnostic summary from the agent's activity tracker.
@@ -31641,6 +32013,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]
             adapter = self._adapter_for_source(source)
+            await _close_voice_progress_speaker()
 
             # Finalize the streaming-TTS consumer (#60671).
             #
@@ -31981,6 +32354,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:
             # Stop progress sender, interrupt monitor, and notification task
+            await _close_voice_progress_speaker()
             if progress_task:
                 progress_task.cancel()
             if log_task:
@@ -32269,6 +32643,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception as _rpe:
                 logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
+
+        if isinstance(response, dict) and turn_ctx.voice_interim_spoken_texts:
+            response["voice_interim_spoken_texts"] = sorted(
+                turn_ctx.voice_interim_spoken_texts
+            )
 
         return response
 

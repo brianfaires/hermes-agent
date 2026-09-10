@@ -131,6 +131,10 @@ class TurnContext:
     #     the sibling closures) ---------------------------------------------
     progress_callback: Optional[Callable] = None
     voice_ack_callback: Optional[Callable] = None
+    voice_progress_speaker: Any = None
+    voice_interim_spoken_texts: set[str] = field(default_factory=set)
+    voice_progress_start_callback: Optional[Callable] = None
+    voice_progress_complete_callback: Optional[Callable] = None
     _step_callback_sync: Optional[Callable] = None
     _event_callback_sync: Optional[Callable] = None
     _status_callback_sync: Optional[Callable] = None

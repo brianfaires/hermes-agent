@@ -6,6 +6,7 @@ import sys
 import time
 import types
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -57,6 +58,9 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str):
         return {"id": chat_id}
+
+    def is_in_voice_channel(self, guild_id: int) -> bool:
+        return True
 
 
 class DiscordProgressCaptureAdapter(ProgressCaptureAdapter):
@@ -467,6 +471,7 @@ def _make_runner(adapter):
     runner._reasoning_config = None
     runner._provider_routing = {}
     runner._fallback_model = None
+    runner._send_voice_reply = AsyncMock()
     runner._session_db = None
     runner._running_agents = {}
     runner._session_run_generation = {}
@@ -886,6 +891,44 @@ class QueuedCommentaryAgent:
         }
 
 
+class VoiceInterimThenToolAgent:
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tool_start_callback = kwargs.get("tool_start_callback")
+        self.tool_complete_callback = kwargs.get("tool_complete_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback("I'll inspect the repo first.", already_streamed=False)
+        if self.tool_start_callback:
+            self.tool_start_callback("call-1", "execute_code", {"cmd": "sleep 1"})
+        time.sleep(0.02)
+        if self.tool_complete_callback:
+            self.tool_complete_callback("call-1", "execute_code", {"cmd": "sleep 1"}, "done")
+        return {
+            "final_response": "Done.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class VoiceToolOnlyAgent:
+    def __init__(self, **kwargs):
+        self.tool_start_callback = kwargs.get("tool_start_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.tool_start_callback:
+            self.tool_start_callback("call-1", "execute_code", {"cmd": "sleep 1"})
+        time.sleep(0.04)
+        return {
+            "final_response": "Done.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class QueuedMediaAgent:
     """Return an explicit image attachment before a queued follow-up."""
 
@@ -1006,6 +1049,10 @@ async def _run_with_agent(
     adapter_cls=ProgressCaptureAdapter,
     user_id=None,
     scope_id=None,
+    guild_id=None,
+    message_type=MessageType.TEXT,
+    initial_voice_mode=None,
+    return_runner=False,
 ):
     if config_data:
         import yaml
@@ -1034,6 +1081,7 @@ async def _run_with_agent(
         thread_id=thread_id,
         user_id=user_id,
         scope_id=scope_id,
+        guild_id=guild_id,
     )
     session_key = f"agent:main:{platform.value}:{chat_type}:{chat_id}"
     if thread_id:
@@ -1045,6 +1093,12 @@ async def _run_with_agent(
             source=source,
             message_id="queued-1",
         )
+    if initial_voice_mode is not None:
+        runner._voice_mode[runner._voice_key(platform, chat_id)] = initial_voice_mode
+        if initial_voice_mode in {"voice_only", "all"}:
+            adapter._auto_tts_enabled_chats.add(chat_id)
+        elif initial_voice_mode == "off":
+            adapter._auto_tts_disabled_chats.add(chat_id)
 
     result = await runner._run_agent(
         message="hello",
@@ -1053,7 +1107,10 @@ async def _run_with_agent(
         source=source,
         session_id=session_id,
         session_key=session_key,
+        message_type=message_type,
     )
+    if return_runner:
+        return adapter, result, runner
     return adapter, result
 
 
@@ -1181,6 +1238,69 @@ async def test_display_streaming_does_not_enable_gateway_streaming(monkeypatch, 
     assert result.get("already_sent") is not True
     assert adapter.edits == []
     assert [call["content"] for call in adapter.sent] == ["I'll inspect the repo first."]
+
+
+@pytest.mark.asyncio
+async def test_discord_voice_interim_commentary_is_spoken_before_tool_progress(
+    monkeypatch, tmp_path,
+):
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(
+        gateway_run.DiscordVoiceProgressSpeaker,
+        "DEFAULT_SILENCE_SECONDS",
+        10.0,
+    )
+    adapter, result, runner = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        VoiceInterimThenToolAgent,
+        session_id="sess-voice-interim",
+        config_data={"display": {"interim_assistant_messages": True}},
+        platform=Platform.DISCORD,
+        chat_id="789",
+        chat_type="group",
+        thread_id=None,
+        guild_id="42",
+        message_type=MessageType.VOICE,
+        initial_voice_mode="voice_only",
+        return_runner=True,
+    )
+
+    spoken = [call.args[1] for call in runner._send_voice_reply.await_args_list]
+    assert result["final_response"] == "Done."
+    assert spoken[:1] == ["I'll inspect the repo first."]
+    assert all("Still working on execute code" not in text for text in spoken)
+    assert result["voice_interim_spoken_texts"] == ["i'll inspect the repo first."]
+
+
+@pytest.mark.asyncio
+async def test_discord_voice_progress_not_started_for_muted_session(
+    monkeypatch, tmp_path,
+):
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(
+        gateway_run.DiscordVoiceProgressSpeaker,
+        "DEFAULT_SILENCE_SECONDS",
+        0.01,
+    )
+    _adapter, result, runner = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        VoiceToolOnlyAgent,
+        session_id="sess-voice-muted-start",
+        config_data={"display": {"interim_assistant_messages": True}},
+        platform=Platform.DISCORD,
+        chat_id="789",
+        chat_type="group",
+        thread_id=None,
+        guild_id="42",
+        message_type=MessageType.VOICE,
+        initial_voice_mode="off",
+        return_runner=True,
+    )
+
+    assert result["final_response"] == "Done."
+    runner._send_voice_reply.assert_not_awaited()
 
 
 class TransformedStreamAgent:

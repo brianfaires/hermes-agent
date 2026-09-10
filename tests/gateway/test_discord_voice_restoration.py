@@ -67,7 +67,7 @@ _ensure_discord_mock()
 
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
-from gateway.run import GatewayRunner, TurnRunner
+from gateway.run import DiscordVoiceProgressSpeaker, GatewayRunner, TurnRunner
 from gateway.session import SessionSource, build_session_key
 from gateway.turn_context import TurnContext
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -649,3 +649,212 @@ def test_stt_alias_catalog_is_profile_local(tmp_path):
         assert _load_profile_stt_aliases() == {"/model gpt-5": ["load gpt five"]}
     finally:
         reset_hermes_home_override(token)
+
+
+def test_voice_progress_lifecycle_callbacks_accept_agent_completion_shape():
+    speaker = SimpleNamespace(tool_started=MagicMock(), tool_completed=MagicMock())
+    ctx = TurnContext(
+        source=SessionSource(platform=Platform.DISCORD, chat_id="789"),
+        _run_still_current=lambda: True,
+        voice_progress_speaker=speaker,
+    )
+    turn_runner = TurnRunner(SimpleNamespace(), ctx)
+
+    turn_runner.combined_tool_start_callback("call-1", "execute_code", {"cmd": "date"})
+    turn_runner.combined_tool_complete_callback(
+        "call-1",
+        "execute_code",
+        {"cmd": "date"},
+        "ok",
+    )
+
+    speaker.tool_started.assert_called_once_with(
+        "call-1",
+        "execute_code",
+        {"cmd": "date"},
+    )
+    speaker.tool_completed.assert_called_once_with(
+        "call-1",
+        "execute_code",
+        {"cmd": "date"},
+        "ok",
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_progress_speaks_after_silence_for_active_voice_tool():
+    adapter = SimpleNamespace(is_in_voice_channel=MagicMock(return_value=True))
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="789",
+        guild_id="42",
+        profile="ops",
+    )
+    event = MessageEvent(
+        source=source,
+        text="look this up",
+        message_type=MessageType.VOICE,
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+    runner = SimpleNamespace(
+        _adapter_for_source=MagicMock(return_value=adapter),
+        _send_voice_reply=AsyncMock(),
+    )
+    speaker = DiscordVoiceProgressSpeaker(
+        runner,
+        event,
+        loop=asyncio.get_running_loop(),
+        guild_id=42,
+        silence_seconds=0.01,
+    )
+
+    speaker.tool_started("call-1", "execute_code", {"cmd": "date"})
+    await asyncio.sleep(0.04)
+    await speaker.close()
+
+    runner._send_voice_reply.assert_awaited()
+    spoken_event, text = runner._send_voice_reply.await_args.args
+    assert spoken_event.source.profile == "ops"
+    assert text == "Still working on execute code."
+
+
+@pytest.mark.asyncio
+async def test_voice_progress_completion_cancels_pending_tool_speech():
+    adapter = SimpleNamespace(is_in_voice_channel=MagicMock(return_value=True))
+    event = MessageEvent(
+        source=SessionSource(platform=Platform.DISCORD, chat_id="789", guild_id="42"),
+        text="check",
+        message_type=MessageType.VOICE,
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+    runner = SimpleNamespace(
+        _adapter_for_source=MagicMock(return_value=adapter),
+        _send_voice_reply=AsyncMock(),
+    )
+    speaker = DiscordVoiceProgressSpeaker(
+        runner,
+        event,
+        loop=asyncio.get_running_loop(),
+        guild_id=42,
+        silence_seconds=0.02,
+    )
+
+    speaker.tool_started("call-1", "web_search", {})
+    speaker.tool_completed("call-1", "web_search", {}, "done")
+    await asyncio.sleep(0)
+    await speaker.close()
+
+    runner._send_voice_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_progress_stale_or_disconnected_turn_does_not_speak():
+    connected = True
+    current = True
+
+    def _connected(_guild_id):
+        return connected
+
+    adapter = SimpleNamespace(is_in_voice_channel=MagicMock(side_effect=_connected))
+    event = MessageEvent(
+        source=SessionSource(platform=Platform.DISCORD, chat_id="789", guild_id="42"),
+        text="check",
+        message_type=MessageType.VOICE,
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+    setattr(event, "_voice_progress_run_still_current", lambda: current)
+    runner = SimpleNamespace(
+        _adapter_for_source=MagicMock(return_value=adapter),
+        _send_voice_reply=AsyncMock(),
+    )
+    speaker = DiscordVoiceProgressSpeaker(
+        runner,
+        event,
+        loop=asyncio.get_running_loop(),
+        guild_id=42,
+        silence_seconds=0.01,
+    )
+
+    speaker.tool_started("call-1", "web_search", {})
+    current = False
+    await asyncio.sleep(0.03)
+    runner._send_voice_reply.assert_not_awaited()
+
+    current = True
+    speaker.tool_started("call-2", "web_search", {})
+    connected = False
+    await asyncio.sleep(0.03)
+    await speaker.close()
+
+    runner._send_voice_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_progress_mute_during_long_tool_prevents_queued_speech():
+    allowed = True
+    adapter = SimpleNamespace(is_in_voice_channel=MagicMock(return_value=True))
+    event = MessageEvent(
+        source=SessionSource(platform=Platform.DISCORD, chat_id="789", guild_id="42"),
+        text="check",
+        message_type=MessageType.VOICE,
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+
+    def _allowed(_event, _text):
+        return allowed
+
+    runner = SimpleNamespace(
+        _adapter_for_source=MagicMock(return_value=adapter),
+        _should_send_voice_progress_reply=MagicMock(side_effect=_allowed),
+        _send_voice_reply=AsyncMock(),
+    )
+    speaker = DiscordVoiceProgressSpeaker(
+        runner,
+        event,
+        loop=asyncio.get_running_loop(),
+        guild_id=42,
+        silence_seconds=0.01,
+    )
+
+    speaker.tool_started("call-1", "web_search", {})
+    allowed = False
+    await asyncio.sleep(0.04)
+    await speaker.close()
+
+    runner._send_voice_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_voice_progress_close_cancels_pending_commentary_speech():
+    started = asyncio.Event()
+    adapter = SimpleNamespace(is_in_voice_channel=MagicMock(return_value=True))
+    event = MessageEvent(
+        source=SessionSource(platform=Platform.DISCORD, chat_id="789", guild_id="42"),
+        text="check",
+        message_type=MessageType.VOICE,
+        raw_message=SimpleNamespace(guild_id=42),
+    )
+
+    async def _slow_send(_event, _text):
+        started.set()
+        await asyncio.Event().wait()
+
+    runner = SimpleNamespace(
+        _adapter_for_source=MagicMock(return_value=adapter),
+        _should_send_voice_progress_reply=MagicMock(return_value=True),
+        _send_voice_reply=AsyncMock(side_effect=_slow_send),
+    )
+    speaker = DiscordVoiceProgressSpeaker(
+        runner,
+        event,
+        loop=asyncio.get_running_loop(),
+        guild_id=42,
+        silence_seconds=10.0,
+    )
+
+    speaker.speak_commentary("I'll inspect the repo first.", wait_timeout=0)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await speaker.close()
+
+    assert speaker.spoken_text_keys() == set()
+    assert runner._send_voice_reply.await_count == 1
