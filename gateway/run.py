@@ -4906,8 +4906,8 @@ class TurnRunner:
             and isinstance(args.get("command"), str)
             and args["command"].strip()
         ):
-            from agent.display import get_tool_preview_max_len
-            _cmd_full = args["command"].rstrip()
+            from agent.display import get_tool_preview_max_len, shorten_tool_display_value
+            _cmd_full = shorten_tool_display_value("terminal", "command", args["command"]).rstrip()
             # Consecutive terminal calls: drop the repeated
             # "💻 terminal" header so back-to-back commands render as
             # adjacent code blocks under a single header.
@@ -4937,7 +4937,8 @@ class TurnRunner:
             if args:
                 from agent.display import get_tool_preview_max_len
                 _pl = get_tool_preview_max_len()
-                args_str = json.dumps(args, ensure_ascii=False, default=str)
+                from agent.display import shorten_tool_display_args
+                args_str = json.dumps(shorten_tool_display_args(tool_name, args), ensure_ascii=False, default=str)
                 # When tool_preview_length is 0 (default), don't truncate
                 # in verbose mode — the user explicitly asked for full
                 # detail.  Platform message-length limits handle the rest.
@@ -30627,6 +30628,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # reply anchor; carry it so progress joins that thread.
             _progress_metadata = {"reply_to_message_id": event_message_id}
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
+        if source.platform == Platform.DISCORD:
+            _progress_metadata = {**(_progress_metadata or {}), "suppress_embeds": True}
         if _native_slack_task_cards:
             # chat.startStream in channels requires the recipient team/user
             # pair; harmless extras elsewhere, so stamp them whenever known.
