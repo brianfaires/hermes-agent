@@ -1,7 +1,6 @@
 """Retained payload transforms must reap their disposable process tree."""
 import os
 from pathlib import Path
-import sys
 import tempfile
 import time
 import unittest
