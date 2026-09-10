@@ -1756,8 +1756,6 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
 # ===========================================================================
 def _elevenlabs_voice_settings(el_config: Dict[str, Any], tts_config: Dict[str, Any]):
     """Build optional ElevenLabs VoiceSettings from config knobs."""
-    from elevenlabs.types.voice_settings import VoiceSettings
-
     values = {}
     speed = float(el_config.get("speed", tts_config.get("speed", 1.0)))
     if speed != 1.0:
@@ -1771,7 +1769,12 @@ def _elevenlabs_voice_settings(el_config: Dict[str, Any], tts_config: Dict[str, 
     if "use_speaker_boost" in el_config:
         raw = el_config["use_speaker_boost"]
         values["use_speaker_boost"] = raw if isinstance(raw, bool) else str(raw).lower() in {"1", "true", "yes", "on"}
-    return VoiceSettings(**values) if values else None
+    if not values:
+        return None
+
+    from elevenlabs.types.voice_settings import VoiceSettings
+
+    return VoiceSettings(**values)
 
 
 def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:

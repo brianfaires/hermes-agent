@@ -62,7 +62,11 @@ async def test_restart_with_external_supervisor_marker_uses_service_path(
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+    runner.request_restart.assert_called_once_with(
+        detached=False, via_service=True,
+        defer_until_session_delivered="agent:main:telegram:dm:123456",
+        defer_until_delivery=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -75,4 +79,8 @@ async def test_false_external_supervisor_marker_keeps_detached_path(
 
     await runner._handle_restart_command(_make_restart_event())
 
-    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+    runner.request_restart.assert_called_once_with(
+        detached=True, via_service=False,
+        defer_until_session_delivered="agent:main:telegram:dm:123456",
+        defer_until_delivery=None,
+    )
