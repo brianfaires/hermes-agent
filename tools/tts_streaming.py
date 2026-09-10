@@ -232,6 +232,7 @@ class ElevenLabsStreamer(StreamingTTSProvider):
             DEFAULT_ELEVENLABS_STREAMING_MODEL_ID,
             DEFAULT_ELEVENLABS_VOICE_ID,
             _elevenlabs_environment_kwargs,
+            _elevenlabs_voice_settings,
             _import_elevenlabs,
         )
 
@@ -244,12 +245,16 @@ class ElevenLabsStreamer(StreamingTTSProvider):
             "streaming_model_id",
             self.section.get("model_id", DEFAULT_ELEVENLABS_STREAMING_MODEL_ID),
         )
-        yield from client.text_to_speech.convert(
+        convert_kwargs = dict(
             text=text,
             voice_id=voice_id,
             model_id=model_id,
             output_format="pcm_24000",
         )
+        voice_settings = _elevenlabs_voice_settings(self.section, self.tts_config)
+        if voice_settings is not None:
+            convert_kwargs["voice_settings"] = voice_settings
+        yield from client.text_to_speech.convert(**convert_kwargs)
 
 
 def _openai_config_api_key() -> str:
