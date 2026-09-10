@@ -1,7 +1,7 @@
 # Cumulative safe-slice checklist — human UAT deferred
 
 Continuation test/source candidate: `76d908a34804889c9c27cebd08619e71528070e4`.
-Final documentation-bound HEAD is in `../continuation-result.md`. Previous
+Final documentation-bound HEAD is in the task-only handoff `/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/continuation-result.md`. Previous
 exact `3c8f7d0` staging CI **passed**, run 34523897060, including 52 added tests.
 The prior pending-CI and partial-milestone language below is historical.
 
@@ -10,18 +10,22 @@ moving; human checks accumulate and are not development prerequisites. Existing
 [Critical gates](critical-gates.md) remain unchanged. No activation, main
 promotion, live restart/install/send/config/data/credential change is claimed.
 
-## Ang's next source-only integration checks
+## Current checkpoint and next integration check
 
-1. Inspect local continuation commits and the native blocker review in
-   `../continuation-review.md`; verify exact covered candidate.
-2. Rerun the six new test files listed in
-   [continuation qualification](V021_CONTINUATION_QUALIFICATION.md), using the
-   canonical interpreter read-only and isolated task environment. Expected:
-   seven tests pass; all filesystem writes remain in disposable fixtures.
-3. Integrate/push to source-only staging, then verify fresh exact-SHA hosted CI,
-   including actual collection of all six files. No new CI result is claimed.
-4. Verify ledger preservation: 51 IDs, 37 old-main/14 archive-only, 239 original
-   evidence entries, 241 split subfeatures, 46 unchanged Critical entries.
+Ang accepted the eda8d0537b1b66000b5ade38855343634ddd4e75 review,
+independently reran seven tests and pushed that exact candidate to source-only
+staging. Hosted CI remains pending until Ang reports its actual result. The
+[finite compatibility tail](V021_COMPATIBILITY_TAIL.md) adds documentation-only
+resolution/classification evidence; deterministic checks replace a second broad
+code review. Ang next inspects and integrates this tail, then verifies CI.
+
+Added future checks, only after the affected Critical implementation approval:
+
+- Validate approved explicit voice dependencies on supported runtime/platform
+  paths; wheels-only resolution is already completed and is not runtime proof.
+- Exercise approved process-command parser changes against the preserved G30
+  matrix, including current stronger timeout/env-unset refusals. Never execute
+  destructive matrix commands as part of this qualification.
 
 ## Added future human checks (deferred)
 
