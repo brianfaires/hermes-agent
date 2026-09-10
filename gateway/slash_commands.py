@@ -4937,6 +4937,9 @@ class GatewaySlashCommandsMixin:
                         "preserving original transcript instead of overwriting "
                         "it (#44794)."
                     )
+                    raise RuntimeError(
+                        "compression did not create a durable continuation session"
+                    )
                 # Reset stored token count — transcript changed, old value is stale
                 await self.async_session_store.update_session(
                     session_entry.session_key, last_prompt_tokens=0
