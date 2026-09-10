@@ -1192,13 +1192,19 @@ def _normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
     return str(raw_desc).strip().strip("'\"") if raw_desc else ""
 
 
-def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
+def extract_skill_description(
+    frontmatter: Dict[str, Any], max_chars: int = SKILL_PROMPT_DESC_LIMIT,
+) -> str:
     """Extract a system-prompt-length description from parsed frontmatter."""
     desc = _normalize_skill_description(frontmatter)
     if not desc:
         return ""
-    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
-        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+    if max_chars <= 0:
+        return ""
+    if len(desc) > max_chars:
+        if max_chars <= 3:
+            return desc[:max_chars]
+        return desc[:max_chars - 3] + "..."
     return desc
 
 
