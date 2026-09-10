@@ -1,0 +1,111 @@
+{
+  "base": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+  "test_commit": "76d908a34804889c9c27cebd08619e71528070e4",
+  "hosted_run": 34523897060,
+  "reused_hosted_files": [
+    {
+      "file": "tests/gateway/test_run_progress_topics.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118405.txt",
+      "receipt": "2026-09-10T20:04:06.8289798Z [ 39.4% |  1821/~4616 | \u27132002 | \u2717   0] \u2713 tests/gateway/test_run_progress_topics.py (28\u2713, 13.2s)"
+    },
+    {
+      "file": "tests/cron/test_scheduler_provider.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118331.txt",
+      "receipt": "2026-09-10T20:03:39.1789512Z [ 21.3% |   914/~4300 | \u27131019 | \u2717   0] \u2713 tests/cron/test_scheduler_provider.py (36\u2713, 3.2s)"
+    },
+    {
+      "file": "tests/gateway/test_restart_drain.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118351.txt",
+      "receipt": "2026-09-10T20:03:44.5292853Z [ 31.6% |  1570/~4963 | \u27131714 | \u2717   0] \u2713 tests/gateway/test_restart_drain.py (14\u2713 2s, 2.6s)"
+    },
+    {
+      "file": "tests/hermes_cli/test_cron_status_profile_isolation.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118351.txt",
+      "receipt": "2026-09-10T20:04:02.2860603Z [ 39.0% |  1934/~4963 | \u27132106 | \u2717   0] \u2713 tests/hermes_cli/test_cron_status_profile_isolation.py (6\u2713, 0.7s)"
+    },
+    {
+      "file": "tests/gateway/test_model_picker_persist.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118414.txt",
+      "receipt": "2026-09-10T20:03:50.1492722Z [ 26.9% |  1214/~4519 | \u27131436 | \u2717   0] \u2713 tests/gateway/test_model_picker_persist.py (3\u2713, 1.2s)"
+    },
+    {
+      "file": "tests/plugins/test_gateway_restart_tool.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118414.txt",
+      "receipt": "2026-09-10T20:04:58.8847726Z [ 59.4% |  2683/~4519 | \u27133259 | \u2717   0] \u2713 tests/plugins/test_gateway_restart_tool.py (17\u2713, 2.9s)"
+    },
+    {
+      "file": "tests/gateway/test_model_command_profile_config.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118323.txt",
+      "receipt": "2026-09-10T20:03:52.0939643Z [ 33.0% |  1432/~4337 | \u27131581 | \u2717   0] \u2713 tests/gateway/test_model_command_profile_config.py (1\u2713, 1.2s)"
+    },
+    {
+      "file": "tests/gateway/test_v021_restart_delivery.py",
+      "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+      "job_log": "103028118387.txt",
+      "receipt": "2026-09-10T20:04:11.3005257Z [ 38.8% |  1710/~4411 | \u27131975 | \u2717   0] \u2713 tests/gateway/test_v021_restart_delivery.py (5\u2713, 1.8s)"
+    }
+  ],
+  "new_local_tests": [
+    {
+      "file": "tests/hermes_cli/test_v021_install_launcher_guard.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_worktree_returns_before_launcher_or_shell_changes (__main__.InstallLauncherGuard.test_worktree_returns_before_launcher_or_shell_changes) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.015s\n\nOK\n"
+    },
+    {
+      "file": "tests/gateway/test_v021_profile_scope_qualification.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_heartbeat_uses_active_home_and_explicit_store_then_restores (__main__.ProfileScopeQualification.test_heartbeat_uses_active_home_and_explicit_store_then_restores) ... Executing <Task finished name='Task-2' coro=<ProfileScopeQualification.test_heartbeat_uses_active_home_and_explicit_store_then_restores() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_profile_scope_qualification.py:38> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 1.742 seconds\nok\ntest_nested_scopes_propagate_to_thread_and_reset_on_exception (__main__.ProfileScopeQualification.test_nested_scopes_propagate_to_thread_and_reset_on_exception) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 1.770s\n\nOK\n"
+    },
+    {
+      "file": "tests/gateway/test_v021_notifier_profile_qualification.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_secondary_only_platform_delivers_through_secondary_adapter (__main__.NotifierProfileQualification.test_secondary_only_platform_delivers_through_secondary_adapter) ... kanban.db (board.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nExecuting <Task pending name='Task-2' coro=<NotifierProfileQualification.test_secondary_only_platform_delivers_through_secondary_adapter() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notifier_profile_qualification.py:54> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 3.081 seconds\nok\n\n----------------------------------------------------------------------\nRan 1 test in 3.152s\n\nOK\n"
+    },
+    {
+      "file": "tests/plugins/test_v021_restart_preflight_qualification.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_active_work_all_profiles_is_reported_without_reservation (__main__.RestartPreflightQualification.test_active_work_all_profiles_is_reported_without_reservation) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 1.790s\n\nOK\n"
+    },
+    {
+      "file": "tests/gateway/test_v021_restart_teardown_qualification.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_shared_service_restart_tears_down_adapters_without_self_cancel (__main__.RestartTeardownQualification.test_shared_service_restart_tears_down_adapters_without_self_cancel) ... Executing <Task pending name='Task-2' coro=<RestartTeardownQualification.test_shared_service_restart_tears_down_adapters_without_self_cancel() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_restart_teardown_qualification.py:66> wait_for=<Future pending cb=[Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 2.337 seconds\nok\n\n----------------------------------------------------------------------\nRan 1 test in 2.461s\n\nOK\n"
+    },
+    {
+      "file": "tests/gateway/test_v021_cron_startup_qualification.py",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "test_gateway_dispatches_selected_homes_and_owned_adapters (__main__.CronStartupQualification.test_gateway_dispatches_selected_homes_and_owned_adapters) ... Executing <Task pending name='Task-2' coro=<CronStartupQualification.test_gateway_dispatches_selected_homes_and_owned_adapters() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_cron_startup_qualification.py:67> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 2.019 seconds\ncron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nExecuting <Task finished name='Task-2' coro=<CronStartupQualification.test_gateway_dispatches_selected_homes_and_owned_adapters() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_cron_startup_qualification.py:17> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.418 seconds\nok\n\n----------------------------------------------------------------------\nRan 1 test in 2.451s\n\nOK\n"
+    }
+  ],
+  "critical_count_unchanged": 46,
+  "gated_design_observations": {
+    "continuation-design-results.json": {
+      "returncode": 0,
+      "stdout": "[\n  {\n    \"case\": \"G11/numeric_name\",\n    \"current\": \"accepted\",\n    \"value\": {\n      \"name\": 123,\n      \"enabled_toolsets\": null\n    }\n  },\n  {\n    \"case\": \"G11/numeric_toolset\",\n    \"current\": \"accepted\",\n    \"value\": {\n      \"name\": \"fixture\",\n      \"enabled_toolsets\": [\n        \"123\"\n      ]\n    }\n  },\n  {\n    \"case\": \"FC18/relative_dir\",\n    \"current\": \"accepted\",\n    \"value\": {\n      \"workspace_kind\": \"dir\",\n      \"workspace_path\": \"relative\",\n      \"branch_name\": null\n    }\n  },\n  {\n    \"case\": \"FC18/invalid_worktree_branch\",\n    \"current\": \"accepted\",\n    \"value\": {\n      \"workspace_kind\": \"worktree\",\n      \"workspace_path\": null,\n      \"branch_name\": \"bad..ref\"\n    }\n  },\n  {\n    \"case\": \"FC18/dir_branch\",\n    \"current\": \"rejected\",\n    \"exception\": \"ValueError\",\n    \"message\": \"branch_name is only valid for worktree workspaces\"\n  }\n]\n",
+      "stderr": "kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\n"
+    },
+    "continuation-notification-results.json": {
+      "returncode": 0,
+      "stdout": "[\n  {\n    \"policy\": \"origin\",\n    \"old_helper_target\": \"fixture-origin\",\n    \"current_watcher_targets\": [\n      \"fixture-origin\"\n    ],\n    \"proposed_contract_passes_current\": true\n  },\n  {\n    \"policy\": \"deny\",\n    \"old_helper_target\": null,\n    \"current_watcher_targets\": [\n      \"fixture-origin\"\n    ],\n    \"proposed_contract_passes_current\": false\n  },\n  {\n    \"policy\": 17,\n    \"old_helper_target\": null,\n    \"current_watcher_targets\": [\n      \"fixture-origin\"\n    ],\n    \"proposed_contract_passes_current\": false\n  }\n]\n",
+      "stderr": "kanban.db (board.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\n"
+    },
+    "continuation-tirith-results.json": {
+      "returncode": 0,
+      "stdout": "[\n  {\n    \"source\": \"old\",\n    \"action\": \"warn\",\n    \"displayed_findings\": 50,\n    \"proposed_full_findings_contract_passes\": true\n  },\n  {\n    \"source\": \"current\",\n    \"action\": \"allow\",\n    \"displayed_findings\": 0,\n    \"proposed_full_findings_contract_passes\": false\n  }\n]\n",
+      "stderr": ""
+    }
+  }
+}

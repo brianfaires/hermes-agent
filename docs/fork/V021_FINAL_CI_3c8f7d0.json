@@ -1,0 +1,206 @@
+{
+  "sha": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d",
+  "tree": "a72185b2c8a42b6b4d87bc21272390d232832ba0",
+  "run_id": "34523897060",
+  "url": "https://github.com/brianfaires/hermes-agent/actions/runs/34523897060",
+  "conclusion": "success",
+  "required_job_id": 103032192253,
+  "required_conclusion": "success",
+  "jobs": {
+    "success": 28,
+    "skipped": 6
+  },
+  "new_files": 17,
+  "new_tests": 52,
+  "new_test_receipts": {
+    "tests/cron/test_v021_delivery_attention.py": {
+      "passed": 4,
+      "job": 103028118323,
+      "receipt": "2026-09-10T20:03:30.5945127Z [ 17.6% |   765/~4337 | \u2713839 | \u2717  0] \u2713 tests/cron/test_v021_delivery_attention.py (4\u2713, 1.0s)"
+    },
+    "tests/gateway/test_v021_notifier_diagnostics.py": {
+      "passed": 1,
+      "job": 103028118323,
+      "receipt": "2026-09-10T20:04:07.4461250Z [ 39.4% |  1709/~4337 | \u27131878 | \u2717   0] \u2713 tests/gateway/test_v021_notifier_diagnostics.py (1\u2713, 0.8s)"
+    },
+    "tests/agent/test_v021_retained_runtime.py": {
+      "passed": 6,
+      "job": 103028118331,
+      "receipt": "2026-09-10T20:03:20.8065565Z [ 12.5% |   536/~4300 | \u2713617 | \u2717  0] \u2713 tests/agent/test_v021_retained_runtime.py (6\u2713, 4.6s)"
+    },
+    "tests/gateway/test_v021_compression_failure.py": {
+      "passed": 1,
+      "job": 103028118331,
+      "receipt": "2026-09-10T20:04:10.3356161Z [ 35.0% |  1505/~4300 | \u27131775 | \u2717   0] \u2713 tests/gateway/test_v021_compression_failure.py (1\u2713, 2.5s)"
+    },
+    "tests/test_v021_dependency_floors.py": {
+      "passed": 1,
+      "job": 103028118351,
+      "receipt": "2026-09-10T20:05:30.6448493Z [ 79.2% |  3933/~4963 | \u27134247 | \u2717   0] \u2713 tests/test_v021_dependency_floors.py (1\u2713, 0.6s)"
+    },
+    "tests/agent/test_v021_external_skill_refresh.py": {
+      "passed": 2,
+      "job": 103028118372,
+      "receipt": "2026-09-10T20:03:24.5123398Z [ 10.0% |   492/~4915 | \u2713560 | \u2717  0] \u2713 tests/agent/test_v021_external_skill_refresh.py (2\u2713, 0.7s)"
+    },
+    "tests/gateway/test_v021_background_notify_retained.py": {
+      "passed": 3,
+      "job": 103028118372,
+      "receipt": "2026-09-10T20:04:12.4469161Z [ 27.8% |  1367/~4915 | \u27131645 | \u2717   0] \u2713 tests/gateway/test_v021_background_notify_retained.py (3\u2713, 0.9s)"
+    },
+    "tests/tools/test_v021_elevenlabs_settings.py": {
+      "passed": 4,
+      "job": 103028118372,
+      "receipt": "2026-09-10T20:07:18.2714460Z [ 94.3% |  4633/~4915 | \u27135544 | \u2717   0] \u2713 tests/tools/test_v021_elevenlabs_settings.py (4\u2713, 1.6s)"
+    },
+    "tests/gateway/test_v021_restart_delivery.py": {
+      "passed": 5,
+      "job": 103028118387,
+      "receipt": "2026-09-10T20:04:11.3005257Z [ 38.8% |  1710/~4411 | \u27131975 | \u2717   0] \u2713 tests/gateway/test_v021_restart_delivery.py (5\u2713, 1.8s)"
+    },
+    "tests/agent/test_v021_worker_scope.py": {
+      "passed": 4,
+      "job": 103028118405,
+      "receipt": "2026-09-10T20:03:13.2475509Z [ 13.3% |   616/~4616 | \u2713678 | \u2717  0] \u2713 tests/agent/test_v021_worker_scope.py (4\u2713, 1.0s)"
+    },
+    "tests/gateway/test_v021_discord_text.py": {
+      "passed": 4,
+      "job": 103028118405,
+      "receipt": "2026-09-10T20:04:08.0524287Z [ 39.6% |  1830/~4616 | \u27132013 | \u2717   0] \u2713 tests/gateway/test_v021_discord_text.py (4\u2713, 0.9s)"
+    },
+    "tests/hermes_cli/test_v021_board_inventory.py": {
+      "passed": 1,
+      "job": 103028118405,
+      "receipt": "2026-09-10T20:04:42.9126711Z [ 58.7% |  2711/~4616 | \u27132979 | \u2717   0] \u2713 tests/hermes_cli/test_v021_board_inventory.py (1\u2713, 0.7s)"
+    },
+    "tests/cron/test_prompt_path_scanning_fc13.py": {
+      "passed": 8,
+      "job": 103028118414,
+      "receipt": "2026-09-10T20:03:27.6879636Z [ 16.6% |   750/~4519 | \u2713834 | \u2717  0] \u2713 tests/cron/test_prompt_path_scanning_fc13.py (8\u2713, 1.5s)"
+    },
+    "tests/gateway/test_v021_webhook_process_cleanup.py": {
+      "passed": 2,
+      "job": 103028118414,
+      "receipt": "2026-09-10T20:04:08.7527231Z [ 35.7% |  1613/~4519 | \u27132011 | \u2717   0] \u2713 tests/gateway/test_v021_webhook_process_cleanup.py (2\u2713, 1.7s)"
+    },
+    "tests/plugins/test_v021_cleanup_safety.py": {
+      "passed": 2,
+      "job": 103028118414,
+      "receipt": "2026-09-10T20:04:58.2678059Z [ 59.0% |  2665/~4519 | \u27133233 | \u2717   0] \u2713 tests/plugins/test_v021_cleanup_safety.py (2\u2713, 0.6s)"
+    },
+    "tests/agent/test_v021_compact_display.py": {
+      "passed": 3,
+      "job": 103028118423,
+      "receipt": "2026-09-10T20:03:18.6614396Z [ 16.4% |   864/~5254 | \u2713943 | \u2717  0] \u2713 tests/agent/test_v021_compact_display.py (3\u2713, 0.7s)"
+    },
+    "tests/test_v021_runner_cleanup.py": {
+      "passed": 1,
+      "job": 103028118423,
+      "receipt": "2026-09-10T20:05:19.0028933Z [ 71.2% |  3743/~5254 | \u27134144 | \u2717   0] \u2713 tests/test_v021_runner_cleanup.py (1\u2713, 0.5s)"
+    }
+  },
+  "correction_receipts": {
+    "tests/gateway/test_restart_drain.py": {
+      "passed": 14,
+      "receipt": "2026-09-10T20:03:44.5292853Z [ 31.6% |  1570/~4963 | \u27131714 | \u2717   0] \u2713 tests/gateway/test_restart_drain.py (14\u2713 2s, 2.6s)"
+    },
+    "tests/tools/test_tts_dotenv_fallback.py": {
+      "passed": 6,
+      "receipt": "2026-09-10T20:06:33.4291294Z [ 93.7% |  4131/~4411 | \u27134540 | \u2717   0] \u2713 tests/tools/test_tts_dotenv_fallback.py (6\u2713, 2.4s)"
+    },
+    "tests/gateway/test_restart_service_detection.py": {
+      "passed": 5,
+      "receipt": "2026-09-10T20:03:54.4260777Z [ 32.9% |  1518/~4616 | \u27131692 | \u2717   0] \u2713 tests/gateway/test_restart_service_detection.py (5\u2713, 1.2s)"
+    },
+    "tests/gateway/test_run_progress_topics.py": {
+      "passed": 28,
+      "receipt": "2026-09-10T20:04:06.8289798Z [ 39.4% |  1821/~4616 | \u27132002 | \u2717   0] \u2713 tests/gateway/test_run_progress_topics.py (28\u2713, 13.2s)"
+    }
+  },
+  "python_slices": [
+    {
+      "job": 103028118323,
+      "name": "Python tests / Run tests slice 5/8",
+      "files": 441,
+      "passed": 5835,
+      "failed": 0,
+      "skipped": 38,
+      "receipt": "2026-09-10T20:07:04.7581966Z === Summary: 441 files, 5835 tests passed, 0 failed, 38 skipped (100% complete) in 254.1s (4 workers) ==="
+    },
+    {
+      "job": 103028118331,
+      "name": "Python tests / Run tests slice 3/8",
+      "files": 441,
+      "passed": 4710,
+      "failed": 0,
+      "skipped": 85,
+      "receipt": "2026-09-10T20:06:43.3805813Z === Summary: 441 files, 4710 tests passed, 0 failed, 85 skipped (100% complete) in 233.6s (4 workers) ==="
+    },
+    {
+      "job": 103028118351,
+      "name": "Python tests / Run tests slice 8/8",
+      "files": 441,
+      "passed": 5391,
+      "failed": 0,
+      "skipped": 70,
+      "receipt": "2026-09-10T20:06:23.5641711Z === Summary: 441 files, 5391 tests passed, 0 failed, 70 skipped (100% complete) in 214.3s (4 workers) ==="
+    },
+    {
+      "job": 103028118372,
+      "name": "Python tests / Run tests slice 2/8",
+      "files": 442,
+      "passed": 5923,
+      "failed": 0,
+      "skipped": 56,
+      "receipt": "2026-09-10T20:09:07.0292181Z === Summary: 442 files, 5923 tests passed, 0 failed, 56 skipped (100% complete) in 375.8s (4 workers) ==="
+    },
+    {
+      "job": 103028118387,
+      "name": "Python tests / Run tests slice 6/8",
+      "files": 441,
+      "passed": 4835,
+      "failed": 0,
+      "skipped": 50,
+      "receipt": "2026-09-10T20:06:46.0806248Z === Summary: 441 files, 4835 tests passed, 0 failed, 50 skipped (100% complete) in 237.3s (4 workers) ==="
+    },
+    {
+      "job": 103028118405,
+      "name": "Python tests / Run tests slice 4/8",
+      "files": 441,
+      "passed": 5046,
+      "failed": 0,
+      "skipped": 32,
+      "receipt": "2026-09-10T20:06:24.6841288Z === Summary: 441 files, 5046 tests passed, 0 failed, 32 skipped (100% complete) in 212.7s (4 workers) ==="
+    },
+    {
+      "job": 103028118414,
+      "name": "Python tests / Run tests slice 7/8",
+      "files": 441,
+      "passed": 5271,
+      "failed": 0,
+      "skipped": 38,
+      "receipt": "2026-09-10T20:08:17.7695630Z === Summary: 441 files, 5271 tests passed, 0 failed, 38 skipped (100% complete) in 326.7s (4 workers) ==="
+    },
+    {
+      "job": 103028118423,
+      "name": "Python tests / Run tests slice 1/8",
+      "files": 442,
+      "passed": 5754,
+      "failed": 0,
+      "skipped": 50,
+      "receipt": "2026-09-10T20:06:17.8341483Z === Summary: 442 files, 5754 tests passed, 0 failed, 50 skipped (100% complete) in 208.1s (4 workers) ==="
+    }
+  ],
+  "python_totals": {
+    "files": 3530,
+    "passed": 42765,
+    "failed": 0,
+    "skipped": 419
+  },
+  "e2e_receipts": [
+    "2026-09-10T20:02:43.9830771Z ======================== 61 passed, 7 skipped in 15.81s ========================"
+  ],
+  "limits": [
+    "CI proves configured checks, including its explicitly skipped lanes; no live activation or full historical parity claim."
+  ]
+}
