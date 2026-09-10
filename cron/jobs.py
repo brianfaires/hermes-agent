@@ -2447,6 +2447,13 @@ def create_job(
         prompt_text, normalized_prompt_path, read_file=bool(normalized_prompt_path)
     )
 
+    # Scan the effective authored source at the persistence boundary, so
+    # CLI, API and tool callers share the same file-backed prompt checks.
+    from tools.cronjob_tools import _scan_cron_prompt
+    scan_error = _scan_cron_prompt(combined_prompt)
+    if scan_error:
+        raise ValueError(scan_error)
+
     # Reject cron jobs that schedule gateway-lifecycle commands. Prevents
     # agent-driven SIGTERM-respawn loops under launchd/systemd KeepAlive
     # (#30719). Enforced here (not only in the CLI layer) so the agent's
@@ -2714,6 +2721,17 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     bool(updated.get("no_agent")),
                     _upd_script or None,
                 )
+
+            if {"prompt", "prompt_path", "skill", "skills"}.intersection(updates):
+                from tools.cronjob_tools import _scan_cron_prompt
+
+                # Include unchanged inline/file fields: a directive can span
+                # both sources, and maintained file contents may have changed.
+                scan_error = _scan_cron_prompt(combine_prompt_sources(
+                    updated.get("prompt"), updated.get("prompt_path")
+                ))
+                if scan_error:
+                    raise ValueError(scan_error)
 
             if any(k in updates for k in _PAYLOAD_FIELDS):
                 if job_payload_is_empty(updated):

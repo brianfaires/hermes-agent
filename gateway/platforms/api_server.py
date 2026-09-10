@@ -6640,7 +6640,7 @@ class APIServerAdapter(BasePlatformAdapter):
             body = await request.json()
             name = (body.get("name") or "").strip()
             schedule = (body.get("schedule") or "").strip()
-            prompt = body.get("prompt", "")
+            prompt = body.get("prompt") or ""
             prompt_path = body.get("prompt_path")
             deliver = body.get("deliver", "local")
             skills = body.get("skills")
@@ -6691,6 +6691,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
             job = _cron_create(**kwargs)
             return web.json_response({"job": job})
+        except ValueError as e:
+            return web.json_response({"error": _redact_api_error_text(e)}, status=400)
         except _CronSchedulerRegistrationError as e:
             return web.json_response(e.to_dict(), status=424)
         except Exception as e:
@@ -6737,6 +6739,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     {"error": f"Name must be ≤ {self._MAX_NAME_LENGTH} characters"}, status=400,
                 )
+            if "prompt" in sanitized and sanitized["prompt"] is None:
+                sanitized["prompt"] = ""
             if "prompt" in sanitized and len(sanitized["prompt"]) > self._MAX_PROMPT_LENGTH:
                 return web.json_response(
                     {"error": f"Prompt must be ≤ {self._MAX_PROMPT_LENGTH} characters"}, status=400,
@@ -6750,6 +6754,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response({"error": "Job not found"}, status=404)
             _notify_cron_provider_jobs_changed()
             return web.json_response({"job": job})
+        except ValueError as e:
+            return web.json_response({"error": _redact_api_error_text(e)}, status=400)
         except Exception as e:
             return web.json_response({"error": _redact_api_error_text(e)}, status=500)
 
