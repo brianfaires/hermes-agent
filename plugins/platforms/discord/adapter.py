@@ -3508,7 +3508,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
-                result = await self._send_to_forum(channel, content)
+                result = await self._send_to_forum(channel, content, suppress_embeds=bool(metadata and metadata.get("suppress_embeds")))
                 await asyncio.to_thread(
                     self._record_discord_response,
                     reply_to=reply_to,
@@ -3537,6 +3537,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     msg = await channel.send(
                         content=chunk,
                         reference=chunk_reference,
+                        **({"suppress_embeds": True} if metadata and metadata.get("suppress_embeds") else {}),
                     )
                 except Exception as e:
                     err_text = str(e)
@@ -3559,6 +3560,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
+                            **({"suppress_embeds": True} if metadata and metadata.get("suppress_embeds") else {}),
                         )
                     else:
                         raise
@@ -3599,7 +3601,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             return result
 
-    async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
+    async def _send_to_forum(self, forum_channel: Any, content: str, *, suppress_embeds: bool = False) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
 
         Forum channels (type 15) don't support direct messages.  Instead we
@@ -3624,6 +3626,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread = await forum_channel.create_thread(
                 name=thread_name,
                 content=starter_content,
+                **({"suppress_embeds": True} if suppress_embeds else {}),
             )
         except Exception as e:
             logger.error("[%s] Failed to create forum thread in %s: %s", self.name, forum_channel.id, e)
@@ -3640,7 +3643,7 @@ class DiscordAdapter(BasePlatformAdapter):
         warnings: list[str] = []
         for chunk in chunks[1:]:
             try:
-                msg = await thread_channel.send(content=chunk)
+                msg = await thread_channel.send(content=chunk, **({"suppress_embeds": True} if suppress_embeds else {}))
                 message_ids.append(str(msg.id))
             except Exception as e:
                 warning = f"Failed to send follow-up chunk to forum thread {thread_id}: {e}"
@@ -3790,6 +3793,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if finalize:
                     return await self._edit_overflow_split(
                         channel, msg, message_id, content,
+                        suppress_embeds=bool(metadata and metadata.get("suppress_embeds")),
                     )
                 formatted = self.truncate_message(
                     formatted, self.MAX_MESSAGE_LENGTH,
@@ -3809,7 +3813,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 self._last_overflow_preview.pop(_preview_key, None)
 
             try:
-                await msg.edit(content=formatted)
+                await msg.edit(content=formatted, **({"suppress": True} if metadata and metadata.get("suppress_embeds") else {}))
                 if _saturated_preview:
                     self._last_overflow_preview[_preview_key] = formatted
             except Exception as edit_err:
@@ -3821,6 +3825,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if finalize:
                         return await self._edit_overflow_split(
                             channel, msg, message_id, content,
+                            suppress_embeds=bool(metadata and metadata.get("suppress_embeds")),
                         )
                     # Mid-stream: truncate and retry in place (no split).
                     truncated = self.truncate_message(
@@ -3829,7 +3834,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if self._last_overflow_preview.get(_preview_key) == truncated:
                         # Saturated-preview dedup (see pre-flight path above).
                         return SendResult(success=True, message_id=message_id)
-                    await msg.edit(content=truncated)
+                    await msg.edit(content=truncated, **({"suppress": True} if metadata and metadata.get("suppress_embeds") else {}))
                     self._last_overflow_preview[_preview_key] = truncated
                 else:
                     raise
@@ -3867,6 +3872,8 @@ class DiscordAdapter(BasePlatformAdapter):
         msg: Any,
         message_id: str,
         content: str,
+        *,
+        suppress_embeds: bool = False,
     ) -> SendResult:
         """Deliver an oversized final edit across message + continuations.
 
@@ -3892,12 +3899,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if len(chunks) <= 1:
             # Defensive: caller's pre-flight should guarantee >1 chunk, but if
             # not, just edit normally.
-            await msg.edit(content=chunks[0] if chunks else formatted)
+            await msg.edit(content=chunks[0] if chunks else formatted, **({"suppress": True} if suppress_embeds else {}))
             return SendResult(success=True, message_id=message_id)
 
         # Step 1 — edit the existing message with the first chunk.
         try:
-            await msg.edit(content=chunks[0])
+            await msg.edit(content=chunks[0], **({"suppress": True} if suppress_embeds else {}))
         except Exception as e:
             logger.error(
                 "[%s] Overflow split: first-chunk edit failed: %s",
@@ -3923,7 +3930,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # overflow continuations stay threaded.
                 reference = self._message_reference_from_ids(prev_msg.id, channel)
             try:
-                sent = await channel.send(content=chunk, reference=reference)
+                sent = await channel.send(content=chunk, reference=reference, **({"suppress_embeds": True} if suppress_embeds else {}))
             except Exception as send_err:
                 # Drop the reply anchor and retry once — a deleted/expired
                 # anchor (10008) or system-message reply (50035) shouldn't lose
@@ -3933,7 +3940,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     self.name, send_err,
                 )
                 try:
-                    sent = await channel.send(content=chunk, reference=None)
+                    sent = await channel.send(content=chunk, reference=None, **({"suppress_embeds": True} if suppress_embeds else {}))
                 except Exception as retry_err:
                     logger.warning(
                         "[%s] Overflow split: stopped at %d/%d chunks delivered: %s",
