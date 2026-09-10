@@ -37,6 +37,34 @@ class ElevenLabsSettingsTests(unittest.TestCase):
         for call in self.generate({}):
             self.assertNotIn('voice_settings', call)
 
+    def test_no_settings_needs_no_sdk_types_and_keeps_dotenv_fallback(self):
+        import builtins
+        import os
+
+        real_import = builtins.__import__
+        def without_sdk(name, *args, **kwargs):
+            if name == "elevenlabs" or name.startswith("elevenlabs."):
+                raise ModuleNotFoundError("ElevenLabs SDK deliberately unavailable")
+            return real_import(name, *args, **kwargs)
+
+        for config in ({}, {"speed": 1.0}, {"elevenlabs": {"speed": 1.0}}):
+            with self.subTest(config=config), tempfile.TemporaryDirectory() as tmp:
+                client = Mock()
+                client.text_to_speech.convert.side_effect = lambda **kw: iter([b"audio"])
+                factory = Mock(return_value=client)
+                with patch.dict(os.environ, {}, clear=True), patch.object(tts_tool, "get_env_value", return_value="el-dotenv-key") as dotenv, patch.object(tts_tool, "_import_elevenlabs", return_value=factory), patch("builtins.__import__", side_effect=without_sdk):
+                    dest = str(Path(tmp) / "speech.mp3")
+                    self.assertEqual(tts_tool._generate_elevenlabs("text", dest, config), dest)
+                    self.assertEqual(Path(dest).read_bytes(), b"audio")
+                    self.assertEqual(list(ElevenLabsStreamer(config, config.get("elevenlabs", {})).stream("text")), [b"audio"])
+                dotenv.assert_any_call("ELEVENLABS_API_KEY")
+                self.assertEqual(factory.call_count, 2)
+                for call in factory.call_args_list:
+                    self.assertEqual(call.kwargs, {"api_key": "el-dotenv-key"})
+                self.assertEqual(client.text_to_speech.convert.call_count, 2)
+                for call in client.text_to_speech.convert.call_args_list:
+                    self.assertNotIn("voice_settings", call.kwargs)
+
     def test_text_remains_visible_when_streaming_provider_fails(self):
         import queue
         import threading
