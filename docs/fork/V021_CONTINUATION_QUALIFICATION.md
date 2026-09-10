@@ -48,10 +48,10 @@ changes any Critical gate.
 | FC18: relative dir path; `bad..ref` worktree branch | Source: normalizers reject, `2945588a:hermes_cli/kanban_db.py:2545-2602`. | Executed real `create_task`: both persist. | Decide validation at normal create/set boundaries and compatibility for existing callers; preserve delegated durable-write refusals. |
 | FC18: persistent dir with `feature/test` branch | Source: old normalizer permits persistent dir. | Executed create rejects `branch_name is only valid for worktree workspaces`. | Separate interface decision from validation: approve dir metadata semantics and dashboard field propagation before expanding accepted input. |
 | G19: origin / deny / malformed policy `17` | Executed full historical helper: origin / no target / no target. | Executed real current watcher with temp board + recording adapter: origin for all three. Proposed deny/malformed contracts **fail**. | Resolve policy at subscription and delivery consistently; retain subscription data; decide home rerouting and TUI/allowlist exceptions individually. |
-| G17R: equal job ID in two homes | Source: old `(resolved home, id)` registration permits both; old runtime was not rerun. | Accepted prior real scheduler receipt `../fc17-registry-result.json`: `[true,false]`. | Capture qualified keys through register/release/stale sweep; maintain global drain snapshot and profile-local manual precheck separately. No getter-only or scheduler-only substitution. |
+| G17R: equal job ID in two homes | Source: old `(resolved home, id)` registration permits both; old runtime was not rerun. | Accepted prior real scheduler receipt `/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/fc17-registry-result.json` (task-only provenance): `[true,false]`. | Capture qualified keys through register/release/stale sweep; maintain global drain snapshot and profile-local manual precheck separately. No getter-only or scheduler-only substitution. |
 | G33: 50 suppressible `.app` findings followed by another warning, scanner exit 2 | Executed full old module: warn, 50 displayed findings. | Executed current module: allow, zero findings. Proposed full-findings contract **fails**. | Decide full-findings verdict evaluation independently of exact-package-name suppression. Keep external scanner exit semantics and bounded display; do not change authorization without approval. |
 
-Detailed commands, raw output and probe paths are in `../continuation-evidence.md`.
+Detailed commands, raw output and probe paths are in `/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/continuation-evidence.md` (task-only provenance).
 G11/FC18 fixtures only write disposable stores; G19 invokes the old helper from
 a read-only old blob materialized in the task evidence folder, never its old
 watcher. G33 replaces external binary resolution/execution with the same fixed
@@ -76,15 +76,18 @@ Other gated designs retain the concrete anchors in `critical-gates.md`:
   cost, model-specific stopping policy and caller thread ceilings. Preserve
   cached conversation bytes and explicit caller settings until each decision.
 - G28: current manifest uses `discord.py[voice]==2.7.1` plus a uv PyNaCl override;
-  a higher direct floor alone conflicts with the declared extra cap. Qualify a
-  proposed explicit dependency replacement with pip and uv resolution after the
-  packaging choice; no installer/lock/voice-source change in this continuation.
+  a higher direct floor alone conflicts with the declared extra cap. The earlier
+  suggestion to wait for the packaging choice before resolution is superseded:
+  [finite tail](V021_COMPATIBILITY_TAIL.md) completed pip/uv resolution without
+  installation. Packaging implementation remains Critical.
 - G30: fork SARIF publication and process-killer argv classification remain
-  separate decisions. A wrapper/flag-value/ancestor matrix must preserve current
-  refusals; test-process cleanup receipts do not approve classifier changes.
+  separate decisions. The [finite tail](V021_COMPATIBILITY_TAIL.md) now records
+  the wrapper/flag-value/ancestor matrix and failures in both old/current code;
+  test-process cleanup receipts do not approve classifier changes.
 
 Ledger reconciliation found no additional ungated production restoration
 among the existing 241 subfeatures. All ten qualification-only entries now have
 named evidence; 46 Critical subfeatures stay parked, independently of deferred
-human UAT. Broader gated design matrices above remain follow-up work where
-explicitly identified, not assertions of full historical parity.
+human UAT. The finite compatibility tail completes the remaining known safe prerequisite
+matrices. Future chosen-contract implementation tests remain gated work, not
+assertions of full historical parity or a human-UAT prerequisite.

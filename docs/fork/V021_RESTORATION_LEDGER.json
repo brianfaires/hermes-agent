@@ -22,7 +22,7 @@
   ],
   "qualification": {
     "command_template": "env -i HOME=<task-temp> HERMES_HOME=<task-temp>/hermes PATH=/usr/bin:/bin PYTHONPATH=<worktree> PYTHONDONTWRITEBYTECODE=1 TZ=UTC LANG=C.UTF-8 <canonical>/.venv/bin/python -B -m unittest discover -s <test-dir> -p <test-file> -v",
-    "focused_receipt": "../qualification-final.json (outside source, task evidence)",
+    "focused_receipt": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/qualification-final.json [task-only provenance] (outside source, task evidence)",
     "independent_review": "independent-review.md (durable original native review; closed R1/R2 retained)",
     "critical_decisions": "critical-gates.md (verbatim precise decisions)",
     "local_pytest_limitation": "Canonical interpreter lacks pytest; no installs. Host limitation, not a Critical approval blocker. Existing fixtures were executed by hosted CI.",
@@ -31,7 +31,13 @@
     "correction_tests": "Exact 3c8f7d0 run 34523897060 succeeded, including 52 added tests and corrected existing fixtures; supersedes pending correction CI.",
     "final_previous_ci": "V021_FINAL_CI_3c8f7d0.json",
     "continuation": "V021_CONTINUATION_QUALIFICATION.md; V021_CONTINUATION_RECEIPTS.json; seven local unittest tests in six new files passed; new candidate hosted CI awaits Ang integration.",
-    "continuation_review": "../continuation-review.md (native read-only review of new delta; candidate recorded in report)"
+    "continuation_review": "CONTINUATION_REVIEW.md (verbatim accepted native read-only report; exact candidate eda8d0537b1b66000b5ade38855343634ddd4e75)",
+    "compatibility_tail": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json; finite safe prerequisites completed, Critical classifications unchanged.",
+    "staging_checkpoint": {
+      "sha": "eda8d0537b1b66000b5ade38855343634ddd4e75",
+      "source": "Ang report in compatibility-tail-brief.md",
+      "ci": "pending; no new result reported"
+    }
   },
   "limitations": [
     "No live activation, delivery, restart, install, data migration, pushes or Kanban mutation.",
@@ -6468,7 +6474,12 @@
           "runtime_tests": [],
           "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
           "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "prerequisite_qualification": {
+            "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
+            "status": "completed_with_results_and_limits",
+            "approval": "Critical decision unchanged; no affected implementation"
+          }
         },
         {
           "id": "FC-28-E03",
@@ -6706,7 +6717,12 @@
           "runtime_tests": [],
           "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
           "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "prerequisite_qualification": {
+            "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
+            "status": "completed_with_results_and_limits",
+            "approval": "Critical decision unchanged; no affected implementation"
+          }
         },
         {
           "id": "FC-30-E02",
