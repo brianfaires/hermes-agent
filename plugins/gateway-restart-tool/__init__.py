@@ -236,6 +236,10 @@ def _schedule_restart(runner: Any) -> bool:
     if loop is None or not loop.is_running():
         raise RuntimeError("gateway event loop unavailable")
     detached, via_service = _restart_modes()
+    from gateway.session_context import get_session_env
+
+    # Capture the caller context before crossing onto the owning event loop.
+    caller_session_key = get_session_env("HERMES_SESSION_KEY", "") or None
 
     def request_on_loop():
         # The worker's preflight can precede an operator drain. Recheck on the
@@ -244,7 +248,10 @@ def _schedule_restart(runner: Any) -> bool:
             return False
         if runner._draining or getattr(runner, "_external_drain_active", False):
             raise RuntimeError("gateway_already_draining")
-        return runner.request_restart(detached=detached, via_service=via_service)
+        return runner.request_restart(
+            detached=detached, via_service=via_service,
+            defer_until_session_delivered=caller_session_key,
+        )
 
     try:
         current = asyncio.get_running_loop()

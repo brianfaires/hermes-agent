@@ -12462,7 +12462,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         return True
 
-    def request_restart(self, *, detached: bool = False, via_service: bool = False) -> bool:
+    def request_restart(
+        self, *, detached: bool = False, via_service: bool = False,
+        defer_until_session_delivered: str | None = None,
+    ) -> bool:
         if self._restart_task_started:
             return False
         self._restart_requested = True
@@ -12474,8 +12477,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # turn can still deliver its final response (#77184).
         self._draining = True
 
+        # Runner accounting ends before the adapter sends the returned response.
+        # Bind to that adapter run's delivery callback, independently of the
+        # active-work timeout (including its wedged-turn and zero-timeout paths).
+        delivered = asyncio.Event()
+        delivered.set()
+        if defer_until_session_delivered:
+            adapter_maps = [getattr(self, "adapters", {})]
+            adapter_maps.extend((getattr(self, "_profile_adapters", None) or {}).values())
+            for adapter_map in adapter_maps:
+                for adapter in (adapter_map or {}).values():
+                    active = getattr(adapter, "_active_sessions", {}).get(
+                        defer_until_session_delivered
+                    )
+                    register = getattr(adapter, "register_post_delivery_callback", None)
+                    if active is None or not callable(register):
+                        continue
+                    delivered.clear()
+                    register(
+                        defer_until_session_delivered, delivered.set,
+                        generation=getattr(active, "_hermes_run_generation", None),
+                    )
+                    break
+                if not delivered.is_set():
+                    break
+
         async def _run_restart() -> None:
             await self._await_active_work_before_restart()
+            await delivered.wait()
             # Launch the detached helper only AFTER the after-turn wait.
             # Its deadline is drain_timeout+5 and covers stop() teardown —
             # launching earlier would fire `hermes gateway restart` while
