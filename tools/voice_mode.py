@@ -1260,6 +1260,35 @@ def is_whisper_hallucination(transcript: str) -> bool:
     return False
 
 
+_STT_CANCELLATION_SUFFIXES = ("cancel that", "strike that")
+_STT_CANCELLATION_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_VOICE_THINKING_FILLER_RE = re.compile(
+    r"(?<!\w)(?:oh+|uh+|um+)(?![\w\-])[\s,.;:!?]*",
+    re.IGNORECASE,
+)
+_VOICE_INITIAL_ACK_RE = re.compile(
+    r"^\s*(?:yeah|yes|okay|ok|alright|right|sure)[\s,.;:!?]+",
+    re.IGNORECASE,
+)
+
+
+def clean_voice_transcript(transcript: str) -> str:
+    """Remove spoken disfluencies before matching voice-command aliases."""
+    cleaned = _VOICE_THINKING_FILLER_RE.sub(" ", str(transcript or ""))
+    cleaned = _VOICE_INITIAL_ACK_RE.sub("", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def is_stt_cancellation(transcript: str) -> bool:
+    """Return whether a transcript ends with a spoken cancellation instruction."""
+    normalized = _STT_CANCELLATION_PUNCT_RE.sub(" ", str(transcript or "").casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return any(
+        normalized == suffix or normalized.endswith(f" {suffix}")
+        for suffix in _STT_CANCELLATION_SUFFIXES
+    )
+
+
 # ============================================================================
 # Voice-chat stop phrases
 # ============================================================================

@@ -43,6 +43,7 @@ import time
 import traceback
 from collections import OrderedDict
 from contextvars import Context, copy_context
+from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Optional, Any, List, Tuple, Union, cast
@@ -5591,7 +5592,7 @@ class TurnRunner:
         if not ctx._run_still_current():
             return
         ctx._voice_ack_fired[0] = True
-        _adapter = self._runner.adapters.get(Platform.DISCORD)
+        _adapter = self._runner._adapter_for_source(ctx.source)
         if _adapter is None or not hasattr(_adapter, "play_ack_in_voice"):
             return
         try:
@@ -17901,6 +17902,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # is truly hung — the executor thread is blocked and never checks
         # _interrupt_requested.  Force-clean _running_agents so the session
         # is unlocked and subsequent messages are processed normally.
+        await self._stop_voice_playback_for_event(event)
         await self._interrupt_and_clear_session(
             quick_key,
             source,
@@ -23856,10 +23858,228 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return None
 
 
+    async def _wait_for_discord_voice_ready(
+        self, adapter, guild_id: int, *, timeout: float = 3.0
+    ) -> bool:
+        """Wait briefly for Discord voice to be connected before first playback."""
+        is_in_voice_channel = getattr(adapter, "is_in_voice_channel", None)
+        if not callable(is_in_voice_channel):
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                ready = is_in_voice_channel(guild_id)
+                if inspect.isawaitable(ready):
+                    ready = await ready
+                if ready:
+                    return True
+            except Exception:
+                logger.debug("Discord voice readiness check failed", exc_info=True)
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.1, remaining))
+
+    @staticmethod
+    def _discord_adapter_connected_to_voice_channel(
+        adapter,
+        guild_id: int,
+        channel_id: int,
+    ) -> bool:
+        voice_clients = getattr(adapter, "_voice_clients", {}) or {}
+        existing = (
+            voice_clients.get(int(guild_id))
+            if isinstance(voice_clients, dict)
+            else None
+        )
+        if existing is None:
+            return False
+        try:
+            return bool(
+                existing.is_connected()
+                and getattr(getattr(existing, "channel", None), "id", None)
+                == int(channel_id)
+            )
+        except Exception:
+            return False
+
+    def _wire_discord_voice_callbacks(self, adapter) -> None:
+        """Bind receive/cleanup callbacks to the profile adapter owning the VC."""
+        if hasattr(adapter, "_voice_input_callback"):
+
+            async def _input(guild_id, user_id, transcript):
+                await self._handle_voice_channel_input(
+                    guild_id,
+                    user_id,
+                    transcript,
+                    adapter=adapter,
+                )
+
+            adapter._voice_input_callback = _input
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = (
+                lambda chat_id: self._handle_voice_timeout_cleanup(
+                    chat_id,
+                    adapter=adapter,
+                )
+            )
+        if hasattr(adapter, "_voice_mode_getter"):
+            adapter._voice_mode_getter = lambda chat_id: self._voice_mode.get(
+                self._voice_key(Platform.DISCORD, str(chat_id)), "off"
+            )
+
+    def _clear_discord_voice_callbacks_if_idle(self, adapter) -> None:
+        if getattr(adapter, "_voice_clients", {}) or {}:
+            return
+        if hasattr(adapter, "_voice_input_callback"):
+            adapter._voice_input_callback = None
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = None
+
+    @staticmethod
+    def _discord_auto_voice_text_channel_id(adapter) -> Optional[int]:
+        """Return configured transcript/control channel for auto voice, if any."""
+        adapter_getter = getattr(adapter, "_auto_voice_text_channel_id", None)
+        if callable(adapter_getter):
+            try:
+                return adapter_getter()
+            except Exception:
+                logger.debug("Discord auto voice text-channel lookup failed", exc_info=True)
+                return None
+        extra = getattr(getattr(adapter, "config", None), "extra", {}) or {}
+        raw = extra.get("auto_voice_text_channel_id")
+        if raw in (None, ""):
+            return None
+        try:
+            channel_id = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid discord.auto_voice_text_channel_id: %r", raw)
+            return None
+        return channel_id if channel_id > 0 else None
+
+    async def _handle_discord_auto_voice_join(
+        self, adapter, member, voice_channel
+    ) -> bool:
+        """Join configured Discord voice presence on the owning profile adapter."""
+        guild = getattr(voice_channel, "guild", None) or getattr(member, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        channel_id = getattr(voice_channel, "id", None)
+        if guild_id is None or channel_id is None:
+            return False
+
+        text_channel_id = self._discord_auto_voice_text_channel_id(adapter)
+        chat_id = str(text_channel_id or channel_id)
+        voice_key = self._voice_key(Platform.DISCORD, chat_id)
+        if self._voice_mode.get(voice_key) == "off":
+            logger.info(
+                "Discord auto-voice join suppressed for chat %s by persisted voice off state",
+                chat_id,
+            )
+            self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            return False
+
+        already_connected = self._discord_adapter_connected_to_voice_channel(
+            adapter,
+            int(guild_id),
+            int(channel_id),
+        )
+        self._wire_discord_voice_callbacks(adapter)
+        try:
+            if not await adapter.join_voice_channel(voice_channel):
+                self._clear_discord_voice_callbacks_if_idle(adapter)
+                return False
+        except Exception:
+            logger.warning("Failed to auto-join Discord voice channel", exc_info=True)
+            self._clear_discord_voice_callbacks_if_idle(adapter)
+            return False
+
+        rejoining_persisted_voice_session = self._voice_mode.get(
+            voice_key
+        ) in {"voice_only", "all"}
+        adapter._voice_text_channels[int(guild_id)] = int(chat_id)
+        getattr(adapter, "_auto_voice_session_channels", set()).add(chat_id)
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id=chat_id,
+            chat_name=getattr(voice_channel, "name", None),
+            chat_type="group",
+            user_id=str(getattr(member, "id", "")) or None,
+            user_name=getattr(member, "display_name", None),
+            guild_id=str(guild_id),
+            profile=getattr(adapter, "_runtime_profile_name", None),
+        )
+        if hasattr(adapter, "_voice_sources"):
+            adapter._voice_sources[int(guild_id)] = source.to_dict()
+        self._voice_mode[voice_key] = "voice_only"
+        self._save_voice_modes()
+        self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+        if not already_connected and text_channel_id is not None:
+            if not await self._wait_for_discord_voice_ready(adapter, int(guild_id)):
+                logger.warning(
+                    "Discord auto-voice greeting skipped: voice connection not "
+                    "ready for guild %s",
+                    guild_id,
+                )
+                return True
+            event = MessageEvent(
+                source=source,
+                text="",
+                message_type=MessageType.TEXT,
+                raw_message=SimpleNamespace(guild_id=int(guild_id), guild=guild),
+            )
+            await self._send_voice_reply(
+                event,
+                "Back online." if rejoining_persisted_voice_session else "I'm here. What's up?",
+            )
+        return True
+
+    async def _handle_discord_auto_voice_leave(
+        self, adapter, member, voice_channel
+    ) -> bool:
+        guild = getattr(voice_channel, "guild", None) or getattr(member, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        if guild_id is None:
+            return False
+        chat_id = str(
+            getattr(adapter, "_voice_text_channels", {}).get(int(guild_id))
+            or getattr(voice_channel, "id", "")
+        )
+        try:
+            await adapter.leave_voice_channel(int(guild_id))
+        except Exception:
+            logger.warning("Failed to auto-leave Discord voice channel", exc_info=True)
+        if chat_id:
+            voice_key = self._voice_key(Platform.DISCORD, chat_id)
+            if self._voice_mode.get(voice_key) == "voice_only":
+                self._voice_mode.pop(voice_key, None)
+                self._save_voice_modes()
+            self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            getattr(adapter, "_auto_voice_session_channels", set()).discard(chat_id)
+        self._clear_discord_voice_callbacks_if_idle(adapter)
+        return True
+
+    async def _stop_voice_playback_for_event(self, event: MessageEvent) -> bool:
+        """Stop Discord voice playback for the event's owning adapter."""
+        if getattr(event.source, "platform", None) != Platform.DISCORD:
+            return False
+        guild_id = self._get_guild_id(event)
+        if not guild_id:
+            return False
+        adapter = self._adapter_for_source(event.source)
+        stop_voice = getattr(adapter, "stop_voice_playback", None)
+        if not callable(stop_voice):
+            return False
+        try:
+            return bool(await stop_voice(guild_id))
+        except Exception:
+            logger.debug("Discord voice stop failed", exc_info=True)
+            return False
+
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
         adapter = self._adapter_for_source(event.source)
-        if not hasattr(adapter, "join_voice_channel"):
+        if adapter is None or not hasattr(adapter, "join_voice_channel"):
             return "Voice channels are not supported on this platform."
 
         guild_id = self._get_guild_id(event)
@@ -23872,18 +24092,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not voice_channel:
             return "You need to be in a voice channel first."
 
-        # Wire callbacks BEFORE join so voice input arriving immediately
-        # after connection is not lost.
-        if hasattr(adapter, "_voice_input_callback"):
-            adapter._voice_input_callback = self._handle_voice_channel_input
-        if hasattr(adapter, "_on_voice_disconnect"):
-            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
-        # Let the adapter's inactivity timer see the live voice-reply mode so it
-        # doesn't disconnect a deliberately text-only (/voice off) session.
-        if hasattr(adapter, "_voice_mode_getter"):
-            adapter._voice_mode_getter = lambda chat_id: self._voice_mode.get(
-                self._voice_key(Platform.DISCORD, str(chat_id)), "off"
-            )
+        self._wire_discord_voice_callbacks(adapter)
 
         try:
             success = await adapter.join_voice_channel(voice_channel)
@@ -23918,7 +24127,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         adapter = self._adapter_for_source(event.source)
         guild_id = self._get_guild_id(event)
 
-        if not guild_id or not hasattr(adapter, "leave_voice_channel"):
+        if not guild_id or adapter is None or not hasattr(adapter, "leave_voice_channel"):
             return "Not in a voice channel."
 
         if not hasattr(adapter, "is_in_voice_channel") or not adapter.is_in_voice_channel(guild_id):
@@ -23936,17 +24145,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter._voice_input_callback = None
         return "Left voice channel."
 
-    def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
+    def _handle_voice_timeout_cleanup(self, chat_id: str, *, adapter=None) -> None:
         """Called by the adapter when a voice channel times out.
 
         Cleans up runner-side voice_mode state that the adapter cannot reach.
         """
         self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
         self._save_voice_modes()
-        adapter = self.adapters.get(Platform.DISCORD)
+        if adapter is None:
+            adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
 
-    def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
+    def _is_duplicate_voice_transcript(
+        self,
+        guild_id: int,
+        user_id: int,
+        transcript: str,
+        *,
+        profile: Optional[str] = None,
+    ) -> bool:
         """Suppress repeated STT outputs for the same recent utterance.
 
         Voice capture can occasionally emit the same utterance twice a few
@@ -23963,7 +24180,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         now = time.monotonic()
         window_seconds = 12.0
-        key = (guild_id, user_id)
+        key = (profile or "", guild_id, user_id)
         recent_store = getattr(self, "_recent_voice_transcripts", None)
         if not isinstance(recent_store, dict):
             recent_store = {}
@@ -23988,14 +24205,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return False
 
     async def _handle_voice_channel_input(
-        self, guild_id: int, user_id: int, transcript: str
+        self,
+        guild_id: int,
+        user_id: int,
+        transcript: str,
+        *,
+        adapter=None,
     ):
-        """Handle transcribed voice from a user in a voice channel.
-
-        Creates a synthetic MessageEvent and processes it through the
-        adapter's full message pipeline (session, typing, agent, TTS reply).
-        """
-        adapter = self.adapters.get(Platform.DISCORD)
+        """Handle transcribed voice through the adapter that owns its profile."""
+        if adapter is None:
+            adapter = self.adapters.get(Platform.DISCORD)
         if not adapter:
             return
 
@@ -24017,6 +24236,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=str(user_id),
                 user_name=str(user_id),
                 chat_type="channel",
+                profile=getattr(adapter, "_runtime_profile_name", None),
             )
 
         # Check authorization before processing voice input
@@ -24024,7 +24244,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return
 
-        if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
+        if self._is_duplicate_voice_transcript(
+            guild_id,
+            user_id,
+            transcript,
+            profile=getattr(source, "profile", None),
+        ):
             logger.info(
                 "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
                 guild_id,
@@ -24034,13 +24259,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         # Show transcript in text channel (after auth, with mention sanitization)
-        try:
-            channel = adapter._client.get_channel(text_ch_id)
-            if channel:
-                safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
-                await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
-        except Exception:
-            pass
+        transcript_channel_id = self._discord_auto_voice_text_channel_id(adapter)
+        if transcript_channel_id is not None and self._should_echo_stt_transcripts():
+            try:
+                channel = adapter._client.get_channel(transcript_channel_id)
+                if channel:
+                    safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+                    await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
+            except Exception:
+                pass
 
         # Build a synthetic MessageEvent and feed through the normal pipeline
         # Use SimpleNamespace as raw_message so _get_guild_id() can extract
@@ -24144,7 +24371,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _should_echo_stt_transcripts(self) -> bool:
         """Return whether inbound voice/STT transcripts should be echoed to chat."""
-        return bool(getattr(self.config, "stt_echo_transcripts", True))
+        return bool(getattr(getattr(self, "config", None), "stt_echo_transcripts", True))
 
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
@@ -30413,7 +30640,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _voice_ack_fired = [False]
         _voice_ack_guild: List[Optional[int]] = [None]
         if source.platform == Platform.DISCORD:
-            _va = self.adapters.get(Platform.DISCORD)
+            _va = self._adapter_for_source(source)
             # source.chat_id is the linked text channel; resolve the guild whose
             # voice connection is bound to it (mirrors DiscordAdapter.play_tts).
             _vtc = getattr(_va, "_voice_text_channels", None)

@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 from collections import defaultdict
 from contextlib import suppress
@@ -38,6 +39,32 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MARKDOWN_LINK_LABEL_RE = re.compile(r"([\\\[\]])")
 _DISCORD_URL_LABEL_SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
+_DISCORD_STT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _load_profile_stt_aliases() -> Dict[str, Any]:
+    """Load Discord STT aliases from the profile-local voice command catalog."""
+    from hermes_constants import get_hermes_home
+
+    path = get_hermes_home() / "voice" / "commands.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            aliases = tomllib.load(handle).get("stt_aliases")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("Could not load Discord STT aliases from %s: %s", path, exc)
+        return {}
+    if not isinstance(aliases, dict):
+        logger.warning("Discord STT aliases in %s must be a TOML table", path)
+        return {}
+    return aliases
+
+
+def _normalize_discord_stt_alias_text(text: str) -> str:
+    """Normalize a spoken transcript or configured STT alias for exact matching."""
+    normalized = _DISCORD_STT_ALIAS_PUNCT_RE.sub(" ", str(text or "").casefold())
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _format_discord_markdown_link(label: str, url: str) -> str:
@@ -1095,7 +1122,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self._text_batch_split_delay_seconds = env_float("HERMES_DISCORD_TEXT_BATCH_SPLIT_DELAY_SECONDS", 2.0)
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
-        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
+        self._voice_text_channels: Dict[int, int] = {}  # guild_id -> session/control channel_id
+        self._auto_voice_session_channels: set[str] = set()  # channels bound by presence-triggered auto voice
         self._voice_sources: Dict[int, Dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         self._voice_timeout_seconds = self._load_voice_timeout()
@@ -1103,6 +1131,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Phase 2: voice listening
         self._voice_receivers: Dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
+        self._voice_session_generations: Dict[int, int] = {}  # guild_id -> stale STT guard
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
         # Resolves the current voice-reply mode ("off"|"voice_only"|"all") for a
@@ -1116,6 +1145,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._stt_aliases = _load_profile_stt_aliases()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -1405,6 +1435,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 if adapter_self._missed_message_backfill_enabled():
                     adapter_self._ensure_missed_message_backfill_task()
+                if adapter_self._auto_voice_channel_id() is not None:
+                    asyncio.create_task(adapter_self._sync_auto_voice_presence())
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1428,16 +1460,19 @@ class DiscordAdapter(BasePlatformAdapter):
 
             @self._client.event
             async def on_voice_state_update(member, before, after):
-                """Track voice channel join/leave events."""
+                """Track voice channel join/leave events and auto voice presence."""
+                # Ignore the bot itself
+                if member == adapter_self._client.user:
+                    return
+
+                await adapter_self._handle_auto_voice_state_update(member, before, after)
+
                 # Only track channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
                     return
                 guild_id = member.guild.id
                 if guild_id not in bot_guild_ids:
-                    return
-                # Ignore the bot itself
-                if member == adapter_self._client.user:
                     return
 
                 joined = before.channel is None and after.channel is not None
@@ -4577,6 +4612,243 @@ class DiscordAdapter(BasePlatformAdapter):
         mixers = getattr(self, "_voice_mixers", None)
         return bool(mixers) and mixers.get(guild_id) is not None
 
+    def _auto_voice_channel_id(self) -> Optional[int]:
+        """Configured Discord voice channel that explicitly enables hands-free mode."""
+        raw = self.config.extra.get("auto_voice_channel_id")
+        if raw in (None, ""):
+            return None
+        try:
+            channel_id = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid discord.auto_voice_channel_id: %r", raw)
+            return None
+        return channel_id if channel_id > 0 else None
+
+    def _auto_voice_user_ids(self) -> set[str]:
+        """Explicit Discord user IDs allowed to trigger auto voice mode."""
+        raw = self.config.extra.get("auto_voice_user_ids")
+        if raw in (None, ""):
+            return set()
+        items = raw if isinstance(raw, (list, tuple, set)) else str(raw).split(",")
+        return {
+            _clean_discord_id(str(item))
+            for item in items
+            if str(item).strip()
+        }
+
+    def _auto_voice_text_channel_id(self) -> Optional[int]:
+        """Configured text channel for auto voice transcript/control, if any."""
+        raw = self.config.extra.get("auto_voice_text_channel_id")
+        if raw in (None, ""):
+            return None
+        try:
+            channel_id = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid discord.auto_voice_text_channel_id: %r", raw)
+            return None
+        return channel_id if channel_id > 0 else None
+
+    def _auto_voice_channel_allowed(self, channel) -> bool:
+        """Apply this adapter's existing channel allow/ignore policy to auto voice."""
+        channel_ids = {str(getattr(channel, "id", ""))}
+        text_channel_id = self._auto_voice_text_channel_id()
+        if text_channel_id is not None:
+            channel_ids.add(str(text_channel_id))
+        channel_ids = {item for item in channel_ids if item}
+
+        ignored = self._get_ignored_channels()
+        if ignored and ("*" in ignored or channel_ids & ignored):
+            return False
+        allowed = self._get_allowed_channels()
+        if allowed and "*" not in allowed and not (channel_ids & allowed):
+            return False
+        return True
+
+    def _is_auto_voice_member_allowed(self, member, guild=None) -> bool:
+        explicit_users = self._auto_voice_user_ids()
+        member_id = str(getattr(member, "id", ""))
+        if explicit_users and _clean_discord_id(member_id) not in explicit_users:
+            return False
+        return self._is_allowed_user(member_id, member, guild=guild, is_dm=False)
+
+    def _is_auto_voice_user_id_allowed(self, user_id: str | int) -> bool:
+        explicit_users = self._auto_voice_user_ids()
+        if not explicit_users:
+            return False
+        return _clean_discord_id(str(user_id)) in explicit_users
+
+    def _is_voice_speaker_allowed(self, user_id: str | int, *, guild=None) -> bool:
+        """Authorize captured voice input for the active voice session."""
+        explicit_users = self._auto_voice_user_ids()
+        cleaned = _clean_discord_id(str(user_id))
+        if explicit_users and cleaned not in explicit_users:
+            return False
+        return self._is_allowed_user(cleaned, guild=guild, is_dm=False)
+
+    async def _get_channel_by_id(self, channel_id: int):
+        """Return a Discord channel from cache or API fetch."""
+        if not self._client:
+            return None
+        channel = self._client.get_channel(int(channel_id))
+        if channel is not None:
+            return channel
+        fetch = getattr(self._client, "fetch_channel", None)
+        if fetch is None:
+            return None
+        try:
+            return await fetch(int(channel_id))
+        except Exception as exc:
+            logger.warning("Failed to fetch Discord channel %s: %s", channel_id, exc)
+            return None
+
+    def _has_allowed_human_in_voice_channel(self, channel) -> bool:
+        """True when at least one authorized non-bot user is present."""
+        guild = getattr(channel, "guild", None)
+        for member in getattr(channel, "members", []) or []:
+            if getattr(member, "bot", False):
+                continue
+            if self._is_auto_voice_member_allowed(member, guild=guild):
+                return True
+        return False
+
+    def _is_auto_voice_guild(self, guild_id: int) -> bool:
+        """Return True when connected to the configured auto voice channel."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None:
+            return False
+        vc = self._voice_clients.get(guild_id)
+        channel = getattr(vc, "channel", None) if vc else None
+        return getattr(channel, "id", None) == auto_channel_id
+
+    async def _sync_auto_voice_presence(self) -> None:
+        """Join the configured voice channel on startup when an allowed user is present."""
+        channel_id = self._auto_voice_channel_id()
+        if channel_id is None:
+            return
+        channel = await self._get_channel_by_id(channel_id)
+        if channel is None:
+            logger.warning("Configured Discord auto voice channel %s was not found", channel_id)
+            return
+        if not self._auto_voice_channel_allowed(channel):
+            return
+        if not self._has_allowed_human_in_voice_channel(channel):
+            return
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None or not hasattr(runner, "_handle_discord_auto_voice_join"):
+            return
+        member = next(
+            (
+                m for m in getattr(channel, "members", []) or []
+                if not getattr(m, "bot", False)
+                and self._is_auto_voice_member_allowed(
+                    m, guild=getattr(channel, "guild", None)
+                )
+            ),
+            None,
+        )
+        if member is not None:
+            await runner._handle_discord_auto_voice_join(self, member, channel)
+
+    async def _handle_auto_voice_state_update(self, member, before, after) -> None:
+        """Join/leave auto voice mode based only on configured Discord VC presence."""
+        auto_channel_id = self._auto_voice_channel_id()
+        if auto_channel_id is None or getattr(member, "bot", False):
+            return
+        guild = getattr(member, "guild", None)
+        if not self._is_auto_voice_member_allowed(member, guild=guild):
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        before_id = getattr(before_channel, "id", None)
+        after_id = getattr(after_channel, "id", None)
+        moved_into_auto = after_id == auto_channel_id and before_id != auto_channel_id
+        moved_out_of_auto = before_id == auto_channel_id and after_id != auto_channel_id
+        if not moved_into_auto and not moved_out_of_auto:
+            return
+        if moved_into_auto and not self._auto_voice_channel_allowed(after_channel):
+            return
+
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None:
+            return
+        if moved_into_auto and hasattr(runner, "_handle_discord_auto_voice_join"):
+            await runner._handle_discord_auto_voice_join(self, member, after_channel)
+        elif moved_out_of_auto and hasattr(runner, "_handle_discord_auto_voice_leave"):
+            if before_channel is not None and self._has_allowed_human_in_voice_channel(before_channel):
+                return
+            await runner._handle_discord_auto_voice_leave(self, member, before_channel)
+
+    def _configured_stt_aliases(self) -> Dict[str, str]:
+        """Return normalized Discord STT alias phrase -> replacement text."""
+        raw = getattr(self, "_stt_aliases", {})
+        if not isinstance(raw, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for target, phrases in raw.items():
+            replacement = str(target or "").strip()
+            if not replacement:
+                continue
+            if isinstance(phrases, str):
+                phrases = [phrases]
+            if not isinstance(phrases, (list, tuple, set)):
+                continue
+            for phrase in phrases:
+                norm = _normalize_discord_stt_alias_text(str(phrase or ""))
+                if norm:
+                    aliases[norm] = replacement
+        return aliases
+
+    def _rewrite_stt_alias(self, transcript: str) -> str:
+        """Rewrite a Discord voice transcript alias to configured text."""
+        aliases = self._configured_stt_aliases()
+        if not aliases:
+            return transcript
+        from tools.voice_mode import clean_voice_transcript
+
+        candidate = clean_voice_transcript(transcript)
+        normalized = _normalize_discord_stt_alias_text(candidate)
+        replacement = aliases.get(normalized)
+        if replacement:
+            logger.info("Discord STT alias matched; rewriting voice transcript")
+            return replacement
+
+        candidate_words = list(re.finditer(r"\w+", candidate, flags=re.UNICODE))
+        if not candidate_words:
+            return transcript
+        normalized_words = [match.group(0).casefold() for match in candidate_words]
+        best: Optional[Tuple[int, str]] = None
+        for alias_norm, alias_replacement in aliases.items():
+            alias_words = alias_norm.split()
+            if not alias_words or len(alias_words) >= len(normalized_words):
+                continue
+            if normalized_words[:len(alias_words)] != alias_words:
+                continue
+            # Prefix matching is token based, so "queue" does not match
+            # "queueing"; the original tail keeps its case and punctuation.
+            if best is None or len(alias_words) > best[0]:
+                best = (len(alias_words), alias_replacement)
+        if best is None:
+            return transcript
+        word_count, replacement = best
+        tail_start = candidate_words[word_count - 1].end()
+        tail = candidate[tail_start:].lstrip()
+        logger.info("Discord STT alias matched; rewriting voice transcript")
+        return f"{replacement} {tail}".rstrip()
+
+    async def _schedule_stt_warmup(self) -> None:
+        """Best-effort background warmup for local STT on first VC join."""
+        try:
+            from tools.transcription_tools import warm_local_stt_model
+            result = await asyncio.to_thread(warm_local_stt_model)
+            if result.get("success") and result.get("warmed"):
+                logger.info(
+                    "Voice STT warmup complete (provider=%s model=%s)",
+                    result.get("provider"), result.get("model"),
+                )
+        except Exception as exc:
+            logger.debug("Voice STT warmup skipped: %s", exc)
+
     async def join_voice_channel(self, channel, *, text_channel_id: int = None, source: dict = None) -> bool:
         """Join a Discord voice channel. Returns True on success.
 
@@ -4603,6 +4875,9 @@ class DiscordAdapter(BasePlatformAdapter):
 
             vc = await channel.connect()
             self._voice_clients[guild_id] = vc
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             self._reset_voice_timeout(guild_id)
 
             # Store text-channel binding for automatic/programmatic joins
@@ -4614,12 +4889,16 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start voice receiver (Phase 2: listen to users)
             try:
-                receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+                receiver = VoiceReceiver(
+                    vc,
+                    allowed_user_ids=self._auto_voice_user_ids() or self._allowed_user_ids,
+                )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
                 self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
                     self._voice_listen_loop(guild_id)
                 )
+                asyncio.ensure_future(self._schedule_stt_warmup())
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
 
@@ -4637,19 +4916,38 @@ class DiscordAdapter(BasePlatformAdapter):
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            if not hasattr(self, "_voice_session_generations"):
+                self._voice_session_generations = {}
+            self._voice_session_generations[guild_id] = (
+                self._voice_session_generations.get(guild_id, 0) + 1
+            )
             # Stop voice receiver first
             receiver = self._voice_receivers.pop(guild_id, None)
-            pending_inputs = []
+            pending_audio = []
             if receiver:
-                pending_inputs = receiver.flush_pending()
+                flush_pending = getattr(receiver, "flush_pending", None)
+                if callable(flush_pending):
+                    try:
+                        pending_audio = flush_pending() or []
+                    except Exception:
+                        logger.debug(
+                            "Discord voice receiver pending flush failed",
+                            exc_info=True,
+                        )
                 receiver.stop()
             listen_task = self._voice_listen_tasks.pop(guild_id, None)
             if listen_task:
                 listen_task.cancel()
 
-            guild = self._client.get_guild(guild_id) if self._client is not None else None
-            for user_id, pcm_data in pending_inputs:
-                if self._is_allowed_user(str(user_id), guild=guild, is_dm=False):
+            if pending_audio:
+                _vc_guild = (
+                    self._client.get_guild(guild_id)
+                    if self._client is not None and hasattr(self._client, "get_guild")
+                    else None
+                )
+                for user_id, pcm_data in pending_audio:
+                    if not self._is_voice_speaker_allowed(user_id, guild=_vc_guild):
+                        continue
                     await self._process_voice_input(guild_id, user_id, pcm_data)
 
             # Tear down the mixer (stops the continuous outgoing stream).
@@ -4667,8 +4965,34 @@ class DiscordAdapter(BasePlatformAdapter):
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
                 task.cancel()
-            self._voice_text_channels.pop(guild_id, None)
+            session_channel_id = self._voice_text_channels.pop(guild_id, None)
+            if session_channel_id is not None:
+                auto_voice_channels = getattr(self, "_auto_voice_session_channels", None)
+                if isinstance(auto_voice_channels, set):
+                    auto_voice_channels.discard(str(session_channel_id))
             self._voice_sources.pop(guild_id, None)
+
+    async def stop_voice_playback(self, guild_id: int) -> bool:
+        """Stop active TTS in one guild while keeping the voice connection alive."""
+        mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
+        if mixer is not None:
+            mixer.stop_speech()
+            return True
+
+        vc = self._voice_clients.get(guild_id)
+        if vc is None:
+            return False
+        try:
+            if vc.is_playing():
+                vc.stop()
+                return True
+        except Exception as exc:
+            logger.debug(
+                "Failed to stop Discord voice playback for guild %s: %s",
+                guild_id,
+                exc,
+            )
+        return False
 
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
@@ -4789,6 +5113,8 @@ class DiscordAdapter(BasePlatformAdapter):
         timeout = self._voice_timeout_limit()
         if timeout <= 0:
             logger.debug("Voice inactivity timeout disabled (guild=%d)", guild_id)
+            return
+        if self._is_auto_voice_guild(guild_id):
             return
         self._voice_timeout_tasks[guild_id] = asyncio.ensure_future(
             self._voice_timeout_handler(guild_id, timeout)
@@ -4942,43 +5268,102 @@ class DiscordAdapter(BasePlatformAdapter):
                 # guild-scoped and not cross-guild.
                 _vc_guild = self._client.get_guild(guild_id) if self._client is not None else None
                 for user_id, pcm_data in completed:
-                    if not self._is_allowed_user(
-                        str(user_id),
-                        guild=_vc_guild,
-                        is_dm=False,
-                    ):
+                    if not self._is_voice_speaker_allowed(user_id, guild=_vc_guild):
                         continue
                     # A user speaking to the bot is activity too — not just the
                     # bot's own playback. Reset the inactivity timer so an active
                     # listener isn't disconnected mid-conversation (this also
                     # covers voice-on text-only sessions that never play audio).
                     self._reset_voice_timeout(guild_id)
-                    await self._process_voice_input(guild_id, user_id, pcm_data)
+                    session_generation = self._voice_session_generations.get(guild_id, 0)
+                    await self._process_voice_input(
+                        guild_id,
+                        user_id,
+                        pcm_data,
+                        session_generation=session_generation,
+                    )
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error("Voice listen loop error: %s", e, exc_info=True)
 
-    async def _process_voice_input(self, guild_id: int, user_id: int, pcm_data: bytes):
+    async def _process_voice_worker(self, awaitable, phase: str, wav_path: str):
+        """Run voice file work to completion even if the listener is cancelled."""
+        task = asyncio.create_task(awaitable)
+        logged_cancel = False
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not logged_cancel:
+                    logger.info(
+                        "Voice input %s continuing after listener cancellation (%s)",
+                        phase,
+                        os.path.basename(wav_path),
+                    )
+                    logged_cancel = True
+
+    async def play_cancellation_ack_in_voice(self, guild_id: int) -> bool:
+        """Speak a short acknowledgement after a cancelled voice transcript."""
+        if not self.is_in_voice_channel(guild_id):
+            return False
+        phrases = self._voice_fx_cfg.get("cancellation_ack_phrases") or ["Canceled."]
+        phrase = phrases[0] if isinstance(phrases, list) and phrases else "Canceled."
+        return await self.play_ack_in_voice(guild_id, str(phrase))
+
+    async def _process_voice_input(
+        self,
+        guild_id: int,
+        user_id: int,
+        pcm_data: bytes,
+        *,
+        session_generation: Optional[int] = None,
+    ):
         """Convert PCM -> WAV -> STT -> callback."""
-        from tools.voice_mode import is_whisper_hallucination
+        from tools.voice_mode import (
+            is_stt_cancellation,
+            is_whisper_hallucination,
+        )
 
         tmp_f = tempfile.NamedTemporaryFile(suffix=".wav", prefix="vc_listen_", delete=False)
         wav_path = tmp_f.name
         tmp_f.close()
         try:
-            await asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path)
+            await self._process_voice_worker(
+                asyncio.to_thread(VoiceReceiver.pcm_to_wav, pcm_data, wav_path),
+                "wav conversion",
+                wav_path,
+            )
 
             from tools.transcription_tools import transcribe_audio
-            result = await asyncio.to_thread(transcribe_audio, wav_path)
+            result = await self._process_voice_worker(
+                asyncio.to_thread(transcribe_audio, wav_path),
+                "transcription",
+                wav_path,
+            )
 
             if not result.get("success"):
                 return
             transcript = result.get("transcript", "").strip()
             if not transcript or is_whisper_hallucination(transcript):
                 return
+            if is_stt_cancellation(transcript):
+                logger.info("Dropped Discord voice transcript after spoken cancellation")
+                await self.play_cancellation_ack_in_voice(guild_id)
+                return
+            if (
+                session_generation is not None
+                and self._voice_session_generations.get(guild_id, 0) != session_generation
+            ):
+                logger.info(
+                    "Dropping stale Discord voice transcript for guild=%s "
+                    "after voice session changed",
+                    guild_id,
+                )
+                return
 
             logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:
                 await self._voice_input_callback(
@@ -10631,6 +11016,14 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
     if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
         os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
+    for voice_key in (
+        "auto_voice_channel_id",
+        "auto_voice_user_ids",
+        "auto_voice_text_channel_id",
+    ):
+        value = discord_cfg.get(voice_key)
+        if value is not None:
+            seeded_extra[voice_key] = value
     backfill_cfg = discord_cfg.get("missed_message_backfill")
     if isinstance(backfill_cfg, dict):
         seeded_extra["missed_message_backfill"] = dict(backfill_cfg)

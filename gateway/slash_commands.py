@@ -1544,6 +1544,10 @@ class GatewaySlashCommandsMixin:
         """
         from gateway.run import _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
         source = event.source
+        stop_voice_playback = getattr(self, "_stop_voice_playback_for_event", None)
+        voice_playback_stopped = False
+        if callable(stop_voice_playback):
+            voice_playback_stopped = bool(await stop_voice_playback(event))
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
@@ -1612,6 +1616,8 @@ class GatewaySlashCommandsMixin:
                     exc_info=True,
                 )
 
+        if voice_playback_stopped:
+            return EphemeralReply(t("gateway.stop.stopped"))
         return t("gateway.stop.no_active")
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:
