@@ -519,6 +519,8 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
             continue
         if _is_durable_script_path(p) or _would_remove_worktree(p):
             continue
+        if p.is_dir() and item["category"] in {"test", "temp", "cron-output"}:
+            continue
         age = (now - datetime.fromisoformat(item["timestamp"])).days
         cat = item["category"]
         size = item["size"]
@@ -611,6 +613,13 @@ def quick() -> Dict[str, Any]:
 
         if _is_durable_script_path(p):
             _log(f"SKIP durable script path: {p} (removed from tracking)")
+            continue
+
+        # A legacy directory record cannot authorize deleting untracked
+        # descendants. Recursive retention requires an explicit wildcard policy.
+        if p.is_dir() and cat in {"test", "temp", "cron-output"}:
+            _log(f"SKIP legacy non-wildcard directory: {p}")
+            new_tracked.append(item)
             continue
 
         age = (now - datetime.fromisoformat(item["timestamp"])).days
