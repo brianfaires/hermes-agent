@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from agent.system_prompt import build_system_prompt, build_system_prompt_parts
 
 
@@ -33,6 +35,38 @@ def _make_agent(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _tool_defs(*names: str) -> list:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for name in names
+    ]
+
+
+def _kanban_guidance_present(text: str) -> bool:
+    return "Kanban task execution protocol" in text
+
+
+def _set_kanban_task_env(monkeypatch, task_value, *, session_context_engaged=False):
+    if task_value is None:
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_KANBAN_TASK", task_value)
+    import gateway.session_context as session_context
+
+    monkeypatch.setattr(
+        session_context,
+        "_session_context_engaged",
+        session_context_engaged,
+    )
 
 
 def _captured_context_cwd(agent):
@@ -118,6 +152,89 @@ def _stable_prompt(agent):
         patch("run_agent.build_context_files_prompt", return_value=""),
     ):
         return build_system_prompt_parts(agent)["stable"]
+
+
+@pytest.mark.parametrize(
+    ("task_value", "tool_names", "expected"),
+    [
+        (None, (), False),
+        (None, ("kanban_show",), False),
+        ("", (), False),
+        ("", ("kanban_show",), False),
+        ("t_hotfix_64186", (), False),
+        ("t_hotfix_64186", ("kanban_show",), True),
+    ],
+)
+def test_kanban_guidance_init_requires_task_scope_and_loaded_show(
+    monkeypatch, tmp_path, task_value, tool_names, expected
+):
+    _set_kanban_task_env(monkeypatch, task_value)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=_tool_defs(*tool_names)),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.invalid/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert bool(agent._kanban_worker_guidance) is expected
+
+
+@pytest.mark.parametrize(
+    ("task_value", "tool_names", "expected"),
+    [
+        (None, (), False),
+        (None, ("kanban_show",), False),
+        ("", (), False),
+        ("", ("kanban_show",), False),
+        ("t_hotfix_64186", (), False),
+        ("t_hotfix_64186", ("kanban_show",), True),
+    ],
+)
+def test_kanban_guidance_bypass_fallback_requires_task_scope_and_loaded_show(
+    monkeypatch, task_value, tool_names, expected
+):
+    _set_kanban_task_env(monkeypatch, task_value)
+
+    agent = _make_agent(
+        valid_tool_names=set(tool_names),
+        _kanban_worker_guidance=None,
+    )
+
+    assert _kanban_guidance_present(_stable_prompt(agent)) is expected
+
+
+def test_kanban_guidance_init_snapshot_survives_later_env_clear(monkeypatch, tmp_path):
+    _set_kanban_task_env(monkeypatch, "t_hotfix_64186")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=_tool_defs("kanban_show")),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.invalid/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    assert _kanban_guidance_present(_stable_prompt(agent))
 
 
 def _prompt_parts(agent):
@@ -762,4 +879,3 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
-
