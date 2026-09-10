@@ -313,6 +313,9 @@ class GatewayKanbanWatchersMixin:
         _gc_next_at = 0.0  # 0 → sweep on the first tick after startup
 
         while self._running:
+            # Reset each tick so an early failure never reports the previous
+            # board or subscription. This context is diagnostic only.
+            tick_context = {"operation": "collect", "board": None, "task_id": None}
             try:
                 _gc_due = time.monotonic() >= _gc_next_at
                 _gc_retention_days = 30
@@ -377,6 +380,7 @@ class GatewayKanbanWatchersMixin:
                     seen_db_paths: set[str] = set()
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+                        tick_context.update(operation="collect_subscriptions", board=slug, task_id=None)
                         db_path = board_meta.get("db_path")
                         try:
                             resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(_kb.kanban_db_path(slug).resolve())
@@ -518,6 +522,7 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
+                    tick_context.update(operation="deliver_subscription", board=board_slug, task_id=sub.get("task_id"))
                     platform_str = (sub["platform"] or "").lower()
                     try:
                         plat = _Platform(platform_str)
@@ -1096,7 +1101,13 @@ class GatewayKanbanWatchersMixin:
                                 self._kanban_unsub, sub, board_slug,
                             )
             except Exception as exc:
-                logger.warning("kanban notifier tick failed: %s", exc)
+                logger.warning(
+                    "kanban notifier tick failed: %s: %s "
+                    "(profile=%s operation=%s board=%s task_id=%s)",
+                    type(exc).__name__, exc, notifier_profile,
+                    tick_context["operation"], tick_context["board"],
+                    tick_context["task_id"], exc_info=True,
+                )
             # Sleep with cancellation checks.
             for _ in range(int(max(1, interval))):
                 if not self._running:
