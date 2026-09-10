@@ -53,7 +53,7 @@ class ElevenLabsSettingsTests(unittest.TestCase):
             yield b""
         streamer.stream.side_effect = fail_stream
         done = threading.Event()
-        with patch.object(tts_tool, '_load_tts_config', return_value={}), patch.object(tts_streaming, 'resolve_streaming_provider', return_value=streamer), patch.object(tts_tool, '_import_sounddevice', return_value=Mock()):
+        with patch.dict('sys.modules', {'numpy': types.ModuleType('numpy')}), patch.object(tts_tool, '_load_tts_config', return_value={}), patch.object(tts_streaming, 'resolve_streaming_provider', return_value=streamer), patch.object(tts_tool, '_import_sounddevice', return_value=Mock()):
             tts_tool.stream_tts_to_speaker(text_queue, threading.Event(), done, shown.append)
         self.assertIn("This text remains visible", ''.join(shown))
         self.assertTrue(done.is_set())
