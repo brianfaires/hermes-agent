@@ -1813,10 +1813,12 @@ class GatewaySlashCommandsMixin:
         _in_container = is_container_restart_context()
         if _under_service or _in_container:
             self.request_restart(detached=False, via_service=True,
-                                 defer_until_session_delivered=self._session_key_for_source(event.source))
+                                 defer_until_session_delivered=self._session_key_for_source(event.source),
+                                 defer_until_delivery=getattr(event, "_hermes_response_delivered", None))
         else:
             self.request_restart(detached=True, via_service=False,
-                                 defer_until_session_delivered=self._session_key_for_source(event.source))
+                                 defer_until_session_delivered=self._session_key_for_source(event.source),
+                                 defer_until_delivery=getattr(event, "_hermes_response_delivered", None))
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
