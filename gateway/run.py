@@ -12466,6 +12466,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def request_restart(
         self, *, detached: bool = False, via_service: bool = False,
         defer_until_session_delivered: str | None = None,
+        defer_until_delivery: asyncio.Event | None = None,
     ) -> bool:
         if self._restart_task_started:
             return False
@@ -12507,6 +12508,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         async def _run_restart() -> None:
             await self._await_active_work_before_restart()
             await delivered.wait()
+            if defer_until_delivery is not None:
+                await defer_until_delivery.wait()
             # Launch the detached helper only AFTER the after-turn wait.
             # Its deadline is drain_timeout+5 and covers stop() teardown —
             # launching earlier would fire `hermes gateway restart` while

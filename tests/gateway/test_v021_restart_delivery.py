@@ -97,6 +97,49 @@ class RestartDelivery(unittest.IsolatedAsyncioTestCase):
                         restart.cancel()
                         await asyncio.gather(restart, return_exceptions=True)
 
+    async def test_busy_slash_waits_for_its_own_inline_reply(self):
+        from gateway.session import build_session_key
+        with tempfile.TemporaryDirectory() as home, patch('gateway.run._hermes_home', Path(home)):
+            runner = object.__new__(GatewayRunner)
+            runner._restart_task_started = runner._restart_requested = runner._draining = False
+            runner._await_active_work_before_restart = AsyncMock()
+            runner.stop = AsyncMock()
+            runner._is_stale_restart_redelivery = lambda event: False
+            runner._running_agent_count = lambda: 1
+            adapter = Adapter(PlatformConfig(), Platform.TELEGRAM)
+            adapter._heal_stale_session_lock = lambda key: None
+            adapter.sending, adapter.release = asyncio.Event(), asyncio.Event()
+            runner.adapters = {Platform.TELEGRAM: adapter}
+            event = MessageEvent(text='/restart', source=SessionSource(platform=Platform.TELEGRAM, chat_id='chat'))
+            key = build_session_key(event.source, group_sessions_per_user=True,
+                                    thread_sessions_per_user=False, profile=adapter._session_key_profile(event.source))
+            runner._session_key_for_source = lambda source: key
+            guard = asyncio.Event()
+            guard._hermes_run_generation = 7
+            adapter._active_sessions[key] = guard
+            adapter._message_handler = runner._handle_restart_command
+            with patch('gateway.restart.is_gateway_supervisor_process', return_value=True):
+                task = asyncio.create_task(adapter.handle_message(event))
+                try:
+                    await asyncio.wait_for(adapter.sending.wait(), 3)
+                    # The original turn finishes while the slash reply is still sending.
+                    callback = adapter.pop_post_delivery_callback(key, generation=7)
+                    callback()
+                    await asyncio.sleep(.15)
+                    self.assertFalse(task.done())
+                    runner.stop.assert_not_awaited()
+                    adapter.release.set()
+                    await asyncio.wait_for(task, 3)
+                    await asyncio.wait_for(runner._restart_task, 3)
+                    runner.stop.assert_awaited_once()
+                finally:
+                    adapter.release.set()
+                    await asyncio.gather(task, return_exceptions=True)
+                    restart = getattr(runner, '_restart_task', None)
+                    if restart and not restart.done():
+                        restart.cancel()
+                        await asyncio.gather(restart, return_exceptions=True)
+
     async def test_slash_restart_passes_caller_delivery_key(self):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as home, patch('gateway.run._hermes_home', Path(home)):
@@ -111,7 +154,7 @@ class RestartDelivery(unittest.IsolatedAsyncioTestCase):
                 await runner._handle_restart_command(event)
             runner.request_restart.assert_called_once_with(
                 detached=False, via_service=True,
-                defer_until_session_delivered='slash-caller',
+                defer_until_session_delivered='slash-caller', defer_until_delivery=None,
             )
 
     async def test_restart_audit_failure_still_denies_before_scheduling(self):

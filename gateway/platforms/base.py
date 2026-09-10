@@ -6357,6 +6357,10 @@ class BasePlatformAdapter(ABC):
                     "[%s] Command '/%s' bypassing active-session guard for %s",
                     self.name, cmd, session_key,
                 )
+                # A bypass command has its own reply, independent of the
+                # running turn's generation-bound post-delivery callbacks.
+                # Restart uses this signal to keep that inline reply alive.
+                event._hermes_response_delivered = asyncio.Event()
                 try:
                     _thread_meta = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
                     response = await self._message_handler(event)
@@ -6376,6 +6380,8 @@ class BasePlatformAdapter(ABC):
                             )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+                finally:
+                    event._hermes_response_delivered.set()
                 return
 
             # Clarify reply bypass: if the agent is blocked on a
