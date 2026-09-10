@@ -319,6 +319,8 @@ def heartbeat_current_worker_from_env() -> bool:
     timestamp (monotonic clock); not thread-safe in the strict sense, but
     the worst case is one extra DB write per race, which is harmless.
     """
+    if not _is_dispatcher_owned_worker():
+        return False
     global _auto_heartbeat_last_attempt
     tid = os.environ.get("HERMES_KANBAN_TASK")
     if not tid:
@@ -381,6 +383,8 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     the run started are injected. The worker's own authored comments (matched
     by ``HERMES_PROFILE``) are skipped to avoid echoing itself.
     """
+    if not _is_dispatcher_owned_worker():
+        return False
     tid = os.environ.get("HERMES_KANBAN_TASK")
     if not tid or agent is None or not hasattr(agent, "steer"):
         return False
