@@ -36,3 +36,24 @@ class ElevenLabsSettingsTests(unittest.TestCase):
             self.assertEqual(call.get('voice_settings'), {'speed': .7})
         for call in self.generate({}):
             self.assertNotIn('voice_settings', call)
+
+    def test_text_remains_visible_when_streaming_provider_fails(self):
+        import queue
+        import threading
+        from tools import tts_streaming
+
+        text_queue = queue.Queue()
+        text_queue.put("This text remains visible despite synthesis failure.")
+        text_queue.put(None)
+        shown = []
+        streamer = Mock(sample_rate=24000, channels=1)
+        def fail_stream(text):
+            self.assertTrue(shown)  # display occurs before the provider is called
+            raise ImportError("provider SDK unavailable")
+            yield b""
+        streamer.stream.side_effect = fail_stream
+        done = threading.Event()
+        with patch.object(tts_tool, '_load_tts_config', return_value={}), patch.object(tts_streaming, 'resolve_streaming_provider', return_value=streamer), patch.object(tts_tool, '_import_sounddevice', return_value=Mock()):
+            tts_tool.stream_tts_to_speaker(text_queue, threading.Event(), done, shown.append)
+        self.assertIn("This text remains visible", ''.join(shown))
+        self.assertTrue(done.is_set())
