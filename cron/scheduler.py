@@ -291,6 +291,29 @@ def _log_tick_yield_once(reason: str) -> None:
     _last_yield_log = {"reason": reason, "at": now}
 
 
+_RED_CRON_PREFIX = "❌"
+_WARN_CRON_PREFIX = "⚠️"
+_ATTENTION_PREFIX_RE = re.compile(r"^\s*(?:❌|🚨|🛑|🔴|⚠️|⚠)\s*")
+_WARNING_HEAD_RE = re.compile(
+    r"^\s*(?:warn(?:ing)?|caution|attention)\b|\b(?:status|result)\s*[:—-]\s*warn\b|—\s*warn\b",
+    re.IGNORECASE,
+)
+
+
+def _ensure_cron_attention_prefix(content: str, *, failed: bool = False, warn: bool = False) -> str:
+    """Ensure delivered cron failures/warnings start with an attention emoji."""
+    text = content or ""
+    if _ATTENTION_PREFIX_RE.match(text):
+        return text
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    looks_warning = bool(_WARNING_HEAD_RE.search(first_line[:240]))
+    if failed:
+        return f"{_RED_CRON_PREFIX} {text.lstrip()}"
+    if warn or looks_warning:
+        return f"{_WARN_CRON_PREFIX} {text.lstrip()}"
+    return text
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -349,7 +372,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # fallback was attempted (#82460 @jbagdonas, #78503 @daxro).
     if lower.startswith("script timed out"):
         return (
-            f"⚠️ Cron '{job_name}' failed: script timed out. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: script timed out. "
             "No model was invoked. Full details saved in cron output."
         )
 
@@ -366,7 +389,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         elif "quota" in lower:
             reason = "quota limit"
         return (
-            f"⚠️ Cron '{job_name}' failed: provider {reason}. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider {reason}. "
             f"{_fallback_chain_phrase()} "
             "Full details saved in cron output."
         )
@@ -389,7 +412,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # — check the more specific, deterministic signature first.
     if re.search(r"idle for \d+s\s*\(limit \d+s\)", lower):
         return (
-            f"⚠️ Cron '{job_name}' failed: the job itself stalled — no tool/API "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: the job itself stalled — no tool/API "
             "activity for the configured inactivity window. Not a provider or "
             "fallback-chain issue; check what the job was doing when it went "
             "quiet. Full details saved in cron output."
@@ -399,7 +422,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         "readtimeout" in lower or "timed out" in lower or "timeout" in lower
     ):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider timeout. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider timeout. "
             f"{_fallback_chain_phrase()} "
             "Full details saved in cron output."
         )
@@ -411,7 +434,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         re.search(r"authenticat|authoriz", lower) or re.search(r"\b(401|403)\b", text)
     ):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider authentication error. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider authentication error. "
             "Full details saved in cron output."
         )
 
@@ -425,7 +448,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
-    message = f"⚠️ Cron '{job_name}' failed: {cleaned}"
+    message = f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: {cleaned}"
 
     # Import-class failures (#95294 part 3): a long-lived gateway whose
     # checkout was updated underneath it (interrupted `hermes update`, manual
@@ -3060,6 +3083,25 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _delivery_target_lost_origin_thread(origin: dict, target: dict) -> bool:
+    """Return True when a delivery target should have preserved origin thread_id.
+
+    ``thread_id`` values are scoped to a platform/channel.  A job may be born
+    in a Discord thread but intentionally deliver to Telegram (or any other
+    home channel); in that case the Discord thread ID is not meaningful for the
+    target and logging a warning is noise.  Warn only when the concrete target
+    is the same platform + chat as the origin and the target has dropped the
+    origin's thread/topic ID.
+    """
+    origin_thread = origin.get("thread_id")
+    if not origin_thread or target.get("thread_id"):
+        return False
+    return (
+        str(origin.get("platform", "")).lower() == str(target.get("platform", "")).lower()
+        and str(origin.get("chat_id", "")) == str(target.get("chat_id", ""))
+    )
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -3119,6 +3161,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         )
     else:
         delivery_content = content
+
+    # Attention alerts must start with their emoji even when cron response
+    # wrapping is enabled. Detect the attention class from the original content
+    # and prefix the final message body that actually reaches chat.
+    _attention_source = (content or "").lstrip()
+    _attention_first_line = _attention_source.splitlines()[0] if _attention_source else ""
+    delivery_content = _ensure_cron_attention_prefix(
+        delivery_content,
+        failed=_attention_source.startswith(("❌", "🚨", "🛑", "🔴")),
+        warn=_attention_source.startswith(("⚠️", "⚠"))
+        or bool(_WARNING_HEAD_RE.search(_attention_first_line[:240])),
+    )
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
@@ -3193,10 +3247,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.append(bot_chat_error)
             continue
 
-        # Diagnostic: log thread_id for topic-aware delivery debugging
+        # Thread IDs only have meaning within their origin platform/chat.
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if _delivery_target_lost_origin_thread(origin, target):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",
@@ -4717,6 +4771,10 @@ def _build_job_prompt(
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "ATTENTION PREFIXES: if your delivered report is a warning, "
+        "start it with a meaningful warning emoji such as ⚠️; if it is "
+        "an error, blocker, or failure, start it with a red/error emoji "
+        "such as ❌, 🚨, 🛑, or 🔴. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "

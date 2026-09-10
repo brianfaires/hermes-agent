@@ -116,7 +116,7 @@ def test_run_one_job_exception_delivers_failure_alert(monkeypatch):
 
     assert ok is False
     assert delivered == [
-        ("j3", "⚠️ Cron 'morning' failed: Gemini HTTP 503 (UNAVAILABLE)")
+        ("j3", "❌ Cron 'morning' failed: Gemini HTTP 503 (UNAVAILABLE)")
     ]
     assert marked == [
         (("j3", False, "Gemini HTTP 503 (UNAVAILABLE)"), {"delivery_error": None})
@@ -234,7 +234,7 @@ def test_escaped_failure_delivery_stays_quiet_below_the_threshold(monkeypatch):
     )
 
     assert ok is False
-    assert delivered == ["⚠️ Cron 'scout' failed: provider failed"]
+    assert delivered == ["❌ Cron 'scout' failed: provider failed"]
 
 
 def test_run_one_job_exception_after_delivery_does_not_redeliver(monkeypatch):
