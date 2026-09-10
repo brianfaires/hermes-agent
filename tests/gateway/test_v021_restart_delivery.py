@@ -28,6 +28,13 @@ class Adapter(BasePlatformAdapter):
 
 class RestartDelivery(unittest.IsolatedAsyncioTestCase):
     async def test_model_restart_waits_through_real_adapter_delivery(self):
+        await self._delivery_case(hanging_callback=False)
+
+    async def test_prior_callback_timeout_cannot_strand_restart(self):
+        with patch('gateway.platforms.base._POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS', .05):
+            await self._delivery_case(hanging_callback=True)
+
+    async def _delivery_case(self, *, hanging_callback):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'HERMES_HOME': home}):
             Path(home, 'config.yaml').write_text('plugins:\n  enabled: [gateway-restart-tool]\n')
             path = Path(__file__).resolve().parents[2] / 'plugins/gateway-restart-tool/__init__.py'
@@ -51,6 +58,10 @@ class RestartDelivery(unittest.IsolatedAsyncioTestCase):
             interrupt = asyncio.Event()
             interrupt._hermes_run_generation = 7
             adapter._active_sessions['caller'] = interrupt
+            if hanging_callback:
+                async def prior_callback():
+                    await asyncio.Event().wait()
+                adapter.register_post_delivery_callback('caller', prior_callback, generation=7)
 
             async def handler(event):
                 tokens = set_session_vars(platform='telegram', session_key='caller')

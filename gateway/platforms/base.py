@@ -5513,6 +5513,7 @@ class BasePlatformAdapter(ABC):
         callback: Callable,
         *,
         generation: int | None = None,
+        prepend: bool = False,
     ) -> None:
         """Register a deferred callback to fire after the main response.
 
@@ -5521,7 +5522,9 @@ class BasePlatformAdapter(ABC):
 
         If a callback for the same ``session_key`` (and generation, when set)
         is already registered, the new callback is chained — both fire, in
-        registration order, with per-callback exception isolation. This lets
+        registration order, with per-callback exception isolation. ``prepend``
+        places a delivery-boundary signal first so a later callback timeout
+        cannot strand gateway teardown waiting for a response already sent. This lets
         independent features (background-review release + temporary-bubble
         cleanup) coexist without clobbering each other. Stale-generation
         callers never overwrite a fresher generation's slot.
@@ -5559,7 +5562,7 @@ class BasePlatformAdapter(ABC):
                     # sync wrapper here would call ``_prev()`` / ``_new()`` and
                     # silently drop any returned coroutine, breaking chained
                     # async post-delivery hooks (e.g. ``/goal`` continuations).
-                    for _cb in (_prev, _new):
+                    for _cb in ((_new, _prev) if prepend else (_prev, _new)):
                         try:
                             _result = _cb()
                             if inspect.isawaitable(_result):

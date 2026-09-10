@@ -12498,6 +12498,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     register(
                         defer_until_session_delivered, delivered.set,
                         generation=getattr(active, "_hermes_run_generation", None),
+                        prepend=True,
                     )
                     break
                 if not delivered.is_set():
