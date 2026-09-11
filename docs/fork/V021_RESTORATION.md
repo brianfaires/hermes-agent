@@ -1,3 +1,16 @@
+# Current approved checkpoint — batch 2
+
+[Batch 2](V021_APPROVED_BATCH2.md) continues accepted `4cef65cada` with source
+candidate `59b7ab83634cdf1e57c091e9072002b18b7eba3b`: 15 implemented nonvoice G17
+subfeatures and one compatible retained executor qualification. Independent review
+passed all 36 new tests with no P0/P1 blockers. Cumulative human checklist: 52 landed
+IDs, all pending; 26 approved ledger entries plus G32 thread contract remain.
+Next: G17 served-profile ownership/status E17/E18/E29. Existing approval stands;
+Ang handles staging/CI. No push or live mutation. Prior checkpoints below remain
+historical; their older counts and next-step statements are superseded here.
+
+---
+
 # Approved restoration continuation
 
 Brian's 2026-09-10 staging approval supersedes historical implementation holds
