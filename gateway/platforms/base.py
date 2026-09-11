@@ -5175,7 +5175,7 @@ class BasePlatformAdapter(ABC):
         #  - serialized JSON string values hold stored tool-result text (#34375)
         # Both maskers are offset-preserving (chars -> spaces) so match offsets
         # stay valid; chaining them masks the union of both protected regions.
-        scan_content = _media_directive_scan_text(content)
+        scan_content = _media_directive_scan_text(cleaned)
         # Dedupe on the expanded path (first occurrence wins) so the same file
         # referenced twice in one response — e.g. a MEDIA tag inline AND in a
         # summary footer — is uploaded once, not twice (#29131).
