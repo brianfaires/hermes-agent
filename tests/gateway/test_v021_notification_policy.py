@@ -86,6 +86,10 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(policy.resolve_notify_target(platform='discord',chat_id='origin',notifier_profile='missing'))
         self.assertEqual(before,(get_hermes_home(),current_secret_scope(),dict(os.environ)))
 
+    def test_foreign_existing_home_without_config_is_denied(self):
+        other=self.root/'unconfigured'; other.mkdir()
+        self.assertIsNone(policy.resolve_notify_target(platform='discord',chat_id='origin',notifier_profile='other',profile_home=other))
+
     def test_foreign_owner_home_does_not_inherit_process_destination(self):
         other=self.root/'mounted-owner'; other.mkdir()
         (other/'config.yaml').write_text(json.dumps({'kanban':{'notification_policy':'telegram_home_only'},'platforms':{'telegram':{'home_channel':{'platform':'telegram','chat_id':'owned-home'}}}}))

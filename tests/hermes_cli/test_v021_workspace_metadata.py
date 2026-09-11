@@ -38,6 +38,17 @@ class MetadataTests(unittest.TestCase):
             with self.assertRaises(ValueError): kb.create_task(self.conn,title='bad',**kwargs)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0],count)
 
+    def test_create_inherits_board_default_before_required_dir_validation(self):
+        kb.write_board_metadata('default',default_workdir=str(self.root/'checkout'))
+        tid=kb.create_task(self.conn,title='inherited',workspace_kind='dir',branch_name='feature/inherited',board='default')
+        self.assertEqual(kb.get_task(self.conn,tid).workspace_path,str(self.root/'checkout'))
+        scratch=kb.create_task(self.conn,title='scratch',board='default')
+        self.assertIsNone(kb.get_task(self.conn,scratch).workspace_path)
+        kb.write_board_metadata('default',default_workdir='relative')
+        with self.assertRaises(ValueError):
+            kb.create_task(self.conn,title='invalid-default',workspace_kind='dir',board='default')
+        self.assertIsNone(self.conn.execute("SELECT id FROM tasks WHERE title='invalid-default'").fetchone())
+
     def test_branch_setter_rejects_invalid_legacy_workspace_atomically(self):
         tid = kb.create_task(self.conn,title='legacy',workspace_kind='dir',workspace_path=str(self.root),branch_name='feature/old')
         with kb.write_txn(self.conn):

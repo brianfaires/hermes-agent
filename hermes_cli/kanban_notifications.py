@@ -177,6 +177,8 @@ def resolve_notify_target(*, profile_home=None, **kwargs) -> Optional[NotifyTarg
             if not home.is_dir():
                 return None
         foreign_home = home.resolve() != get_hermes_home().resolve()
+        if foreign_home and not (home / "config.yaml").is_file():
+            return None
         home_token = set_hermes_home_override(home)
         try:
             secrets = refresh_profile_secret_scope(home, inherit_process_secrets=not foreign_home)

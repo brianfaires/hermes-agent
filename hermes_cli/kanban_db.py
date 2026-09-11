@@ -3267,7 +3267,7 @@ def create_task(
         )
     workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
         workspace_kind=workspace_kind, workspace_path=workspace_path,
-        branch_name=branch_name, require_dir_path=True,
+        branch_name=branch_name, require_dir_path=False,
     )
 
     # Inherit the board's scoped project when the caller didn't name one, so a
@@ -3512,6 +3512,14 @@ def create_task(
                             )
                         except Exception:
                             branch_name = None
+
+                # Validate after board/project derivation so valid inherited
+                # persistent paths remain supported and generated metadata is
+                # subject to the same rules as explicit input.
+                workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+                    workspace_kind=workspace_kind, workspace_path=workspace_path,
+                    branch_name=branch_name, require_dir_path=True,
+                )
 
                 conn.execute(
                     """
