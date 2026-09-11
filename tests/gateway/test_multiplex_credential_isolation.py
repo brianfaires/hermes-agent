@@ -127,7 +127,7 @@ def test_cold_profile_hydrates_external_source_without_global_env(
         assert environ is not os.environ
         assert environ is not None
         assert environ["EXPLICIT_API_KEY"] == "dotenv-wins"
-        environ["TEST_PROVIDER_API_KEY"] = "profile-only"
+        environ["TEST_PROVIDER_API_KEY"] = f"profile-only-{calls['count']}"
         return ApplyReport(
             sources=[
                 SourceReport(
@@ -151,17 +151,17 @@ def test_cold_profile_hydrates_external_source_without_global_env(
     env_loader.reset_secret_source_cache()
 
     with _profile_runtime_scope(profile):
-        assert get_secret("TEST_PROVIDER_API_KEY") == "profile-only"
+        assert get_secret("TEST_PROVIDER_API_KEY") == "profile-only-1"
         assert get_secret("EXPLICIT_API_KEY") == "dotenv-wins"
         assert env_loader.get_secret_source_values(profile) == {
-            "TEST_PROVIDER_API_KEY": "profile-only"
+            "TEST_PROVIDER_API_KEY": "profile-only-1"
         }
     with _profile_runtime_scope(profile):
-        assert get_secret("TEST_PROVIDER_API_KEY") == "profile-only"
+        assert get_secret("TEST_PROVIDER_API_KEY") == "profile-only-2"
     with _profile_runtime_scope(sibling):
         assert get_secret("TEST_PROVIDER_API_KEY") is None
 
-    assert calls["count"] == 1
+    assert calls["count"] == 2
     assert "TEST_PROVIDER_API_KEY" not in os.environ
     assert "EXPLICIT_API_KEY" not in os.environ
 
