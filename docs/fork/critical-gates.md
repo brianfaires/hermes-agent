@@ -6,7 +6,10 @@ brief). **The historical decision requests and “pending approval” language b
 are superseded. Do not request the same approval again.** Critical classifications
 and the described compatibility/security contracts remain. Human UAT is deferred
 and never gates development. Retired consumers, archive-only new features and
-Discord voice remain excluded; no live mutation, activation, push or main change.
+Discord voice remain excluded; no live mutation, activation or main change.
+Ang is authorized to integrate and push staging; source workers do not push.
+All approved remaining IDs and G32 are now locally qualified in batch3; the
+historical decision requests below remain provenance, not new approval holds.
 
 Implementation status and exact evidence live in V021_RESTORATION_LEDGER.json.
 The following anchors and original decision text are preserved as historical

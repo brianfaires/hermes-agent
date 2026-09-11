@@ -1,0 +1,1567 @@
+{
+  "source_candidate": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+  "source_tree": "c3805ee8ae23c20ebdcaa3a25426b6f4d4e2eaa0",
+  "feature_map": {
+    "FC-10-E02": {
+      "owning_commits": [
+        "f5c98229e3784250604f35e8cdc030ab82134aa7"
+      ],
+      "path": "gateway/platforms/webhook.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_webhook_namespace.py"
+      ],
+      "decision": "Profile+route rate keys and profile+route+delivery idempotency/cache/session keys; raw external IDs retained, legacy toolset source reads preserved."
+    },
+    "FC-11-E08": {
+      "owning_commits": [
+        "f5c98229e3784250604f35e8cdc030ab82134aa7"
+      ],
+      "path": "cron/jobs.py",
+      "runtime_tests": [
+        "tests/cron/test_v021_ancillary_validation.py"
+      ],
+      "decision": "Shared strict plain-string name and list-of-identifier toolset normalization at create/update; rejected writes preserve stored bytes and legacy reads remain tolerant."
+    },
+    "FC-14-E01": {
+      "owning_commits": [
+        "ad7e4dc28466fd134b27c86f256dfca26605f1fc"
+      ],
+      "path": "plugins/platforms/discord/adapter.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_text_compatibility.py"
+      ],
+      "decision": "Literal prose escaping after table conversion with code spans preserved."
+    },
+    "FC-14-E02": {
+      "owning_commits": [
+        "ad7e4dc28466fd134b27c86f256dfca26605f1fc",
+        "97ad45b32cbd9df946662860192aaaa446394502",
+        "8741695f9ad9d73b770ed7e2969579d5be8e5e74",
+        "b411e475e24abd72eaae3a8810f8004a21f4660e"
+      ],
+      "path": "gateway/platforms/base.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_text_compatibility.py"
+      ],
+      "decision": "Only standalone MEDIA directives extract/clean; original-line protected-span eligibility and document-marker cleanup agree; existing file validation and denial retained."
+    },
+    "FC-15-E01": {
+      "owning_commits": [
+        "ad7e4dc28466fd134b27c86f256dfca26605f1fc"
+      ],
+      "path": "plugins/platforms/discord/adapter.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_text_compatibility.py"
+      ],
+      "decision": "Configured auto-thread includes free-response channels, explicit no-thread and other guards remain; failure never falls through to agent inline."
+    },
+    "FC-17-E17": {
+      "owning_commits": [
+        "4775bf2b0396d8a224eface290744213c9ff4608"
+      ],
+      "path": "gateway/run.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_served_coverage.py"
+      ],
+      "decision": "Launch-home-owned runtime publication with scoped restoration; existing adapter maps govern connected membership without resurrecting retired Kanban runtime mixin."
+    },
+    "FC-17-E18": {
+      "owning_commits": [
+        "4775bf2b0396d8a224eface290744213c9ff4608"
+      ],
+      "path": "hermes_cli/profiles.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_served_coverage.py"
+      ],
+      "decision": "CLI coverage requires served+connected membership and existing PID/start-time/home validation; stale/malformed/missing records fail closed."
+    },
+    "FC-17-E29": {
+      "owning_commits": [
+        "4775bf2b0396d8a224eface290744213c9ff4608"
+      ],
+      "path": "gateway/run.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_served_coverage.py"
+      ],
+      "decision": "Successful connected_profiles membership updated on startup/reconnect/fatal/shutdown; configured served_profiles remains routing/cron eligibility for current adapterless consumers."
+    },
+    "FC-18-E03": {
+      "owning_commits": [
+        "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "hermes_cli/kanban.py",
+      "runtime_tests": [
+        "tests/hermes_cli/test_v021_workspace_metadata.py"
+      ],
+      "decision": "Persistent dir/worktree branches supported; scratch rejects, inherited board workdir remains available."
+    },
+    "FC-18-E04": {
+      "owning_commits": [
+        "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "plugins/kanban/dashboard/plugin_api.py",
+      "runtime_tests": [
+        "tests/hermes_cli/test_v021_workspace_metadata.py"
+      ],
+      "decision": "Dashboard branch_name model and forwarding share canonical DB validation."
+    },
+    "FC-18-E05": {
+      "owning_commits": [
+        "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "e39c7aaefa38c2d37b730076f2da30e06ec23569",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "hermes_cli/kanban_db.py",
+      "runtime_tests": [
+        "tests/hermes_cli/test_v021_workspace_metadata.py"
+      ],
+      "decision": "Validate complete final create/set metadata inside transaction after derivation; legacy invalid paths reject branch mutation atomically."
+    },
+    "FC-20-E12": {
+      "owning_commits": [
+        "f5c98229e3784250604f35e8cdc030ab82134aa7"
+      ],
+      "path": "agent/delegation_context.py",
+      "runtime_tests": [
+        "tests/agent/test_v021_child_env_namespace.py"
+      ],
+      "decision": "Copy and remove every HERMES_KANBAN_* child key while retaining delegated lineage marker and durable mutation refusal; no writable scratch-board escape hatch."
+    },
+    "FC-25-E04": {
+      "owning_commits": [
+        "71da39be8ece2dc9f8478647bee748c8563e394e",
+        "31bf95b85160ec4b205b28b01f5f4b99a2caa802"
+      ],
+      "path": "agent/conversation_compression.py",
+      "runtime_tests": [
+        "tests/agent/test_v021_compression_publication.py",
+        "tests/gateway/test_v021_compression_adoption.py",
+        "tests/agent/test_v021_compression_tail_guards.py"
+      ],
+      "decision": "Complete preserved tail joins before core atomic publication; gateway adopts canonical child without destructive post-publication rewrite or unsafe child rollback. Original partial boundary survives durable-parent adoption; todo/user transforms apply to head only, explicit-tail growth refuses without salvage."
+    },
+    "FC-26-default": {
+      "owning_commits": [
+        "49b056b85f41472cb21de9ebb54270252110fff7"
+      ],
+      "path": "agent/skill_utils.py",
+      "runtime_tests": [
+        "tests/agent/test_v021_prompt_contracts.py"
+      ],
+      "decision": "Approved default description budget1024; explicit caller budgets preserved, new prompt builds only."
+    },
+    "FC-27-E01": {
+      "owning_commits": [
+        "49b056b85f41472cb21de9ebb54270252110fff7"
+      ],
+      "path": "agent/prompt_builder.py",
+      "runtime_tests": [
+        "tests/agent/test_v021_prompt_contracts.py"
+      ],
+      "decision": "Bounded guidance for exact sol/terra model IDs with optional one provider prefix; common mandatory-tool guidance and tool filtering retained."
+    },
+    "FC-27-E02": {
+      "owning_commits": [
+        "49b056b85f41472cb21de9ebb54270252110fff7"
+      ],
+      "path": "agent/system_prompt.py",
+      "runtime_tests": [
+        "tests/agent/test_v021_prompt_contracts.py"
+      ],
+      "decision": "Variant selection follows existing independent execution-guidance gates; repeated prompt builds byte-stable."
+    },
+    "FC-28-E02": {
+      "owning_commits": [
+        "3354b0a08e110a9ef067cc8beaba5aeee848e676"
+      ],
+      "path": "tools/lazy_deps.py",
+      "runtime_tests": [
+        "tests/tools/test_v021_discord_packaging.py"
+      ],
+      "decision": "Explicit discord.py/PyNaCl/davey requirements agree across pip and uv surfaces; actual no-install resolution succeeds. Davey0.1.4->0.1.6 is intentional historical pin; other third-party versions/hashes unchanged."
+    },
+    "FC-30-E01": {
+      "owning_commits": [
+        "a87ac195800888b334a4b977d19b1419c44d99b2",
+        "eef1c3a41dbdd9fc2870c4580e39e3a6181f4fa3",
+        "6f78aabd57afc2ffd551e2855b0e9e5e81890558"
+      ],
+      "path": "scripts/process_guard.py",
+      "runtime_tests": [
+        "tests/tools/test_v021_security_contracts.py"
+      ],
+      "decision": "Pure wrapper/executable-aware process classifier preserves subtree fences, full-python pattern blocks and harmless-argument distinction; no killer commands executed."
+    },
+    "FC-30-E03": {
+      "owning_commits": [
+        "a87ac195800888b334a4b977d19b1419c44d99b2"
+      ],
+      "path": ".github/workflows/osv-scanner.yml",
+      "runtime_tests": [
+        "tests/tools/test_v021_security_contracts.py"
+      ],
+      "decision": "Pinned reusable lockfile scan unconditional; code-scanning publication gated to exact upstream repository only."
+    },
+    "FC-30-E04": {
+      "owning_commits": [
+        "a87ac195800888b334a4b977d19b1419c44d99b2"
+      ],
+      "path": ".github/workflows/osv-scanner.yml",
+      "runtime_tests": [
+        "tests/tools/test_v021_security_contracts.py"
+      ],
+      "decision": "Explicit upload-sarif input verified against exact pinned official workflow; artifact result path and scan retained everywhere."
+    },
+    "FC-33-E01": {
+      "owning_commits": [
+        "a87ac195800888b334a4b977d19b1419c44d99b2"
+      ],
+      "path": "tools/tirith_security.py",
+      "runtime_tests": [
+        "tests/tools/test_v021_security_contracts.py"
+      ],
+      "decision": "Evaluate all findings before display cap; exact case-sensitive package pair warning suppression only, BLOCK verdict/evidence and malformed warning refusal retained."
+    },
+    "FC-19-E01": {
+      "owning_commits": [
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "gateway/kanban_watchers.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_notification_policy.py"
+      ],
+      "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained."
+    },
+    "FC-19-E02": {
+      "owning_commits": [
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "hermes_cli/kanban.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_notification_policy.py"
+      ],
+      "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained."
+    },
+    "FC-19-E03": {
+      "owning_commits": [
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "tools/kanban_tools.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_notification_policy.py"
+      ],
+      "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained."
+    },
+    "FC-19-E04": {
+      "owning_commits": [
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "gateway/slash_commands.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_notification_policy.py"
+      ],
+      "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained."
+    },
+    "FC-19-E05": {
+      "owning_commits": [
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "path": "plugins/kanban/dashboard/plugin_api.py",
+      "runtime_tests": [
+        "tests/gateway/test_v021_notification_policy.py"
+      ],
+      "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained."
+    }
+  },
+  "selected_final_tests": {
+    "tests/gateway/test_v021_webhook_namespace.py": {
+      "receipt": "batch3-isolation-metadata-review-tests.json",
+      "file": "tests/gateway/test_v021_webhook_namespace.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_webhook_namespace.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_profile_reload_and_route_delivery_ids_do_not_collide (test_v021_webhook_namespace.WebhookNamespaceTests.test_profile_reload_and_route_delivery_ids_do_not_collide) ... [webhook] Invalid signature for route events\nExecuting <Task pending name='Task-2' coro=<WebhookNamespaceTests.test_profile_reload_and_route_delivery_ids_do_not_collide() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_webhook_namespace.py:40> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/tasks.py:709> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.108 seconds\n[webhook] Route events is not authorized for profile 'a'\nok\n\n----------------------------------------------------------------------\nRan 1 test in 0.130s\n\nOK\n"
+    },
+    "tests/cron/test_v021_ancillary_validation.py": {
+      "receipt": "batch3-isolation-metadata-review-tests.json",
+      "file": "tests/cron/test_v021_ancillary_validation.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cron",
+        "-p",
+        "test_v021_ancillary_validation.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_create_update_validate_without_rewriting_legacy_reads (test_v021_ancillary_validation.AncillaryValidationTests.test_create_update_validate_without_rewriting_legacy_reads) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 9.001s\n\nOK\n"
+    },
+    "tests/agent/test_v021_child_env_namespace.py": {
+      "receipt": "batch3-isolation-metadata-review-tests.json",
+      "file": "tests/agent/test_v021_child_env_namespace.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/agent",
+        "-p",
+        "test_v021_child_env_namespace.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_unknown_keys_scrubbed_and_real_child_refuses_mutation (test_v021_child_env_namespace.ChildEnvironmentTests.test_unknown_keys_scrubbed_and_real_child_refuses_mutation) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 1.275s\n\nOK\n"
+    },
+    "tests/hermes_cli/test_v021_workspace_metadata.py": {
+      "receipt": "batch3-review-kanban-corrected-tests.json",
+      "file": "tests/hermes_cli/test_v021_workspace_metadata.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/hermes_cli",
+        "-p",
+        "test_v021_workspace_metadata.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_branch_setter_rejects_invalid_legacy_workspace_atomically (test_v021_workspace_metadata.MetadataTests.test_branch_setter_rejects_invalid_legacy_workspace_atomically) ... kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_cli_persistent_dir_branch_roundtrip (test_v021_workspace_metadata.MetadataTests.test_cli_persistent_dir_branch_roundtrip) ... ok\ntest_create_inherits_board_default_before_required_dir_validation (test_v021_workspace_metadata.MetadataTests.test_create_inherits_board_default_before_required_dir_validation) ... ok\ntest_create_set_normalize_and_reject_without_partial_writes (test_v021_workspace_metadata.MetadataTests.test_create_set_normalize_and_reject_without_partial_writes) ... ok\ntest_dashboard_forwards_branch_and_real_db_rejects_invalid (test_v021_workspace_metadata.MetadataTests.test_dashboard_forwards_branch_and_real_db_rejects_invalid) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 4.591s\n\nOK\n"
+    },
+    "tests/gateway/test_v021_served_coverage.py": {
+      "receipt": "batch3-review-served-tests.json",
+      "file": "tests/gateway/test_v021_served_coverage.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_served_coverage.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_cli_renders_connected_coverage_without_false_service_failure (test_v021_served_coverage.ServedCoverageTests.test_cli_renders_connected_coverage_without_false_service_failure) ... ok\ntest_failed_publication_restores_scope (test_v021_served_coverage.ServedCoverageTests.test_failed_publication_restores_scope) ... ok\ntest_fatal_removal_publishes_before_disconnect (test_v021_served_coverage.ServedCoverageTests.test_fatal_removal_publishes_before_disconnect) ... ok\ntest_publication_pins_owner_and_restores_caller (test_v021_served_coverage.ServedCoverageTests.test_publication_pins_owner_and_restores_caller) ... ok\ntest_reader_requires_explicit_membership_and_validated_owner (test_v021_served_coverage.ServedCoverageTests.test_reader_requires_explicit_membership_and_validated_owner) ... ok\ntest_reader_uses_real_stopped_and_pid_reuse_fences (test_v021_served_coverage.ServedCoverageTests.test_reader_uses_real_stopped_and_pid_reuse_fences) ... ok\ntest_real_profile_start_only_successful_connect_claims_slot (test_v021_served_coverage.ServedCoverageTests.test_real_profile_start_only_successful_connect_claims_slot) ... \u2717 discord failed to connect (profile: worker)\nok\ntest_reconnect_publishes_only_while_runner_still_owns_slot (test_v021_served_coverage.ServedCoverageTests.test_reconnect_publishes_only_while_runner_still_owns_slot) ... ok\ntest_single_profile_clears_previous_membership (test_v021_served_coverage.ServedCoverageTests.test_single_profile_clears_previous_membership) ... ok\ntest_startup_failed_and_adapterless_remain_eligible_not_connected (test_v021_served_coverage.ServedCoverageTests.test_startup_failed_and_adapterless_remain_eligible_not_connected) ... Failed to start adapters for profile 'failed': isolated failure\nTraceback (most recent call last):\n  File \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/gateway/run.py\", line 16682, in _start_secondary_profile_adapters\n    connected += await self._start_one_profile_adapters(\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/unittest/mock.py\", line 2251, in _execute_mock_call\n    result = await effect(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_served_coverage.py\", line 46, in start\n    raise RuntimeError('isolated failure')\nRuntimeError: isolated failure\nSkipping secondary profile 'port' due to port-binding config error: invalid listener\nok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.827s\n\nOK\n"
+    },
+    "tests/gateway/test_v021_notification_policy.py": {
+      "receipt": "batch3-review-kanban-corrected-tests.json",
+      "file": "tests/gateway/test_v021_notification_policy.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_notification_policy.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_cli_denial_audit_is_readonly_and_no_false_success (test_v021_notification_policy.PolicyTests.test_cli_denial_audit_is_readonly_and_no_false_success) ... kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_dashboard_filters_homes_but_allows_removing_denied_existing_sub (test_v021_notification_policy.PolicyTests.test_dashboard_filters_homes_but_allows_removing_denied_existing_sub) ... /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n  import audioop\nok\ntest_delivery_rechecks_policy_preserves_existing_row_and_cursor (test_v021_notification_policy.PolicyTests.test_delivery_rechecks_policy_preserves_existing_row_and_cursor) ... Executing <Task pending name='Task-10' coro=<PolicyTests.test_delivery_rechecks_policy_preserves_existing_row_and_cursor() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:112> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.444 seconds\nok\ntest_denied_between_claim_and_send_rewinds_original_row (test_v021_notification_policy.PolicyTests.test_denied_between_claim_and_send_rewinds_original_row) ... Executing <Task pending name='Task-15' coro=<PolicyTests.test_denied_between_claim_and_send_rewinds_original_row() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:122> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.369 seconds\nok\ntest_foreign_existing_home_without_config_is_denied (test_v021_notification_policy.PolicyTests.test_foreign_existing_home_without_config_is_denied) ... ok\ntest_foreign_owner_home_does_not_inherit_process_destination (test_v021_notification_policy.PolicyTests.test_foreign_owner_home_does_not_inherit_process_destination) ... ok\ntest_malformed_policy_denies_external_and_preserves_tui_explicitly (test_v021_notification_policy.PolicyTests.test_malformed_policy_denies_external_and_preserves_tui_explicitly) ... Failed to parse /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml: while parsing a flow sequence\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 1, column 9\ndid not find expected ',' or ']'\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 2, column 1. Falling back to default config \u2014 every user override (auxiliary providers, fallback chain, model settings) is being IGNORED. Fix the YAML and restart. A copy of the corrupted file was saved to /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml.corrupt.20260911-005340.bak.\n\u26a0\ufe0f  hermes config: Failed to parse /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml: while parsing a flow sequence\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 1, column 9\ndid not find expected ',' or ']'\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 2, column 1. Falling back to default config \u2014 every user override (auxiliary providers, fallback chain, model settings) is being IGNORED. Fix the YAML and restart. A copy of the corrupted file was saved to /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml.corrupt.20260911-005340.bak.\nok\ntest_owner_missing_fails_closed_and_scope_resets (test_v021_notification_policy.PolicyTests.test_owner_missing_fails_closed_and_scope_resets) ... ok\ntest_redirect_send_failure_rewinds_original_row (test_v021_notification_policy.PolicyTests.test_redirect_send_failure_rewinds_original_row) ... Executing <Task pending name='Task-36' coro=<PolicyTests.test_redirect_send_failure_rewinds_original_row() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:129> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.351 seconds\nkanban notifier: send failed for t_66658a9f on telegram (attempt 1/12): temporary send failure\nok\ntest_redirect_subscription_sanitizes_origin_metadata (test_v021_notification_policy.PolicyTests.test_redirect_subscription_sanitizes_origin_metadata) ... ok\ntest_slash_create_denied_subscription_keeps_created_task (test_v021_notification_policy.PolicyTests.test_slash_create_denied_subscription_keeps_created_task) ... kanban create auto-subscribe failed: Notification policy denied this destination\nok\ntest_tool_subscription_uses_policy_and_tui_preservation (test_v021_notification_policy.PolicyTests.test_tool_subscription_uses_policy_and_tui_preservation) ... ok\n\n----------------------------------------------------------------------\nRan 12 tests in 19.088s\n\nOK\n"
+    },
+    "tests/gateway/test_v021_text_compatibility.py": {
+      "receipt": "batch3-independent-text-correction-tests.json",
+      "file": "tests/gateway/test_v021_text_compatibility.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_text_compatibility.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_explicit_no_thread_and_disabled_auto_thread_stay_inline (test_v021_text_compatibility.FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline) ... Executing <Task finished name='Task-2' coro=<FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_text_compatibility.py:95> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.126 seconds\nok\ntest_failed_thread_does_not_invoke_agent_inline (test_v021_text_compatibility.FreeResponseRouting.test_failed_thread_does_not_invoke_agent_inline) ... ok\ntest_free_response_uses_configured_thread_and_route (test_v021_text_compatibility.FreeResponseRouting.test_free_response_uses_configured_thread_and_route) ... ok\ntest_document_marker_agrees_with_delivery_without_promoting_code_prefix (test_v021_text_compatibility.TextCompatibility.test_document_marker_agrees_with_delivery_without_promoting_code_prefix) ... ok\ntest_literal_prose_preserves_code_and_converts_tables (test_v021_text_compatibility.TextCompatibility.test_literal_prose_preserves_code_and_converts_tables) ... ok\ntest_prose_code_json_and_adjacent_tags_stay_literal (test_v021_text_compatibility.TextCompatibility.test_prose_code_json_and_adjacent_tags_stay_literal) ... ok\ntest_standalone_media_extract_and_cleanup_agree (test_v021_text_compatibility.TextCompatibility.test_standalone_media_extract_and_cleanup_agree) ... ok\ntest_unknown_extension_real_file_validation_and_missing_file (test_v021_text_compatibility.TextCompatibility.test_unknown_extension_real_file_validation_and_missing_file) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.554s\n\nOK\n"
+    },
+    "tests/agent/test_v021_prompt_contracts.py": {
+      "receipt": "batch3-independent-text-packaging-tests.json",
+      "file": "tests/agent/test_v021_prompt_contracts.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/agent",
+        "-p",
+        "test_v021_prompt_contracts.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_exact_model_variants_keep_common_guidance_and_tool_filter (test_v021_prompt_contracts.PromptContracts.test_exact_model_variants_keep_common_guidance_and_tool_filter) ... ok\ntest_real_stable_prompt_builder_honors_gates (test_v021_prompt_contracts.PromptContracts.test_real_stable_prompt_builder_honors_gates) ... ok\ntest_skill_description_default_and_explicit_budget (test_v021_prompt_contracts.PromptContracts.test_skill_description_default_and_explicit_budget) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 6.668s\n\nOK\n"
+    },
+    "tests/tools/test_v021_discord_packaging.py": {
+      "receipt": "batch3-independent-text-packaging-tests.json",
+      "file": "tests/tools/test_v021_discord_packaging.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/tools",
+        "-p",
+        "test_v021_discord_packaging.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_lazy_and_manifest_specs_agree_for_pip_and_uv_commands (test_v021_discord_packaging.DiscordPackagingTests.test_lazy_and_manifest_specs_agree_for_pip_and_uv_commands) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.015s\n\nOK\n"
+    },
+    "tests/agent/test_v021_compression_publication.py": {
+      "receipt": "batch3-review-compression-final-tests.json",
+      "file": "tests/agent/test_v021_compression_publication.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/agent",
+        "-p",
+        "test_v021_compression_publication.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_in_place_preserves_tail_in_same_commit (test_v021_compression_publication.CompressionPublicationTests.test_in_place_preserves_tail_in_same_commit) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_partial_tail_is_in_atomic_child_and_foreign_append_survives (test_v021_compression_publication.CompressionPublicationTests.test_partial_tail_is_in_atomic_child_and_foreign_append_survives) ... ok\ntest_publication_failure_preserves_parent_and_input (test_v021_compression_publication.CompressionPublicationTests.test_publication_failure_preserves_parent_and_input) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 22.529s\n\nOK\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n"
+    },
+    "tests/agent/test_v021_compression_tail_guards.py": {
+      "receipt": "batch3-review-compression-final-tests.json",
+      "file": "tests/agent/test_v021_compression_tail_guards.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/agent",
+        "-p",
+        "test_v021_compression_tail_guards.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_durable_parent_growth_keeps_original_requested_tail_out_of_summary (test_v021_compression_tail_guards.PreservedTailGuards.test_durable_parent_growth_keeps_original_requested_tail_out_of_summary) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_growing_candidate_refuses_without_salvaging_preserved_tail (test_v021_compression_tail_guards.PreservedTailGuards.test_growing_candidate_refuses_without_salvaging_preserved_tail) ... ok\ntest_todo_refresh_does_not_change_preserved_last_user_message (test_v021_compression_tail_guards.PreservedTailGuards.test_todo_refresh_does_not_change_preserved_last_user_message) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 22.393s\n\nOK\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0\ufe0f Compression refused: the generated summary would have GROWN the conversation instead of shrinking it. No messages were dropped \u2014 conversation continues unchanged.\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n"
+    },
+    "tests/gateway/test_v021_compression_adoption.py": {
+      "receipt": "batch3-review-compression-final-tests.json",
+      "file": "tests/gateway/test_v021_compression_adoption.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_compression_adoption.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_published_child_is_adopted_without_rewrite (test_v021_compression_adoption.CompressionAdoptionTests.test_published_child_is_adopted_without_rewrite) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nExecuting <Task pending name='Task-2' coro=<CompressionAdoptionTests.test_published_child_is_adopted_without_rewrite() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_adoption.py:71> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 5.572 seconds\nok\ntest_routing_save_failure_never_deletes_canonical_child (test_v021_compression_adoption.CompressionAdoptionTests.test_routing_save_failure_never_deletes_canonical_child) ... Manual compress failed: route save failed\nExecuting <Task finished name='Task-7' coro=<CompressionAdoptionTests.test_routing_save_failure_never_deletes_canonical_child() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_adoption.py:73> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 1.868 seconds\nok\n\n----------------------------------------------------------------------\nRan 2 tests in 7.469s\n\nOK\n"
+    },
+    "tests/gateway/test_v021_compression_failure.py": {
+      "receipt": "batch3-review-compression-final-tests.json",
+      "file": "tests/gateway/test_v021_compression_failure.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/gateway",
+        "-p",
+        "test_v021_compression_failure.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_no_rotation_is_failure_without_success_bookkeeping (test_v021_compression_failure.CompressionFailure.test_no_rotation_is_failure_without_success_bookkeeping) ... Manual /compress: session rotation did not occur (session_id unchanged) and in-place mode is off \u2014 preserving original transcript instead of overwriting it (#44794).\nManual compress failed: compression did not create a durable continuation session\nExecuting <Task finished name='Task-2' coro=<CompressionFailure.test_no_rotation_is_failure_without_success_bookkeeping() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_failure.py:16> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 4.163 seconds\nok\n\n----------------------------------------------------------------------\nRan 1 test in 4.176s\n\nOK\n"
+    },
+    "tests/tools/test_v021_security_contracts.py": {
+      "receipt": "batch3-review-security-final-tests.json",
+      "file": "tests/tools/test_v021_security_contracts.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/tools",
+        "-p",
+        "test_v021_security_contracts.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_harmless_operands_are_not_executables (test_v021_security_contracts.ProcessClassifierTests.test_harmless_operands_are_not_executables) ... ok\ntest_wrapped_killers_and_full_python_patterns_are_blocked (test_v021_security_contracts.ProcessClassifierTests.test_wrapped_killers_and_full_python_patterns_are_blocked) ... ok\ntest_real_child_receives_ceiling_without_mutating_controller (test_v021_security_contracts.ThreadCeilingTests.test_real_child_receives_ceiling_without_mutating_controller) ... ok\ntest_exact_pair_warn_only_and_distinct_names_preserved (test_v021_security_contracts.TirithFindingsTests.test_exact_pair_warn_only_and_distinct_names_preserved) ... ok\ntest_late_nonsuppressible_finding_cannot_be_hidden_by_cap (test_v021_security_contracts.TirithFindingsTests.test_late_nonsuppressible_finding_cannot_be_hidden_by_cap) ... ok\ntest_malformed_findings_never_suppress_verdict (test_v021_security_contracts.TirithFindingsTests.test_malformed_findings_never_suppress_verdict) ... ok\n\n----------------------------------------------------------------------\nRan 6 tests in 0.184s\n\nOK\n"
+    },
+    "tests/test_v021_restoration_checklist.py": {
+      "receipt": "batch3-checklist-tests.json",
+      "file": "tests/test_v021_restoration_checklist.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_v021_restoration_checklist.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_every_landed_subfeature_has_exactly_one_human_check (test_v021_restoration_checklist.RestorationChecklistCoverageTests.test_every_landed_subfeature_has_exactly_one_human_check) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.013s\n\nOK\n"
+    }
+  },
+  "original_receipts": {
+    "batch3-isolation-metadata-review-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_webhook_namespace.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_webhook_namespace.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_profile_reload_and_route_delivery_ids_do_not_collide (test_v021_webhook_namespace.WebhookNamespaceTests.test_profile_reload_and_route_delivery_ids_do_not_collide) ... [webhook] Invalid signature for route events\nExecuting <Task pending name='Task-2' coro=<WebhookNamespaceTests.test_profile_reload_and_route_delivery_ids_do_not_collide() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_webhook_namespace.py:40> wait_for=<_GatheringFuture pending cb=[Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/tasks.py:709> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.108 seconds\n[webhook] Route events is not authorized for profile 'a'\nok\n\n----------------------------------------------------------------------\nRan 1 test in 0.130s\n\nOK\n"
+      },
+      {
+        "file": "tests/cron/test_v021_ancillary_validation.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/cron",
+          "-p",
+          "test_v021_ancillary_validation.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_create_update_validate_without_rewriting_legacy_reads (test_v021_ancillary_validation.AncillaryValidationTests.test_create_update_validate_without_rewriting_legacy_reads) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 9.001s\n\nOK\n"
+      },
+      {
+        "file": "tests/agent/test_v021_child_env_namespace.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/agent",
+          "-p",
+          "test_v021_child_env_namespace.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_unknown_keys_scrubbed_and_real_child_refuses_mutation (test_v021_child_env_namespace.ChildEnvironmentTests.test_unknown_keys_scrubbed_and_real_child_refuses_mutation) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 1.275s\n\nOK\n"
+      },
+      {
+        "file": "tests/hermes_cli/test_v021_workspace_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/hermes_cli",
+          "-p",
+          "test_v021_workspace_metadata.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_cli_persistent_dir_branch_roundtrip (test_v021_workspace_metadata.MetadataTests.test_cli_persistent_dir_branch_roundtrip) ... kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_create_set_normalize_and_reject_without_partial_writes (test_v021_workspace_metadata.MetadataTests.test_create_set_normalize_and_reject_without_partial_writes) ... ok\ntest_dashboard_forwards_branch_and_real_db_rejects_invalid (test_v021_workspace_metadata.MetadataTests.test_dashboard_forwards_branch_and_real_db_rejects_invalid) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 3.094s\n\nOK\n"
+      }
+    ],
+    "batch3-review-served-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_served_coverage.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_served_coverage.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_cli_renders_connected_coverage_without_false_service_failure (test_v021_served_coverage.ServedCoverageTests.test_cli_renders_connected_coverage_without_false_service_failure) ... ok\ntest_failed_publication_restores_scope (test_v021_served_coverage.ServedCoverageTests.test_failed_publication_restores_scope) ... ok\ntest_fatal_removal_publishes_before_disconnect (test_v021_served_coverage.ServedCoverageTests.test_fatal_removal_publishes_before_disconnect) ... ok\ntest_publication_pins_owner_and_restores_caller (test_v021_served_coverage.ServedCoverageTests.test_publication_pins_owner_and_restores_caller) ... ok\ntest_reader_requires_explicit_membership_and_validated_owner (test_v021_served_coverage.ServedCoverageTests.test_reader_requires_explicit_membership_and_validated_owner) ... ok\ntest_reader_uses_real_stopped_and_pid_reuse_fences (test_v021_served_coverage.ServedCoverageTests.test_reader_uses_real_stopped_and_pid_reuse_fences) ... ok\ntest_real_profile_start_only_successful_connect_claims_slot (test_v021_served_coverage.ServedCoverageTests.test_real_profile_start_only_successful_connect_claims_slot) ... \u2717 discord failed to connect (profile: worker)\nok\ntest_reconnect_publishes_only_while_runner_still_owns_slot (test_v021_served_coverage.ServedCoverageTests.test_reconnect_publishes_only_while_runner_still_owns_slot) ... ok\ntest_single_profile_clears_previous_membership (test_v021_served_coverage.ServedCoverageTests.test_single_profile_clears_previous_membership) ... ok\ntest_startup_failed_and_adapterless_remain_eligible_not_connected (test_v021_served_coverage.ServedCoverageTests.test_startup_failed_and_adapterless_remain_eligible_not_connected) ... Failed to start adapters for profile 'failed': isolated failure\nTraceback (most recent call last):\n  File \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/gateway/run.py\", line 16682, in _start_secondary_profile_adapters\n    connected += await self._start_one_profile_adapters(\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/unittest/mock.py\", line 2251, in _execute_mock_call\n    result = await effect(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_served_coverage.py\", line 46, in start\n    raise RuntimeError('isolated failure')\nRuntimeError: isolated failure\nSkipping secondary profile 'port' due to port-binding config error: invalid listener\nok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.827s\n\nOK\n"
+      }
+    ],
+    "batch3-review-kanban-corrected-tests.json": [
+      {
+        "file": "tests/hermes_cli/test_v021_workspace_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/hermes_cli",
+          "-p",
+          "test_v021_workspace_metadata.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_branch_setter_rejects_invalid_legacy_workspace_atomically (test_v021_workspace_metadata.MetadataTests.test_branch_setter_rejects_invalid_legacy_workspace_atomically) ... kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_cli_persistent_dir_branch_roundtrip (test_v021_workspace_metadata.MetadataTests.test_cli_persistent_dir_branch_roundtrip) ... ok\ntest_create_inherits_board_default_before_required_dir_validation (test_v021_workspace_metadata.MetadataTests.test_create_inherits_board_default_before_required_dir_validation) ... ok\ntest_create_set_normalize_and_reject_without_partial_writes (test_v021_workspace_metadata.MetadataTests.test_create_set_normalize_and_reject_without_partial_writes) ... ok\ntest_dashboard_forwards_branch_and_real_db_rejects_invalid (test_v021_workspace_metadata.MetadataTests.test_dashboard_forwards_branch_and_real_db_rejects_invalid) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 4.591s\n\nOK\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_notification_policy.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_notification_policy.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_cli_denial_audit_is_readonly_and_no_false_success (test_v021_notification_policy.PolicyTests.test_cli_denial_audit_is_readonly_and_no_false_success) ... kanban.db (kanban.db): linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_dashboard_filters_homes_but_allows_removing_denied_existing_sub (test_v021_notification_policy.PolicyTests.test_dashboard_filters_homes_but_allows_removing_denied_existing_sub) ... /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n  import audioop\nok\ntest_delivery_rechecks_policy_preserves_existing_row_and_cursor (test_v021_notification_policy.PolicyTests.test_delivery_rechecks_policy_preserves_existing_row_and_cursor) ... Executing <Task pending name='Task-10' coro=<PolicyTests.test_delivery_rechecks_policy_preserves_existing_row_and_cursor() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:112> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.444 seconds\nok\ntest_denied_between_claim_and_send_rewinds_original_row (test_v021_notification_policy.PolicyTests.test_denied_between_claim_and_send_rewinds_original_row) ... Executing <Task pending name='Task-15' coro=<PolicyTests.test_denied_between_claim_and_send_rewinds_original_row() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:122> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.369 seconds\nok\ntest_foreign_existing_home_without_config_is_denied (test_v021_notification_policy.PolicyTests.test_foreign_existing_home_without_config_is_denied) ... ok\ntest_foreign_owner_home_does_not_inherit_process_destination (test_v021_notification_policy.PolicyTests.test_foreign_owner_home_does_not_inherit_process_destination) ... ok\ntest_malformed_policy_denies_external_and_preserves_tui_explicitly (test_v021_notification_policy.PolicyTests.test_malformed_policy_denies_external_and_preserves_tui_explicitly) ... Failed to parse /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml: while parsing a flow sequence\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 1, column 9\ndid not find expected ',' or ']'\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 2, column 1. Falling back to default config \u2014 every user override (auxiliary providers, fallback chain, model settings) is being IGNORED. Fix the YAML and restart. A copy of the corrupted file was saved to /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml.corrupt.20260911-005340.bak.\n\u26a0\ufe0f  hermes config: Failed to parse /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml: while parsing a flow sequence\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 1, column 9\ndid not find expected ',' or ']'\n  in \"/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml\", line 2, column 1. Falling back to default config \u2014 every user override (auxiliary providers, fallback chain, model settings) is being IGNORED. Fix the YAML and restart. A copy of the corrupted file was saved to /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/approved-tests-nc1ihjwa/tmpiygxg79i/config.yaml.corrupt.20260911-005340.bak.\nok\ntest_owner_missing_fails_closed_and_scope_resets (test_v021_notification_policy.PolicyTests.test_owner_missing_fails_closed_and_scope_resets) ... ok\ntest_redirect_send_failure_rewinds_original_row (test_v021_notification_policy.PolicyTests.test_redirect_send_failure_rewinds_original_row) ... Executing <Task pending name='Task-36' coro=<PolicyTests.test_redirect_send_failure_rewinds_original_row() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_notification_policy.py:129> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.351 seconds\nkanban notifier: send failed for t_66658a9f on telegram (attempt 1/12): temporary send failure\nok\ntest_redirect_subscription_sanitizes_origin_metadata (test_v021_notification_policy.PolicyTests.test_redirect_subscription_sanitizes_origin_metadata) ... ok\ntest_slash_create_denied_subscription_keeps_created_task (test_v021_notification_policy.PolicyTests.test_slash_create_denied_subscription_keeps_created_task) ... kanban create auto-subscribe failed: Notification policy denied this destination\nok\ntest_tool_subscription_uses_policy_and_tui_preservation (test_v021_notification_policy.PolicyTests.test_tool_subscription_uses_policy_and_tui_preservation) ... ok\n\n----------------------------------------------------------------------\nRan 12 tests in 19.088s\n\nOK\n"
+      }
+    ],
+    "batch3-independent-text-packaging-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_text_compatibility.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_text_compatibility.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_explicit_no_thread_and_disabled_auto_thread_stay_inline (test_v021_text_compatibility.FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline) ... Executing <Task finished name='Task-2' coro=<FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_text_compatibility.py:87> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.131 seconds\nok\ntest_failed_thread_does_not_invoke_agent_inline (test_v021_text_compatibility.FreeResponseRouting.test_failed_thread_does_not_invoke_agent_inline) ... ok\ntest_free_response_uses_configured_thread_and_route (test_v021_text_compatibility.FreeResponseRouting.test_free_response_uses_configured_thread_and_route) ... ok\ntest_literal_prose_preserves_code_and_converts_tables (test_v021_text_compatibility.TextCompatibility.test_literal_prose_preserves_code_and_converts_tables) ... ok\ntest_prose_code_json_and_adjacent_tags_stay_literal (test_v021_text_compatibility.TextCompatibility.test_prose_code_json_and_adjacent_tags_stay_literal) ... ok\ntest_standalone_media_extract_and_cleanup_agree (test_v021_text_compatibility.TextCompatibility.test_standalone_media_extract_and_cleanup_agree) ... ok\ntest_unknown_extension_real_file_validation_and_missing_file (test_v021_text_compatibility.TextCompatibility.test_unknown_extension_real_file_validation_and_missing_file) ... ok\n\n----------------------------------------------------------------------\nRan 7 tests in 0.516s\n\nOK\n"
+      },
+      {
+        "file": "tests/agent/test_v021_prompt_contracts.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/agent",
+          "-p",
+          "test_v021_prompt_contracts.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_exact_model_variants_keep_common_guidance_and_tool_filter (test_v021_prompt_contracts.PromptContracts.test_exact_model_variants_keep_common_guidance_and_tool_filter) ... ok\ntest_real_stable_prompt_builder_honors_gates (test_v021_prompt_contracts.PromptContracts.test_real_stable_prompt_builder_honors_gates) ... ok\ntest_skill_description_default_and_explicit_budget (test_v021_prompt_contracts.PromptContracts.test_skill_description_default_and_explicit_budget) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 6.668s\n\nOK\n"
+      },
+      {
+        "file": "tests/tools/test_v021_discord_packaging.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/tools",
+          "-p",
+          "test_v021_discord_packaging.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_lazy_and_manifest_specs_agree_for_pip_and_uv_commands (test_v021_discord_packaging.DiscordPackagingTests.test_lazy_and_manifest_specs_agree_for_pip_and_uv_commands) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.015s\n\nOK\n"
+      }
+    ],
+    "batch3-independent-text-correction-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_text_compatibility.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_text_compatibility.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_explicit_no_thread_and_disabled_auto_thread_stay_inline (test_v021_text_compatibility.FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline) ... Executing <Task finished name='Task-2' coro=<FreeResponseRouting.test_explicit_no_thread_and_disabled_auto_thread_stay_inline() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_text_compatibility.py:95> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 0.126 seconds\nok\ntest_failed_thread_does_not_invoke_agent_inline (test_v021_text_compatibility.FreeResponseRouting.test_failed_thread_does_not_invoke_agent_inline) ... ok\ntest_free_response_uses_configured_thread_and_route (test_v021_text_compatibility.FreeResponseRouting.test_free_response_uses_configured_thread_and_route) ... ok\ntest_document_marker_agrees_with_delivery_without_promoting_code_prefix (test_v021_text_compatibility.TextCompatibility.test_document_marker_agrees_with_delivery_without_promoting_code_prefix) ... ok\ntest_literal_prose_preserves_code_and_converts_tables (test_v021_text_compatibility.TextCompatibility.test_literal_prose_preserves_code_and_converts_tables) ... ok\ntest_prose_code_json_and_adjacent_tags_stay_literal (test_v021_text_compatibility.TextCompatibility.test_prose_code_json_and_adjacent_tags_stay_literal) ... ok\ntest_standalone_media_extract_and_cleanup_agree (test_v021_text_compatibility.TextCompatibility.test_standalone_media_extract_and_cleanup_agree) ... ok\ntest_unknown_extension_real_file_validation_and_missing_file (test_v021_text_compatibility.TextCompatibility.test_unknown_extension_real_file_validation_and_missing_file) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.554s\n\nOK\n"
+      }
+    ],
+    "batch3-review-compression-final-tests.json": [
+      {
+        "file": "tests/agent/test_v021_compression_publication.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/agent",
+          "-p",
+          "test_v021_compression_publication.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_in_place_preserves_tail_in_same_commit (test_v021_compression_publication.CompressionPublicationTests.test_in_place_preserves_tail_in_same_commit) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_partial_tail_is_in_atomic_child_and_foreign_append_survives (test_v021_compression_publication.CompressionPublicationTests.test_partial_tail_is_in_atomic_child_and_foreign_append_survives) ... ok\ntest_publication_failure_preserves_parent_and_input (test_v021_compression_publication.CompressionPublicationTests.test_publication_failure_preserves_parent_and_input) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 22.529s\n\nOK\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n"
+      },
+      {
+        "file": "tests/agent/test_v021_compression_tail_guards.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/agent",
+          "-p",
+          "test_v021_compression_tail_guards.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_durable_parent_growth_keeps_original_requested_tail_out_of_summary (test_v021_compression_tail_guards.PreservedTailGuards.test_durable_parent_growth_keeps_original_requested_tail_out_of_summary) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_growing_candidate_refuses_without_salvaging_preserved_tail (test_v021_compression_tail_guards.PreservedTailGuards.test_growing_candidate_refuses_without_salvaging_preserved_tail) ... ok\ntest_todo_refresh_does_not_change_preserved_last_user_message (test_v021_compression_tail_guards.PreservedTailGuards.test_todo_refresh_does_not_change_preserved_last_user_message) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 22.393s\n\nOK\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n\u26a0\ufe0f Compression refused: the generated summary would have GROWN the conversation instead of shrinking it. No messages were dropped \u2014 conversation continues unchanged.\n\u26a0 No auxiliary LLM provider configured \u2014 context compression will drop middle turns without a summary. Run `hermes setup` or set OPENROUTER_API_KEY.\n\ud83d\udddc\ufe0f Compacting context \u2014 summarizing earlier conversation so I can continue...\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_compression_adoption.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_compression_adoption.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_published_child_is_adopted_without_rewrite (test_v021_compression_adoption.CompressionAdoptionTests.test_published_child_is_adopted_without_rewrite) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nExecuting <Task pending name='Task-2' coro=<CompressionAdoptionTests.test_published_child_is_adopted_without_rewrite() running at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_adoption.py:71> wait_for=<Future pending cb=[_chain_future.<locals>._call_check_cancel() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/futures.py:387, Task.task_wakeup()] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:428> cb=[_run_until_complete_cb() at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/base_events.py:181] created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 5.572 seconds\nok\ntest_routing_save_failure_never_deletes_canonical_child (test_v021_compression_adoption.CompressionAdoptionTests.test_routing_save_failure_never_deletes_canonical_child) ... Manual compress failed: route save failed\nExecuting <Task finished name='Task-7' coro=<CompressionAdoptionTests.test_routing_save_failure_never_deletes_canonical_child() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_adoption.py:73> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 1.868 seconds\nok\n\n----------------------------------------------------------------------\nRan 2 tests in 7.469s\n\nOK\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_compression_failure.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_compression_failure.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_no_rotation_is_failure_without_success_bookkeeping (test_v021_compression_failure.CompressionFailure.test_no_rotation_is_failure_without_success_bookkeeping) ... Manual /compress: session rotation did not occur (session_id unchanged) and in-place mode is off \u2014 preserving original transcript instead of overwriting it (#44794).\nManual compress failed: compression did not create a durable continuation session\nExecuting <Task finished name='Task-2' coro=<CompressionFailure.test_no_rotation_is_failure_without_success_bookkeeping() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_compression_failure.py:16> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 4.163 seconds\nok\n\n----------------------------------------------------------------------\nRan 1 test in 4.176s\n\nOK\n"
+      }
+    ],
+    "batch3-review-security-final-tests.json": [
+      {
+        "file": "tests/tools/test_v021_security_contracts.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/tools",
+          "-p",
+          "test_v021_security_contracts.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_harmless_operands_are_not_executables (test_v021_security_contracts.ProcessClassifierTests.test_harmless_operands_are_not_executables) ... ok\ntest_wrapped_killers_and_full_python_patterns_are_blocked (test_v021_security_contracts.ProcessClassifierTests.test_wrapped_killers_and_full_python_patterns_are_blocked) ... ok\ntest_real_child_receives_ceiling_without_mutating_controller (test_v021_security_contracts.ThreadCeilingTests.test_real_child_receives_ceiling_without_mutating_controller) ... ok\ntest_exact_pair_warn_only_and_distinct_names_preserved (test_v021_security_contracts.TirithFindingsTests.test_exact_pair_warn_only_and_distinct_names_preserved) ... ok\ntest_late_nonsuppressible_finding_cannot_be_hidden_by_cap (test_v021_security_contracts.TirithFindingsTests.test_late_nonsuppressible_finding_cannot_be_hidden_by_cap) ... ok\ntest_malformed_findings_never_suppress_verdict (test_v021_security_contracts.TirithFindingsTests.test_malformed_findings_never_suppress_verdict) ... ok\n\n----------------------------------------------------------------------\nRan 6 tests in 0.184s\n\nOK\n"
+      }
+    ],
+    "batch3-checklist-tests.json": [
+      {
+        "file": "tests/test_v021_restoration_checklist.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-p",
+          "test_v021_restoration_checklist.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_every_landed_subfeature_has_exactly_one_human_check (test_v021_restoration_checklist.RestorationChecklistCoverageTests.test_every_landed_subfeature_has_exactly_one_human_check) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.013s\n\nOK\n"
+      }
+    ],
+    "batch3-isolation-metadata-review-bindings.json": [
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "agent/delegation_context.py",
+        "committed_blob": "0c28881690f95ac47260add8a5427d69fb0031fc",
+        "committed_sha256": "26f6f0018b18f8cca0f7652f9e207a7f2858f40493abbf1c110e5450eb8e957b",
+        "tested_current_sha256": "26f6f0018b18f8cca0f7652f9e207a7f2858f40493abbf1c110e5450eb8e957b",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "cron/jobs.py",
+        "committed_blob": "2b436a2b03ae75de9f895c361802f835d2687778",
+        "committed_sha256": "409d34b8b688350a043a9ab5d329c70b54068fa4367d7c63ce23fbb609dab649",
+        "tested_current_sha256": "409d34b8b688350a043a9ab5d329c70b54068fa4367d7c63ce23fbb609dab649",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "gateway/platforms/webhook.py",
+        "committed_blob": "7fe622c2ee1713c974cc9708ff8b97c00cbaf9db",
+        "committed_sha256": "7737d1bb6d8f2c474f3c68b70c185aa31cf159d23343f9c05cefdbf115295449",
+        "tested_current_sha256": "7737d1bb6d8f2c474f3c68b70c185aa31cf159d23343f9c05cefdbf115295449",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "tests/agent/test_v021_child_env_namespace.py",
+        "committed_blob": "285b9523b7113743127178aa1082c055caa5cbd0",
+        "committed_sha256": "a713439f104e82cbdfd81b9f34f7ab43ea67f2cb286769a07962bdfed5ef42d1",
+        "tested_current_sha256": "a713439f104e82cbdfd81b9f34f7ab43ea67f2cb286769a07962bdfed5ef42d1",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "tests/cron/test_v021_ancillary_validation.py",
+        "committed_blob": "1ed52db306a7b5f6dc78a20fedcd5633cce8034f",
+        "committed_sha256": "b76a8ecffe025a60be4e0a4d025db09fe3996bb7eb128b6378fba157f8a231fa",
+        "tested_current_sha256": "b76a8ecffe025a60be4e0a4d025db09fe3996bb7eb128b6378fba157f8a231fa",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "tests/gateway/test_v021_webhook_namespace.py",
+        "committed_blob": "8bca6d406390ff8f6febe4553c12cbe6d54b0a8e",
+        "committed_sha256": "01ca3ba0f913463177deab814acb72fdcf677d2c2abb9ff2b780179dee7a1c0d",
+        "tested_current_sha256": "01ca3ba0f913463177deab814acb72fdcf677d2c2abb9ff2b780179dee7a1c0d",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+        "path": "tests/gateway/test_webhook_integration.py",
+        "committed_blob": "87971b8facd12c76c38a8f3c33d8d1bd4521cf70",
+        "committed_sha256": "e309a440510ad288b824adb7682271c4516f976090d62d5de5f783ee74395a6c",
+        "tested_current_sha256": "e309a440510ad288b824adb7682271c4516f976090d62d5de5f783ee74395a6c",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "path": "hermes_cli/kanban.py",
+        "committed_blob": "f7b2c17fedccdeef98e4873b6e2d0bd08e8f661d",
+        "committed_sha256": "fb91da0713ef4a2613ee99832c34e6ef301719ce345d402d4222329e5889860c",
+        "tested_current_sha256": "3d61e158639b8f3a3b18d7f5f3a72d6c0485f6c70959bfff3871c1aebaff8d15",
+        "current_matches_commit": false
+      },
+      {
+        "commit": "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "path": "hermes_cli/kanban_db.py",
+        "committed_blob": "23897ffe249729cd474182edf50aa3701b984152",
+        "committed_sha256": "38a1cbb7ca22e52bdc03a2497a27fd0b46ddddc5d0190da86917fcfd37e75e9a",
+        "tested_current_sha256": "38a1cbb7ca22e52bdc03a2497a27fd0b46ddddc5d0190da86917fcfd37e75e9a",
+        "current_matches_commit": true
+      },
+      {
+        "commit": "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "path": "plugins/kanban/dashboard/plugin_api.py",
+        "committed_blob": "81854273354e8f0a39240e8a844b3838ae5d23ab",
+        "committed_sha256": "38387a996d06d377ee5ac7934e562bfb61e3280b7b6f68ac96ebe0cdabbc9ca0",
+        "tested_current_sha256": "ad51c167900c20df97c3e2cfeb5e8d626b4cb64d202de0d68a39f7d2fdf69c8e",
+        "current_matches_commit": false
+      },
+      {
+        "commit": "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "path": "tests/hermes_cli/test_v021_workspace_metadata.py",
+        "committed_blob": "2072b97bb6b95b599502eb8beea34ecf44267008",
+        "committed_sha256": "6480d392cca2e81647dd32a36fd8c437405e33520813c9ada3c69e25d6850e05",
+        "tested_current_sha256": "6480d392cca2e81647dd32a36fd8c437405e33520813c9ada3c69e25d6850e05",
+        "current_matches_commit": true
+      }
+    ],
+    "batch3-served-notification-review-bindings.json": {
+      "reviewed_commits": [
+        "4775bf2b0396d8a224eface290744213c9ff4608",
+        "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+        "674378e8597a78df67f4ff7a3dcb937262286289",
+        "e39c7aaefa38c2d37b730076f2da30e06ec23569",
+        "105608061f34bd14614500143c11baba99e7fcb1"
+      ],
+      "binding_head": "71da39be8ece2dc9f8478647bee748c8563e394e",
+      "tree": "d32b0f862cd7ee6e32bbcc8f9ae230c0b073221d",
+      "paths": {
+        "gateway/kanban_watchers.py": {
+          "reviewed_commit": "674378e8597a78df67f4ff7a3dcb937262286289",
+          "git_blob": "a5272715db60fede7305f7bb5307224052804f97",
+          "sha256": "57279c52c02d443017f04dca7f549197b2ac8112304acb3824abc276deec6924",
+          "current_sha256": "57279c52c02d443017f04dca7f549197b2ac8112304acb3824abc276deec6924",
+          "current_matches_reviewed": true
+        },
+        "gateway/run.py": {
+          "reviewed_commit": "4775bf2b0396d8a224eface290744213c9ff4608",
+          "git_blob": "75c8afdb186d2d12c0a17c323c63e0a95db6d8a5",
+          "sha256": "414e3886b41997916e5efbc3d953502258b9005ffcde79fb561e4a425984be80",
+          "current_sha256": "414e3886b41997916e5efbc3d953502258b9005ffcde79fb561e4a425984be80",
+          "current_matches_reviewed": true
+        },
+        "gateway/slash_commands.py": {
+          "reviewed_commit": "674378e8597a78df67f4ff7a3dcb937262286289",
+          "git_blob": "0bf911107951c1cb31bdb7e131443b0190494abf",
+          "sha256": "f770e0100b310813ada8e1563299c1d1c63276e13e083a1f3a2a750987fb118f",
+          "current_sha256": "3da4a84e9dc1f4a4e3dbef3bedf1e126207b94a35c696e31d45a59ae23cba377",
+          "current_matches_reviewed": false
+        },
+        "gateway/status.py": {
+          "reviewed_commit": "4775bf2b0396d8a224eface290744213c9ff4608",
+          "git_blob": "ded88ab97a7d07d3f7ff115820ffc8abc5fa8a8b",
+          "sha256": "b511bbb7f1d90e5db98639e7d0cbb59cf25ed599da0bc1fba4b808665b61d002",
+          "current_sha256": "b511bbb7f1d90e5db98639e7d0cbb59cf25ed599da0bc1fba4b808665b61d002",
+          "current_matches_reviewed": true
+        },
+        "hermes_cli/kanban.py": {
+          "reviewed_commit": "674378e8597a78df67f4ff7a3dcb937262286289",
+          "git_blob": "08a40604912f1ee8949c218b7624615f8d44b02e",
+          "sha256": "3d61e158639b8f3a3b18d7f5f3a72d6c0485f6c70959bfff3871c1aebaff8d15",
+          "current_sha256": "3d61e158639b8f3a3b18d7f5f3a72d6c0485f6c70959bfff3871c1aebaff8d15",
+          "current_matches_reviewed": true
+        },
+        "hermes_cli/kanban_db.py": {
+          "reviewed_commit": "105608061f34bd14614500143c11baba99e7fcb1",
+          "git_blob": "66d8eb5bef6f8f2a7ea20218f689d0be1a926a4f",
+          "sha256": "387a4891479288e7b6859bbfcd406a441d0b38a1b36e7421a3a3814ad8224ba2",
+          "current_sha256": "387a4891479288e7b6859bbfcd406a441d0b38a1b36e7421a3a3814ad8224ba2",
+          "current_matches_reviewed": true
+        },
+        "hermes_cli/kanban_notifications.py": {
+          "reviewed_commit": "105608061f34bd14614500143c11baba99e7fcb1",
+          "git_blob": "abb865c8c4801894e92c1c1802642905efe5c368",
+          "sha256": "6e3f38ab5e606b11eb6773df8756abe20e185c9230a0e170383ee40470ed8e2f",
+          "current_sha256": "6e3f38ab5e606b11eb6773df8756abe20e185c9230a0e170383ee40470ed8e2f",
+          "current_matches_reviewed": true
+        },
+        "hermes_cli/profiles.py": {
+          "reviewed_commit": "4775bf2b0396d8a224eface290744213c9ff4608",
+          "git_blob": "7c6beef323c3d0174b31b8d3031e3748274ac87c",
+          "sha256": "f2c572ac169eb442a64acef7ae46146364a7771a3c1a8c9808681d3faa08cd2b",
+          "current_sha256": "f2c572ac169eb442a64acef7ae46146364a7771a3c1a8c9808681d3faa08cd2b",
+          "current_matches_reviewed": true
+        },
+        "hermes_cli/status.py": {
+          "reviewed_commit": "4775bf2b0396d8a224eface290744213c9ff4608",
+          "git_blob": "24a6ac850e2b7498cee323837abaef7e00080a0f",
+          "sha256": "fa96ae662508ca81a9fadd55dc2eb3f89cdf5fb7cf5262fdfa6d4e6d95a8d35b",
+          "current_sha256": "fa96ae662508ca81a9fadd55dc2eb3f89cdf5fb7cf5262fdfa6d4e6d95a8d35b",
+          "current_matches_reviewed": true
+        },
+        "plugins/kanban/dashboard/plugin_api.py": {
+          "reviewed_commit": "674378e8597a78df67f4ff7a3dcb937262286289",
+          "git_blob": "b7f54060512791cdb7ee74e95f8511814d712f14",
+          "sha256": "ad51c167900c20df97c3e2cfeb5e8d626b4cb64d202de0d68a39f7d2fdf69c8e",
+          "current_sha256": "ad51c167900c20df97c3e2cfeb5e8d626b4cb64d202de0d68a39f7d2fdf69c8e",
+          "current_matches_reviewed": true
+        },
+        "tests/gateway/test_v021_notification_policy.py": {
+          "reviewed_commit": "105608061f34bd14614500143c11baba99e7fcb1",
+          "git_blob": "7a244fd4bb2a95316e098057b43707ac51289734",
+          "sha256": "8ef74f94c5771608ddae6531187faad0aea085c187573697b40105ae25d55017",
+          "current_sha256": "8ef74f94c5771608ddae6531187faad0aea085c187573697b40105ae25d55017",
+          "current_matches_reviewed": true
+        },
+        "tests/gateway/test_v021_served_coverage.py": {
+          "reviewed_commit": "4775bf2b0396d8a224eface290744213c9ff4608",
+          "git_blob": "6abb6c0fa842eb33b0a32219447cbfa64dcb5caf",
+          "sha256": "9231ffbaa26d1d00eb1d8702fcae4a884ada277de93703c17be6b5fc085ea124",
+          "current_sha256": "9231ffbaa26d1d00eb1d8702fcae4a884ada277de93703c17be6b5fc085ea124",
+          "current_matches_reviewed": true
+        },
+        "tests/hermes_cli/test_v021_workspace_metadata.py": {
+          "reviewed_commit": "105608061f34bd14614500143c11baba99e7fcb1",
+          "git_blob": "5661816041eebc4bd1ddbbd46768450e9b20789f",
+          "sha256": "fb1d6d8d9f3410ff45edb11ddc7dfb598ace844fd53966a4905873e8ce7b7ece",
+          "current_sha256": "fb1d6d8d9f3410ff45edb11ddc7dfb598ace844fd53966a4905873e8ce7b7ece",
+          "current_matches_reviewed": true
+        },
+        "tools/kanban_tools.py": {
+          "reviewed_commit": "674378e8597a78df67f4ff7a3dcb937262286289",
+          "git_blob": "7019351221d6aca4b68bcdc8c65308d04160faef",
+          "sha256": "36b83e68003800e490e0091ad171221010afd5487ab5570b34a74db90de68f28",
+          "current_sha256": "36b83e68003800e490e0091ad171221010afd5487ab5570b34a74db90de68f28",
+          "current_matches_reviewed": true
+        }
+      }
+    },
+    "batch3-text-packaging-review-final-bindings.json": {
+      "reviewed_head": "b411e475e24abd72eaae3a8810f8004a21f4660e",
+      "reviewed_tree": "f87ea8aaa871f82840d2c7bc4d38c5b028cfb716",
+      "files": {
+        "agent/prompt_builder.py": {
+          "sha256": "22c8bddcd1c20505725edcb454e6cb9cd100ceccc43fc7f6ce5952e56521d97d",
+          "git_blob": "60d21fe420292e78d65612a6cb6d823f22fd9070",
+          "matches_committed_bytes": true
+        },
+        "agent/skill_utils.py": {
+          "sha256": "15b0998d4289530799d1f84df2e145588025a65157f1de2ee50247bbaa36fb2d",
+          "git_blob": "220ee1d633fb1efcf6af60fa6572b6f2ff924e58",
+          "matches_committed_bytes": true
+        },
+        "agent/system_prompt.py": {
+          "sha256": "8034aa9ff666833912ce48ecad17c4076bfb2f2ea5804e68da5a136abb369ab1",
+          "git_blob": "952b1161e86da8808f4d8abeffb66d95b47e1615",
+          "matches_committed_bytes": true
+        },
+        "gateway/platforms/base.py": {
+          "sha256": "65c248ec776d48012c6ceb3c33c83908d49718142c8baf82df3d110eb2bf4bbf",
+          "git_blob": "fc75295e6299f85ae2234a2709ad98019f59ef17",
+          "matches_committed_bytes": true
+        },
+        "plugins/platforms/discord/adapter.py": {
+          "sha256": "6bab6b39705fa0c698a781fe6c04a467a75ef87ebf7968d8040bef591720adcf",
+          "git_blob": "bf62f901a74ae15a06f1b92b9bd893d775263ad8",
+          "matches_committed_bytes": true
+        },
+        "tests/agent/test_prompt_builder.py": {
+          "sha256": "0f176f8ac2687b89829554d8206f3321c6e60fd4c19f023123e7c42cf7fa2ce6",
+          "git_blob": "53d7d043345d5a560a101f267901e4af023cbc00",
+          "matches_committed_bytes": true
+        },
+        "tests/agent/test_v021_prompt_contracts.py": {
+          "sha256": "1e7d78ff3edfeab264d3a6006f788500e81baf71817891256e018eafbb8a362f",
+          "git_blob": "918e679acbb21d2f9504e8e85cb0db0ecaef51d9",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_discord_format.py": {
+          "sha256": "9bea7d533eeaf7a83d20472de668ef46a1d219b5aa43cca8d8ac5df92cb5a454",
+          "git_blob": "04617bdaba0ff25244fa5b905ec9702e39695cdd",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_discord_free_response.py": {
+          "sha256": "38bd418c4f9e13e7daf35d6fb44b0c0f29f3039e650642a4fe2936d44dc0c149",
+          "git_blob": "55d2f7ac9b7cd2fff7185223fd75af5abe33566b",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_media_spaced_paths_and_history_dedupe.py": {
+          "sha256": "e3ca33c8b90c79fe9b7066966e5931e42fe2540ae75011a580572c35395cd71c",
+          "git_blob": "1db355b28bd0e2807f55068b28822fa33c6655e6",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_media_tag_cleanup.py": {
+          "sha256": "1dfe8311de7fd4a3fa9bd69ae85ac79e8d13445ee44379347e559169916735e6",
+          "git_blob": "5798b8dce471da01bdac27aa8465bb5cc08f7187",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_media_tag_formatting_variants.py": {
+          "sha256": "bc754af09eead8221c4e440158c77200987c0c1a52592491c8f2b68562d9bf5f",
+          "git_blob": "cef5701c67034c4e6aa904b0a7124dfa1f452b28",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_media_tag_separator.py": {
+          "sha256": "26a4012c8e32d08c49ea50df064a0b284e377c575185ee4700fac0964868a36b",
+          "git_blob": "d2d6f117dd0830e7838fcc9409e50374fb6136fa",
+          "matches_committed_bytes": true
+        },
+        "tests/gateway/test_v021_text_compatibility.py": {
+          "sha256": "1f4ed82ed88d3d901e5e12339e604954465d6ea5b8ff7469b96b4ebdb77c5fc7",
+          "git_blob": "450ff0bc3ec6b4dbb76d460cac59e73d300fd3dd",
+          "matches_committed_bytes": true
+        },
+        "website/docs/user-guide/messaging/discord.md": {
+          "sha256": "e1587ac51d9d4233c3d62032122870036a3956121f1453cddea3e6b2f9efc2d2",
+          "git_blob": "a7f15fd24fc5273ebda6336e75f0258c5abb9ac9",
+          "matches_committed_bytes": true
+        },
+        "pyproject.toml": {
+          "sha256": "3f8d6814d74c8790ebde1d1c1fe65490e9b1dde02077ea51d3a87265f8458caf",
+          "git_blob": "e7e364a949fb57eeada0809691c44ff94ba450f1",
+          "matches_committed_bytes": true
+        },
+        "uv.lock": {
+          "sha256": "019de443e20ced8c01fb13ddd14853286472258accfcde52c76f43722f6f7424",
+          "git_blob": "5618e670c88dccebb5568e4d79e6e50ed11f8092",
+          "matches_committed_bytes": true
+        },
+        "tools/lazy_deps.py": {
+          "sha256": "6876a8927705238949d0e4f6c96d4a87d0d8451e61f6b80ef6050556097a4748",
+          "git_blob": "cf0933748d39e66891be2a8daf059ca72563ec80",
+          "matches_committed_bytes": true
+        },
+        "tests/tools/test_v021_discord_packaging.py": {
+          "sha256": "b932bf30f9deefc99727a58b4f83b46b942ef8d3b0bdc134603a933aca607f92",
+          "git_blob": "207c3ba7cc974d745b6fe82e7820a067ec32608c",
+          "matches_committed_bytes": true
+        }
+      },
+      "receipt_sha256": {
+        "batch3-resolver-tests.json": "05174a4f5d106d008d12cb4c3e1d057e8623dcd79cdd2284ad3f4a7fa060f196",
+        "batch3-lock-integrity.json": "8d85ed13133f5762fff3b7d8bcdd066d84ba016b3b9408044390b3d35c5aa7a4",
+        "batch3-resolver-home/discord.in": "dc6485085513acb73957d67c4abeba40eaf7c998cd07dafc27a11e3ea53898c2",
+        "batch3-resolver-home/discord.txt": "689294f5e2e35aa6a9ad1ef95a339e935772f04306693e2784d0471f2b865693",
+        "batch3-resolver-home/pip-report.json": "5123bbe4db1bd59af80eb1335ce6ddca3345e60c828aed42b17f76163d8553b0",
+        "batch3-independent-text-packaging-tests.json": "353b466ea501d4705e46358c2b12b98161af21fdff4fc4a66286b98fd7441cb6",
+        "batch3-independent-text-correction-tests.json": "473298797131739f1aa30aa3c3841fa89000ee241d78528651dca9b4fce3563c",
+        "batch3-review-media-marker-reproduction.json": "1cadc6981a35ec3dba026a9a49f2092e7f4593c6c881f63e84083a622753cf9e"
+      },
+      "resolver_input_matches_manifest": true,
+      "resolver_codes": [
+        0,
+        0,
+        0
+      ],
+      "resolver_report_versions_and_wheel_hashes_match_lock": [
+        "discord-py",
+        "pynacl",
+        "davey",
+        "brotlicffi",
+        "aiohttp"
+      ],
+      "lock_changed_package_records": [
+        "davey",
+        "discord-py",
+        "hermes-agent"
+      ],
+      "all_other_package_versions_artifact_hashes_unchanged": true
+    },
+    "batch3-compression-independent-bindings.json": {
+      "reviewed_commits": [
+        "71da39be8ece2dc9f8478647bee748c8563e394e",
+        "31bf95b85160ec4b205b28b01f5f4b99a2caa802"
+      ],
+      "binding_head": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+      "tree": "c3805ee8ae23c20ebdcaa3a25426b6f4d4e2eaa0",
+      "paths": {
+        "agent/conversation_compression.py": {
+          "git_blob": "bfcc22d079eb91b58718d577b53cf890e3924294",
+          "sha256": "9761d38d03949e02b8392367ec926674fdecaaa1e88663984da7f69cf362f47d"
+        },
+        "gateway/slash_commands.py": {
+          "git_blob": "32fd9bf2ca9d868e038eefac1e2c12e166c9788e",
+          "sha256": "3da4a84e9dc1f4a4e3dbef3bedf1e126207b94a35c696e31d45a59ae23cba377"
+        },
+        "run_agent.py": {
+          "git_blob": "babcfd1c96daba19782f7333406ae330954f6731",
+          "sha256": "b7982b890594f09fbe2bdf6b9f3726db50580c9d3c6a8ce003f08b037ca50792"
+        },
+        "tests/agent/test_v021_compression_publication.py": {
+          "git_blob": "df34db5008850556d263638a43239e72466a0e00",
+          "sha256": "80523dfc790224298b46e1a6f9b906c1c1e1767efd4393bfc2c0e3179412a6c0"
+        },
+        "tests/agent/test_v021_compression_tail_guards.py": {
+          "git_blob": "09c5cf1b2778c258e29521e45f892218a675b4ab",
+          "sha256": "7763a3b77c8dda0130c1dfae3b79c29165c9c6fd13fa13d9861d80253755fd99"
+        },
+        "tests/gateway/test_v021_compression_adoption.py": {
+          "git_blob": "fcc3015ff7c446aad89b0c503c8bfdfae4f274e8",
+          "sha256": "988a5a2f74894a793ead03a0f2d49d4dfe711104c587b9c76a64c6cfa688ee7b"
+        }
+      }
+    },
+    "batch3-security-independent-bindings.json": {
+      "reviewed_commits": [
+        "a87ac195800888b334a4b977d19b1419c44d99b2",
+        "eef1c3a41dbdd9fc2870c4580e39e3a6181f4fa3",
+        "6f78aabd57afc2ffd551e2855b0e9e5e81890558"
+      ],
+      "paths": {
+        ".github/workflows/osv-scanner.yml": {
+          "sha256": "22895442b1fb9896dca49eb83d3377527feb6b46a5ce4f76775b87ee302a1489",
+          "blob": "7681568e22bea832ec8831a2c74e6134c6027c75"
+        },
+        "tools/tirith_security.py": {
+          "sha256": "494579b524598aa237cb884d296799c3e4b63edeeb016426a41fef5ed88b3abe",
+          "blob": "7f41a415b0278e9c90a47dd81338835c71459bc5"
+        },
+        "scripts/process_guard.py": {
+          "sha256": "3265134136623233ee077450e0d213387e60c4665bdf9e894004b7db2a4538d9",
+          "blob": "cbf8c5df42646e20f73f8020556bfb9f5e5e1d6f"
+        },
+        "scripts/run_tests_parallel.py": {
+          "sha256": "207adc518115e51e9801f5146dcfb890b7647ab4620e942dd832e2ad21f597f9",
+          "blob": "893220e2da1b38be241877a1a003b2cd41a7d887"
+        },
+        "tests/conftest.py": {
+          "sha256": "a146915addef2db9b5e80b82784791f1494f08843c8f3485c26e65d2ce249bad",
+          "blob": "3993cc7b8a88d7fcea7074eea0a1d58389aa538d"
+        },
+        "tests/tools/test_v021_security_contracts.py": {
+          "sha256": "92ff585099e13a45a774f7efc5556a5db808a08b63b851214f1b5b54b313b445",
+          "blob": "ebd06dbc83a83cd4f30203f2a595da4a50231fa7"
+        }
+      }
+    },
+    "batch3-resolver-tests.json": [
+      {
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pip",
+          "--isolated",
+          "install",
+          "--dry-run",
+          "--ignore-installed",
+          "--only-binary=:all:",
+          "--no-build-isolation",
+          "--report",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/pip-report.json",
+          "-r",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in"
+        ],
+        "returncode": 0,
+        "output": "Collecting discord.py==2.7.1 (from -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 1))\n  Downloading discord_py-2.7.1-py3-none-any.whl.metadata (7.5 kB)\nCollecting PyNaCl==1.6.2 (from -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 2))\n  Downloading pynacl-1.6.2-cp38-abi3-manylinux_2_34_x86_64.whl.metadata (10.0 kB)\nCollecting davey==0.1.6 (from -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 3))\n  Downloading davey-0.1.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.9 kB)\nCollecting brotlicffi==1.2.0.1 (from -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 4))\n  Downloading brotlicffi-1.2.0.1-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (6.5 kB)\nCollecting aiohttp==3.14.3 (from -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading aiohttp-3.14.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (8.3 kB)\nCollecting cffi>=2.0.0 (from PyNaCl==1.6.2->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 2))\n  Downloading cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.5 kB)\nCollecting aiohappyeyeballs>=2.5.0 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl.metadata (5.9 kB)\nCollecting aiosignal>=1.4.0 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)\nCollecting attrs>=17.3.0 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)\nCollecting frozenlist>=1.1.1 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading frozenlist-1.8.0-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (20 kB)\nCollecting multidict<7.0,>=4.5 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading multidict-6.8.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (5.3 kB)\nCollecting propcache>=0.2.0 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading propcache-0.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (16 kB)\nCollecting typing_extensions>=4.4 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)\nCollecting yarl<2.0,>=1.17.0 (from aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading yarl-1.24.5-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (103 kB)\n     \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 104.0/104.0 kB 5.0 MB/s eta 0:00:00\nCollecting pycparser (from cffi>=2.0.0->PyNaCl==1.6.2->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 2))\n  Downloading pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)\nCollecting idna>=2.0 (from yarl<2.0,>=1.17.0->aiohttp==3.14.3->-r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in (line 5))\n  Downloading idna-3.19-py3-none-any.whl.metadata (9.2 kB)\nDownloading discord_py-2.7.1-py3-none-any.whl (1.2 MB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 1.2/1.2 MB 15.0 MB/s eta 0:00:00\nDownloading pynacl-1.6.2-cp38-abi3-manylinux_2_34_x86_64.whl (1.4 MB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 1.4/1.4 MB 16.6 MB/s eta 0:00:00\nDownloading davey-0.1.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (914 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 914.5/914.5 kB 14.4 MB/s eta 0:00:00\nDownloading brotlicffi-1.2.0.1-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.5 MB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 1.5/1.5 MB 16.3 MB/s eta 0:00:00\nDownloading aiohttp-3.14.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 1.8/1.8 MB 15.2 MB/s eta 0:00:00\nDownloading aiohappyeyeballs-2.7.1-py3-none-any.whl (15 kB)\nDownloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)\nDownloading attrs-26.1.0-py3-none-any.whl (67 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 67.5/67.5 kB 1.9 MB/s eta 0:00:00\nDownloading cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (217 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 217.8/217.8 kB 6.6 MB/s eta 0:00:00\nDownloading frozenlist-1.8.0-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (231 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 231.1/231.1 kB 4.2 MB/s eta 0:00:00\nDownloading multidict-6.8.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (272 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 272.6/272.6 kB 5.4 MB/s eta 0:00:00\nDownloading propcache-0.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (58 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 58.9/58.9 kB 1.1 MB/s eta 0:00:00\nDownloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 45.6/45.6 kB 953.8 kB/s eta 0:00:00\nDownloading yarl-1.24.5-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (111 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 111.9/111.9 kB 2.6 MB/s eta 0:00:00\nDownloading idna-3.19-py3-none-any.whl (68 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 68.5/68.5 kB 1.3 MB/s eta 0:00:00\nDownloading pycparser-3.0-py3-none-any.whl (48 kB)\n   \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 48.2/48.2 kB 611.6 kB/s eta 0:00:00\nWould install PyNaCl-1.6.2 aiohappyeyeballs-2.7.1 aiohttp-3.14.3 aiosignal-1.4.0 attrs-26.1.0 brotlicffi-1.2.0.1 cffi-2.1.1 davey-0.1.6 discord.py-2.7.1 frozenlist-1.8.0 idna-3.19 multidict-6.8.0 propcache-0.5.2 pycparser-3.0 typing_extensions-4.16.0 yarl-1.24.5\n\n[notice] A new release of pip is available: 24.0 -> 26.2.1\n[notice] To update, run: /home/brian/.hermes/hermes-agent/.venv/bin/python -m pip install --upgrade pip\n"
+      },
+      {
+        "command": [
+          "/home/brian/.local/bin/uv",
+          "--no-config",
+          "pip",
+          "compile",
+          "--python",
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "--only-binary=:all:",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in",
+          "-o",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.txt"
+        ],
+        "returncode": 0,
+        "output": "Resolved 16 packages in 1.05s\n# This file was autogenerated by uv via the following command:\n#    uv --no-config pip compile --python /home/brian/.hermes/hermes-agent/.venv/bin/python --only-binary=:all: /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in -o /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.txt\naiohappyeyeballs==2.7.1\n    # via aiohttp\naiohttp==3.14.3\n    # via\n    #   -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in\n    #   discord-py\naiosignal==1.4.0\n    # via aiohttp\nattrs==26.1.0\n    # via aiohttp\nbrotlicffi==1.2.0.1\n    # via -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in\ncffi==2.1.1\n    # via\n    #   brotlicffi\n    #   pynacl\ndavey==0.1.6\n    # via -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in\ndiscord-py==2.7.1\n    # via -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in\nfrozenlist==1.8.0\n    # via\n    #   aiohttp\n    #   aiosignal\nidna==3.19\n    # via yarl\nmultidict==6.8.0\n    # via\n    #   aiohttp\n    #   yarl\npropcache==0.5.2\n    # via\n    #   aiohttp\n    #   yarl\npycparser==3.0\n    # via cffi\npynacl==1.6.2\n    # via -r /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/batch3-resolver-home/discord.in\ntyping-extensions==4.16.0\n    # via\n    #   aiohttp\n    #   aiosignal\nyarl==1.24.5\n    # via aiohttp\n"
+      },
+      {
+        "command": [
+          "/home/brian/.local/bin/uv",
+          "lock",
+          "--python",
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python"
+        ],
+        "returncode": 0,
+        "output": "Using CPython 3.11.15 interpreter at: /home/brian/.hermes/hermes-agent/.venv/bin/python\nResolved 255 packages in 10.05s\nUpdated davey v0.1.4 -> v0.1.6\n"
+      }
+    ],
+    "batch3-lock-integrity.json": {
+      "changed_package_records": [
+        "davey",
+        "discord-py",
+        "hermes-agent"
+      ],
+      "davey_before": "0.1.4",
+      "davey_after": "0.1.6",
+      "discord_only_removed_unused_voice_extra_metadata": {
+        "optional-dependencies": [
+          {
+            "voice": [
+              {
+                "name": "davey"
+              },
+              {
+                "name": "pynacl"
+              }
+            ]
+          },
+          null
+        ]
+      },
+      "all_other_third_party_versions_and_hashes_unchanged": true,
+      "same_package_names": true,
+      "scope": "Linux CPython3.11 no-install resolvers; no voice runtime assertion"
+    },
+    "batch3-osv-contract-check.json": {
+      "url": "https://raw.githubusercontent.com/google/osv-scanner-action/9a498708959aeaef5ef730655706c5a1df1edbc2/.github/workflows/osv-scanner-reusable.yml",
+      "sha256": "ed3830519b9ffc799eafa57fd3bc9f3e0b3c8fe000542c4ebbc5654a92d3f92a",
+      "result": "PASS: five-lockfile scan remains unconditional, boolean input gates only code-scanning publication, artifact retained",
+      "local_sha256": "22895442b1fb9896dca49eb83d3377527feb6b46a5ce4f76775b87ee302a1489"
+    },
+    "batch3-integrity.json": {
+      "source_candidate": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+      "source_tree": "c3805ee8ae23c20ebdcaa3a25426b6f4d4e2eaa0",
+      "base": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
+      "historical_rows": 51,
+      "historical_scopes": {
+        "old_main": 37,
+        "archive_only": 14
+      },
+      "historical_evidence_entries": 239,
+      "historical_subfeatures": 241,
+      "historical_fields_and_baseline_sources_unchanged": true,
+      "prior_source_receipts_unchanged": [
+        "docs/fork/V021_APPROVED_BATCH2.md",
+        "docs/fork/V021_APPROVED_BATCH2_METADATA_REVIEW.md",
+        "docs/fork/V021_APPROVED_BATCH2_REVIEW.md",
+        "docs/fork/V021_APPROVED_BATCH2_TESTS.json",
+        "docs/fork/V021_APPROVED_CI_CORRECTION.md",
+        "docs/fork/V021_APPROVED_CI_CORRECTION_REVIEW.md",
+        "docs/fork/V021_APPROVED_CI_CORRECTION_TESTS.json",
+        "docs/fork/V021_APPROVED_CONTINUATION.md",
+        "docs/fork/V021_APPROVED_REVIEW.md",
+        "docs/fork/V021_APPROVED_TESTS.json"
+      ],
+      "approved_remaining_ids": [],
+      "G32": "implemented with tests",
+      "landed_checklist_ids": 78,
+      "grouped_human_rows": 36,
+      "human_status": "all pending",
+      "focused_unique_counts": {
+        "tests/gateway/test_v021_webhook_namespace.py": 1,
+        "tests/cron/test_v021_ancillary_validation.py": 1,
+        "tests/agent/test_v021_child_env_namespace.py": 1,
+        "tests/hermes_cli/test_v021_workspace_metadata.py": 5,
+        "tests/gateway/test_v021_served_coverage.py": 10,
+        "tests/gateway/test_v021_notification_policy.py": 12,
+        "tests/gateway/test_v021_text_compatibility.py": 8,
+        "tests/agent/test_v021_prompt_contracts.py": 3,
+        "tests/tools/test_v021_discord_packaging.py": 1,
+        "tests/agent/test_v021_compression_publication.py": 3,
+        "tests/agent/test_v021_compression_tail_guards.py": 3,
+        "tests/gateway/test_v021_compression_adoption.py": 2,
+        "tests/gateway/test_v021_compression_failure.py": 1,
+        "tests/tools/test_v021_security_contracts.py": 6,
+        "tests/test_v021_restoration_checklist.py": 1
+      },
+      "focused_unique_total": 58,
+      "new_focused_cases": 56,
+      "changed_source_files_review_bound": {
+        "agent/delegation_context.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "cron/jobs.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "gateway/platforms/webhook.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "tests/agent/test_v021_child_env_namespace.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "tests/cron/test_v021_ancillary_validation.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "tests/gateway/test_v021_webhook_namespace.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "tests/gateway/test_webhook_integration.py": [
+          "batch3-isolation-metadata-review-bindings.json"
+        ],
+        "gateway/kanban_watchers.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "gateway/run.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "gateway/status.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "hermes_cli/kanban.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "hermes_cli/kanban_db.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "hermes_cli/kanban_notifications.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "hermes_cli/profiles.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "hermes_cli/status.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "plugins/kanban/dashboard/plugin_api.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "tests/gateway/test_v021_notification_policy.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "tests/gateway/test_v021_served_coverage.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "tests/hermes_cli/test_v021_workspace_metadata.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "tools/kanban_tools.py": [
+          "batch3-served-notification-review-bindings.json"
+        ],
+        "agent/prompt_builder.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "agent/skill_utils.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "agent/system_prompt.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "gateway/platforms/base.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "plugins/platforms/discord/adapter.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/agent/test_prompt_builder.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/agent/test_v021_prompt_contracts.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_discord_format.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_discord_free_response.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_media_spaced_paths_and_history_dedupe.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_media_tag_cleanup.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_media_tag_formatting_variants.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_media_tag_separator.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/gateway/test_v021_text_compatibility.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "website/docs/user-guide/messaging/discord.md": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "pyproject.toml": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "uv.lock": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tools/lazy_deps.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "tests/tools/test_v021_discord_packaging.py": [
+          "batch3-text-packaging-review-final-bindings.json"
+        ],
+        "agent/conversation_compression.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        "gateway/slash_commands.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        "run_agent.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        "tests/agent/test_v021_compression_publication.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        "tests/agent/test_v021_compression_tail_guards.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        "tests/gateway/test_v021_compression_adoption.py": [
+          "batch3-compression-independent-bindings.json"
+        ],
+        ".github/workflows/osv-scanner.yml": [
+          "batch3-security-independent-bindings.json"
+        ],
+        "tools/tirith_security.py": [
+          "batch3-security-independent-bindings.json"
+        ],
+        "scripts/process_guard.py": [
+          "batch3-security-independent-bindings.json"
+        ],
+        "scripts/run_tests_parallel.py": [
+          "batch3-security-independent-bindings.json"
+        ],
+        "tests/conftest.py": [
+          "batch3-security-independent-bindings.json"
+        ],
+        "tests/tools/test_v021_security_contracts.py": [
+          "batch3-security-independent-bindings.json"
+        ]
+      },
+      "changed_source_file_count": 51,
+      "changed_python_ast": "pass",
+      "diff_check": "pass"
+    }
+  },
+  "receipt_sha256": {
+    "batch3-isolation-metadata-review-tests.json": "b164af8e7c6ee062271497459c670108ca6e57206993ae6b8409559beafa679d",
+    "batch3-review-served-tests.json": "f3860e80d2c8a676ef1863147c995a64acf77b6087111d6a01fb666646bfee89",
+    "batch3-review-kanban-corrected-tests.json": "58b85e61d97011918901d29923f0447ff320a0de073e008bbe550ce3713cd214",
+    "batch3-independent-text-packaging-tests.json": "353b466ea501d4705e46358c2b12b98161af21fdff4fc4a66286b98fd7441cb6",
+    "batch3-independent-text-correction-tests.json": "473298797131739f1aa30aa3c3841fa89000ee241d78528651dca9b4fce3563c",
+    "batch3-review-compression-final-tests.json": "6abedd57a480f290d4f2ab2c76b49fa0d338b28809705e8cacffebbddf4a0c2c",
+    "batch3-review-security-final-tests.json": "6c0a77a710bfeee03a386d70927219335ce03408ffdc319c4653b9e14ab27e8f",
+    "batch3-checklist-tests.json": "9735d1a6fc7d07499d222391e1c2ec11dcdf04afd3a4962cf74b08129357a177",
+    "batch3-isolation-metadata-review-bindings.json": "48ab2b645ee7f1358c337d284acf4cd12416f9acad0f9d80c59847049010fb71",
+    "batch3-served-notification-review-bindings.json": "93387a49c9b2f37c7578c9b9e3c7f004644d0fe870b625de68d095eaf75df550",
+    "batch3-text-packaging-review-final-bindings.json": "9634d733ebdb65e50a9575a4fa5d2d5819c5584aaaa8a7f852bbcf2d95a5ca8a",
+    "batch3-compression-independent-bindings.json": "b2c1a0274ac0a248c83afd27ab694966a8554546e25c776ac57f095db8490271",
+    "batch3-security-independent-bindings.json": "135c99c9e88a3cb43722fd1b0d18f513183c78cb17df355c777766ba97d04f2d",
+    "batch3-resolver-tests.json": "05174a4f5d106d008d12cb4c3e1d057e8623dcd79cdd2284ad3f4a7fa060f196",
+    "batch3-lock-integrity.json": "8d85ed13133f5762fff3b7d8bcdd066d84ba016b3b9408044390b3d35c5aa7a4",
+    "batch3-osv-contract-check.json": "e62a79f853d8293ff632a4afd0e6175d39e4fbb496dbd6abb038f03070243165",
+    "batch3-integrity.json": "d19d92a8e104af00a8954ef179fccb17f425cefa3d5412a89a9699efccdf9b5f"
+  }
+}
