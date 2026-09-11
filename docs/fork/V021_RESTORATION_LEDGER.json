@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "status": "approved_restoration_in_progress_human_uat_deferred",
+  "status": "approved_scoped_restoration_locally_qualified_hosted_ci_and_human_uat_pending",
   "base": "cf62291dad2cd9c12de80bc5194ff76ef0f6ce55",
   "old_main": "2945588a014543d47c9e5e4a0d92ba6e361387c1",
   "audited_main": "31bb2aed2f65d8d4193b97d57a11770009fba656",
-  "source_candidate": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+  "source_candidate": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
   "historical_audit_unchanged": true,
   "row_counts": {
     "unique_ids": 51,
@@ -54,13 +54,21 @@
       "raw_sha256": "4a3ccd44fbf6529e48cd4648dca08ec1b80b4f707444e406df4da1d2c9557b89",
       "next_ci": "Fresh exact candidate full hosted CI required after Ang integrates batch2 plus correction; no success inferred"
     },
-    "approved_ci_correction": "V021_APPROVED_CI_CORRECTION.md; V021_APPROVED_CI_CORRECTION_TESTS.json; V021_APPROVED_CI_CORRECTION_REVIEW.md"
+    "approved_ci_correction": "V021_APPROVED_CI_CORRECTION.md; V021_APPROVED_CI_CORRECTION_TESTS.json; V021_APPROVED_CI_CORRECTION_REVIEW.md",
+    "approved_batch3_tests": "V021_APPROVED_BATCH3_TESTS.json",
+    "approved_batch3_review": "V021_APPROVED_BATCH3_REVIEW.md",
+    "latest_staging_checkpoint": {
+      "sha": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
+      "source": "Ang user report: all12 batch2 hashes/correction bindings verified;47 focused tests independently passed",
+      "ci": "Fresh full hosted CI starting per Ang; no green result supplied",
+      "authority": "Ang may integrate and push staging; source workers do not push. Main/live remain excluded."
+    }
   },
   "limitations": [
-    "No live activation, delivery, restart, install, data migration, pushes or Kanban mutation.",
-    "Named qualification assertions are not blanket historical parity. All ten source-qualification entries resolved; approved implementation follow-ups remain.",
-    "Windows transform cleanup not locally exercised; strict current security restrictions preserved.",
-    "Compression published-child rollback and other gated subfeatures remain unimplemented."
+    "Ang is authorized to integrate and push staging; source workers do not push. No live activation, delivery, restart, install, data migration, main/canonical or Kanban mutation.",
+    "All approved scoped pending IDs and G32 locally qualified; named assertions are not blanket historical parity. Human UAT and fresh exact-candidate full hosted CI remain pending.",
+    "Packaging is LinuxCPython3.11 wheels-only no-install resolution, not cross-platform or voice runtime proof. Windows transform cleanup remains previously unqualified locally.",
+    "Current canonical publication replaces unsafe published-child rollback; connected adapter coverage is separate from configured routing/cron eligibility. Retired/archive/voice features remain excluded."
   ],
   "commits": [
     {
@@ -170,6 +178,74 @@
     {
       "sha": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
       "subject": "fix(gateway): bind transport authorization and state to owning profiles"
+    },
+    {
+      "sha": "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+      "subject": "fix(kanban): validate persistent workspace metadata across write surfaces"
+    },
+    {
+      "sha": "f5c98229e3784250604f35e8cdc030ab82134aa7",
+      "subject": "fix(isolation): qualify webhook state and validate cron child boundaries"
+    },
+    {
+      "sha": "4775bf2b0396d8a224eface290744213c9ff4608",
+      "subject": "fix(gateway): publish validated connected profile coverage separately from routing"
+    },
+    {
+      "sha": "ad7e4dc28466fd134b27c86f256dfca26605f1fc",
+      "subject": "fix(discord): restore literal prose and configured standalone delivery routing"
+    },
+    {
+      "sha": "49b056b85f41472cb21de9ebb54270252110fff7",
+      "subject": "fix(prompts): restore bounded model guidance and approved skill description budget"
+    },
+    {
+      "sha": "97ad45b32cbd9df946662860192aaaa446394502",
+      "subject": "fix(media): preserve original line context before protected-span masking"
+    },
+    {
+      "sha": "674378e8597a78df67f4ff7a3dcb937262286289",
+      "subject": "fix(kanban): enforce profile-owned notification policy before subscribe and delivery"
+    },
+    {
+      "sha": "3354b0a08e110a9ef067cc8beaba5aeee848e676",
+      "subject": "fix(packaging): align Discord pip and uv crypto requirements"
+    },
+    {
+      "sha": "e39c7aaefa38c2d37b730076f2da30e06ec23569",
+      "subject": "fix(kanban): validate complete legacy workspace before branch updates"
+    },
+    {
+      "sha": "105608061f34bd14614500143c11baba99e7fcb1",
+      "subject": "fix(kanban): preserve derived workspaces and deny unconfigured foreign notification owners"
+    },
+    {
+      "sha": "a87ac195800888b334a4b977d19b1419c44d99b2",
+      "subject": "fix(security): restore bounded scanner and test process contracts"
+    },
+    {
+      "sha": "71da39be8ece2dc9f8478647bee748c8563e394e",
+      "subject": "fix(compression): publish preserved gateway tail in the core transaction"
+    },
+    {
+      "sha": "eef1c3a41dbdd9fc2870c4580e39e3a6181f4fa3",
+      "subject": "fix(tests): retain process guard across shell control separators"
+    },
+    {
+      "sha": "8741695f9ad9d73b770ed7e2969579d5be8e5e74",
+      "subject": "fix(media): scan standalone delivery after document marker removal"
+    },
+    {
+      "sha": "b411e475e24abd72eaae3a8810f8004a21f4660e",
+      "subject": "test(media): cover document marker extraction and code-prefix isolation"
+    },
+    {
+      "sha": "6f78aabd57afc2ffd551e2855b0e9e5e81890558",
+      "subject": "fix(tests): guard shell predicates and env split-string commands"
+    },
+    {
+      "sha": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+      "subject": "fix(compression): preserve explicit tail through adoption and commit transforms"
     }
   ],
   "rows": [
@@ -998,7 +1074,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_LOW_VALUE",
       "historical_summary": "Intentional trigger omission also dropped independently useful multiplex isolation and transform process-tree cleanup. Prior low-value rationale did not account for retained non-trigger consumers.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-10-E01",
@@ -1051,16 +1127,20 @@
           },
           "candidate_source": {
             "path": "gateway/platforms/webhook.py",
-            "git_blob": "1ff741f1e257cafef589c1d8a86707d29043a483",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7fe622c2ee1713c974cc9708ff8b97c00cbaf9db"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Shared adapter rate/idempotency/delivery-cache identities omit profile namespace; source.profile is still set on downstream event. This is adapter-state collision exposure, not absence of every session profile gate.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Profile+route rate keys and profile+route+delivery idempotency/cache/session keys; raw external IDs retained, legacy toolset source reads preserved.",
+          "owning_commits": [
+            "f5c98229e3784250604f35e8cdc030ab82134aa7"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_webhook_namespace.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -1068,7 +1148,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-10-E03",
@@ -1151,7 +1232,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "REWRITE",
       "historical_summary": "REWRITE is real but deliberately changes lifecycle/config/schedule/output semantics and omits generic hooks/event bus. Additional compatibility losses: legacy Calendar adoption/duration learning, pre-upgrade output replay and strict job name/toolset validation. No live enablement claim.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-11-E01",
@@ -1384,16 +1465,20 @@
           },
           "candidate_source": {
             "path": "cron/jobs.py",
-            "git_blob": "d09c5a4fe3b34ed472b830d453d248034c9e777a",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "2b436a2b03ae75de9f895c361802f835d2687778"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. I110 ancillary plain-string name/toolset validation is not preserved: create stringifies toolsets and update has no prior strict list/name normalizers.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared strict plain-string name and list-of-identifier toolset normalization at create/update; rejected writes preserve stored bytes and legacy reads remain tolerant.",
+          "owning_commits": [
+            "f5c98229e3784250604f35e8cdc030ab82134aa7"
+          ],
+          "runtime_tests": [
+            "tests/cron/test_v021_ancillary_validation.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G11 ancillary validation compatibility; Calendar lifecycle/configuration replacement remains intentional.",
           "staging_approval": {
@@ -1401,7 +1486,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-11-E09",
@@ -1800,7 +1886,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM overstates parity: literal prose escaping, standalone-only MEDIA recognition, display path/shell shortening and progress embed suppression were lost; table conversion and bounded previews remain.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-14-E01",
@@ -1823,16 +1909,20 @@
           },
           "candidate_source": {
             "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "bf62f901a74ae15a06f1b92b9bd893d775263ad8"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Prose markdown escaping removed; table conversion remains.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Literal prose escaping after table conversion with code spans preserved.",
+          "owning_commits": [
+            "ad7e4dc28466fd134b27c86f256dfca26605f1fc"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_text_compatibility.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
           "staging_approval": {
@@ -1840,7 +1930,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-14-E02",
@@ -1863,16 +1954,23 @@
           },
           "candidate_source": {
             "path": "gateway/platforms/base.py",
-            "git_blob": "49cd652001e2625643741540b5a058610682a1aa",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "fc75295e6299f85ae2234a2709ad98019f59ef17"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Unanchored MEDIA patterns consume prose mentions; inline/fenced-code mask still applies.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Only standalone MEDIA directives extract/clean; original-line protected-span eligibility and document-marker cleanup agree; existing file validation and denial retained.",
+          "owning_commits": [
+            "ad7e4dc28466fd134b27c86f256dfca26605f1fc",
+            "97ad45b32cbd9df946662860192aaaa446394502",
+            "8741695f9ad9d73b770ed7e2969579d5be8e5e74",
+            "b411e475e24abd72eaae3a8810f8004a21f4660e"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_text_compatibility.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
           "staging_approval": {
@@ -1880,7 +1978,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-14-E03",
@@ -2038,7 +2137,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Slash-sync retry semantics are equivalent; free-response auto-threading was removed. Responded-thread participation is a different behavior and does not supply it.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-15-E01",
@@ -2061,16 +2160,20 @@
           },
           "candidate_source": {
             "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "bf62f901a74ae15a06f1b92b9bd893d775263ad8"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW explicitly adds or is_free_channel to skip_thread, disabling auto-thread for free-response channels.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Configured auto-thread includes free-response channels, explicit no-thread and other guards remain; failure never falls through to agent inline.",
+          "owning_commits": [
+            "ad7e4dc28466fd134b27c86f256dfca26605f1fc"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_text_compatibility.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G15: free-response auto-threading changes routing policy.",
           "staging_approval": {
@@ -2078,7 +2181,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-15-E02",
@@ -2303,7 +2407,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM only partly justified. Multiplex core, delayed picker scope, transport selection and PID scope survive; fork home pinning, transport pairing, cron registries, config bridge and durable-owner guards do not fully migrate. I140 is branch-only. Context-dependent outcomes explicitly unresolved.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-17-E01",
@@ -3054,15 +3158,19 @@
           },
           "candidate_source": {
             "path": "gateway/run.py",
-            "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "75c8afdb186d2d12c0a17c323c63e0a95db6d8a5"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Served-profile publication remains; Kanban runtime-owner mixin absent.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Launch-home-owned runtime publication with scoped restoration; existing adapter maps govern connected membership without resurrecting retired Kanban runtime mixin.",
+          "owning_commits": [
+            "4775bf2b0396d8a224eface290744213c9ff4608"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_served_coverage.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
           "supplemental_existing_ci_evidence": [
             {
               "file": "tests/gateway/test_multiplex_lifecycle.py",
@@ -3072,7 +3180,7 @@
             }
           ],
           "supplemental_evidence_limit": "Existing related tests are evidence only for their assertions. Broader historical contract remains unresolved; no new Critical approval is required to qualify unchanged code.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3080,7 +3188,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-17-E18",
@@ -3102,17 +3211,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "hermes_cli/status.py",
-            "git_blob": "569c759835b4b3411b66da5c6a5e50cbb0b29b68",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "hermes_cli/profiles.py",
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7c6beef323c3d0174b31b8d3031e3748274ac87c"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. No served-by-multiplex reader replacement in assigned CLI files.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "CLI coverage requires served+connected membership and existing PID/start-time/home validation; stale/malformed/missing records fail closed.",
+          "owning_commits": [
+            "4775bf2b0396d8a224eface290744213c9ff4608"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_served_coverage.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3120,7 +3233,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-17-E19",
@@ -3553,15 +3667,19 @@
           },
           "candidate_source": {
             "path": "gateway/run.py",
-            "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "75c8afdb186d2d12c0a17c323c63e0a95db6d8a5"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Configured homes replace successful _served_profiles bookkeeping used by old status and cron.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Successful connected_profiles membership updated on startup/reconnect/fatal/shutdown; configured served_profiles remains routing/cron eligibility for current adapterless consumers.",
+          "owning_commits": [
+            "4775bf2b0396d8a224eface290744213c9ff4608"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_served_coverage.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
           "supplemental_existing_ci_evidence": [
             {
               "file": "tests/gateway/test_multiplex_lifecycle.py",
@@ -3571,7 +3689,7 @@
             }
           ],
           "supplemental_evidence_limit": "Existing related tests are evidence only for their assertions. Broader historical contract remains unresolved; no new Critical approval is required to qualify unchanged code.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3579,7 +3697,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-17-E30",
@@ -3643,7 +3762,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: generic workspace/project storage remains, but board inventory again follows the task-DB override and omits its warning; dir-branch metadata/dashboard fields and normal write-boundary validation regressed. Validation helpers are used only by decomposition.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-18-E01",
@@ -3750,16 +3869,21 @@
           },
           "candidate_source": {
             "path": "hermes_cli/kanban.py",
-            "git_blob": "7574800ac30fbe270df53cbc981451371e944ee9",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "08a40604912f1ee8949c218b7624615f8d44b02e"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Persistent dir branches accepted in OLD, only worktree accepted in NEW.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Persistent dir/worktree branches supported; scratch rejects, inherited board workdir remains available.",
+          "owning_commits": [
+            "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/hermes_cli/test_v021_workspace_metadata.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
           "staging_approval": {
@@ -3767,7 +3891,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-18-E04",
@@ -3790,16 +3915,21 @@
           },
           "candidate_source": {
             "path": "plugins/kanban/dashboard/plugin_api.py",
-            "git_blob": "9a76f1d8523048dc23a06af5a3adf6875d92a657",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "b7f54060512791cdb7ee74e95f8511814d712f14"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW create model and forwarding have no branch_name; search of whole NEW API finds no branch_name.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Dashboard branch_name model and forwarding share canonical DB validation.",
+          "owning_commits": [
+            "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/hermes_cli/test_v021_workspace_metadata.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
           "staging_approval": {
@@ -3807,7 +3937,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-18-E05",
@@ -3830,16 +3961,22 @@
           },
           "candidate_source": {
             "path": "hermes_cli/kanban_db.py",
-            "git_blob": "6518f487074e77528f97f0c7f3511ae6af07de64",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "66d8eb5bef6f8f2a7ea20218f689d0be1a926a4f"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD create/set invoke shared normalizers; NEW only decomposition invokes normalize_workspace_metadata, setters are direct SQL.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Validate complete final create/set metadata inside transaction after derivation; legacy invalid paths reject branch mutation atomically.",
+          "owning_commits": [
+            "7bc38d6fe36f1ca079f6c41e319f816f5b7f87ac",
+            "e39c7aaefa38c2d37b730076f2da30e06ec23569",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/hermes_cli/test_v021_workspace_metadata.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
           "staging_approval": {
@@ -3847,7 +3984,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         }
       ]
     },
@@ -3858,7 +3996,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: subscriptions and multi-profile notifier exist, but the origin/Telegram-home routing policy, fail-closed validation and notify-audit interface are absent; detailed outer tick diagnostics also regressed.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-19-E01",
@@ -3881,16 +4019,21 @@
           },
           "candidate_source": {
             "path": "gateway/kanban_watchers.py",
-            "git_blob": "d6f7cc72bd8947bb75ff8d1878f76855b65c917f",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "a5272715db60fede7305f7bb5307224052804f97"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD resolves/denies policy-approved target; NEW uses subscription platform directly. Fixed-tree grep finds no notification_policy/telegram_home_only consumer.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained.",
+          "owning_commits": [
+            "674378e8597a78df67f4ff7a3dcb937262286289",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_notification_policy.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
           "staging_approval": {
@@ -3898,7 +4041,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-19-E02",
@@ -3921,16 +4065,21 @@
           },
           "candidate_source": {
             "path": "hermes_cli/kanban.py",
-            "git_blob": "7574800ac30fbe270df53cbc981451371e944ee9",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "08a40604912f1ee8949c218b7624615f8d44b02e"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW add_notify_sub receives requested destination directly.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained.",
+          "owning_commits": [
+            "674378e8597a78df67f4ff7a3dcb937262286289",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_notification_policy.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
           "staging_approval": {
@@ -3938,7 +4087,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-19-E03",
@@ -3961,16 +4111,21 @@
           },
           "candidate_source": {
             "path": "tools/kanban_tools.py",
-            "git_blob": "1fe0f204fc2a51fed3bd27b0bffd6769411658fd",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7019351221d6aca4b68bcdc8c65308d04160faef"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Policy resolution removed from tool auto-subscribe.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained.",
+          "owning_commits": [
+            "674378e8597a78df67f4ff7a3dcb937262286289",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_notification_policy.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
           "staging_approval": {
@@ -3978,7 +4133,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-19-E04",
@@ -4001,16 +4157,21 @@
           },
           "candidate_source": {
             "path": "gateway/slash_commands.py",
-            "git_blob": "70724f695f2bf80cf41cda9411276df8a91d63b0",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "32fd9bf2ca9d868e038eefac1e2c12e166c9788e"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Policy resolution removed from slash subscription.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained.",
+          "owning_commits": [
+            "674378e8597a78df67f4ff7a3dcb937262286289",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_notification_policy.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
           "staging_approval": {
@@ -4018,7 +4179,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-19-E05",
@@ -4041,16 +4203,21 @@
           },
           "candidate_source": {
             "path": "plugins/kanban/dashboard/plugin_api.py",
-            "git_blob": "9a76f1d8523048dc23a06af5a3adf6875d92a657",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "b7f54060512791cdb7ee74e95f8511814d712f14"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Dashboard no longer filters home targets by policy.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Shared profile-owned notification policy enforced consistently at subscription and delivery; malformed/missing foreign configuration denies; redirect metadata sanitized and original row/claim/cursor preserved. CLI/tool/slash/dashboard paths qualified; TUI subscription compatibility retained.",
+          "owning_commits": [
+            "674378e8597a78df67f4ff7a3dcb937262286289",
+            "105608061f34bd14614500143c11baba99e7fcb1"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_notification_policy.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
           "staging_approval": {
@@ -4058,7 +4225,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-19-E06",
@@ -4152,7 +4320,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect. I045 task-plus-tool prompt gating is lost. Replacement delegation guards preserve mutation isolation but leave child stop nudges and raw-env lifecycle attempts; ContextVar worker exposure and disposable-board semantics differ.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-20-E01",
@@ -4676,16 +4844,20 @@
           },
           "candidate_source": {
             "path": "agent/delegation_context.py",
-            "git_blob": "9b8bce97597a964e01507a744d9b67a0a41762bc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "0c28881690f95ac47260add8a5427d69fb0031fc"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD strips every HERMES_KANBAN_* and assigns scratch roots. NEW scrubs listed keys and stamps lineage.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Copy and remove every HERMES_KANBAN_* child key while retaining delegated lineage marker and durable mutation refusal; no writable scratch-board escape hatch.",
+          "owning_commits": [
+            "f5c98229e3784250604f35e8cdc030ab82134aa7"
+          ],
+          "runtime_tests": [
+            "tests/agent/test_v021_child_env_namespace.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "Broad environment scrubbing/identity replacement gated.",
           "staging_approval": {
@@ -4693,7 +4865,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-20-E13",
@@ -6428,7 +6601,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "KEEP",
       "historical_summary": "Spoken compression and protected-handoff replacement retained. Atomic core publication is stronger, but I031 gateway follow-up rollback and explicit no-rotation failure guard were lost; prior ledger claim of full atomic equivalence is too broad.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-25-E01",
@@ -6582,17 +6755,24 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/slash_commands.py",
-            "git_blob": "70724f695f2bf80cf41cda9411276df8a91d63b0",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "agent/conversation_compression.py",
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "bfcc22d079eb91b58718d577b53cf890e3924294"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. After core publication, gateway follow-up rewrite failure no longer discards child/reopens parent; only raises.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Complete preserved tail joins before core atomic publication; gateway adopts canonical child without destructive post-publication rewrite or unsafe child rollback. Original partial boundary survives durable-parent adoption; todo/user transforms apply to head only, explicit-tail growth refuses without salvage.",
+          "owning_commits": [
+            "71da39be8ece2dc9f8478647bee748c8563e394e",
+            "31bf95b85160ec4b205b28b01f5f4b99a2caa802"
+          ],
+          "runtime_tests": [
+            "tests/agent/test_v021_compression_publication.py",
+            "tests/gateway/test_v021_compression_adoption.py",
+            "tests/agent/test_v021_compression_tail_guards.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G25: published-child rollback conflicts with current atomic lineage/concurrent-tail safeguards.",
           "staging_approval": {
@@ -6600,7 +6780,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-25-E05",
@@ -6653,7 +6834,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: in-process external-skill cache keys reverted to paths only and return cached prompts before rescanning. Skill index descriptions reverted from 1024 to 60 chars, and explicit max_chars API (including small limits) was removed.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-26-E01",
@@ -6741,13 +6922,17 @@
         },
         {
           "id": "FC-26-default",
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. ",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "blocker_kind": "approved_implementation_pending",
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Approved default description budget1024; explicit caller budgets preserved, new prompt builds only.",
+          "owning_commits": [
+            "49b056b85f41472cb21de9ebb54270252110fff7"
+          ],
+          "runtime_tests": [
+            "tests/agent/test_v021_prompt_contracts.py"
+          ],
+          "blocker_kind": null,
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G26: automatic description default footprint remains 60 pending cost decision.",
           "staging_approval": {
@@ -6755,7 +6940,13 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "candidate_source": {
+            "path": "agent/skill_utils.py",
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "220ee1d633fb1efcf6af60fa6572b6f2ff924e58"
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         }
       ]
     },
@@ -6766,7 +6957,7 @@
       "historical_status": "missing",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM substitutes generic persistence for the actual bounded policy. Target gpt-5.6-sol/terra models no longer receive one-verification/proportional-stop/avoid-adjacent-work guidance. Generic mandatory-tool and prerequisite verification remain.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-27-E01",
@@ -6789,16 +6980,20 @@
           },
           "candidate_source": {
             "path": "agent/prompt_builder.py",
-            "git_blob": "b9d6f7c0e09f0301e4a249519ca7f835e6e549a8",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "60d21fe420292e78d65612a6cb6d823f22fd9070"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Bounded persistence replaced by keep-calling-tools guidance.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Bounded guidance for exact sol/terra model IDs with optional one provider prefix; common mandatory-tool guidance and tool filtering retained.",
+          "owning_commits": [
+            "49b056b85f41472cb21de9ebb54270252110fff7"
+          ],
+          "runtime_tests": [
+            "tests/agent/test_v021_prompt_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G27: model-specific execution/cost policy requires explicit approval.",
           "staging_approval": {
@@ -6806,7 +7001,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-27-E02",
@@ -6829,16 +7025,20 @@
           },
           "candidate_source": {
             "path": "agent/system_prompt.py",
-            "git_blob": "666d54132091de8c1eed26bb7501a4d21a5cdb51",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "952b1161e86da8808f4d8abeffb66d95b47e1615"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. New independent execution_guidance gate invokes generic text rather than variant resolver.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Variant selection follows existing independent execution-guidance gates; repeated prompt builds byte-stable.",
+          "owning_commits": [
+            "49b056b85f41472cb21de9ebb54270252110fff7"
+          ],
+          "runtime_tests": [
+            "tests/agent/test_v021_prompt_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G27: model-specific execution/cost policy requires explicit approval.",
           "staging_approval": {
@@ -6846,7 +7046,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         }
       ]
     },
@@ -6857,7 +7058,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Lock regeneration retains/advances most old security selections, but does not replace core-install ASGI floors or explicit PyNaCl packaging on all installers. Supplemental h2 4.4.1 protection is absent (current lock remains 4.3.0, same as OLD main). Do not equate this source-policy audit with deployed vulnerability/exploit verification.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-28-E01",
@@ -6922,16 +7123,20 @@
           },
           "candidate_source": {
             "path": "tools/lazy_deps.py",
-            "git_blob": "64d4f2ec3128fda37557d2d1622b563aa2dbddb7",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "cf0933748d39e66891be2a8daf059ca72563ec80"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Discord lazy specs revert to upstream voice extra; pip fallback has no uv override.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Explicit discord.py/PyNaCl/davey requirements agree across pip and uv surfaces; actual no-install resolution succeeds. Davey0.1.4->0.1.6 is intentional historical pin; other third-party versions/hashes unchanged.",
+          "owning_commits": [
+            "3354b0a08e110a9ef067cc8beaba5aeee848e676"
+          ],
+          "runtime_tests": [
+            "tests/tools/test_v021_discord_packaging.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "prerequisite_qualification": {
             "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
             "status": "completed_with_results_and_limits",
@@ -6944,7 +7149,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-28-E03",
@@ -7150,7 +7356,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Fork CI parity is incomplete: wrapper-aware process-killer parsing and webhook process-tree cleanup regressed. The fork-specific SARIF publication gate is also absent, confirmed against the exact pinned reusable workflow. Historical test-baseline equivalence remains source-reviewed with the limitations below; no broad hosted result is claimed.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-30-E01",
@@ -7172,17 +7378,23 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "tests/conftest.py",
-            "git_blob": "ffa5e7b9282ca6189d3eda1177a26d30a948284e",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "scripts/process_guard.py",
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "cbf8c5df42646e20f73f8020556bfb9f5e5e1d6f"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current wrapper token scanning reintroduces harmless-argument false positives and loses command wrapper detection.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Pure wrapper/executable-aware process classifier preserves subtree fences, full-python pattern blocks and harmless-argument distinction; no killer commands executed.",
+          "owning_commits": [
+            "a87ac195800888b334a4b977d19b1419c44d99b2",
+            "eef1c3a41dbdd9fc2870c4580e39e3a6181f4fa3",
+            "6f78aabd57afc2ffd551e2855b0e9e5e81890558"
+          ],
+          "runtime_tests": [
+            "tests/tools/test_v021_security_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "prerequisite_qualification": {
             "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
             "status": "completed_with_results_and_limits",
@@ -7195,7 +7407,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-30-E02",
@@ -7260,16 +7473,20 @@
           },
           "candidate_source": {
             "path": ".github/workflows/osv-scanner.yml",
-            "git_blob": "671eecb9474a387df05c6c1fa8a9ee591bf90720",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7681568e22bea832ec8831a2c74e6134c6027c75"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Unconditional scanner invocation remains; explicit local fork-only SARIF publication separation no longer visible.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Pinned reusable lockfile scan unconditional; code-scanning publication gated to exact upstream repository only.",
+          "owning_commits": [
+            "a87ac195800888b334a4b977d19b1419c44d99b2"
+          ],
+          "runtime_tests": [
+            "tests/tools/test_v021_security_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
           "staging_approval": {
@@ -7277,7 +7494,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         },
         {
           "id": "FC-30-E04",
@@ -7300,16 +7518,20 @@
           },
           "candidate_source": {
             "path": ".github/workflows/osv-scanner.yml",
-            "git_blob": "671eecb9474a387df05c6c1fa8a9ee591bf90720",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7681568e22bea832ec8831a2c74e6134c6027c75"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW does not pass upload-sarif; pinned reusable workflow defaults it true (lines42-46) and directly uses it for upload (125-129). The old fork-only publication gate is not reproduced. Exact external source: https://github.com/google/osv-scanner-action/blob/9a498708959aeaef5ef730655706c5a1df1edbc2/.github/workflows/osv-scanner-reusable.yml. No hosted run was triggered.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Explicit upload-sarif input verified against exact pinned official workflow; artifact result path and scan retained everywhere.",
+          "owning_commits": [
+            "a87ac195800888b334a4b977d19b1419c44d99b2"
+          ],
+          "runtime_tests": [
+            "tests/tools/test_v021_security_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
           "staging_approval": {
@@ -7317,7 +7539,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         }
       ]
     },
@@ -7399,7 +7622,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Per-file pytest temp isolation survives via PYTEST_DEBUG_TEMPROOT instead of --basetemp, including normal/timeout/interrupt cleanup. Popen failure cleanup and standalone thread-limit injection were dropped. Historical multi-profile fixture/mirror parser patches are largely absent or superseded by removed consumers; current suite parity was not executed.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-32-E01",
@@ -7422,16 +7645,18 @@
           },
           "candidate_source": {
             "path": "scripts/run_tests_parallel.py",
-            "git_blob": "9bf10c09cb199c17fc64eae63766fe74432dd7cf",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "893220e2da1b38be241877a1a003b2cd41a7d887"
           },
           "disposition": "restoration_implemented_with_tests",
-          "decision": "Spawn-failure temp cleanup restored and previously CI-qualified. G32 standalone thread ceilings are a separate approved pending contract within this historical runner entry; no thread-policy implementation claimed.",
+          "decision": "Existing spawn-failure cleanup retained; G32 child BLAS/OMP/MKL/NUMEXPR/VECLIB ceilings implemented via copied child environment, leaving parent environment unchanged.",
           "owning_commits": [
-            "56c972bdc11b504da71ece6e25f6f53ab073e9f1"
+            "56c972bdc11b504da71ece6e25f6f53ab073e9f1",
+            "a87ac195800888b334a4b977d19b1419c44d99b2"
           ],
           "runtime_tests": [
-            "tests/test_v021_runner_cleanup.py"
+            "tests/test_v021_runner_cleanup.py",
+            "tests/tools/test_v021_security_contracts.py"
           ],
           "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
           "hosted_ci_evidence": [
@@ -7445,16 +7670,19 @@
           "remaining_approved_work": {
             "gate": "G32",
             "contract": "Standalone runner BLAS/OMP thread ceilings",
-            "status": "approved_pending_implementation",
+            "status": "restoration_implemented_with_tests",
             "risk_classification": "Critical",
             "staging_approval": {
               "by": "Brian",
               "recorded_at": "2026-09-10 16:51 (root Kanban comment, per approved brief)",
               "quote": "I approve of all features added to staging. Keep the list of manual human tests. Keep it lean, but cover every feature.",
-              "scope": "Documented restoration gates for source/tests/staging; Ang integrates. No live mutation, push, voice, retired consumers or archive-only new features.",
+              "scope": "Documented restoration gates for source/tests/staging; Ang is authorized to integrate/push staging. Workers do not push; main/live/voice/retired/archive exclusions remain.",
               "source": "../approved-restoration-brief.md (task evidence)"
             },
-            "evidence": "critical-gates.md G32; no additional subfeature ID created (preserve original 241)."
+            "evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; G32 completed inside existing historical ID; no extra ID added.",
+            "owning_commits": [
+              "a87ac195800888b334a4b977d19b1419c44d99b2"
+            ]
           }
         },
         {
@@ -7543,7 +7771,7 @@
       "historical_status": "missing",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: exact identical-package warning suppression and filter-before-display-cap were removed. Distinct package warnings remain naturally; historical canonical-name normalization was already superseded in OLD by exact comparison.",
-      "disposition": "approved_pending_implementation",
+      "disposition": "restoration_implemented_with_tests",
       "subfeatures": [
         {
           "id": "FC-33-E01",
@@ -7566,16 +7794,20 @@
           },
           "candidate_source": {
             "path": "tools/tirith_security.py",
-            "git_blob": "a284c6d4007cd99521673a41b92a465cd17edc1b",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+            "git_blob": "7f41a415b0278e9c90a47dd81338835c71459bc5"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current parser truncates before .app filtering and has no exact-package filter.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Evaluate all findings before display cap; exact case-sensitive package pair warning suppression only, BLOCK verdict/evidence and malformed warning refusal retained.",
+          "owning_commits": [
+            "a87ac195800888b334a4b977d19b1419c44d99b2"
+          ],
+          "runtime_tests": [
+            "tests/tools/test_v021_security_contracts.py"
+          ],
+          "qualification_limit": "Locally qualified named runtime assertions only; live activation/delivery, hosted full CI and human UAT are not claimed. Existing stronger security/ownership contracts preserved; historical implementation shape may be replaced by compatible outcome.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH3.md (pre-mutation contracts preserved; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G33: scanner warn/allow verdict changes require explicit approval.",
           "staging_approval": {
@@ -7583,7 +7815,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH3.md; V021_APPROVED_BATCH3_TESTS.json; V021_APPROVED_BATCH3_REVIEW.md"
         }
       ]
     },
@@ -9533,6 +9766,11 @@
       "ci_run": 34545497788,
       "supersedes": "Previously reported queued status; original receipts retained",
       "fresh_candidate_ci": "Required after fixture correction and batch2 integration"
+    },
+    {
+      "source_candidate": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
+      "status": "Ang independently verified batch2+CI correction and47 focused tests; exact origin/staging accepted",
+      "ci": "Fresh full hosted CI starting per Ang; first-batch34545497788 failed. No final green result inferred."
     }
   ],
   "approved_continuation_base": "c0a3098235b47d88090966e38837953dc95ddf30",
@@ -9540,8 +9778,9 @@
     "by": "Brian",
     "recorded_at": "2026-09-10 16:51 (root Kanban comment, per approved brief)",
     "quote": "I approve of all features added to staging. Keep the list of manual human tests. Keep it lean, but cover every feature.",
-    "scope": "Documented restoration gates for source/tests/staging; Ang integrates. No live mutation, push, voice, retired consumers or archive-only new features.",
+    "scope": "Documented restoration gates for source/tests/staging; Ang is authorized to integrate/push staging. Workers do not push; main/live/voice/retired/archive exclusions remain.",
     "source": "../approved-restoration-brief.md (task evidence)"
   },
-  "approved_batch2_base": "4cef65cada7ac1e483d117949862784beb8dc7aa"
+  "approved_batch2_base": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+  "approved_batch3_base": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8"
 }

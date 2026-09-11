@@ -1,3 +1,17 @@
+# Current checkpoint: approved batch 3 locally qualified
+
+All 26 remaining approved IDs plus G32 are implemented and independently reviewed.
+[Batch 3 evidence](V021_APPROVED_BATCH3.md), [independent reviews](V021_APPROVED_BATCH3_REVIEW.md)
+and [raw checks/bindings](V021_APPROVED_BATCH3_TESTS.json) bind the exact source candidate.
+No scoped implementation remains pending. The single cumulative checklist covers
+78 landed IDs in 36 grouped rows, all human results pending. Critical labels and
+voice/retired/archive exclusions remain. First-batch CI failed; fresh exact-candidate
+hosted CI remains required. Ang may integrate/push staging; workers do not push;
+main/live remain excluded. Prior checkpoint counts and stop/next-step language below
+are historical and superseded by this checkpoint; prior receipts remain immutable.
+
+---
+
 # Current CI correction checkpoint
 
 First-batch CI **34545497788 completed FAILURE** for `4cef65cada`: one failing
@@ -32,8 +46,8 @@ Implementation is in progress; human UAT stays deferred and never blocks dev.
 Critical classifications remain. G17R is the first approved implementation batch;
 exact commits, tests and remaining steps are recorded in
 [V021_APPROVED_CONTINUATION.md](V021_APPROVED_CONTINUATION.md) and the ledger.
-No source push, staging integration, main change or live mutation is authorized
-here. Ang owns independent staging integration and exact-SHA hosted CI.
+Workers may not push or integrate staging; Ang is authorized to integrate and push
+staging and owns exact-SHA hosted CI. Main and live changes remain excluded.
 
 The previous handoff below is preserved as a historical checkpoint. Its parked,
 approval-required and next-integration statements are superseded by this section;
