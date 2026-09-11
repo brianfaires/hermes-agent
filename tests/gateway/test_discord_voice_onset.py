@@ -73,3 +73,23 @@ async def test_other_adapter_generation_is_not_affected():
         assert second.voice_output_current(42)
     finally:
         output_scope.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_stt_older_than_new_onset_is_not_dispatched(monkeypatch):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    obj = adapter()
+    obj._voice_input_callback = AsyncMock()
+    def stt(_):
+        entered.set()
+        release.wait(3)
+        return {'success': True, 'transcript': 'Old request that must never speak.'}
+    monkeypatch.setattr(VoiceReceiver, 'pcm_to_wav', lambda *args: None)
+    monkeypatch.setattr('tools.transcription_tools.transcribe_audio', stt)
+    task = asyncio.create_task(obj._process_voice_input(42, 123, b'\0' * 96000, session_generation=1))
+    assert await asyncio.to_thread(entered.wait, 2)
+    await obj.stop_voice_playback(42)
+    release.set()
+    await asyncio.wait_for(task, 3)
+    obj._voice_input_callback.assert_not_awaited()

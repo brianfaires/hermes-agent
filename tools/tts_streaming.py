@@ -67,6 +67,20 @@ SPEECH_INTERRUPTED_NOTE = (
     "[Note: the user interrupted your previous spoken reply before it finished.]"
 )
 _INTERRUPT_TTL_S = 120.0
+class SpeechInterruptionLatch:
+    """Same TTL latch, instantiable by isolated concurrent voice sessions."""
+
+    def __init__(self):
+        self._at = None
+
+    def mark(self):
+        self._at = time.monotonic()
+
+    def take(self):
+        at, self._at = self._at, None
+        return at is not None and time.monotonic() - at < _INTERRUPT_TTL_S
+
+
 _interrupted_at: Optional[float] = None
 
 
@@ -76,7 +90,7 @@ def mark_speech_interrupted() -> None:
 
 
 def take_speech_interrupted() -> bool:
-    """Pop the latch; True when a barge happened within the TTL."""
+    """Pop the default CLI latch; concurrent surfaces own separate instances."""
     global _interrupted_at
     at, _interrupted_at = _interrupted_at, None
     return at is not None and time.monotonic() - at < _INTERRUPT_TTL_S
@@ -119,7 +133,9 @@ class SentenceChunker:
 
     def flush(self) -> List[str]:
         """Drain the tail (end-of-text or long-idle flush)."""
-        tail = _THINK_BLOCK_RE.sub("", self.buf).strip()
+        tail = _THINK_BLOCK_RE.sub("", self.buf)
+        # An interrupted generation may never close its reasoning block.
+        tail = re.split(r"<think(?:[\s>]|$)", tail, maxsplit=1)[0].strip()
         self.buf = ""
         return [tail] if tail else []
 

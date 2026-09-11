@@ -72,6 +72,7 @@ class StreamingTTSConsumer:
         self._tts_config = tts_config
         self._loop = loop
         self._metadata = metadata
+        self._text_size = 0
 
         # Resolve the streaming provider once. If unavailable, the consumer is
         # inactive and the gateway falls back to whole-file TTS.
@@ -157,6 +158,10 @@ class StreamingTTSConsumer:
         """Receive a text delta from the agent. Non-blocking."""
         if self._aborted or not self.active or self._finished:
             return
+        self._text_size = getattr(self, "_text_size", 0) + len(text)
+        if self._text_size > 65536:
+            self._dropped = True
+            return
         try:
             for clause in self._chunker.feed(text):
                 self._queue.put_nowait(clause)
@@ -238,12 +243,16 @@ class StreamingTTSConsumer:
         if self._handle is None:
             return
 
+        if self._aborted:
+            await self._safe_abort("cancelled before start")
+            return
         self._started = True
         self._suppress_whole_file = False
 
         try:
             while True:
-                if self._aborted:
+                if self._aborted or self._handle.aborted:
+                    self._suppress_whole_file = True
                     break
                 try:
                     item = await asyncio.to_thread(self._queue.get, True, 0.1)
@@ -256,7 +265,8 @@ class StreamingTTSConsumer:
                     break
                 if not isinstance(item, str):
                     continue
-                if self._aborted:
+                if self._aborted or self._handle.aborted:
+                    self._suppress_whole_file = True
                     break
 
                 try:
@@ -267,12 +277,12 @@ class StreamingTTSConsumer:
                         self._partial = True
                         self._suppress_whole_file = True
                     else:
-                        self._suppress_whole_file = False
+                        self._suppress_whole_file = bool(self._aborted or (self._handle and self._handle.aborted))
                     self._completed = False
                     await self._safe_abort(str(exc))
                     return
 
-            if not self._aborted and self._handle is not None:
+            if not self._aborted and self._handle is not None and not self._handle.aborted:
                 _finish_failed = False
                 try:
                     await self._adapter.finish_streaming_tts(self._handle, interrupted=self._aborted)
@@ -342,11 +352,16 @@ class StreamingTTSConsumer:
         if self._streamer is None:
             return
         iterator = iter(self._streamer.stream(text))
-        while True:
-            has_chunk, chunk = await asyncio.to_thread(self._next_stream_chunk, iterator)
-            if not has_chunk:
-                break
-            yield chunk
+        try:
+            while not self._aborted and not (self._handle and self._handle.aborted):
+                has_chunk, chunk = await asyncio.to_thread(self._next_stream_chunk, iterator)
+                if not has_chunk:
+                    break
+                yield chunk
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                await asyncio.to_thread(close)
 
     @staticmethod
     def _next_stream_chunk(iterator: Any) -> tuple[bool, Optional[bytes]]:

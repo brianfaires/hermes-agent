@@ -4338,6 +4338,100 @@ class DiscordAdapter(BasePlatformAdapter):
                     except Exception:
                         pass
 
+    def _voice_guild_for_chat(self, chat_id):
+        return next((gid for gid, chat in self._voice_text_channels.items()
+                     if str(chat) == str(chat_id) and self.is_in_voice_channel(gid)), None)
+
+    def supports_streaming_tts(self, chat_id, audio_format):
+        try:
+            import audioop  # noqa: F401 — also shipped by discord.py on newer Python
+        except ImportError:
+            return False
+        return (self._voice_guild_for_chat(chat_id) is not None
+                and audio_format.sample_width == 2
+                and audio_format.channels in (1, 2)
+                and audio_format.sample_rate in (16000, 22050, 24000, 44100, 48000))
+
+    async def begin_streaming_tts(self, chat_id, audio_format, metadata=None):
+        from gateway.platforms.base import StreamingTTSHandle
+        from plugins.platforms.discord.voice_stream import PCMStream
+        if not self.supports_streaming_tts(chat_id, audio_format):
+            return None
+        guild_id = self._voice_guild_for_chat(chat_id)
+        if not self.voice_output_current(guild_id):
+            return None
+        if not hasattr(self, "_voice_streams"):
+            self._voice_streams = {}
+        old = self._voice_streams.get(guild_id)
+        if old is not None:
+            await self.abort_streaming_tts(old)
+        handle = StreamingTTSHandle(chat_id=str(chat_id), audio_format=audio_format)
+        handle.guild_id = guild_id
+        handle.generation = self._voice_output_generation(guild_id)
+        handle.source = PCMStream(audio_format, gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)))
+        handle.playing = False
+        self._voice_streams[guild_id] = handle
+        return handle
+
+    async def write_streaming_tts(self, handle, chunk):
+        if (handle.aborted or handle.generation != self._voice_output_generation(handle.guild_id)
+                or not self.voice_output_current(handle.guild_id)):
+            handle.aborted = True
+            raise RuntimeError("Stale Discord voice stream")
+        if not handle.playing:
+            vc = self._voice_clients.get(handle.guild_id)
+            if vc is None or not vc.is_connected():
+                raise RuntimeError("Discord voice disconnected")
+            mixer = self._voice_mixers.get(handle.guild_id)
+            if mixer is not None:
+                mixer.stop_speech()
+                mixer.play_stream(handle.source)
+            else:
+                if vc.is_playing():
+                    vc.stop()
+                vc.play(handle.source)
+            handle.playing = True
+            self.voice_timing().mark("playback_started")
+            self._cancel_voice_timeout(handle.guild_id)
+        # A single provider chunk can fill the queue and partly play before
+        # write() raises. Conservatively claim delivery before that await.
+        if chunk:
+            handle.audible = True
+        await handle.source.write(chunk)
+
+    async def finish_streaming_tts(self, handle, *, interrupted=False):
+        if interrupted or handle.aborted:
+            await self.abort_streaming_tts(handle)
+            return
+        await handle.source.finish()
+        if handle.playing:
+            deadline = time.monotonic() + 10
+            while not handle.source.drained.is_set():
+                if handle.aborted or time.monotonic() >= deadline:
+                    raise TimeoutError("Discord stream drain interrupted or timed out")
+                await asyncio.sleep(0.02)
+        if getattr(self, "_voice_streams", {}).get(handle.guild_id) is handle:
+            self._voice_streams.pop(handle.guild_id, None)
+        self._reset_voice_timeout(handle.guild_id)
+
+    async def abort_streaming_tts(self, handle, error=None):
+        handle.aborted = True
+        handle.source.cleanup()
+        if getattr(self, "_voice_streams", {}).get(handle.guild_id) is handle:
+            self._voice_streams.pop(handle.guild_id, None)
+            mixer = self._voice_mixers.get(handle.guild_id)
+            if mixer is not None:
+                mixer.stop_speech()
+            elif handle.playing:
+                vc = self._voice_clients.get(handle.guild_id)
+                if vc is not None:
+                    vc.stop()
+            self._reset_voice_timeout(handle.guild_id)
+
+    def _voice_stream_playing(self, guild_id):
+        handle = getattr(self, "_voice_streams", {}).get(guild_id)
+        return handle is not None and handle.playing and not handle.aborted
+
     async def play_tts(
         self,
         chat_id: str,
@@ -4678,7 +4772,7 @@ class DiscordAdapter(BasePlatformAdapter):
         quiet to work.  No-op unless the mixer is installed and acks enabled.
         """
         generation = self._voice_output_generation(guild_id)
-        if not self.voice_output_current(guild_id):
+        if not self.voice_output_current(guild_id) or self._voice_stream_playing(guild_id):
             return False
         if not self._voice_fx_cfg.get("ack_enabled"):
             return False
@@ -4712,7 +4806,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 from .voice_mixer import decode_to_pcm
             pcm = await asyncio.to_thread(decode_to_pcm, actual)
             if (not pcm or generation != self._voice_output_generation(guild_id)
-                    or not self.voice_output_current(guild_id)):
+                    or not self.voice_output_current(guild_id) or self._voice_stream_playing(guild_id)):
                 return False
             mixer.play_speech(
                 self._lead_silence_bytes() + pcm,
@@ -5145,6 +5239,11 @@ class DiscordAdapter(BasePlatformAdapter):
         guild = self._client.get_guild(guild_id) if self._client is not None else None
         if not self._is_voice_speaker_allowed(user_id, guild=guild):
             return
+        from tools.tts_streaming import SpeechInterruptionLatch
+        if not hasattr(self, "_voice_interruption_latches"):
+            self._voice_interruption_latches = {}
+        latch = self._voice_interruption_latches.setdefault(guild_id, SpeechInterruptionLatch())
+        latch.mark()
         self.voice_timing().mark("speech_onset")
         # Stop runs on the event loop, independently of the serial STT worker.
         task = asyncio.create_task(self.stop_voice_playback(guild_id))
@@ -5163,6 +5262,9 @@ class DiscordAdapter(BasePlatformAdapter):
         if not hasattr(self, "_voice_output_generations"):
             self._voice_output_generations = {}
         self._voice_output_generations[guild_id] = self._voice_output_generation(guild_id) + 1
+        stream = getattr(self, "_voice_streams", {}).get(guild_id)
+        if stream is not None:
+            await self.abort_streaming_tts(stream)
         mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
         if mixer is not None:
             mixer.stop_speech()
@@ -5198,7 +5300,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
         generation = self._voice_output_generation(guild_id)
-        if not self.voice_output_current(guild_id):
+        if not self.voice_output_current(guild_id) or self._voice_stream_playing(guild_id):
             return False
 
         # Playback is activity. Do not let the inactivity timer disconnect the
@@ -5217,7 +5319,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     from .voice_mixer import decode_to_pcm
                 pcm = await asyncio.to_thread(decode_to_pcm, audio_path)
                 if pcm:
-                    if generation != self._voice_output_generation(guild_id) or not self.voice_output_current(guild_id):
+                    if generation != self._voice_output_generation(guild_id) or not self.voice_output_current(guild_id) or self._voice_stream_playing(guild_id):
                         return False
                     speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
                     mixer.play_speech(self._lead_silence_bytes() + pcm, gain=speech_gain)
@@ -5460,6 +5562,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # (guild_id is in scope). Pass it so role checks are
                 # guild-scoped and not cross-guild.
                 _vc_guild = self._client.get_guild(guild_id) if self._client is not None else None
+                utterance_generation = self._voice_output_generation(guild_id)
                 for user_id, pcm_data in completed:
                     if not self._is_voice_speaker_allowed(user_id, guild=_vc_guild):
                         continue
@@ -5474,6 +5577,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         user_id,
                         pcm_data,
                         session_generation=session_generation,
+                        utterance_generation=utterance_generation,
                     )
         except asyncio.CancelledError:
             pass
@@ -5511,6 +5615,7 @@ class DiscordAdapter(BasePlatformAdapter):
         pcm_data: bytes,
         *,
         session_generation: Optional[int] = None,
+        utterance_generation: Optional[int] = None,
     ):
         """Convert PCM -> WAV -> STT -> callback."""
         from tools.voice_mode import (
@@ -5518,6 +5623,10 @@ class DiscordAdapter(BasePlatformAdapter):
             is_whisper_hallucination,
         )
 
+        if utterance_generation is None:
+            utterance_generation = self._voice_output_generation(guild_id)
+        if utterance_generation != self._voice_output_generation(guild_id):
+            return
         tmp_f = tempfile.NamedTemporaryFile(suffix=".wav", prefix="vc_listen_", delete=False)
         wav_path = tmp_f.name
         tmp_f.close()
@@ -5536,6 +5645,10 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             self.voice_timing().mark("stt_ready")
+            if (utterance_generation != self._voice_output_generation(guild_id)
+                    or (session_generation is not None
+                        and self._voice_session_generations.get(guild_id, 0) != session_generation)):
+                return
             if not result.get("success"):
                 return
             transcript = result.get("transcript", "").strip()

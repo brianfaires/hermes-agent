@@ -5987,7 +5987,11 @@ class TurnRunner:
                 return
             display_text = text
             voice_speaker = getattr(ctx, "voice_progress_speaker", None)
-            if voice_speaker is not None and str(display_text or "").strip():
+            if (_stts_consumer_ref is not None and _stts_consumer_ref.active
+                    and not _stts_consumer_ref.done):
+                if not already_streamed:
+                    _stts_consumer_ref.on_delta(display_text + "\n\n")
+            elif voice_speaker is not None and str(display_text or "").strip():
                 try:
                     voice_speaker.speak_commentary(display_text)
                 except Exception:
@@ -7408,7 +7412,11 @@ class DiscordVoiceProgressSpeaker:
         if not callable(is_in_voice_channel):
             return False
         try:
-            return bool(is_in_voice_channel(self._guild_id))
+            current = getattr(adapter, "voice_output_current", None)
+            streaming = getattr(adapter, "_voice_stream_playing", None)
+            return (bool(is_in_voice_channel(self._guild_id))
+                    and (not callable(current) or current(self._guild_id))
+                    and (not callable(streaming) or not streaming(self._guild_id)))
         except Exception:
             logger.debug("Discord voice progress connection check failed", exc_info=True)
             return False

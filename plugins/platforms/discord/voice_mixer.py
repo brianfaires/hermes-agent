@@ -230,6 +230,15 @@ class VoiceMixer(discord.AudioSource):
             if self._ambient is not None:
                 self._ambient.gain = self._duck_gain
 
+    def play_stream(self, source) -> None:
+        """Attach a bounded streaming child through the existing speech lane."""
+        with self._lock:
+            self._speech.append(source)
+            self._speech_active = True
+            self._duck_release_left = 0
+            if self._ambient is not None:
+                self._ambient.gain = self._duck_gain
+
     @property
     def speech_active(self) -> bool:
         with self._lock:
