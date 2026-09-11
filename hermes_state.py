@@ -6561,101 +6561,117 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if not session_id or not session_key:
             return
 
-        def _do(conn):
-            lineage_cte = ""
-            target_clause = "WHERE id = ?"
-            query_params = []
-            if include_compression_ancestors:
-                lineage_cte = """
-                    WITH RECURSIVE compression_lineage(id) AS (
-                        SELECT ?
-                        UNION
-                        SELECT parent.id
-                        FROM compression_lineage lineage
-                        JOIN sessions child ON child.id = lineage.id
-                        JOIN sessions parent ON parent.id = child.parent_session_id
-                        WHERE parent.end_reason = 'compression'
-                          AND json_extract(
-                              COALESCE(child.model_config, '{}'),
-                              '$._branched_from'
-                          ) IS NULL
-                          AND json_extract(
-                              COALESCE(child.model_config, '{}'),
-                              '$._delegate_from'
-                          ) IS NULL
-                          AND COALESCE(child.source, '') != 'tool'
-                    )
-                """
-                target_clause = "WHERE id IN (SELECT id FROM compression_lineage)"
-                query_params.append(session_id)
-            query_params.extend(
-                (
-                    session_key,
-                    source,
-                    user_id,
-                    chat_id,
-                    chat_type,
-                    thread_id,
-                    display_name,
-                    origin_json,
-                )
-            )
-            if not include_compression_ancestors:
-                query_params.append(session_id)
-            conn.execute(
-                f"""{lineage_cte}
-                   UPDATE sessions
-                   SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
-                       chat_type = ?, thread_id = ?,
-                       display_name = COALESCE(?, display_name),
-                       origin_json = COALESCE(?, origin_json)
-                   {target_clause}""",
-                query_params,
-            )
-            # Self-heal (#82616): the UPDATE is a silent no-op when the row
-            # is missing (create_session failed earlier, or a crash landed
-            # between routing publication and row creation). Insert it with
-            # the full identity so the session is durably routable — never
-            # leave first-creation to an identity-less lazy writer.
-            if not include_compression_ancestors:
-                cur = conn.execute(
-                    "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)
-                )
-                if cur.fetchone() is None:
-                    conn.execute(
-                        """INSERT INTO sessions (
-                               id, source, user_id, session_key, chat_id,
-                               chat_type, thread_id, display_name, origin_json,
-                               profile_name, started_at
-                           )
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                           ON CONFLICT(id) DO UPDATE SET
-                               session_key = COALESCE(sessions.session_key, excluded.session_key),
-                               chat_id = COALESCE(sessions.chat_id, excluded.chat_id),
-                               chat_type = COALESCE(sessions.chat_type, excluded.chat_type),
-                               thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
-                               display_name = COALESCE(sessions.display_name, excluded.display_name),
-                               origin_json = COALESCE(sessions.origin_json, excluded.origin_json)""",
-                        (
-                            session_id,
-                            source,
-                            user_id,
-                            session_key,
-                            chat_id,
-                            chat_type,
-                            thread_id,
-                            display_name,
-                            origin_json,
-                            # Same ownership stamp as _insert_session_row: a
-                            # self-healed row is a first creation too, and an
-                            # unowned (NULL) row vanishes from profile-keyed
-                            # consumers (#99222).
-                            self._own_profile_name(),
-                            time.time(),
-                        ),
-                    )
+        self._execute_write(lambda conn: self._record_gateway_session_peer_conn(
+            conn, session_id, source=source, user_id=user_id, session_key=session_key,
+            chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
+            display_name=display_name, origin_json=origin_json,
+            include_compression_ancestors=include_compression_ancestors
+        ))
 
-        self._execute_write(_do)
+    @staticmethod
+    def gateway_session_owner(row) -> Optional[str]:
+        """Read current durable ownership; only legacy NULL rows use route keys."""
+        owner = row["profile_name"]
+        if owner:
+            return str(owner)
+        key = str(row["session_key"] or "")
+        parts = key.split(":")
+        if len(parts) >= 2 and parts[0] == "agent":
+            return "default" if parts[1] in ("", "main") else parts[1]
+        return None
+
+    @staticmethod
+    def _gateway_compression_lineage(conn, session_id):
+        return [row[0] for row in conn.execute("""
+            WITH RECURSIVE compression_lineage(id) AS (
+                SELECT ?
+                UNION
+                SELECT parent.id
+                FROM compression_lineage lineage
+                JOIN sessions child ON child.id = lineage.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            ) SELECT id FROM compression_lineage
+        """, (session_id,))]
+
+    def _record_gateway_session_peer_conn(
+        self, conn, session_id, *, source, user_id=None, session_key=None,
+        chat_id=None, chat_type=None, thread_id=None, display_name=None,
+        origin_json=None, include_compression_ancestors=False,
+    ):
+        target_clause = "WHERE id = ?"
+        query_params = []
+        if include_compression_ancestors:
+            ids = self._gateway_compression_lineage(conn, session_id)
+            target_clause = "WHERE id IN (" + ",".join("?" for _ in ids) + ")"
+        query_params.extend(
+            (
+                session_key,
+                source,
+                user_id,
+                chat_id,
+                chat_type,
+                thread_id,
+                display_name,
+                origin_json,
+            )
+        )
+        query_params.extend(ids if include_compression_ancestors else [session_id])
+        conn.execute(
+            f"""UPDATE sessions
+               SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
+                   chat_type = ?, thread_id = ?,
+                   display_name = COALESCE(?, display_name),
+                   origin_json = COALESCE(?, origin_json)
+               {target_clause}""",
+            query_params,
+        )
+        # Self-heal (#82616): the UPDATE is a silent no-op when the row
+        # is missing (create_session failed earlier, or a crash landed
+        # between routing publication and row creation). Insert it with
+        # the full identity so the session is durably routable — never
+        # leave first-creation to an identity-less lazy writer.
+        if not include_compression_ancestors:
+            cur = conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)
+            )
+            if cur.fetchone() is None:
+                conn.execute(
+                    """INSERT INTO sessions (
+                           id, source, user_id, session_key, chat_id,
+                           chat_type, thread_id, display_name, origin_json,
+                           profile_name, started_at
+                       )
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           session_key = COALESCE(sessions.session_key, excluded.session_key),
+                           chat_id = COALESCE(sessions.chat_id, excluded.chat_id),
+                           chat_type = COALESCE(sessions.chat_type, excluded.chat_type),
+                           thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
+                           display_name = COALESCE(sessions.display_name, excluded.display_name),
+                           origin_json = COALESCE(sessions.origin_json, excluded.origin_json)""",
+                    (
+                        session_id,
+                        source,
+                        user_id,
+                        session_key,
+                        chat_id,
+                        chat_type,
+                        thread_id,
+                        display_name,
+                        origin_json,
+                        # Same ownership stamp as _insert_session_row: a
+                        # self-healed row is a first creation too, and an
+                        # unowned (NULL) row vanishes from profile-keyed
+                        # consumers (#99222).
+                        self._own_profile_name(),
+                        time.time(),
+                    ),
+                )
+
 
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
         """Mark a gateway session's expiry-finalization flag in state.db.
@@ -6726,6 +6742,39 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 )
 
         self._execute_write(_do)
+
+    def switch_gateway_session_route(
+        self, *, old_session_id, target_session_id, session_key, entry_json,
+        scope, requested_profile, allow_ownerless, target_peer,
+    ) -> bool:
+        """Authorize and publish an explicit resume as one durable transition."""
+        def _do(conn):
+            lineage = self._gateway_compression_lineage(conn, target_session_id)
+            for ancestor_id in lineage:
+                row = conn.execute("SELECT * FROM sessions WHERE id = ?", (ancestor_id,)).fetchone()
+                if row is None:
+                    return False
+                owner = self.gateway_session_owner(row)
+                if owner != requested_profile and (owner is not None or not allow_ownerless):
+                    return False
+            conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = 'session_switch' "
+                "WHERE id = ? AND (ended_at IS NULL "
+                f"OR end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))",
+                (time.time(), old_session_id),
+            )
+            self._reopen_session_conn(conn, target_session_id)
+            self._record_gateway_session_peer_conn(
+                conn, target_session_id, include_compression_ancestors=True, **target_peer
+            )
+            conn.execute(
+                "INSERT INTO gateway_routing (scope, session_key, entry_json, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(scope, session_key) DO UPDATE SET "
+                "entry_json = excluded.entry_json, updated_at = excluded.updated_at",
+                (scope, session_key, entry_json, time.time()),
+            )
+            return True
+        return self._execute_write(_do)
 
     def load_gateway_routing_entries(self, *, scope: str = "") -> Dict[str, str]:
         """Load routing entries for *scope* as {session_key: entry_json}."""
@@ -7674,26 +7723,28 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         Before clearing a reset boundary, stabilize markerless legacy reset
         children that still depend on the parent's mutable end_reason.
         """
-        def _do(conn):
-            placeholders = ",".join("?" for _ in _RESET_END_REASONS)
-            # WHERE shape shared with _RESET_CHILD_SQL's fallback arm via
-            # _legacy_reset_child_sql so the stamping and the listing
-            # predicate cannot drift.
-            conn.execute(
-                "UPDATE sessions AS child SET model_config = json_set("
-                "COALESCE(child.model_config, '{}'), '$._reset_from', "
-                "child.parent_session_id) "
-                "WHERE child.parent_session_id = ? "
-                "AND json_extract(COALESCE(child.model_config, '{}'), "
-                "                 '$._reset_from') IS NULL "
-                f"AND {_legacy_reset_child_sql('child', placeholders)}",
-                (session_id, *_RESET_END_REASONS),
-            )
-            conn.execute(
-                "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
-                (session_id,),
-            )
-        self._execute_write(_do)
+        self._execute_write(lambda conn: self._reopen_session_conn(conn, session_id))
+
+    @staticmethod
+    def _reopen_session_conn(conn, session_id):
+        placeholders = ",".join("?" for _ in _RESET_END_REASONS)
+        # WHERE shape shared with _RESET_CHILD_SQL's fallback arm via
+        # _legacy_reset_child_sql so the stamping and the listing
+        # predicate cannot drift.
+        conn.execute(
+            "UPDATE sessions AS child SET model_config = json_set("
+            "COALESCE(child.model_config, '{}'), '$._reset_from', "
+            "child.parent_session_id) "
+            "WHERE child.parent_session_id = ? "
+            "AND json_extract(COALESCE(child.model_config, '{}'), "
+            "                 '$._reset_from') IS NULL "
+            f"AND {_legacy_reset_child_sql('child', placeholders)}",
+            (session_id, *_RESET_END_REASONS),
+        )
+        conn.execute(
+            "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
+            (session_id,),
+        )
 
     def promote_to_session_reset(
         self, session_id: str, reason: str = "session_reset"
