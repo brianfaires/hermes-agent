@@ -18,6 +18,7 @@ _VALUE_OPTIONS = {
     'flock': {'-w', '--wait', '-E', '--conflict-exit-code'},
     'xargs': {'-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n', '-P', '-s', '--max-args', '--max-procs', '--max-chars', '--replace'},
     'nohup': set(), 'setsid': set(), 'command': set(), 'exec': set(),
+    'then': set(), 'do': set(), 'else': set(), '!': set(),
 }
 _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=')
 
@@ -28,7 +29,8 @@ def _head(value):
 
 def _segments(script):
     try:
-        lexer = shlex.shlex(script, posix=True, punctuation_chars=';&|()')
+        lexer = shlex.shlex(script, posix=True, punctuation_chars=';&|()\n')
+        lexer.whitespace = ' \t\r'
         lexer.whitespace_split = True
         lexer.commenters = ''
         tokens = list(lexer)
@@ -36,7 +38,7 @@ def _segments(script):
         tokens = script.split()
     segment = []
     for token in tokens:
-        if token and all(c in ';&|()' for c in token):
+        if token and all(c in ';&|()\n' for c in token):
             if segment:
                 yield segment
             segment = []
@@ -48,6 +50,9 @@ def _segments(script):
 
 def _killer_commands(tokens, depth=0):
     if depth > 20:
+        # Too deeply nested to inspect economically: keep the target guard
+        # conservative rather than silently permitting a wrapped killer.
+        yield tokens
         return
     index = 0
     while index < len(tokens):
