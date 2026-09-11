@@ -1,0 +1,63 @@
+# Discord voice source milestones — September 11, 2026
+
+All six finite source milestones are implemented. This is a **source release candidate**, not a deployed release or acoustic acceptance. Source candidate: `4557bc60348250d464530d6cc63bdd19c59e48e8`, on isolated `dev/discord-voice`. See [independent review](DISCORD_VOICE_REVIEW.md), [human UAT](DISCORD_VOICE_UAT.md), and [handoff](DISCORD_VOICE_HANDOFF.md).
+
+## Isolation and compatibility
+
+Development resumed under the approved overnight brief and September 9 canonical plan, superseding parked/MVP-only notes. Starting voice HEAD was `31ee83fe4bab0f11a5e46841890229844c32b9d8`. Compatibility merge `320fc6db370c72cf15fa21f7ef2ea2f5b83777fd` incorporated existing restoration commit `d06c1ece5da289f0295ea7ed7d862bb15328b5a4` **on voice only**, with no conflicts or discarded voice changes. Main's prompt hotfix is included through that ancestry.
+
+Read-only GitHub API checks confirmed main `cf62291dad2cd9c12de80bc5194ff76ef0f6ce55` and staging `d06c1ece5da289f0295ea7ed7d862bb15328b5a4`. Neither ref was changed. No pushes, tags, canonical checkout writes, gateway operations, provider calls, channel messages, credential/config changes or live/global installs occurred. Only task-local test dependencies were adjusted.
+
+## Feature and rollback ledger
+
+| Milestone | Immutable feature commit and delivered scope | Qualification and limits | Source rollback boundary |
+|---|---|---|---|
+| 1. Previous functionality | `0e6f2526a6324fff8ea1b0cd42e4eaeba629f534`: join/startup/reconnect/manual leave/off; authorized owning-profile ingress and reply; configured aliases with original argument tails; input cancellation. | Accepted historical implementation retained. Historical fixture correction `fe99ce625b1ca46e60966fac857d516c1f35e430`; current restoration tests29 pass. Compatibility fixtures now represent connected adapters and consistent session keys. No live revalidation. | Foundational voice restoration; dependent voice features must be reverted first. Compatibility merge is a separate boundary. |
+| 2. First speech and sparse progress | `2311b967a0108f3d79859f583979cc0b48691bf4`: existing first-tool acknowledgment, actual interim commentary, 18-second silence-based lifecycle progress. | Historical review retained; progress 30 pass in current broad subset. PCM integration suppresses competing/doubled interim speech and stale progress. Acknowledgments remain subject to existing voice-FX settings. No first-audio latency claim. | Revert progress feature after dependent PCM/control wiring; baseline conversation remains. |
+| 3. Local timing | `42f80b293b2e49f53f527a0ee1cfece9daf145fe`: adapter-owned bounded timestamp ring for end-of-speech, endpoint, STT, first text, playback submission and stop. | Timing ring 1 + executable STT path covered. 128 entries, stage names and monotonic seconds only; no text/audio/identifiers/persistent logging. `playback_started` means transport/player submission, not sound measured at the listener. Shared adapter ring is diagnostic event order, not a per-speaker percentile report. | Remove timing hooks/module after dependent onset/PCM hooks; no provider/config dependency. |
+| 4. Receive and onset interruption | `51c04a1646dcc16a91f095f0b461f66ebebf4aa3`: keep receive live during playback; confirmed mapped non-silent PCM schedules existing authorized adapter stop independently of STT; context-local output generations suppress stale audio. | Original commit alone is **not** the qualified RC. STT/queued-batch guard in `aae5ce1c96`, post-echo guard in `1aa651d228`, and rejoin guard in candidate `4557bc6034` complete the invariant. Final onset5/restoration 29/race1 pass. No newly captured speakers or broadened inference/permission rules. Noise/echo thresholds require human measurements. | Revert controls/PCM and subsequent guards before onset feature. Do not use the original onset commit as a standalone qualified release. |
+| 5. Bounded provider PCM | `aae5ce1c963046c6545dd8614f0e0a04fbb350ee`: Discord contract for existing `StreamingTTSConsumer`, PCM conversion and bounded queue, existing mixer speech lane, isolated instances of existing interruption-latch semantics. | Stream 6, consumer 15, provider helpers 29, mixer 9 pass. Claims conservative partial acceptance before an awaited write, preventing full-final replay after first-chunk partial failure. No reasoning or tool-argument feed; unclosed think tail stripped. Provider fixtures only; actual endpoint behavior untested. Qualified RC includes later stale-dispatch/rejoin guards. | Revert controls and dependent fixes, then PCM feature; whole-file baseline survives. Keep cancellation fixes when constructing any alternate candidate. |
+| 6. Completed controls | `347d8b0c33419c9f13957d558656e7ec8eab7406`: bounded spoken status/stop/correction through existing session dispatch; idle stop completion is awaited before correction replacement; busy status speaks a short fact without canceling. | Controls covered in restoration 29 and status 12; normal auth/profile/channel context preserved. Repeated `/status` and `/stop` are not transcript-deduplicated. Final guards prevent obsolete replacement input after a new onset/echo/rejoin. Existing `/steer` aliases retain ordinary session semantics. | Revert controls commit with its dependent dispatch checks/tests; no new model/tool surface or configuration migration. |
+
+Rollback instructions describe **source composition**, not runtime operations. These commits form a dependency chain; reverse-order reverts on an isolated branch are reviewable. Do not cherry-pick an early feature SHA while omitting its listed safety corrections. Runtime rollback must be established separately from the then-current known-good deployment/data state.
+
+## Proposed annotated tags — parent publication only
+
+No tags were created. Local and remote `discord-voice/` namespaces were empty at read-only inspection; parent must recheck immediately before creation and must never move an existing tag. All six proposed tags should target the **same final documentation-bearing handoff commit** recorded in the task result, whose runtime source is exactly `4557bc60348250d464530d6cc63bdd19c59e48e8`; the table above separately preserves each feature's immutable provenance. This avoids presenting known-incomplete intermediate commits as accepted RCs.
+
+1. `discord-voice/20260911-m1-restored-4557bc60-rc1`
+2. `discord-voice/20260911-m2-progress-4557bc60-rc1`
+3. `discord-voice/20260911-m3-timing-4557bc60-rc1`
+4. `discord-voice/20260911-m4-interruption-4557bc60-rc1`
+5. `discord-voice/20260911-m5-pcm-4557bc60-rc1`
+6. `discord-voice/20260911-m6-controls-4557bc60-rc1`
+
+Annotation template: `Discord voice milestone N source RC. Cumulative source 4557bc60348250d464530d6cc63bdd19c59e48e8; feature provenance and safety dependencies in docs/fork/DISCORD_VOICE_MILESTONES.md. Independent scoped review and controlled-path tests; no live provider/Discord/acoustic acceptance. Not a deployed release.` Historical feature commits may separately be tagged only with the historical provenance below, never as tonight's exact-SHA test result.
+
+## Executed verification
+
+Canonical runner throughout: `HERMES_PYTHON="$PWD/../test-venv/bin/python" PYTHONPATH="$PWD" scripts/run_tests.sh ...`. The runner clears credentials and runs files in isolated subprocesses; tests use temporary Hermes homes. Task-local `overnight-source.pth` keeps this checkout on the interpreter path and reads existing runtime dependency packages without writing that venv. Repository-pinned `numpy==2.4.3` was installed only into `../test-venv` for actual mixer/provider-helper coverage.
+
+| Source / slice | Result | Durable test coverage / task-local log |
+|---|---|---|
+| Final frozen source `4557bc60348250d464530d6cc63bdd19c59e48e8` broad subset | **313 passed, 0 failed, no skips**, 24 files | `overnight-frozen-source-tests.log`: Discord restoration/onset/timing/PCM/mixer/race; progress/status/voice commands; aliases/auth/queue/steer; reconnect; streaming consumer and gateway wiring; restoration text/channel/profile regressions; multiplex credentials/adapters; retained ElevenLabs settings and provider helpers. |
+| Prior source `1aa651d228`, real local receive integration | **34 passed**, no live connection | `overnight-codec-tests.log`: `tests/integration/test_voice_channel_flow.py -m integration`; real NaCl and Opus packet pipeline. |
+| Final candidate `4557bc60348250d464530d6cc63bdd19c59e48e8` | **35 passed** after last source change | `overnight-rejoin-tests.log`: onset 5, restoration 29, concurrent join 1. Last change only advances playback epoch on new connection and adds its regression. The final frozen-source broad run above subsequently requalified all 24 files at this SHA. |
+| Static/source checks | AST parse and `git diff --check` pass; added-line security review | `overnight-static-review.txt`; no new tools/schema, provider endpoints, credentials, telemetry, environment settings, raw transcript logging, or system-prompt changes. Ruff was unavailable; no claim it ran. |
+
+Earlier test failures are preserved in `../OVERNIGHT-EVIDENCE.md`, not hidden as flakes. They exposed inconsistent session-key/connected-adapter fixtures, source-inspection tests, the awaited idle-stop ordering, and the independently identified races; relevant executable tests were corrected or added. Live-provider tests were intentionally not enabled. Two credential-gated tests skipped in an earlier exploratory run; the local codec integration file initially deselected by default was subsequently run explicitly as shown above.
+
+Historical evidence for milestones 1/2: accepted candidate `fe99ce625b1ca46e60966fac857d516c1f35e430` had successful hosted CI [run34464455203](https://github.com/brianfaires/hermes-agent/actions/runs/34464455203), aggregate job102832422615, and 53 final-candidate restoration/progress tests. Earlier 150-test evidence was at `9718f1a138a44e9259aae2bb308b2a3819933196`, not the final historical SHA. This is provenance only. No new hosted CI was run: `.github/workflows/ci.yaml` supports pushes to main/staging and PRs, not voice branch pushes. Shared-staging exact-SHA integration/CI remains a later gate.
+
+## Bounded behavior and measurement-dependent disposition
+
+- PCM accepts signed16-bit mono/stereo at16/22.05/24/44.1/48kHz; converts to48kHz stereo20ms frames. Other formats retain fallback. Queue holds at most50 frames (one second), with10-second backpressure/drain timeout; input chunks at most1MiB; text cap65,536 characters and existing256-clause queue. No full-final replay after partial accepted audio or an interrupted stream. Errors before delivery may fall back; acceptance is conservative and can withhold fallback even before physical sound.
+- Speech confirmation is100ms of non-silent mapped PCM with existing adapter speaker checks. It is a bounded noise heuristic, not a measured VAD or echo canceller. Unmapped SSRC is not inferred for onset. Existing receive/STT authorization and capture policy are unchanged.
+- Onset stops speech, not external work. Status keeps work running; the interrupted turn's obsolete audio stays suppressed. Explicit correction stops the old session run and begins a replacement. Cancellation never promises rollback of external side effects. `cancel that` / `strike that` retain the prior utterance-discard behavior.
+- **Endpoint tuning:** retain1.5-second baseline; defer tuning until human endpoint/latency measurements. No measured need for a source change tonight.
+- **Streaming STT comparison:** defer provider comparisons/spend until authorized measurements; full-utterance STT remains.
+- **Speakerphone echo cancellation:** defer pending acoustic measurements/product decision; headset first. No new capture boundary or AEC architecture introduced.
+- **Model/voice A-B:** defer until explicitly authorized measurement runs; selected provider/model/voice/settings untouched.
+- **Separate conversation/front runtime:** conditional only if measurements prove model latency remains the bottleneck. No demonstrated need, no implementation required, no new front agent/orchestrator/monitor.
+
+Proposed interrupt p95≤300ms and warm first meaningful speech median≤2s/p95≤4s remain **unmeasured targets**. Source scope is complete; remaining gates are publication by parent, separately authorized integration/CI/runtime activation, and human acoustic UAT.
