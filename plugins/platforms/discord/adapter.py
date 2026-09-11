@@ -693,8 +693,9 @@ class VoiceReceiver:
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
-    def __init__(self, voice_client, allowed_user_ids: set = None):
+    def __init__(self, voice_client, allowed_user_ids: set = None, *, timing=None):
         self._vc = voice_client
+        self._timing = timing
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
 
@@ -995,6 +996,9 @@ class VoiceReceiver:
                         user_id = self._infer_user_for_ssrc(ssrc)
                     if user_id:
                         completed.append((user_id, bytes(buf)))
+                        if self._timing is not None:
+                            self._timing.mark("end_of_speech", last_time)
+                            self._timing.mark("endpoint_ready", now)
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
@@ -4977,6 +4981,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 receiver = VoiceReceiver(
                     vc,
                     allowed_user_ids=self._auto_voice_user_ids() or self._allowed_user_ids,
+                    timing=self.voice_timing(),
                 )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
@@ -5057,11 +5062,19 @@ class DiscordAdapter(BasePlatformAdapter):
                     auto_voice_channels.discard(str(session_channel_id))
             self._voice_sources.pop(guild_id, None)
 
+    def voice_timing(self):
+        """Return this adapter's bounded, timestamp-only diagnostic ring."""
+        if not hasattr(self, "_voice_timing"):
+            from plugins.platforms.discord.voice_timing import VoiceTiming
+            self._voice_timing = VoiceTiming()
+        return self._voice_timing
+
     async def stop_voice_playback(self, guild_id: int) -> bool:
         """Stop active TTS in one guild while keeping the voice connection alive."""
         mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
         if mixer is not None:
             mixer.stop_speech()
+            self.voice_timing().mark("stop_complete")
             return True
 
         vc = self._voice_clients.get(guild_id)
@@ -5070,6 +5083,7 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             if vc.is_playing():
                 vc.stop()
+                self.voice_timing().mark("stop_complete")
                 return True
         except Exception as exc:
             logger.debug(
@@ -5109,6 +5123,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if pcm:
                     speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
                     mixer.play_speech(self._lead_silence_bytes() + pcm, gain=speech_gain)
+                    self.voice_timing().mark("playback_started")
                     # Block until the speech child drains so callers serialise
                     # replies (mirrors legacy semantics) but the ambient keeps
                     # playing underneath the whole time.
@@ -5163,6 +5178,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 source = discord.PCMVolumeTransformer(source, volume=1.0)
                 vc.play(source, after=_after)
+                self.voice_timing().mark("playback_started")
                 try:
                     await asyncio.wait_for(done.wait(), timeout=playback_timeout)
                 except asyncio.TimeoutError:
@@ -5427,6 +5443,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 wav_path,
             )
 
+            self.voice_timing().mark("stt_ready")
             if not result.get("success"):
                 return
             transcript = result.get("transcript", "").strip()
@@ -5447,7 +5464,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 return
 
-            logger.info("Voice input from user %d: %s", user_id, transcript[:100])
+            # Transcript visibility belongs to the existing opt-in echo path.
             transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:

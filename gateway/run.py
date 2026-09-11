@@ -5968,6 +5968,20 @@ class TurnRunner:
                 if ctx._run_still_current():
                     _stts_consumer_ref.on_delta(text)
 
+        if _stream_delta_cb is not None and ctx.source.platform == Platform.DISCORD:
+            _voice_delta_cb = _stream_delta_cb
+            _first_voice_text = False
+
+            def _stream_delta_cb(text: str) -> None:
+                nonlocal _first_voice_text
+                if text and not _first_voice_text and ctx._run_still_current():
+                    _first_voice_text = True
+                    adapter = self._runner._adapter_for_source(ctx.source)
+                    timing = getattr(adapter, "voice_timing", None)
+                    if callable(timing):
+                        timing().mark("first_model_text")
+                _voice_delta_cb(text)
+
         def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
                 return

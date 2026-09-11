@@ -154,6 +154,7 @@ def _dispatcher_runner(tmp_path, adapter):
 def _discord_adapter_for_voice_dispatch():
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="token"))
     adapter._runtime_profile_name = "ops"
+    adapter._running = True
     adapter._voice_text_channels[42] = 789
     adapter._voice_sources[42] = SessionSource(
         platform=Platform.DISCORD,
@@ -540,6 +541,7 @@ async def test_voice_alias_idle_dispatches_steer_tail_through_normal_handler(tmp
 
     await asyncio.gather(*list(adapter._background_tasks))
 
+    assert any(stage == "stt_ready" for stage, _ in adapter.voice_timing().snapshot())
     assert runner._is_user_authorized.call_count >= 1
     event = runner._handle_message_with_agent.await_args.args[0]
     assert event.text == "Keep CASE, please!"
