@@ -441,8 +441,14 @@ async def test_safe_sync_slash_commands_only_mutates_diffs():
 
 @pytest.mark.asyncio
 async def test_post_connect_initialization_retries_fingerprint_after_timeout(tmp_path, monkeypatch):
-    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    assert adapter.runtime_profile_home == tmp_path
+    # Reconnect work belongs to the adapter's construction home even when an
+    # unrelated profile is active by the time initialization finishes.
+    foreign_home = tmp_path / "foreign"
+    foreign_home.mkdir()
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: foreign_home)
 
     class _DesiredCommand:
         def to_dict(self, tree):
@@ -503,6 +509,9 @@ async def test_post_connect_initialization_retries_fingerprint_after_timeout(tmp
     recovered_entry = json.loads(state_path.read_text(encoding="utf-8"))["999"]
     assert recovered_entry["last_success_at"] >= recovered_entry["last_attempt_at"]
     assert recovered_entry["summary"] == summary
+
+    assert not (foreign_home / discord_platform._DISCORD_COMMAND_SYNC_STATE_SUBDIR
+                / discord_platform._DISCORD_COMMAND_SYNC_STATE_FILENAME).exists()
 
 
 @pytest.mark.asyncio

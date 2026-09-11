@@ -211,6 +211,7 @@ class TransportIdentityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(view._check_auth(SimpleNamespace(user=SimpleNamespace(id=8))))
             finally:
                 view.stop()
+                self.assertTrue(view.is_finished())
 
     async def test_all_six_control_views_pin_pairing_and_authorization(self):
         self.approve_fixture(self.a, '7'); self.approve_fixture(self.b, '8')
@@ -232,7 +233,9 @@ class TransportIdentityTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(view._check_auth(SimpleNamespace(user=SimpleNamespace(id=8))))
             finally:
                 secret_scope.reset_secret_scope(token)
-                for view in views: view.stop()
+                for view in views:
+                    view.stop()
+                    self.assertTrue(view.is_finished())
 
 
 if __name__ == '__main__':
