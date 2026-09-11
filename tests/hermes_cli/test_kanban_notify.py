@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 
 from pathlib import Path
@@ -395,6 +396,13 @@ async def test_notifier_wake_forwards_persisted_chat_type_and_user_id(kanban_hom
     fake_adapter = MagicMock()
     fake_adapter.send = AsyncMock()
     runner.adapters = {Platform.TELEGRAM: fake_adapter}
+    owner_home = kanban_home / "profiles" / "owner-profile"
+    owner_home.mkdir(parents=True)
+    (owner_home / "config.yaml").write_text(json.dumps({"kanban": {
+        "notification_policy": {"mode": "deny", "allowed_platforms": ["telegram"],
+                                "preserve_tui": False},
+    }}))
+    fake_adapter.runtime_profile_home = owner_home
     runner._profile_adapters = {"owner-profile": {Platform.TELEGRAM: fake_adapter}}
     runner._authorization_adapter = lambda platform, profile=None: fake_adapter
 
