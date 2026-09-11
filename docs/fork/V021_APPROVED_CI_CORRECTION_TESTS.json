@@ -1,0 +1,152 @@
+{
+  "baseline": "127c25627673c4882d0edf83c146960c9ada62d2",
+  "failed_ci": {
+    "sha": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+    "run_id": 34545497788,
+    "status": "completed",
+    "conclusion": "failure",
+    "source": "Ang completed-run report; raw slice7 receipt confirms one failing case,19 passing tests in file",
+    "failed_case": "tests/cron/test_execution_ledger.py::test_execution_ledger_follows_the_current_profile_home",
+    "job_id": 103097319943,
+    "raw_receipt": "../ci-failure-4cef65c-slice7.txt",
+    "raw_sha256": "4a3ccd44fbf6529e48cd4648dca08ec1b80b4f707444e406df4da1d2c9557b89",
+    "excerpt_lines_680_713": [
+      "2026-09-11T00:15:37.3010231Z   \u2554\u254d Failed: tests/cron/test_execution_ledger.py \u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d",
+      "2026-09-11T00:15:37.3011609Z   \u2551 ",
+      "2026-09-11T00:15:37.3012219Z   \u2551 tests/cron/test_execution_ledger.py .F..................                 [100%]",
+      "2026-09-11T00:15:37.3012702Z   \u2551 ",
+      "2026-09-11T00:15:37.3013095Z   \u2551 =================================== FAILURES ===================================",
+      "2026-09-11T00:15:37.3013670Z   \u2551 ____________ test_execution_ledger_follows_the_current_profile_home ____________",
+      "2026-09-11T00:15:37.3014035Z   \u2551 ",
+      "2026-09-11T00:15:37.3014343Z   \u2551 monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f91803073d0>",
+      "2026-09-11T00:15:37.3015236Z   \u2551 tmp_path = PosixPath('/tmp/hermes-pytest-tmproot-vo5wlcr0/pytest-of-runner/pytest-0/test_execution_ledger_follows_0')",
+      "2026-09-11T00:15:37.3015676Z   \u2551 ",
+      "2026-09-11T00:15:37.3016052Z   \u2551     def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):",
+      "2026-09-11T00:15:37.3016527Z   \u2551         import cron.executions as executions",
+      "2026-09-11T00:15:37.3016814Z   \u2551     ",
+      "2026-09-11T00:15:37.3017253Z   \u2551         current_home = {\"path\": tmp_path / \"default\"}",
+      "2026-09-11T00:15:37.3017631Z   \u2551         monkeypatch.setattr(executions, \"EXECUTIONS_FILE\", None)",
+      "2026-09-11T00:15:37.3018166Z   \u2551         monkeypatch.setattr(executions, \"get_hermes_home\", lambda: current_home[\"path\"])",
+      "2026-09-11T00:15:37.3018521Z   \u2551     ",
+      "2026-09-11T00:15:37.3018847Z   \u2551         default_row = executions.create_execution(\"default-job\", source=\"builtin\")",
+      "2026-09-11T00:15:37.3019266Z   \u2551         current_home[\"path\"] = tmp_path / \"worker\"",
+      "2026-09-11T00:15:37.3019893Z   \u2551         worker_row = executions.create_execution(\"worker-job\", source=\"builtin\")",
+      "2026-09-11T00:15:37.3020354Z   \u2551     ",
+      "2026-09-11T00:15:37.3020626Z   \u2551 >       assert executions.list_executions() == [worker_row]",
+      "2026-09-11T00:15:37.3021075Z   \u2551 E       AssertionError: assert [{'id': '99c2...cc2cb4', ...}] == [{'id': '99c2...cc2cb4', ...}]",
+      "2026-09-11T00:15:37.3021493Z   \u2551 E         ",
+      "2026-09-11T00:15:37.3022143Z   \u2551 E         Left contains one more item: {'id': '8060cd34316e49928e17b81b9b35268b', 'job_id': 'default-job', 'source': 'builtin', 'process_id': 'c77b3a42684e4a57b90307132ccc2cb4', ...}",
+      "2026-09-11T00:15:37.3022720Z   \u2551 E         Use -v to get more diff",
+      "2026-09-11T00:15:37.3023003Z   \u2551 ",
+      "2026-09-11T00:15:37.3023308Z   \u2551 tests/cron/test_execution_ledger.py:53: AssertionError",
+      "2026-09-11T00:15:37.3023682Z   \u2551 =========================== short test summary info ============================",
+      "2026-09-11T00:15:37.3026076Z   \u2551 FAILED tests/cron/test_execution_ledger.py::test_execution_ledger_follows_the_current_profile_home",
+      "2026-09-11T00:15:37.3026664Z   \u2551 ======================== 1 failed, 19 passed in 42.27s =========================",
+      "2026-09-11T00:15:37.3026963Z   \u2551",
+      "2026-09-11T00:15:37.3027308Z   \u2551  Repro: python -m pytest tests/cron/test_execution_ledger.py",
+      "2026-09-11T00:15:37.3027717Z   \u255a\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d\u254d"
+    ],
+    "next_ci": "Fresh exact candidate full hosted CI required after Ang integrates batch2 plus correction; no success inferred"
+  },
+  "parent_focused_receipt": [
+    {
+      "file": "tests/cron/test_execution_ledger.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cron",
+        "-p",
+        "test_execution_ledger.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_execution_ledger_follows_the_current_profile_home (test_execution_ledger.ExecutionLedgerProfileTests.test_execution_ledger_follows_the_current_profile_home) ... cron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error (test_execution_ledger.ExecutionLedgerProfileTests.test_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 2.014s\n\nOK\n"
+    },
+    {
+      "file": "tests/cron/test_v021_profile_registry.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cron",
+        "-p",
+        "test_v021_profile_registry.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_due_scan_recovers_own_recurring_error_despite_other_profile_run (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_recovers_own_recurring_error_despite_other_profile_run) ... cron.persisted_error.recovered job='fixture' id=same \u2014 recurring job wedged in stale last_status=error without re-firing for a full cadence; re-arming next_run_at to 2026-09-11T00:36:28.838346+00:00 so it re-dispatches without force-run/resume\nok\ntest_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer) ... Job 'fixture': removed without a completed run \u2014 diagnostic written to its output directory\nok\ntest_equal_ids_local_precheck_global_count_and_captured_release (test_v021_profile_registry.ProfileRegistryTests.test_equal_ids_local_precheck_global_count_and_captured_release) ... ok\ntest_manual_run_dedupe_is_profile_local_and_always_releases (test_v021_profile_registry.ProfileRegistryTests.test_manual_run_dedupe_is_profile_local_and_always_releases) ... ok\ntest_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim (test_v021_profile_registry.ProfileRegistryTests.test_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim) ... Job 'same' interrupted before its durable fire owner was registered; leaving persisted state untouched\nok\ntest_real_tick_releases_after_copied_context_exits (test_v021_profile_registry.ProfileRegistryTests.test_real_tick_releases_after_copied_context_exits) ... cron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_shutdown_targets_exact_owner_and_profile (test_v021_profile_registry.ProfileRegistryTests.test_shutdown_targets_exact_owner_and_profile) ... ok\ntest_stale_sweep_uses_only_own_store_and_preserves_live_future (test_v021_profile_registry.ProfileRegistryTests.test_stale_sweep_uses_only_own_store_and_preserves_live_future) ... cron.inflight.forced_release event=forced_release reason=ledger-terminal job='same' id=same age=0s allowance=1800s future=finished \u2014 stale in-flight claim released; the job was skipping every fire with 'already running'\nok\n\n----------------------------------------------------------------------\nRan 8 tests in 1.839s\n\nOK\n"
+    }
+  ],
+  "limitation": "Final independent rerun:2 corrected/added ledger cases +8 G17R regressions passed. Validator1 passed separately.19 remaining pytest functions not run locally; fresh exact candidate full hosted CI required. No production change.",
+  "independent_focused_receipt": [
+    {
+      "file": "tests/cron/test_execution_ledger.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cron",
+        "-p",
+        "test_execution_ledger.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_execution_ledger_follows_the_current_profile_home (test_execution_ledger.ExecutionLedgerProfileTests.test_execution_ledger_follows_the_current_profile_home) ... cron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error (test_execution_ledger.ExecutionLedgerProfileTests.test_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 2.421s\n\nOK\n"
+    },
+    {
+      "file": "tests/cron/test_v021_profile_registry.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cron",
+        "-p",
+        "test_v021_profile_registry.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_due_scan_recovers_own_recurring_error_despite_other_profile_run (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_recovers_own_recurring_error_despite_other_profile_run) ... cron.persisted_error.recovered job='fixture' id=same \u2014 recurring job wedged in stale last_status=error without re-firing for a full cadence; re-arming next_run_at to 2026-09-11T00:37:19.326321+00:00 so it re-dispatches without force-run/resume\nok\ntest_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer) ... Job 'fixture': removed without a completed run \u2014 diagnostic written to its output directory\nok\ntest_equal_ids_local_precheck_global_count_and_captured_release (test_v021_profile_registry.ProfileRegistryTests.test_equal_ids_local_precheck_global_count_and_captured_release) ... ok\ntest_manual_run_dedupe_is_profile_local_and_always_releases (test_v021_profile_registry.ProfileRegistryTests.test_manual_run_dedupe_is_profile_local_and_always_releases) ... ok\ntest_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim (test_v021_profile_registry.ProfileRegistryTests.test_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim) ... Job 'same' interrupted before its durable fire owner was registered; leaving persisted state untouched\nok\ntest_real_tick_releases_after_copied_context_exits (test_v021_profile_registry.ProfileRegistryTests.test_real_tick_releases_after_copied_context_exits) ... cron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_shutdown_targets_exact_owner_and_profile (test_v021_profile_registry.ProfileRegistryTests.test_shutdown_targets_exact_owner_and_profile) ... ok\ntest_stale_sweep_uses_only_own_store_and_preserves_live_future (test_v021_profile_registry.ProfileRegistryTests.test_stale_sweep_uses_only_own_store_and_preserves_live_future) ... cron.inflight.forced_release event=forced_release reason=ledger-terminal job='same' id=same age=0s allowance=1800s future=finished \u2014 stale in-flight claim released; the job was skipping every fire with 'already running'\nok\n\n----------------------------------------------------------------------\nRan 8 tests in 2.187s\n\nOK\n"
+    }
+  ],
+  "coverage_validator": [
+    {
+      "file": "tests/test_v021_restoration_checklist.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_v021_restoration_checklist.py",
+        "-v"
+      ],
+      "returncode": 0,
+      "output": "test_every_landed_subfeature_has_exactly_one_human_check (test_v021_restoration_checklist.RestorationChecklistCoverageTests.test_every_landed_subfeature_has_exactly_one_human_check) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.012s\n\nOK\n"
+    }
+  ],
+  "integrity": {
+    "baseline": "127c25627673c4882d0edf83c146960c9ada62d2",
+    "unchanged_pytest_functions": 19,
+    "ledger_rows_byte_value_unchanged": true,
+    "batch2_all_12_reviewed_hashes_unchanged": true,
+    "corrected_test_sha256": "5c9cd645b2ac5f96b79c4f8277ca950bfba839debcaeb4962688a13816bdf619",
+    "syntax_valid": true,
+    "unchanged_helpers": 2
+  }
+}

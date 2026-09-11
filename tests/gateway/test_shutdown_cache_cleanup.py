@@ -50,6 +50,10 @@ class _FakeGateway:
         self._pending_messages = {}
         self._pending_approvals = {}
         self._busy_ack_ts = {}
+        self.coverage_publications = []
+
+    def _publish_profile_coverage(self, *, clear=False):
+        self.coverage_publications.append(clear)
 
     def _running_agent_count(self):
         return len(self._running_agents)
@@ -143,6 +147,7 @@ class TestCachedAgentCleanupOnShutdown:
 
         # Call the real stop() from GatewayRunner
         await gw_mod.GatewayRunner.stop(gw)
+        assert gw.coverage_publications == [True]
 
         agent.shutdown_memory_provider.assert_called_once()
 
@@ -154,6 +159,7 @@ class TestCachedAgentCleanupOnShutdown:
         gw._agent_cache["s1"] = (agent, "sig1")
 
         await gw_mod.GatewayRunner.stop(gw)
+        assert gw.coverage_publications == [True]
 
         assert len(gw._agent_cache) == 0
 
@@ -172,6 +178,7 @@ class TestRunningAgentsNotDoubleCleaned:
         gw._agent_cache["s1"] = (shared, "sig1")
 
         await gw_mod.GatewayRunner.stop(gw)
+        assert gw.coverage_publications == [True]
 
         # Called at least once — either from _finalize_shutdown_agents
         # or from the cache sweep (or both)

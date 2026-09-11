@@ -863,7 +863,13 @@ class TestRunJobSessionPersistence:
                 return {"final_response": "ok"}
 
         class FakeFuture:
+            _done = False
+
+            def done(self):
+                return self._done
+
             def result(self):
+                self._done = True
                 return {"final_response": "ok"}
 
         fake_future = FakeFuture()
@@ -899,52 +905,63 @@ class TestRunJobSessionPersistence:
             "heartbeat-job", expected_owner="owner-token"
         )
 
-    def test_run_job_resets_secret_source_cache_before_reload(self, tmp_path, monkeypatch):
-        """Each run must clear the secret-source cache before re-reading the
-        env, so a long-running gateway re-resolves Bitwarden/BSM-backed secrets
-        instead of leaving the startup .env placeholder in place (#33465).
+    def test_run_job_refreshes_private_sources_without_clearing_sibling_cache(self, tmp_path, monkeypatch):
+        """Every agent run sees rotated external secrets; other homes stay cached."""
+        # Complete process startup before measuring per-job source hydration.
+        # A cold run_agent import loads dotenv; it is not a scheduled job.
+        import run_agent
 
-        A bare ``load_dotenv`` re-load can't do this: startup already recorded
-        this HERMES_HOME in ``_APPLIED_HOMES``, so the external-secret pull
-        no-ops and only the placeholder is re-applied. The scheduler must call
-        ``reset_secret_source_cache()`` (forcing the re-pull) and route through
-        ``load_hermes_dotenv`` (which then re-applies external secret sources).
-        """
-        job = {"id": "bsm-job", "name": "bsm", "prompt": "hello"}
+        from agent.secret_scope import current_secret_scope, get_secret
+        from agent.secret_sources.base import FetchResult
+        from agent.secret_sources.registry import AppliedVar, ApplyReport, SourceReport
+        from agent.secret_sources import registry
+        from hermes_cli import env_loader
+
+        sibling = tmp_path / 'sibling'
+        sibling.mkdir()
+        (tmp_path / '.env').write_text('EXPLICIT_API_KEY=dotenv-wins\n')
+        monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+        monkeypatch.setattr(env_loader, '_load_secrets_config', lambda home: {'fake-source': {'enabled': True}})
+        monkeypatch.delenv('TEST_PROVIDER_API_KEY', raising=False)
+        monkeypatch.delenv('EXPLICIT_API_KEY', raising=False)
+        calls = []
+        version = {'value': 'first'}
+        def apply(cfg, home, *, environ=None):
+            assert environ is not os.environ
+            calls.append(home)
+            environ['TEST_PROVIDER_API_KEY'] = ('sibling-only' if home == sibling else version['value'])
+            return ApplyReport(
+                sources=[SourceReport(name='fake-source', label='Fake', result=FetchResult(), applied=['TEST_PROVIDER_API_KEY'])],
+                provenance={'TEST_PROVIDER_API_KEY': AppliedVar(name='TEST_PROVIDER_API_KEY', source='fake-source', shape='mapped', overrode_env=False)},
+            )
+        monkeypatch.setattr(registry, 'apply_all', apply)
+        assert env_loader.hydrate_profile_secret_sources(sibling) == {'TEST_PROVIDER_API_KEY': 'sibling-only'}
+        job = {'id': 'bsm-job', 'name': 'bsm', 'prompt': 'hello'}
         fake_db = MagicMock()
-        call_order = []
-
-        def _record_reset():
-            call_order.append("reset")
-
-        def _record_load(*args, **kwargs):
-            call_order.append("load")
-            return []
-
-        with patch("cron.scheduler._hermes_home", tmp_path), \
-             patch("cron.scheduler._resolve_origin", return_value=None), \
-             patch("hermes_cli.env_loader.reset_secret_source_cache", _record_reset), \
-             patch("hermes_cli.env_loader.load_hermes_dotenv", _record_load), \
-             patch("hermes_state.SessionDB", return_value=fake_db), \
-             patch(
-                 "hermes_cli.runtime_provider.resolve_runtime_provider",
-                 return_value={
-                     "api_key": "***",
-                     "base_url": "https://example.invalid/v1",
-                     "provider": "openrouter",
-                     "api_mode": "chat_completions",
-                 },
-             ), \
-             patch("run_agent.AIAgent") as mock_agent_cls:
-            mock_agent = MagicMock()
-            mock_agent.run_conversation.return_value = {"final_response": "ok"}
-            mock_agent_cls.return_value = mock_agent
-            success, _output, _final, error = run_job(job)
-
-        assert success is True
-        assert error is None
-        # reset MUST precede the reload, else _APPLIED_HOMES no-ops the re-pull.
-        assert call_order[:2] == ["reset", "load"], call_order
+        observed = []
+        def conversation(*args, **kwargs):
+            observed.append((get_secret('TEST_PROVIDER_API_KEY'), get_secret('EXPLICIT_API_KEY')))
+            return {'final_response': 'ok'}
+        prior_scope = current_secret_scope()
+        with patch('cron.scheduler._hermes_home', tmp_path), \
+             patch('cron.scheduler._resolve_origin', return_value=None), \
+             patch('hermes_state.SessionDB', return_value=fake_db), \
+             patch('hermes_cli.runtime_provider.resolve_runtime_provider', return_value={
+                 'api_key': '***', 'base_url': 'https://example.invalid/v1',
+                 'provider': 'openrouter', 'api_mode': 'chat_completions',
+             }), \
+             patch.object(run_agent, 'AIAgent') as agent:
+            agent.return_value.run_conversation.side_effect = conversation
+            for value in ('first', 'rotated'):
+                version['value'] = value
+                success, _output, final, error = run_job(job)
+                assert success is True and error is None and final == 'ok'
+                assert current_secret_scope() is prior_scope
+                assert env_loader.hydrate_profile_secret_sources(sibling) == {'TEST_PROVIDER_API_KEY': 'sibling-only'}
+        assert observed == [('first', 'dotenv-wins'), ('rotated', 'dotenv-wins')]
+        assert calls == [sibling, tmp_path, tmp_path]
+        assert 'TEST_PROVIDER_API_KEY' not in os.environ
+        assert 'EXPLICIT_API_KEY' not in os.environ
 
     def test_run_job_clears_stale_auto_delivery_thread_id_between_jobs(self, tmp_path, monkeypatch):
         jobs = [

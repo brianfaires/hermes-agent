@@ -604,6 +604,7 @@ class CreateTaskBody(BaseModel):
     priority: int = 0
     workspace_kind: str = "scratch"
     workspace_path: Optional[str] = None
+    branch_name: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
     idempotency_key: Optional[str] = None
@@ -634,6 +635,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             created_by="dashboard",
             workspace_kind=payload.workspace_kind,
             workspace_path=payload.workspace_path,
+            branch_name=payload.branch_name,
             tenant=payload.tenant,
             priority=payload.priority,
             parents=payload.parents,
@@ -2055,7 +2057,7 @@ def get_config():
 # watcher delivers events without any additional plumbing.
 
 
-def _configured_home_channels() -> list[dict]:
+def _configured_home_channels(*, apply_policy: bool = True) -> list[dict]:
     """Return every platform that has a home_channel set, fully hydrated.
 
     Reads the live GatewayConfig so env-var overlays (``TELEGRAM_HOME_CHANNEL``
@@ -2071,7 +2073,10 @@ def _configured_home_channels() -> list[dict]:
     except Exception:
         return []
     result: list[dict] = []
+    from hermes_cli.kanban_notifications import is_notify_target_allowed
     for platform, pcfg in gw_cfg.platforms.items():
+        if apply_policy and not is_notify_target_allowed(platform.value):
+            continue
         if not pcfg or not pcfg.home_channel:
             continue
         hc = pcfg.home_channel
@@ -2160,7 +2165,8 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        kanban_db.add_notify_sub(
+        from hermes_cli.kanban_notifications import subscribe_notify
+        target = subscribe_notify(
             conn,
             task_id=task_id,
             platform=platform,
@@ -2168,6 +2174,8 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
             thread_id=home["thread_id"] or None,
             notifier_profile=_active_profile_name(),
         )
+        if target is None:
+            raise HTTPException(status_code=403, detail="Notification policy denied this destination")
         return {"ok": True, "task_id": task_id, "home_channel": home}
     finally:
         conn.close()
@@ -2176,7 +2184,7 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
 @router.delete("/tasks/{task_id}/home-subscribe/{platform}")
 def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(None)):
     """Remove any notify subscription on *task_id* that matches *platform*'s home."""
-    homes = _configured_home_channels()
+    homes = _configured_home_channels(apply_policy=False)
     home = next((h for h in homes if h["platform"] == platform), None)
     if not home:
         raise HTTPException(

@@ -91,17 +91,11 @@ import pytest
 
 
 def _make_source(platform_value="telegram", chat_id="555", user_id="u1"):
-    src = MagicMock()
-    plat = MagicMock()
-    plat.value = platform_value
-    src.platform = plat
-    src.chat_id = chat_id
-    src.user_id = user_id
-    # Real SessionSource.profile is None (single-profile) or a str; a MagicMock
-    # auto-attribute would read as a truthy "stamped profile" and trip the
-    # fail-closed path in _adapter_for_source (see AGENTS.md pitfall #17).
-    src.profile = None
-    return src
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+
+    return SessionSource(platform=Platform(platform_value), chat_id=chat_id,
+                         user_id=user_id, profile=None)
 
 
 def _make_runner_with_adapter(source, adapter):

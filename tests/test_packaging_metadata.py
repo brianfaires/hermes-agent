@@ -434,3 +434,13 @@ def test_security_pins_present_in_mirrored_lazy_features():
         "pyproject extras — the lazy install path would not enforce the "
         "CVE-patched floor:\n  " + "\n  ".join(problems)
     )
+
+
+def test_lock_exclude_newer_exceptions_match_project_policy():
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    expected = {
+        _canonical(name): value
+        for name, value in project["tool"]["uv"]["exclude-newer-package"].items()
+    }
+    assert lock["options"]["exclude-newer-package"] == expected

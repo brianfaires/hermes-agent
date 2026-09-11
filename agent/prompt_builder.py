@@ -609,7 +609,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
 )
 
 
-def execution_guidance_text(valid_tool_names=None) -> str:
+def execution_guidance_text(valid_tool_names=None, model: str = "") -> str:
     """Render OPENAI_MODEL_EXECUTION_GUIDANCE for the session's toolset.
 
     The block names ``web_search`` as the lookup tool for current facts; on
@@ -618,6 +618,23 @@ def execution_guidance_text(valid_tool_names=None) -> str:
     per-session (toolset is fixed at construction), so cache-safe.
     """
     text = OPENAI_MODEL_EXECUTION_GUIDANCE
+    # Match whole IDs, including a provider prefix, never arbitrary substrings.
+    model_parts = (model or "").lower().split("/")
+    if len(model_parts) <= 2 and all(model_parts) and model_parts[-1] in {"gpt-5.6-sol", "gpt-5.6-terra"}:
+        start = text.index("<tool_persistence>")
+        end = text.index("</tool_persistence>") + len("</tool_persistence>")
+        text = text[:start] + (
+            "<tool_persistence>\n"
+            "- Use tools as needed to complete the user's explicit request.\n"
+            "- Keep verification proportional: for simple reversible tasks, perform "
+            "at most one direct verification.\n"
+            "- Do not investigate adjacent issues or optional improvements.\n"
+            "- After the requested result is confirmed, stop and return it.\n"
+            "- Continue when the task is incomplete, a tool failed, results are "
+            "ambiguous, or a stated acceptance criterion remains unmet.\n"
+            "- Retry necessary empty or partial results with a different strategy.\n"
+            "</tool_persistence>"
+        ) + text[end:]
     if valid_tool_names is not None and "web_search" not in valid_tool_names:
         text = text.replace(
             "- Current facts (weather, news, versions) → use web_search\n", ""
@@ -775,7 +792,7 @@ def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 _MEDIA_NATIVE = (
-    "You can send files natively: write MEDIA:/absolute/path/to/file in "
+    "You can send files natively: write MEDIA:/absolute/path/to/file on its own line in "
     "your response. "
 )
 
@@ -828,7 +845,7 @@ PLATFORM_HINTS = {
         "Discord renders standard markdown natively (bold, italic, code "
         "blocks, links); tables are NOT supported — use bullet lists or "
         "labeled lines. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file on its own line "
         "in your response. Images (.png, .jpg, .webp) are sent as photo "
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be sent as attachments."
@@ -838,7 +855,7 @@ PLATFORM_HINTS = {
         "Standard markdown is auto-converted to Slack formatting (bold, "
         "headers, links, code); tables are NOT supported — use bullet lists "
         "or labeled lines. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file on its own line "
         "in your response. Images (.png, .jpg, .webp) are uploaded as photo "
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
@@ -856,7 +873,7 @@ PLATFORM_HINTS = {
         "You are communicating via email. Write clear, well-structured responses "
         "suitable for email. Use plain text formatting (no markdown). "
         "Keep responses concise but complete. You can send file attachments — "
-        "include MEDIA:/absolute/path/to/file in your response. The subject line "
+        "include MEDIA:/absolute/path/to/file on its own line in your response. The subject line "
         "is preserved for threading. Do not include greetings or sign-offs unless "
         "contextually appropriate."
     ),
@@ -939,7 +956,7 @@ PLATFORM_HINTS = {
         "You are in a Mattermost workspace communicating with your user. "
         "Mattermost renders standard Markdown — headings, bold, italic, code "
         "blocks, and tables all work. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file on its own line "
         "in your response. Images (.jpg, .png, .webp) are uploaded as photo "
         "attachments, audio and video as file attachments. "
         "Image URLs in markdown format ![alt](url) are rendered as inline previews automatically."
@@ -959,7 +976,7 @@ PLATFORM_HINTS = {
         "You are in a Feishu (Lark) workspace communicating with your user. "
         "Feishu renders Markdown in messages — bold, italic, code blocks, and "
         "links are supported. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
+        "You can send media files natively: include MEDIA:/absolute/path/to/file on its own line "
         "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
         "inline, audio files as native voice messages (non-Opus formats are "
         "transcoded automatically; without ffmpeg they fall back to file "
@@ -968,7 +985,7 @@ PLATFORM_HINTS = {
     "weixin": (
         "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
         "it improves readability, but keep the message compact and chat-friendly. You can send media files natively: "
-        "include MEDIA:/absolute/path/to/file in your response. Images are sent as native "
+        "include MEDIA:/absolute/path/to/file on its own line in your response. Images are sent as native "
         "photos, videos play inline when supported, and other files arrive as downloadable "
         "documents. You can also include image URLs in markdown format ![alt](url) and they "
         "will be downloaded and sent as native media when possible."
@@ -984,7 +1001,7 @@ PLATFORM_HINTS = {
     ),
     "qqbot": (
         "You are on QQ, a popular Chinese messaging platform. QQ supports markdown formatting "
-        "and emoji. You can send media files natively: include MEDIA:/absolute/path/to/file in "
+        "and emoji. You can send media files natively: include MEDIA:/absolute/path/to/file on its own line in "
         "your response. Images are sent as native photos, and other files arrive as downloadable "
         "documents."
     ),
@@ -1576,6 +1593,35 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
     return manifest
 
 
+def _skills_dirs_signature(
+    skills_dirs: list[Path],
+) -> tuple[tuple[str, tuple[tuple[str, tuple[int, int]], ...]], ...]:
+    """Return path+manifest signature for non-snapshotted skills dirs.
+
+    Cache keys built from external dir *paths* alone never invalidate when a
+    skill inside one of those dirs changes; include each dir's manifest
+    (relative path, mtime, size) so edits are picked up like local skills.
+    """
+    signature = []
+    for skills_dir in skills_dirs:
+        try:
+            manifest = _build_skills_manifest(skills_dir)
+        except Exception:
+            manifest = {}
+        signature.append(
+            (
+                str(skills_dir.resolve()),
+                tuple(
+                    sorted(
+                        (rel, (values[0], values[1]))
+                        for rel, values in manifest.items()
+                    )
+                ),
+            )
+        )
+    return tuple(signature)
+
+
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     """Load the disk snapshot if it exists and its manifest still matches."""
     snapshot_path = _skills_prompt_snapshot_path()
@@ -1839,7 +1885,7 @@ def _build_skills_system_prompt_inner(
     project_dirs = project_dirs or []
     cache_key = (
         str(skills_dir),
-        tuple(str(d) for d in external_dirs),
+        _skills_dirs_signature(external_dirs),
         tuple(str(d) for d in project_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),

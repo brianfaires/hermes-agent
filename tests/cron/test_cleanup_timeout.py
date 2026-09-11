@@ -136,5 +136,5 @@ def test_dispatch_guard_releases_after_sessiondb_finalization_hang(tmp_path):
             assert sched.tick(verbose=False) == 1
     finally:
         release.set()
-        sched._running_job_ids.discard("cleanup-guard-hang")
+        sched._running_job_ids.discard(sched._running_job_key("cleanup-guard-hang"))
         sched._shutdown_parallel_pool()

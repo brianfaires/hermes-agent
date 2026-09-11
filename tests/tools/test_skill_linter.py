@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from agent.skill_utils import SKILL_PROMPT_DESC_LIMIT
+
 from tools.skill_linter import (
     ERROR,
     WARNING,
@@ -48,13 +50,21 @@ def test_clean_skill_has_no_findings():
 
 
 def test_description_too_long_is_warning():
-    long_desc = "x" * 80
+    long_desc = "x" * (SKILL_PROMPT_DESC_LIMIT + 1)
     content = CLEAN.replace(
         "Search arXiv papers by keyword, author, or ID.", long_desc
     )
     findings = lint_content(content)
     assert "description-length" in _rules(findings)
     assert all(f.severity == WARNING for f in findings)
+
+
+def test_description_at_prompt_budget_has_no_length_warning():
+    content = CLEAN.replace(
+        "Search arXiv papers by keyword, author, or ID.",
+        "x" * SKILL_PROMPT_DESC_LIMIT,
+    )
+    assert "description-length" not in _rules(lint_content(content))
 
 
 def test_marketing_words_flagged():

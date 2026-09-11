@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,69 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 30
 _MISSING = object()
+
+
+def _script_process_group_kwargs() -> dict[str, Any]:
+    """Create a POSIX process group; use Windows' best available equivalent."""
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            )
+        }
+    return {"start_new_session": True}
+
+
+def _kill_script_process_group(pid: int) -> None:
+    """Hard-kill a POSIX script group; use taskkill /T best-effort on Windows."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        killpg(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        return
+    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
+def _terminate_script_process(proc: subprocess.Popen[str]) -> None:
+    """Kill a webhook script tree, close its pipes, and reap the direct child."""
+    try:
+        _kill_script_process_group(proc.pid)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        logger.exception("[webhook] failed to kill script process group pid=%s", proc.pid)
+
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        logger.exception("[webhook] failed to kill script process pid=%s", proc.pid)
+
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is None:
+            continue
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        logger.error("[webhook] failed to reap script process pid=%s", proc.pid)
+    except Exception:
+        logger.exception("[webhook] failed to reap script process pid=%s", proc.pid)
 
 
 def _stringify_filter_value(value: Any) -> str:
@@ -244,29 +308,42 @@ class WebhookRouteProcessor:
         else:
             argv = [sys.executable, str(path)]
 
+        proc: Optional[subprocess.Popen[str]] = None
         try:
             from tools.environments.local import build_subprocess_env
 
-            popen_kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
-            result = subprocess.run(
+            serialized_payload = json.dumps(payload)
+            proc = subprocess.Popen(
                 argv,
-                input=json.dumps(payload),
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
-                timeout=self.script_timeout_seconds,
                 cwd=str(path.parent),
                 env=build_subprocess_env(),
-                **popen_kwargs,
+                **_script_process_group_kwargs(),
+            )
+            stdout, stderr = proc.communicate(
+                input=serialized_payload,
+                timeout=self.script_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
             logger.warning("[webhook] script timed out: %s", path)
+            if proc is not None:
+                _terminate_script_process(proc)
             return False, None
         except Exception as exc:
+            if proc is not None:
+                _terminate_script_process(proc)
             logger.warning("[webhook] script execution failed: %s", exc)
             return False, None
+        except BaseException:
+            if proc is not None:
+                _terminate_script_process(proc)
+            raise
 
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        stdout = (stdout or "").strip()
+        stderr = (stderr or "").strip()
         try:
             from agent.redact import redact_sensitive_text
 
@@ -276,11 +353,11 @@ class WebhookRouteProcessor:
             logger.warning("[webhook] Failed to redact script output: %s", exc)
             stdout = "[REDACTED - redaction failed]"
             stderr = "[REDACTED - redaction failed]"
-        if result.returncode != 0:
+        if proc.returncode != 0:
             logger.info(
                 "[webhook] script ignored webhook path=%s code=%s stderr=%s",
                 path.name,
-                result.returncode,
+                proc.returncode,
                 stderr[:200],
             )
             return False, None

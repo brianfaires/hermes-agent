@@ -2071,11 +2071,12 @@ _MEDIA_EXT_ALTERNATION = "|".join(
 _MEDIA_CJK_TERMINATORS = "（）〈〉《》：，。；！？、\u201c\u201d\u2018\u2019【】"
 
 MEDIA_TAG_CLEANUP_RE = re.compile(
-    r'''[`"'*_]{0,3}MEDIA:\s*'''
+    r'''^[ \t]*(?:[-*][ \t]+)?[`"'*_]{0,3}MEDIA:(?![^\n]*MEDIA:)[ \t]*'''
     r'''(?P<path>`[^`\n]+?`|"[^"\n]+?"|'[^'\n]+?'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])\S+?(?:[^\S\n]+\S+?)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
-    re.IGNORECASE,
+    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?'''
+    r'''[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Paths NOT covered by MEDIA_TAG_CLEANUP_RE's extension alternation — both
@@ -2089,73 +2090,27 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
 # prompt-injection paths that do not validate are left visible instead of
 # silently dropped.
 #
-# The path class uses a tempered-greedy token (``[^\s\n`"']+?`` followed by
-# a ``(?=...)`` lookahead) instead of the prior ``[^\s\n`"']+`` so a
-# tag glued to the next ``MEDIA:`` keyword (``MEDIA:/a.pngMEDIA:/b.png``)
-# or to arbitrary following text (``MEDIA:/a.pngSome text``) cannot
-# silently absorb the next path — that earlier behavior merged the two
-# paths into one invalid string and dropped the file (#68773).
-#
-# The bare form stays non-greedy and whitespace-bounded — spaced paths are
-# NOT absorbed at the regex level, because greedy space-tolerance would
-# reintroduce the #68773 bug class (gluing the next MEDIA: tag or trailing
-# prose into one invalid path). Instead, unknown-extension paths containing
-# spaces (``MEDIA:/data/map data.kmz``, ``C:\...\My Documents\x.log``) are
-# recovered by ``_match_extensionless_path`` (#24032): when the bare match
-# fails validation, the candidate is progressively extended forward across
-# single spaces — bounded, stopping at newline / the next ``MEDIA:`` keyword
-# — and the first extension that validates on disk wins. Validation is the
-# oracle, so prose never rides along and non-existent paths stay visible.
+# A directive occupies its own line. Bare paths may contain spaces; the
+# complete captured path must validate. Never shorten a prose suffix into a
+# valid file, or join adjacent MEDIA directives into one path.
 MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
-    r'''[`"'*_]{0,3}MEDIA:\s*'''
+    r'''^[ \t]*(?:[-*][ \t]+)?[`"'*_]{0,3}MEDIA:(?![^\n]*MEDIA:)[ \t]*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
-    r'''(?:~/|/|[A-Za-z]:[/\\])[^\s\n`"']+?)'''
+    r'''(?:~/|/|[A-Za-z]:[/\\])[^\n`"']+?)'''
     r'''(?=[`"'\s,;:)\]}''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|$)'''
-    r'''[`"'*_]{0,3}\s*''',
-    re.IGNORECASE,
+    r'''[`"'*_]{0,3}'''
+    r'''[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
 def _match_extensionless_path(scan_text: str, match: "re.Match") -> Optional[Tuple[str, int]]:
-    """Resolve an extensionless MEDIA tag match to a validated on-disk path.
-
-    Tries the regex-captured path first. When that fails validation, the
-    candidate is progressively extended forward across single spaces
-    (validation-gated, bounded at 8 tokens, never past a newline or a
-    subsequent ``MEDIA:`` keyword) so unknown-extension paths containing
-    spaces deliver (#24032). Returns ``(safe_path, end_offset)`` where
-    ``end_offset`` is the index in ``scan_text`` just past the matched path,
-    or ``None`` when nothing validates.
-    """
-    raw = match.group("path")
-    path = _normalize_media_tag_path(raw)
+    """Validate the complete standalone tag path; never consume prose prefixes."""
+    path = _normalize_media_tag_path(match.group("path"))
     if not path:
         return None
     safe = validate_media_delivery_path(path)
-    if safe:
-        return safe, match.end("path")
-    start = match.start("path")
-    nl = scan_text.find("\n", start)
-    limit = nl if nl != -1 else len(scan_text)
-    segment = scan_text[start:limit]
-    nxt = segment.find("MEDIA:", 1)
-    if nxt != -1:
-        segment = segment[:nxt]
-    pos = match.end("path") - start
-    for _ in range(8):
-        while pos < len(segment) and segment[pos] in " \t":
-            pos += 1
-        if pos >= len(segment):
-            break
-        tok_end = pos
-        while tok_end < len(segment) and segment[tok_end] not in " \t":
-            tok_end += 1
-        candidate = _normalize_media_tag_path(segment[:tok_end])
-        safe = validate_media_delivery_path(candidate)
-        if safe:
-            return safe, start + tok_end
-        pos = tok_end
-    return None
+    return (safe, match.end()) if safe else None
 
 
 def _merge_spans(spans: list) -> list:
@@ -2201,6 +2156,26 @@ def _resolve_extensionless_candidate(path: str) -> Optional[str]:
     return validate_media_delivery_path(path)
 
 
+def _media_directive_scan_text(text: str) -> str:
+    """Mask protected spans without promoting inline tags into directives.
+
+    Code masking replaces characters with spaces. Check line eligibility on
+    the original text first, so a prefix such as `` `example` MEDIA:/file ``
+    cannot become a standalone directive after that masking.
+    """
+    eligible = []
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^[ \t]*(?:[-*][ \t]+)?[`\"'*_]{0,3}MEDIA:", line, re.IGNORECASE):
+            eligible.append(line)
+        else:
+            eligible.append("".join("\n" if char == "\n" else " " for char in line))
+    masked = BasePlatformAdapter._mask_protected_spans(text)
+    masked = BasePlatformAdapter._mask_json_string_media(masked)
+    eligibility = "".join(eligible)
+    return "".join(char if eligibility[index] != " " else " "
+                   for index, char in enumerate(masked))
+
+
 def _strip_media_tag_directives(text: str) -> str:
     """Remove MEDIA: tags and [[audio_as_voice]] / [[as_document]] markers.
 
@@ -2221,8 +2196,7 @@ def _strip_media_tag_directives(text: str) -> str:
     # exactly those spans from the unmasked text — same pattern as
     # extract_media. Import-cycle-free: BasePlatformAdapter is defined later
     # in this module, so resolve it lazily at call time.
-    masked = BasePlatformAdapter._mask_protected_spans(cleaned)
-    masked = BasePlatformAdapter._mask_json_string_media(masked)
+    masked = _media_directive_scan_text(cleaned)
 
     spans: list = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
     for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked):
@@ -3152,6 +3126,8 @@ class BasePlatformAdapter(ABC):
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
+        from hermes_constants import get_hermes_home
+        self._runtime_profile_home = get_hermes_home().resolve()
         self._message_handler: Optional[MessageHandler] = None
         # Optional gateway-supplied fan-out for platform-native emoji
         # reaction events (see ``set_reaction_handler``).
@@ -3959,6 +3935,13 @@ class BasePlatformAdapter(ABC):
         thread replies without explicit mentions).
         """
         self._session_store = session_store
+
+    @property
+    def runtime_profile_home(self) -> Path:
+        """Construction-time transport home, independent of routed turn context."""
+        from hermes_constants import get_hermes_home
+        home = getattr(self, "_runtime_profile_home", None)
+        return Path(home) if home is not None else get_hermes_home().resolve()
 
     def set_owner_profile(self, profile_name: Optional[str]) -> None:
         """Declare which multiplex profile owns this adapter.
@@ -5192,8 +5175,7 @@ class BasePlatformAdapter(ABC):
         #  - serialized JSON string values hold stored tool-result text (#34375)
         # Both maskers are offset-preserving (chars -> spaces) so match offsets
         # stay valid; chaining them masks the union of both protected regions.
-        scan_content = BasePlatformAdapter._mask_protected_spans(content)
-        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+        scan_content = _media_directive_scan_text(cleaned)
         # Dedupe on the expanded path (first occurrence wins) so the same file
         # referenced twice in one response — e.g. a MEDIA tag inline AND in a
         # summary footer — is uploaded once, not twice (#29131).
@@ -5242,8 +5224,7 @@ class BasePlatformAdapter(ABC):
         # ``cleaned`` (not ``content``) keeps offsets valid after the
         # [[audio_as_voice]] / [[as_document]] directives are removed.
         if media:
-            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
-            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
+            masked_cleaned = _media_directive_scan_text(cleaned)
             spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
             for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked_cleaned):
                 path = _normalize_media_tag_path(match.group("path"))
@@ -5513,6 +5494,7 @@ class BasePlatformAdapter(ABC):
         callback: Callable,
         *,
         generation: int | None = None,
+        prepend: bool = False,
     ) -> None:
         """Register a deferred callback to fire after the main response.
 
@@ -5521,7 +5503,9 @@ class BasePlatformAdapter(ABC):
 
         If a callback for the same ``session_key`` (and generation, when set)
         is already registered, the new callback is chained — both fire, in
-        registration order, with per-callback exception isolation. This lets
+        registration order, with per-callback exception isolation. ``prepend``
+        places a delivery-boundary signal first so a later callback timeout
+        cannot strand gateway teardown waiting for a response already sent. This lets
         independent features (background-review release + temporary-bubble
         cleanup) coexist without clobbering each other. Stale-generation
         callers never overwrite a fresher generation's slot.
@@ -5559,7 +5543,7 @@ class BasePlatformAdapter(ABC):
                     # sync wrapper here would call ``_prev()`` / ``_new()`` and
                     # silently drop any returned coroutine, breaking chained
                     # async post-delivery hooks (e.g. ``/goal`` continuations).
-                    for _cb in (_prev, _new):
+                    for _cb in ((_new, _prev) if prepend else (_prev, _new)):
                         try:
                             _result = _cb()
                             if inspect.isawaitable(_result):
@@ -6354,6 +6338,10 @@ class BasePlatformAdapter(ABC):
                     "[%s] Command '/%s' bypassing active-session guard for %s",
                     self.name, cmd, session_key,
                 )
+                # A bypass command has its own reply, independent of the
+                # running turn's generation-bound post-delivery callbacks.
+                # Restart uses this signal to keep that inline reply alive.
+                event._hermes_response_delivered = asyncio.Event()
                 try:
                     _thread_meta = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
                     response = await self._message_handler(event)
@@ -6373,6 +6361,8 @@ class BasePlatformAdapter(ABC):
                             )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+                finally:
+                    event._hermes_response_delivered.set()
                 return
 
             # Clarify reply bypass: if the agent is blocked on a
@@ -7444,7 +7434,7 @@ class BasePlatformAdapter(ABC):
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
-            profile=profile,
+            profile=profile or getattr(self, "_owner_profile", None),
             role_authorized=role_authorized,
             auto_thread_created=auto_thread_created,
             auto_thread_initial_name=auto_thread_initial_name,
@@ -7453,6 +7443,7 @@ class BasePlatformAdapter(ABC):
         # SessionSource.to_dict(). The live receiving adapter is authoritative
         # for this turn even when profile_routes selects a different runtime.
         source._transport_adapter_ref = weakref.ref(self)
+        source._authorization_profile_home = self.runtime_profile_home
         # Keep this transport-only fail-closed signal out of SessionSource
         # serialization/session identity. The shared gateway handler consumes it
         # before auth, hooks, or session setup, so every adapter drops matched

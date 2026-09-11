@@ -235,7 +235,10 @@ class GatewayAuthorizationMixin:
             return None
         transport_adapter = self._registered_transport_adapter(source)
         if transport_adapter is not None:
-            return transport_adapter
+            return None if getattr(transport_adapter, "_running", True) is False else transport_adapter
+        if getattr(source, "_transport_adapter_ref", None) is not None:
+            # Stale provenance is not permission to reply through the routed bot.
+            return None
         # Relay ingress deliberately keeps the underlying platform on the
         # source so session keys and display policy remain Slack/Discord/etc.
         # Delivery still has to use the one live RelayAdapter that owns the
@@ -251,10 +254,14 @@ class GatewayAuthorizationMixin:
             return adapters.get(Platform.RELAY)
         # ``getattr`` guards test fixtures that build a bare source via
         # SimpleNamespace and omit ``profile`` (see AGENTS.md pitfall #17).
-        return self._authorization_adapter(
+        candidate = self._authorization_adapter(
             getattr(source, "platform", None),
             getattr(source, "profile", None),
         )
+        if (getattr(source, "profile", None)
+                and getattr(candidate, "_running", True) is False):
+            return None
+        return candidate
 
     def _registered_transport_adapter(self, source: SessionSource):
         """Return the registered adapter that created *source*, if retained.
@@ -471,18 +478,15 @@ class GatewayAuthorizationMixin:
         return False
 
     def _pairing_store_for(self, source: "SessionSource"):
-        """Pick the per-profile PairingStore for a source, falling back to global.
-
-        In a multiplexing gateway, each profile owns its own pairing whitelist
-        so isolation is preserved. When the source has no profile (single-
-        profile gateway, or a path that hasn't stamped profile yet) or the
-        profile isn't registered, fall back to ``self.pairing_store`` (the
-        global default) so existing behavior is preserved.
-        """
-        per_profile = getattr(self, "pairing_stores", None) or {}
-        profile = getattr(source, "profile", None)
-        if profile and profile in per_profile:
-            return per_profile[profile]
+        """Pairing belongs to the receiving transport, never the routed agent."""
+        if (getattr(source, "_transport_adapter_ref", None) is not None
+                and self._registered_transport_adapter(source) is None):
+            return None
+        profile = self._adapter_profile_for_source(source)
+        active_fn = getattr(self, "_active_profile_name", None)
+        active = active_fn() if callable(active_fn) else None
+        if profile and profile not in {"default", active}:
+            return (getattr(self, "pairing_stores", None) or {}).get(profile)
         return getattr(self, "pairing_store", None)
 
     def _is_user_authorized(
@@ -987,6 +991,15 @@ class GatewayAuthorizationMixin:
            and a potential info-leak. (#9337)
         6. No allowlist and no explicit config → ``"pair"`` (open-gateway default).
         """
+        adapter = self._authorization_adapter(platform, profile)
+        if adapter is not None:
+            extra = getattr(getattr(adapter, "config", None), "extra", None)
+            behavior = extra.get("unauthorized_dm_behavior") if isinstance(extra, dict) else None
+            if isinstance(behavior, str) and behavior in {"pair", "ignore"}:
+                return behavior
+        elif profile:
+            return "ignore"  # missing secondary transport must never solicit pairing
+
         config = getattr(self, "config", None)
 
         # Check for an explicit per-platform override first.

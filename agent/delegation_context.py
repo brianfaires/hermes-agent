@@ -132,9 +132,8 @@ def is_delegated_child_process_context() -> bool:
 
 def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
     """Return *env* with dispatcher-only Kanban variables removed."""
-    cleaned = dict(env)
-    for key in KANBAN_ENV_KEYS:
-        cleaned.pop(key, None)
+    cleaned = {key: value for key, value in env.items()
+               if not key.startswith("HERMES_KANBAN_")}
     cleaned[DELEGATED_CHILD_ENV_MARKER] = "1"
     return cleaned
 

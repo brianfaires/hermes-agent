@@ -510,6 +510,8 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -566,6 +568,8 @@ async def test_progress_carries_anchor_for_relay_discord_auto_thread(monkeypatch
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     # Channel-initiating message: no thread_id yet, but the connector stamped
@@ -625,6 +629,8 @@ async def test_progress_no_anchor_for_native_discord_thread_event(monkeypatch, t
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     # No prospective_thread_id (event is IN a real thread already).
@@ -710,6 +716,8 @@ def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -770,6 +778,8 @@ def test_discord_truncated_tool_url_links_to_full_destination(monkeypatch, tmp_p
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(
         gateway_run,
         "_resolve_runtime_agent_kwargs",
@@ -1073,6 +1083,8 @@ async def _run_with_agent(
     if config_data and "streaming" in config_data:
         runner.config.streaming = StreamingConfig.from_dict(config_data["streaming"])
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
     source = SessionSource(
         platform=platform,
@@ -1639,6 +1651,8 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -1700,6 +1714,8 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -1798,7 +1814,7 @@ class TerminalCommandAgent:
 
     CMD = (
         "set -euo pipefail\n"
-        "printf 'node: '; node --version\n"
+        "printf 'node: '; node --version " + " ".join(["--verbose"] * 20) + "\n"
         "npm install -g hyperframes@latest"
     )
 
@@ -1837,6 +1853,8 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -1861,11 +1879,12 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     # Bare fenced block, no language tag (no '```bash').
     assert "```" in all_content
     assert "```bash" not in all_content
-    # Non-verbose collapses to the first line + truncation marker — the later
-    # command lines must NOT appear (this was the "huge block" regression).
-    assert "set -euo pipefail" in all_content
+    # Skip setup, select the meaningful line, and retain truncation pressure.
+    assert "set -euo pipefail" not in all_content
+    assert "node --version" in all_content
+    assert " ".join(["--verbose"] * 20) not in all_content
+    assert "..." in all_content
     assert "npm install -g hyperframes@latest" not in all_content
-    assert "node --version" not in all_content
     # No truncated quoted preview for the terminal command.
     assert 'terminal: "' not in all_content
 
@@ -1890,6 +1909,8 @@ async def test_terminal_progress_verbose_shows_full_command(monkeypatch, tmp_pat
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -1938,6 +1959,8 @@ async def test_terminal_progress_no_bash_block_in_verbose_mode(monkeypatch, tmp_
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(
@@ -2000,6 +2023,8 @@ async def test_consecutive_terminal_progress_collapses_headers(monkeypatch, tmp_
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner._launch_profile_home = tmp_path
+    runner._launch_profile_name = "default"
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
     source = SessionSource(

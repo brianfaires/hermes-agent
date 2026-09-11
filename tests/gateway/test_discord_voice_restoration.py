@@ -112,7 +112,11 @@ def _dispatcher_runner(tmp_path, adapter):
     )
     runner.session_store = MagicMock()
     runner.session_store._generate_session_key.side_effect = (
-        lambda source: build_session_key(source, profile=source.profile)
+        lambda source: build_session_key(
+            source, profile=source.profile,
+            group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+        )
     )
     runner.session_store.get_or_create_session.return_value = SessionEntry(
         session_key="agent:ops:discord:group:789",

@@ -21,6 +21,8 @@ from tools.skill_manager_tool import (
     _remove_file,
     _find_skill,
     skill_manage,
+    _add_description_prompt_preview,
+    MAX_DESCRIPTION_LENGTH,
 )
 from agent.skill_utils import (
     extract_skill_description,
@@ -63,13 +65,13 @@ Step 1: Do the new thing.
 LONG_DESC_CONTENT = """\
 ---
 name: long-desc
-description: Use when deploying multi-region Kubernetes clusters with custom CNI plugins and service mesh.
+description: {description}
 ---
 
 # Long Desc Skill
 
 Step 1.
-"""
+""".format(description="x" * SKILL_PROMPT_DESC_LIMIT)
 
 
 # ---------------------------------------------------------------------------
@@ -178,17 +180,42 @@ class TestCreateSkill:
         assert not (tmp_path / "escape").exists()
 
 
-    def test_edit_long_desc_still_allowed_with_preview(self, tmp_path):
-        """Edit/patch paths stay permissive so existing over-limit skills
-        remain maintainable — they warn via system_prompt_preview instead."""
+    def test_edit_long_desc_retains_full_approved_prompt_budget(self, tmp_path):
+        """A valid description at the approved budget is editable without loss."""
         with _skill_dir(tmp_path):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
             result = _edit_skill("my-skill", LONG_DESC_CONTENT)
         assert result["success"] is True
-        assert "system_prompt_preview" in result
-        assert "System prompt will show" in result["system_prompt_preview"]
+        assert "system_prompt_preview" not in result
         fm, _ = parse_frontmatter(LONG_DESC_CONTENT)
-        assert extract_skill_description(fm) in result["system_prompt_preview"]
+        assert extract_skill_description(fm) == fm["description"]
+        assert len(extract_skill_description(fm)) == SKILL_PROMPT_DESC_LIMIT
+        assert (tmp_path / "my-skill" / "SKILL.md").read_text() == LONG_DESC_CONTENT
+
+    def test_edit_rejects_description_over_authoring_limit_without_write(self, tmp_path):
+        content = LONG_DESC_CONTENT.replace("x" * SKILL_PROMPT_DESC_LIMIT,
+                                            "x" * (MAX_DESCRIPTION_LENGTH + 1))
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = _edit_skill("my-skill", content)
+        assert result["success"] is False
+        assert result["error"] == f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
+        assert (tmp_path / "my-skill" / "SKILL.md").read_text() == VALID_SKILL_CONTENT
+
+    def test_legacy_over_budget_description_preview_is_bounded(self):
+        # Externally authored existing skills can exceed the manager's write limit.
+        content = LONG_DESC_CONTENT.replace("x" * SKILL_PROMPT_DESC_LIMIT,
+                                            "x" * (SKILL_PROMPT_DESC_LIMIT + 1))
+        result = {}
+        _add_description_prompt_preview(result, content)
+        fm, _ = parse_frontmatter(content)
+        preview = extract_skill_description(fm)
+        assert len(preview) == SKILL_PROMPT_DESC_LIMIT
+        assert preview.endswith("...")
+        assert result["system_prompt_preview"] == (
+            f'System prompt will show: "{preview}" — '
+            f"keep the trigger self-contained in the first {SKILL_PROMPT_DESC_LIMIT - 3} chars."
+        )
 
 
 class TestEditSkill:

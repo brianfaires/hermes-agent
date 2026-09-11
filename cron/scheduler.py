@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
+from agent.secret_scope import get_secret as _get_profile_value
 from hermes_cli.config import (
     _expand_env_vars,
     cron_model_drift_axes,
@@ -291,6 +292,29 @@ def _log_tick_yield_once(reason: str) -> None:
     _last_yield_log = {"reason": reason, "at": now}
 
 
+_RED_CRON_PREFIX = "❌"
+_WARN_CRON_PREFIX = "⚠️"
+_ATTENTION_PREFIX_RE = re.compile(r"^\s*(?:❌|🚨|🛑|🔴|⚠️|⚠)\s*")
+_WARNING_HEAD_RE = re.compile(
+    r"^\s*(?:warn(?:ing)?|caution|attention)\b|\b(?:status|result)\s*[:—-]\s*warn\b|—\s*warn\b",
+    re.IGNORECASE,
+)
+
+
+def _ensure_cron_attention_prefix(content: str, *, failed: bool = False, warn: bool = False) -> str:
+    """Ensure delivered cron failures/warnings start with an attention emoji."""
+    text = content or ""
+    if _ATTENTION_PREFIX_RE.match(text):
+        return text
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    looks_warning = bool(_WARNING_HEAD_RE.search(first_line[:240]))
+    if failed:
+        return f"{_RED_CRON_PREFIX} {text.lstrip()}"
+    if warn or looks_warning:
+        return f"{_WARN_CRON_PREFIX} {text.lstrip()}"
+    return text
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -349,7 +373,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # fallback was attempted (#82460 @jbagdonas, #78503 @daxro).
     if lower.startswith("script timed out"):
         return (
-            f"⚠️ Cron '{job_name}' failed: script timed out. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: script timed out. "
             "No model was invoked. Full details saved in cron output."
         )
 
@@ -366,7 +390,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         elif "quota" in lower:
             reason = "quota limit"
         return (
-            f"⚠️ Cron '{job_name}' failed: provider {reason}. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider {reason}. "
             f"{_fallback_chain_phrase()} "
             "Full details saved in cron output."
         )
@@ -389,7 +413,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     # — check the more specific, deterministic signature first.
     if re.search(r"idle for \d+s\s*\(limit \d+s\)", lower):
         return (
-            f"⚠️ Cron '{job_name}' failed: the job itself stalled — no tool/API "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: the job itself stalled — no tool/API "
             "activity for the configured inactivity window. Not a provider or "
             "fallback-chain issue; check what the job was doing when it went "
             "quiet. Full details saved in cron output."
@@ -399,7 +423,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         "readtimeout" in lower or "timed out" in lower or "timeout" in lower
     ):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider timeout. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider timeout. "
             f"{_fallback_chain_phrase()} "
             "Full details saved in cron output."
         )
@@ -411,7 +435,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         re.search(r"authenticat|authoriz", lower) or re.search(r"\b(401|403)\b", text)
     ):
         return (
-            f"⚠️ Cron '{job_name}' failed: provider authentication error. "
+            f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: provider authentication error. "
             "Full details saved in cron output."
         )
 
@@ -425,7 +449,7 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
-    message = f"⚠️ Cron '{job_name}' failed: {cleaned}"
+    message = f"{_RED_CRON_PREFIX} Cron '{job_name}' failed: {cleaned}"
 
     # Import-class failures (#95294 part 3): a long-lived gateway whose
     # checkout was updated underneath it (interrupted `hermes update`, manual
@@ -814,7 +838,7 @@ _INFLIGHT_MIN_ALLOWANCE_MINUTES = 30.0
 # (#60432). Token keying keeps an interruption scoped to that exact
 # execution: a later run of the same job ID (recurring jobs reuse the ID
 # every fire) must not inherit the stale flag. Legacy dispatch paths without
-# a registered fire owner fall back to storing the bare job ID.
+# a registered fire owner use a profile-qualified job key.
 _interrupted_job_ids: set = set()
 
 
@@ -846,61 +870,59 @@ class _CombinedCancelEvent:
             event.set()
 
 
-def get_running_job_ids() -> "frozenset[str]":
-    """Thread-safe snapshot of cron job IDs currently executing.
+def _running_job_key(job_id: str, profile_home: Optional[Path] = None) -> tuple[Path, str]:
+    """Capture the durable cron store identity, never a process-global job ID."""
+    if profile_home is None:
+        from cron.jobs import _current_cron_store
 
-    A job ID is a member from the moment ``_submit_with_guard`` dispatches
-    it onto the parallel/sequential pool until ``_process_job`` returns —
-    i.e. for the job's *entire* run, tool calls included, not just the
-    ticker's dispatch instant.
+        profile_home = _current_cron_store().cron_dir.parent
+    return (Path(profile_home).expanduser().resolve(), job_id)
 
-    The gateway shutdown path (``gateway/run.py::GatewayRunner.
-    _drain_active_agents``) reads this to treat in-flight cron work as
-    active the same way it already treats in-flight chat sessions via
-    ``_running_agents`` — cron jobs run through their own thread pool here,
-    entirely outside that dict, so without this the drain is structurally
-    blind to them (#60432).
-    """
+
+def get_running_job_keys() -> frozenset[tuple[Path, str]]:
+    """Global drain snapshot, including equal IDs in distinct profiles."""
     with _running_lock:
-        return frozenset(_running_job_ids | _running_fire_owners.keys())
+        return frozenset(_running_job_ids | {
+            (home, job_id)
+            for job_id, executions in _running_fire_owners.items()
+            for _owner, home in executions.values()
+        })
+
+
+def get_running_job_ids(*, current_profile_only: bool = False) -> frozenset[str]:
+    """Legacy global raw IDs, or current-store IDs for manual-run prechecks.
+
+    Global drain/count consumers must use get_running_job_keys so equal IDs
+    in distinct profiles count separately. The default preserves existing
+    callers that only need a global raw-ID snapshot.
+    """
+    home = _running_job_key("")[0] if current_profile_only else None
+    return frozenset(job_id for profile, job_id in get_running_job_keys()
+                     if home is None or profile == home)
 
 
 def try_register_running_job(job_id: str) -> bool:
-    """Atomically add ``job_id`` to the in-flight running set.
-
-    Returns False (without registering) when the job is already mid-run —
-    the caller must skip the fire. This is the single dedupe owner shared by
-    the ticker's ``_submit_with_guard`` and manual runs
-    (``tools/cronjob_tools``): the fire claim alone cannot prevent a
-    double-fire because its TTL (300s) is routinely outlived by real jobs,
-    after which a manual ``cronjob(action='run')`` would claim successfully
-    and run the same job concurrently (idea from #53395 by @izumi0uu).
-
-    Registration also makes the run visible to ``get_running_job_ids`` (the
-    gateway shutdown drain, #60432) and ``mark_running_jobs_interrupted``.
-    Callers MUST pair a successful registration with
-    ``release_running_job`` in a ``finally`` block.
-    """
+    """Atomically claim a job in the current store; pair with release in finally."""
+    key = _running_job_key(job_id)
     with _running_lock:
-        if job_id in _running_job_ids:
+        if key in _running_job_ids:
             return False
-        _running_job_ids.add(job_id)
-        # Claim timestamp + pending-future sentinel are recorded in the SAME
-        # critical section as the add, so there is never a window where an
-        # id is in-flight without an age the stale sweep can bound it by
-        # (t_3778a491).  The sentinel is replaced by the real owning future
-        # once ``pool.submit`` returns.
-        _running_since[job_id] = time.time()
-        _running_futures[job_id] = _FUTURE_PENDING
+        _running_job_ids.add(key)
+        _running_since[key] = time.time()
+        _running_futures[key] = _FUTURE_PENDING
+        # A new claim must not inherit an ownerless shutdown flag from a
+        # previous occurrence. Registered executions retain their own tokens.
+        _interrupted_job_ids.discard(key)
         return True
 
 
-def release_running_job(job_id: str) -> None:
-    """Remove ``job_id`` from the in-flight running set (idempotent)."""
+def release_running_job(job_id: str, *, profile_home: Optional[Path] = None) -> None:
+    """Release in the captured store, even after the worker context exits."""
+    key = _running_job_key(job_id, profile_home)
     with _running_lock:
-        _running_job_ids.discard(job_id)
-        _running_since.pop(job_id, None)
-        _running_futures.pop(job_id, None)
+        _running_job_ids.discard(key)
+        _running_since.pop(key, None)
+        _running_futures.pop(key, None)
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -1017,12 +1039,13 @@ def get_inflight_guard_stats() -> dict:
     recovered without a gateway restart.
     """
     now = time.time()
+    home = _running_job_key("")[0]
     with _running_lock:
         return {
-            "running": sorted(_running_job_ids),
+            "running": sorted(jid for profile, jid in _running_job_ids if profile == home),
             "running_ages_seconds": {
                 jid: round(now - started, 1)
-                for jid, started in _running_since.items()
+                for (profile, jid), started in _running_since.items() if profile == home
             },
             "forced_releases": _forced_release_count,
             "recent_forced_releases": list(_forced_releases),
@@ -1042,7 +1065,7 @@ def _record_forced_release(job_id: str, name: str, age_seconds: float, allowance
         _forced_releases.append(entry)
         del _forced_releases[:-_FORCED_RELEASE_HISTORY]
     try:
-        path = _get_hermes_home() / "cron" / "inflight_forced_releases.jsonl"
+        path = _running_job_key(job_id)[0] / "cron" / "inflight_forced_releases.jsonl"
         _ensure_cron_dir(path.parent)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
@@ -1070,6 +1093,7 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     """
     global _forced_release_count
 
+    home = _running_job_key("")[0]
     by_id = {j.get("id"): j for j in (due_jobs or []) if isinstance(j, dict)}
     floor_seconds = _inflight_min_allowance_minutes() * 60.0
     now = time.time()
@@ -1092,7 +1116,8 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
 
     with _running_lock:
         _claim_futures = {
-            job_id: _running_futures.get(job_id) for job_id in _running_job_ids
+            job_id: _running_futures.get((profile, job_id))
+            for profile, job_id in _running_job_ids if profile == home
         }
     _ledger_candidates = [
         job_id
@@ -1134,19 +1159,22 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     _intervals = {jid: _job_interval_minutes(j) for jid, j in by_id.items()}
 
     with _running_lock:
-        for job_id in list(_running_job_ids):
-            started = _running_since.get(job_id)
+        for key in list(_running_job_ids):
+            profile, job_id = key
+            if profile != home:
+                continue
+            started = _running_since.get(key)
             if started is None:
                 # Claim predates this guard (or was injected directly) — adopt
                 # it now so it becomes sweepable one allowance from here.
-                _running_since[job_id] = now
+                _running_since[key] = now
                 continue
             age = now - started
             interval_minutes = _intervals.get(job_id)
             allowance = floor_seconds
             if interval_minutes:
                 allowance = max(allowance, 2.0 * interval_minutes * 60.0)
-            fut = _running_futures.get(job_id)
+            fut = _running_futures.get(key)
             if fut is _FUTURE_PENDING:
                 # The claim is past its allowance and the owning future still
                 # has not been installed — the submit path itself (SessionDB
@@ -1182,9 +1210,9 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
                 reason = "age"
             else:
                 continue
-            _running_job_ids.discard(job_id)
-            _running_since.pop(job_id, None)
-            _running_futures.pop(job_id, None)
+            _running_job_ids.discard(key)
+            _running_since.pop(key, None)
+            _running_futures.pop(key, None)
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
@@ -1296,15 +1324,15 @@ def mark_running_jobs_interrupted(
                 fire for fire in active_fires
                 if (fire[1], fire[2]) in only_owners
             ]
-        registered_ids = {job_id for _t, job_id, _o, _p in active_fires}
+        registered_ids = {(home, job_id) for _t, job_id, _o, home in active_fires}
         if only_owners is None:
             active_fires.extend(
-                (None, job_id, None, _get_hermes_home())
-                for job_id in _running_job_ids - registered_ids
+                (None, job_id, None, home)
+                for home, job_id in _running_job_ids - registered_ids
             )
         _interrupted_job_ids.update(
-            token if token is not None else job_id
-            for token, job_id, _owner, _profile_home in active_fires
+            token if token is not None else (home, job_id)
+            for token, job_id, _owner, home in active_fires
         )
     marked = []
     for _token, job_id, fire_owner, profile_home in active_fires:
@@ -1348,13 +1376,13 @@ def _is_interrupted(job_id: str, token: Optional[object] = None) -> bool:
     written) still needs to see it. ``token`` scopes the check to one
     exact execution: owner-registered runs are matched by token, so a
     fresh run reusing the same job ID is not poisoned by a flag that
-    targeted its dead predecessor. The bare job ID is only ever stored
+    targeted its dead predecessor. A profile-qualified job key is stored
     for legacy dispatch paths with no registered fire owner.
     """
     with _running_lock:
         if token is not None and token in _interrupted_job_ids:
             return True
-        return job_id in _interrupted_job_ids
+        return _running_job_key(job_id) in _interrupted_job_ids
 
 
 def _consume_interrupted_flag(job_id: str, token: Optional[object] = None) -> bool:
@@ -1370,8 +1398,8 @@ def _consume_interrupted_flag(job_id: str, token: Optional[object] = None) -> bo
         if token is not None and token in _interrupted_job_ids:
             _interrupted_job_ids.discard(token)
             hit = True
-        if job_id in _interrupted_job_ids:
-            _interrupted_job_ids.discard(job_id)
+        if _running_job_key(job_id) in _interrupted_job_ids:
+            _interrupted_job_ids.discard(_running_job_key(job_id))
             hit = True
         return hit
 
@@ -2659,12 +2687,39 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
         except Exception:
             return "bot-chat delivery failed: hermes CLI not resolvable"
 
-    env = os.environ.copy()
+    from agent.secret_scope import (
+        _is_global_env, refresh_profile_secret_scope, reset_secret_scope,
+        scoped_subprocess_environment, set_secret_scope,
+    )
+    from tools.environments.local import build_subprocess_env
+
     if profile:
+        from hermes_cli.profiles import get_profile_dir, profile_exists
+
+        if not profile_exists(profile):
+            return "bot-chat delivery failed: target profile no longer exists"
+        # A named receiver must never inherit the sending profile's secrets,
+        # even when this scheduler is running in single-profile mode.
+        target_home = get_profile_dir(profile)
+        token = set_secret_scope(refresh_profile_secret_scope(
+            target_home, inherit_process_secrets=False,
+        ))
+        try:
+            env = scoped_subprocess_environment(
+                {name: value for name, value in os.environ.items() if _is_global_env(name)}
+            )
+        finally:
+            reset_secret_scope(token)
         argv += ["-p", profile]
-        # -p owns profile resolution in the child; a leftover HERMES_HOME
-        # from THIS scheduler's profile must not shadow it.
-        env.pop("HERMES_HOME", None)
+        # Keep the resolved destination home so custom/mounted profile roots
+        # survive the child's -p resolution. Never carry the sender's home.
+        env["HERMES_HOME"] = str(target_home)
+        env.pop("HERMES_PROFILE", None)
+    else:
+        env = build_subprocess_env(
+            scoped_subprocess_environment(os.environ), scrub_secrets=False,
+            extra={"HERMES_HOME": str(_get_hermes_home())},
+        )
 
     # The prefix tells the receiving bot this is scheduled output, not the
     # human typing — mirrors the Bot Mode sender-attribution convention.
@@ -3060,6 +3115,25 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _delivery_target_lost_origin_thread(origin: dict, target: dict) -> bool:
+    """Return True when a delivery target should have preserved origin thread_id.
+
+    ``thread_id`` values are scoped to a platform/channel.  A job may be born
+    in a Discord thread but intentionally deliver to Telegram (or any other
+    home channel); in that case the Discord thread ID is not meaningful for the
+    target and logging a warning is noise.  Warn only when the concrete target
+    is the same platform + chat as the origin and the target has dropped the
+    origin's thread/topic ID.
+    """
+    origin_thread = origin.get("thread_id")
+    if not origin_thread or target.get("thread_id"):
+        return False
+    return (
+        str(origin.get("platform", "")).lower() == str(target.get("platform", "")).lower()
+        and str(origin.get("chat_id", "")) == str(target.get("chat_id", ""))
+    )
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -3119,6 +3193,18 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         )
     else:
         delivery_content = content
+
+    # Attention alerts must start with their emoji even when cron response
+    # wrapping is enabled. Detect the attention class from the original content
+    # and prefix the final message body that actually reaches chat.
+    _attention_source = (content or "").lstrip()
+    _attention_first_line = _attention_source.splitlines()[0] if _attention_source else ""
+    delivery_content = _ensure_cron_attention_prefix(
+        delivery_content,
+        failed=_attention_source.startswith(("❌", "🚨", "🛑", "🔴")),
+        warn=_attention_source.startswith(("⚠️", "⚠"))
+        or bool(_WARNING_HEAD_RE.search(_attention_first_line[:240])),
+    )
 
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
@@ -3193,10 +3279,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.append(bot_chat_error)
             continue
 
-        # Diagnostic: log thread_id for topic-aware delivery debugging
+        # Thread IDs only have meaning within their origin platform/chat.
         origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
-        if origin_thread and not thread_id:
+        if _delivery_target_lost_origin_thread(origin, target):
             logger.warning(
                 "Job '%s': origin has thread_id=%s but delivery target lost it "
                 "(deliver=%s, target=%s)",
@@ -4395,7 +4481,9 @@ def _run_job_script(
                 "encoding": "utf-8",
                 "errors": "replace",
             }
-        env = build_subprocess_env()
+        from agent.secret_scope import scoped_subprocess_environment
+
+        env = build_subprocess_env(scoped_subprocess_environment(os.environ))
         env.update(env_overlay)
         # Use the job's workdir as the subprocess cwd when configured,
         # otherwise default to the scripts-dir parent (back-compat).
@@ -4717,6 +4805,10 @@ def _build_job_prompt(
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
+        "ATTENTION PREFIXES: if your delivered report is a warning, "
+        "start it with a meaningful warning emoji such as ⚠️; if it is "
+        "an error, blocker, or failure, start it with a red/error emoji "
+        "such as ❌, 🚨, 🛑, or 🔴. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
@@ -4820,7 +4912,9 @@ def _build_job_prompt(
         # data (cron hint + prompt + script output + run context). Declare
         # that boundary for the Anthropic cache planner (#81867).
         stable_prefix = append_user_instruction(parts, prompt)
-    assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    assembled = _scan_assembled_cron_prompt(
+        "\n".join(parts), job, has_skills=True, user_prompt=user_prompt
+    )
     if stable_prefix and len(assembled) > len(stable_prefix) and assembled.startswith(stable_prefix):
         # Guarded because the injection scanner may sanitize (mutate) the
         # assembled bytes; a mismatch simply falls back to whole-message
@@ -4868,7 +4962,7 @@ def _scan_assembled_cron_prompt(
       code, the same trust class — and data feeds (e.g. a triage bot
       ingesting bug reports) legitimately quote dangerous commands.
 
-    When the looser tier is selected because of injected data only,
+    Whenever the looser tier is selected,
     ``user_prompt`` (the raw, pre-assembly prompt) is additionally scanned
     with the STRICT set so the user-authored surface keeps the full
     create/update-time guarantee at runtime (defense-in-depth for legacy
@@ -4884,8 +4978,8 @@ def _scan_assembled_cron_prompt(
         # prompt is what actually runs.
         cleaned, scan_error = _scan_cron_skill_assembled(assembled)
         assembled = cleaned
-        if not scan_error and not has_skills and user_prompt:
-            # Data-injection path: keep the strict guarantee on the
+        if not scan_error and user_prompt:
+            # Keep the strict guarantee on the
             # user-authored prompt itself.
             scan_error = _scan_cron_prompt(user_prompt)
     else:
@@ -5123,7 +5217,7 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
         or str((_cron_cfg or {}).get("model_provider") or "").strip()
         or None
     )
-    model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+    model = job.get("model") or _get_profile_value("HERMES_MODEL") or ""
 
     from hermes_cli.auth import AuthError
 
@@ -5495,6 +5589,30 @@ def run_job(
     cancel_event: Optional[_CancelEventLike] = None,
     execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
+    """Run with fresh private credentials, including direct/script-only callers."""
+    from agent.secret_scope import (
+        refresh_profile_secret_scope, reset_secret_scope, set_secret_scope,
+    )
+
+    token = set_secret_scope(refresh_profile_secret_scope(_get_hermes_home()))
+    try:
+        return _run_job_scoped(
+            job, defer_agent_teardown=defer_agent_teardown,
+            extra_prompt=extra_prompt, cancel_event=cancel_event,
+            execution_id=execution_id,
+        )
+    finally:
+        reset_secret_scope(token)
+
+
+def _run_job_scoped(
+    job: dict,
+    *,
+    defer_agent_teardown: Optional[list] = None,
+    extra_prompt: Optional[str] = None,
+    cancel_event: Optional[_CancelEventLike] = None,
+    execution_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
 
@@ -5537,22 +5655,6 @@ def run_job(
     #                               the whole point of no_agent is that there
     #                               is no agent to wake
     if job.get("no_agent"):
-        # Load .env before the script runs so auto-delivery can resolve home
-        # channels. A standalone cron tick process typically starts WITHOUT
-        # TELEGRAM_HOME_CHANNEL/DISCORD_HOME_CHANNEL in its environment, and
-        # the agent path's per-run dotenv reload below never executes for
-        # no_agent jobs — every deliver=telegram/all script job failed with
-        # "no delivery target resolved". load_hermes_dotenv does not override
-        # already-set vars, so the gateway's in-process tick is unaffected.
-        try:
-            from hermes_cli.env_loader import load_hermes_dotenv
-
-            load_hermes_dotenv(hermes_home=_get_hermes_home())
-        except Exception:
-            logger.debug(
-                "Job '%s': no_agent .env reload failed", job_id, exc_info=True
-            )
-
         script_path = job.get("script")
         # Legacy/hand-edited records can still carry no_agent with a missing or
         # whitespace-only script. Erroring alone left the job enabled, so it
@@ -5905,25 +6007,6 @@ def run_job(
         if _job_workdir:
             logger.info("Job '%s': using task-scoped workdir %s", job_id, _job_workdir)
 
-        # Re-read .env and config.yaml fresh every run so provider/key
-        # changes take effect without a gateway restart. Route through
-        # load_hermes_dotenv (not a bare load_dotenv) and reset the secret-
-        # source cache first: startup already applied external secrets and
-        # recorded this HERMES_HOME in _APPLIED_HOMES, so a naive reload would
-        # re-apply only the .env placeholder and never re-resolve a Bitwarden/
-        # BSM-backed secret — leaving cron jobs 401'ing on the placeholder
-        # (#33465). Clearing the cache forces the re-pull; the resolved secret
-        # overrides the placeholder only when secrets.bitwarden.override_existing
-        # is set (mirrors startup), and the Bitwarden value-cache keeps the
-        # forced re-pull off the network. load_hermes_dotenv also handles the
-        # utf-8/latin-1 encoding fallback internally.
-        from hermes_cli.env_loader import (
-            load_hermes_dotenv,
-            reset_secret_source_cache,
-        )
-        reset_secret_source_cache()
-        load_hermes_dotenv(hermes_home=_get_hermes_home())
-
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set(delivery_target["platform"])
@@ -5940,7 +6023,7 @@ def run_job(
         # re-read from storage every tick so a ``hermes cron edit --model``
         # after a failed run takes effect on the next tick — there is no
         # in-memory cache.
-        model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+        model = job.get("model") or _get_profile_value("HERMES_MODEL") or ""
 
         # cron.model / cron.model_provider: a deliberate cron-fleet default
         # so unattended jobs stop shadowing chat `/model` switches. When an
@@ -5998,7 +6081,7 @@ def run_job(
             raise RuntimeError(
                 f"Cron job '{job_name}' has no model configured "
                 f"(job.model={job.get('model')!r}, "
-                f"HERMES_MODEL={os.getenv('HERMES_MODEL', '')!r}, "
+                f"HERMES_MODEL={_get_profile_value('HERMES_MODEL', '')!r}, "
                 "config.yaml model.default missing or empty). "
                 f"Set a per-job model via "
                 f"`hermes cron edit {job_id} --model <name>` or set a "
@@ -6025,7 +6108,7 @@ def run_job(
         prefill_messages = None
         agent_cfg = _cfg.get("agent", {}) if isinstance(_cfg.get("agent", {}), dict) else {}
         prefill_file = (
-            os.getenv("HERMES_PREFILL_MESSAGES_FILE", "")
+            _get_profile_value("HERMES_PREFILL_MESSAGES_FILE", "")
             or _cfg.get("prefill_messages_file", "")
             or agent_cfg.get("prefill_messages_file", "")
         )
@@ -7111,7 +7194,7 @@ def run_one_job(
     claim = job.get("fire_claim")
     fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     execution_token = object()
-    profile_home = _get_hermes_home().resolve()
+    profile_home = _running_job_key(job["id"])[0]
     with _running_lock:
         _running_fire_owners.setdefault(job["id"], {})[execution_token] = (
             fire_owner or None,
@@ -7194,7 +7277,7 @@ def _run_one_job_body(
     incident_acked = False
     failure_incident_id = None
     from agent.secret_scope import (
-        build_profile_secret_scope,
+        refresh_profile_secret_scope,
         reset_secret_scope,
         set_secret_scope,
     )
@@ -7231,7 +7314,7 @@ def _run_one_job_body(
         # _deliver_result unscoped. Mirrors gateway/run.py's per-turn pattern.
 
         _scope_token = set_secret_scope(
-            build_profile_secret_scope(_get_hermes_home())
+            refresh_profile_secret_scope(_get_hermes_home())
         )
         # Defer the cron agent's async-resource teardown until AFTER delivery.
         # run_job normally closes the agent (and reaps stale async clients) in
@@ -7989,7 +8072,7 @@ def tick(
         if _running_job_ids:
             _sweep_jobs = due_jobs
             try:
-                _inflight_ids = set(_running_job_ids)
+                _inflight_ids = get_running_job_ids(current_profile_only=True)
                 _due_ids = {j.get("id") for j in due_jobs if isinstance(j, dict)}
                 if not _inflight_ids <= _due_ids:
                     from cron.jobs import load_jobs as _load_all_jobs
@@ -8102,6 +8185,7 @@ def tick(
             membership is released in the worker's finally block.
             """
             job_id = job["id"]
+            running_key = _running_job_key(job_id)
 
             def _clear_run_claim_best_effort() -> None:
                 """Best-effort claim cleanup on the dispatch-failure paths.
@@ -8158,7 +8242,7 @@ def tick(
                 # retry instead of wedging on 'already running' forever (the
                 # audit requirement: every add is paired with guaranteed
                 # cleanup).
-                release_running_job(job_id)
+                release_running_job(job_id, profile_home=running_key[0])
                 _clear_run_claim_best_effort()
                 logger.exception(
                     "Job '%s' not dispatched: execution creation failed: %s",
@@ -8171,12 +8255,12 @@ def tick(
                 try:
                     return ctx.run(_process_job, j)
                 finally:
-                    release_running_job(j["id"])
+                    release_running_job(j["id"], profile_home=running_key[0])
 
             try:
                 fut = pool.submit(_run_and_release)
             except Exception as submit_err:
-                release_running_job(job_id)
+                release_running_job(job_id, profile_home=running_key[0])
                 _clear_run_claim_best_effort()
                 finish_execution(
                     execution["id"],
@@ -8201,8 +8285,8 @@ def tick(
             # Record the owning future so the stale sweep can distinguish
             # "still executing" from "claim leaked before/after the future".
             with _running_lock:
-                if job_id in _running_job_ids:
-                    _running_futures[job_id] = fut
+                if running_key in _running_job_ids:
+                    _running_futures[running_key] = fut
             return fut
 
 

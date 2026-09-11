@@ -153,6 +153,86 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
     ),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)[\s\S]*$", re.IGNORECASE),
 )
+_DISCORD_MARKDOWN_ESCAPE_RE = re.compile(r"([*_~|>])")
+_DISCORD_FENCED_CODE_RE = re.compile(r"(```[\s\S]*?```)")
+
+def _format_discord_inline_code_span(body: str) -> str:
+    """Render inline-code content with a delimiter that can contain backticks."""
+    max_run = max((len(match.group(0)) for match in re.finditer(r"`+", body)), default=0)
+    delimiter = "`" * (max_run + 1)
+    if body.startswith("`") or body.endswith("`"):
+        return f"{delimiter} {body} {delimiter}"
+    return f"{delimiter}{body}{delimiter}"
+
+
+def _escape_discord_markdown_segment(segment: str) -> str:
+    """Escape Discord markdown in prose while preserving inline code spans."""
+    escaped: list[str] = []
+    pos = 0
+    length = len(segment)
+
+    while pos < length:
+        if segment[pos] != "`":
+            next_tick = segment.find("`", pos)
+            end = length if next_tick == -1 else next_tick
+            escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:end]))
+            pos = end
+            continue
+
+        delimiter_end = pos
+        while delimiter_end < length and segment[delimiter_end] == "`":
+            delimiter_end += 1
+        delimiter = segment[pos:delimiter_end]
+        body_start = delimiter_end
+        body_chars: list[str] = []
+        cursor = body_start
+        closed = False
+
+        while cursor < length:
+            if segment[cursor] == "\n":
+                break
+            if segment.startswith(delimiter, cursor):
+                escaped.append(_format_discord_inline_code_span("".join(body_chars)))
+                pos = cursor + len(delimiter)
+                closed = True
+                break
+            if segment[cursor] == "\\" and cursor + 1 < length and segment[cursor + 1] == "`":
+                body_chars.append("`")
+                cursor += 2
+                continue
+            body_chars.append(segment[cursor])
+            cursor += 1
+
+        if closed:
+            continue
+
+        # Unmatched backticks are prose, not code. Escape only the surrounding
+        # Discord markdown markers; backticks themselves do not need escaping.
+        escaped.append(_DISCORD_MARKDOWN_ESCAPE_RE.sub(r"\\\1", segment[pos:cursor]))
+        pos = cursor
+
+    return "".join(escaped)
+
+
+def _escape_discord_markdown_outside_code(content: str) -> str:
+    """Escape Discord markdown markers in prose while preserving code spans.
+
+    Discord has no parse-mode toggle. Sending literal text such as
+    ``hindsight*config*`` otherwise renders ``config`` in italics, which is
+    especially confusing when Hermes quotes user-provided strings or config
+    keys. Preserve fenced and inline code because those are intentional
+    formatting. Inside inline code, treat ``\\``` as an escaped literal backtick
+    and rewrap with a longer delimiter so Discord renders the backtick itself.
+    """
+    parts = _DISCORD_FENCED_CODE_RE.split(content or "")
+    escaped: list[str] = []
+    for part in parts:
+        if part.startswith("```") and part.endswith("```"):
+            escaped.append(part)
+        else:
+            escaped.append(_escape_discord_markdown_segment(part))
+    return "".join(escaped)
+
 try:
     import discord
     from discord import Message as DiscordMessage, Intents
@@ -365,15 +445,15 @@ class _DiscordNonConversationalMessageTracker:
 
     _MAX_TRACKED = 2000
 
-    def __init__(self, max_tracked: int = _MAX_TRACKED):
+    def __init__(self, max_tracked: int = _MAX_TRACKED, *, home=None):
+        from hermes_constants import get_hermes_home
+        self._profile_home = _Path(home or get_hermes_home()).resolve()
         self._max_tracked = max_tracked
         self._ids: dict[str, None] = dict.fromkeys(self._load())
 
     def _state_path(self) -> _Path:
-        from hermes_constants import get_hermes_home
-
         return (
-            get_hermes_home()
+            self._profile_home
             / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
             / _DISCORD_NONCONVERSATIONAL_STATE_FILENAME
         )
@@ -1189,7 +1269,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._missed_message_backfill_task: Optional[asyncio.Task] = None
         from hermes_constants import get_hermes_home
         from plugins.platforms.discord.recovery import DiscordRecoveryStore
-        self._discord_recovery_store = DiscordRecoveryStore(get_hermes_home())
+        self._discord_recovery_store = DiscordRecoveryStore(self.runtime_profile_home)
         # Dedup cache: prevents duplicate bot responses when Discord
         # RESUME replays events after reconnects.
         self._dedup = MessageDeduplicator()
@@ -1203,7 +1283,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._last_self_message_id: Dict[str, str] = {}
         # Persistent set of bot-authored lifecycle/status message IDs that
         # should not act as conversational history boundaries after restart.
-        self._nonconversational_messages = _DiscordNonConversationalMessageTracker()
+        self._nonconversational_messages = _DiscordNonConversationalMessageTracker(home=self.runtime_profile_home)
         # Last truncated mid-stream preview delivered per (chat_id, message_id).
         # Once an oversized streaming edit saturates at the 2000-char preview
         # cap, every subsequent progressive edit truncates to the SAME text;
@@ -2252,9 +2332,7 @@ class DiscordAdapter(BasePlatformAdapter):
         logger.info("[%s] Disconnected", self.name)
 
     def _command_sync_state_path(self) -> _Path:
-        from hermes_constants import get_hermes_home
-
-        directory = get_hermes_home() / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+        directory = self.runtime_profile_home / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -3543,7 +3621,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Forum channels reject channel.send() — create a thread post instead.
             if self._is_forum_parent(channel):
-                result = await self._send_to_forum(channel, content)
+                result = await self._send_to_forum(channel, content, suppress_embeds=bool(metadata and metadata.get("suppress_embeds")))
                 await asyncio.to_thread(
                     self._record_discord_response,
                     reply_to=reply_to,
@@ -3572,6 +3650,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     msg = await channel.send(
                         content=chunk,
                         reference=chunk_reference,
+                        **({"suppress_embeds": True} if metadata and metadata.get("suppress_embeds") else {}),
                     )
                 except Exception as e:
                     err_text = str(e)
@@ -3594,6 +3673,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
+                            **({"suppress_embeds": True} if metadata and metadata.get("suppress_embeds") else {}),
                         )
                     else:
                         raise
@@ -3634,7 +3714,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             return result
 
-    async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
+    async def _send_to_forum(self, forum_channel: Any, content: str, *, suppress_embeds: bool = False) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
 
         Forum channels (type 15) don't support direct messages.  Instead we
@@ -3659,6 +3739,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread = await forum_channel.create_thread(
                 name=thread_name,
                 content=starter_content,
+                **({"suppress_embeds": True} if suppress_embeds else {}),
             )
         except Exception as e:
             logger.error("[%s] Failed to create forum thread in %s: %s", self.name, forum_channel.id, e)
@@ -3675,7 +3756,7 @@ class DiscordAdapter(BasePlatformAdapter):
         warnings: list[str] = []
         for chunk in chunks[1:]:
             try:
-                msg = await thread_channel.send(content=chunk)
+                msg = await thread_channel.send(content=chunk, **({"suppress_embeds": True} if suppress_embeds else {}))
                 message_ids.append(str(msg.id))
             except Exception as e:
                 warning = f"Failed to send follow-up chunk to forum thread {thread_id}: {e}"
@@ -3825,6 +3906,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if finalize:
                     return await self._edit_overflow_split(
                         channel, msg, message_id, content,
+                        suppress_embeds=bool(metadata and metadata.get("suppress_embeds")),
                     )
                 formatted = self.truncate_message(
                     formatted, self.MAX_MESSAGE_LENGTH,
@@ -3844,7 +3926,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 self._last_overflow_preview.pop(_preview_key, None)
 
             try:
-                await msg.edit(content=formatted)
+                await msg.edit(content=formatted, **({"suppress": True} if metadata and metadata.get("suppress_embeds") else {}))
                 if _saturated_preview:
                     self._last_overflow_preview[_preview_key] = formatted
             except Exception as edit_err:
@@ -3856,6 +3938,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if finalize:
                         return await self._edit_overflow_split(
                             channel, msg, message_id, content,
+                            suppress_embeds=bool(metadata and metadata.get("suppress_embeds")),
                         )
                     # Mid-stream: truncate and retry in place (no split).
                     truncated = self.truncate_message(
@@ -3864,7 +3947,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if self._last_overflow_preview.get(_preview_key) == truncated:
                         # Saturated-preview dedup (see pre-flight path above).
                         return SendResult(success=True, message_id=message_id)
-                    await msg.edit(content=truncated)
+                    await msg.edit(content=truncated, **({"suppress": True} if metadata and metadata.get("suppress_embeds") else {}))
                     self._last_overflow_preview[_preview_key] = truncated
                 else:
                     raise
@@ -3902,6 +3985,8 @@ class DiscordAdapter(BasePlatformAdapter):
         msg: Any,
         message_id: str,
         content: str,
+        *,
+        suppress_embeds: bool = False,
     ) -> SendResult:
         """Deliver an oversized final edit across message + continuations.
 
@@ -3927,12 +4012,12 @@ class DiscordAdapter(BasePlatformAdapter):
         if len(chunks) <= 1:
             # Defensive: caller's pre-flight should guarantee >1 chunk, but if
             # not, just edit normally.
-            await msg.edit(content=chunks[0] if chunks else formatted)
+            await msg.edit(content=chunks[0] if chunks else formatted, **({"suppress": True} if suppress_embeds else {}))
             return SendResult(success=True, message_id=message_id)
 
         # Step 1 — edit the existing message with the first chunk.
         try:
-            await msg.edit(content=chunks[0])
+            await msg.edit(content=chunks[0], **({"suppress": True} if suppress_embeds else {}))
         except Exception as e:
             logger.error(
                 "[%s] Overflow split: first-chunk edit failed: %s",
@@ -3958,7 +4043,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # overflow continuations stay threaded.
                 reference = self._message_reference_from_ids(prev_msg.id, channel)
             try:
-                sent = await channel.send(content=chunk, reference=reference)
+                sent = await channel.send(content=chunk, reference=reference, **({"suppress_embeds": True} if suppress_embeds else {}))
             except Exception as send_err:
                 # Drop the reply anchor and retry once — a deleted/expired
                 # anchor (10008) or system-message reply (50035) shouldn't lose
@@ -3968,7 +4053,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     self.name, send_err,
                 )
                 try:
-                    sent = await channel.send(content=chunk, reference=None)
+                    sent = await channel.send(content=chunk, reference=None, **({"suppress_embeds": True} if suppress_embeds else {}))
                 except Exception as retry_err:
                     logger.warning(
                         "[%s] Overflow split: stopped at %d/%d chunks delivered: %s",
@@ -5407,9 +5492,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not user_id:
             return False
         try:
-            from gateway.pairing import PairingStore
-
-            return bool(PairingStore().is_approved("discord", user_id))
+            return _pairing_approved_at_home(self.runtime_profile_home, user_id)
         except Exception:
             return False
 
@@ -6192,11 +6275,12 @@ class DiscordAdapter(BasePlatformAdapter):
         """Format message for Discord.
 
         Converts GFM markdown tables to bullet-list groups since Discord
-        does not render pipe tables natively.
+        does not render pipe tables natively. Prose markers render literally;
+        fenced and inline code remain intact.
         """
         if not content:
             return content
-        return convert_table_to_bullets(content)
+        return _escape_discord_markdown_outside_code(convert_table_to_bullets(content))
 
     async def _run_simple_slash(
         self,
@@ -7069,12 +7153,23 @@ class DiscordAdapter(BasePlatformAdapter):
             return snap[name] or default
         return _scoped_gate_env(name, default)
 
-    def _gate_raw(self, extra_key: str, env_key: str):
-        """Resolve one gate value: env/snapshot first (legacy precedence), then extra."""
+    def _gate_raw(self, extra_key: str, env_key: str, *, prefer_extra: bool = False):
+        """Resolve a gate; channel policy prefers explicit config before connect.
+
+        Connected nonempty profile snapshots stay authoritative. For channel
+        policy only, explicit extra (including empty lists/strings) wins over
+        the pre-connect environment. Other gates keep legacy env precedence.
+        """
+        extra = getattr(getattr(self, "config", None), "extra", None)
+        if prefer_extra:
+            snapshot = getattr(self, "_gate_env_snapshot", None)
+            if snapshot is not None and snapshot.get(env_key):
+                return snapshot[env_key]
+            if isinstance(extra, dict) and extra_key in extra:
+                return extra[extra_key]
         val = self._gate_env(env_key)
         if val:
             return val
-        extra = getattr(getattr(self, "config", None), "extra", None)
         if isinstance(extra, dict):
             return extra.get(extra_key)
         return None
@@ -7089,11 +7184,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _get_allowed_channels(self) -> set:
         """This adapter's DISCORD_ALLOWED_CHANNELS gate (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS"))
+        return self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS", prefer_extra=True))
 
     def _get_ignored_channels(self) -> set:
         """This adapter's DISCORD_IGNORED_CHANNELS gate (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS"))
+        return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS", prefer_extra=True))
 
     async def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
         """Apply this adapter's profile policy to the resolved outbound target."""
@@ -8010,6 +8105,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
                 require_admin=require_admin,
                 admin_user_ids=admin_user_ids,
                 allow_permanent=allow_permanent,
@@ -8075,6 +8172,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 confirm_id=confirm_id,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(content=content, embed=embed, view=view)
@@ -8187,6 +8286,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    pairing_home=self.runtime_profile_home,
+                    auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
                 )
             else:
                 embed.add_field(
@@ -8248,6 +8349,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
             # Mirror the prompt in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
@@ -8319,6 +8422,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_model_selected=on_model_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -8372,6 +8477,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_choice_selected=on_choice_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -8670,7 +8777,7 @@ class DiscordAdapter(BasePlatformAdapter):
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
-            skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
+            skip_thread = bool(channel_keys & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
@@ -9161,10 +9268,38 @@ class DiscordAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
+_COMPONENT_AUTH_KEYS = (
+    "DISCORD_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
+)
+
+
+def _capture_component_auth(pairing_home=None, auth_env=None):
+    from hermes_constants import get_hermes_home
+    return (
+        _Path(pairing_home or get_hermes_home()).resolve(),
+        dict(auth_env) if auth_env is not None else {
+            key: _scoped_gate_env(key) for key in _COMPONENT_AUTH_KEYS
+        },
+    )
+
+
+def _pairing_approved_at_home(home, user_id):
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from gateway.pairing import PairingStore
+    token = set_hermes_home_override(home)
+    try:
+        return bool(PairingStore().is_approved("discord", user_id))
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _component_check_auth(
     interaction,
     allowed_user_ids: Optional[set],
     allowed_role_ids: Optional[set],
+    *,
+    pairing_home=None,
+    auth_env=None,
 ) -> bool:
     """Shared user-or-role OR semantics for component view button clicks.
 
@@ -9184,6 +9319,9 @@ def _component_check_auth(
       - user is approved in the pairing store -> allow
       - otherwise -> reject
     """
+    def auth_value(key):
+        return auth_env.get(key, "") if auth_env is not None else _scoped_gate_env(key)
+
     user = getattr(interaction, "user", None)
     if user is None or getattr(user, "id", None) is None:
         return False
@@ -9193,15 +9331,15 @@ def _component_check_auth(
     # profile's runtime scope, so the profile's secret-scope contextvar is
     # inherited here. Under multiplex a raw os.getenv could return ANOTHER
     # profile's allow-all flag and authorize a click on this profile's bot.
-    if _scoped_gate_env("DISCORD_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
+    if auth_value("DISCORD_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
         return True
-    if _scoped_gate_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
+    if auth_value("GATEWAY_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
         return True
 
     user_set = {str(uid).strip() for uid in (allowed_user_ids or set()) if str(uid).strip()}
     global_allowed = {
         uid.strip()
-        for uid in _scoped_gate_env("GATEWAY_ALLOWED_USERS").split(",")
+        for uid in auth_value("GATEWAY_ALLOWED_USERS").split(",")
         if uid.strip()
     }
     user_set.update(global_allowed)
@@ -9239,9 +9377,8 @@ def _component_check_auth(
     # component buttons even without DISCORD_ALLOWED_USERS set.
     if uid:
         try:
-            from gateway.pairing import PairingStore
-            store = PairingStore()
-            if store.is_approved("discord", uid):
+            from hermes_constants import get_hermes_home
+            if _pairing_approved_at_home(pairing_home or get_hermes_home(), uid):
                 return True
         except Exception:
             pass
@@ -9317,11 +9454,14 @@ def _define_discord_view_classes() -> None:
             allow_permanent: bool = True,
             allow_session: bool = True,
             smart_denied: bool = False,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             # Opt-in admin gate for exec approval (default off → user-scope,
             # the v0.16-restored behavior). When on, the clicker must be in
             # ``admin_user_ids`` on top of passing the base admission check.
@@ -9348,6 +9488,7 @@ def _define_discord_view_classes() -> None:
             """
             if not _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             ):
                 return False
             if not self.require_admin:
@@ -9484,17 +9625,21 @@ def _define_discord_view_classes() -> None:
             confirm_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.confirm_id = confirm_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _resolve(
@@ -9589,16 +9734,20 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _respond(
@@ -9688,6 +9837,8 @@ def _define_discord_view_classes() -> None:
             on_model_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=120)
             self.providers = providers
@@ -9697,6 +9848,7 @@ def _define_discord_view_classes() -> None:
             self.on_model_selected = on_model_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
             self._selected_provider: str = ""
             self._pending_expensive_model: str = ""
@@ -9706,6 +9858,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         def _build_provider_select(self):
@@ -10048,12 +10201,15 @@ def _define_discord_view_classes() -> None:
             on_choice_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=120)
             self.choices = list(choices)[:_DISCORD_SELECT_MAX_OPTIONS]
             self.on_choice_selected = on_choice_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
             self._message = None
 
@@ -10079,6 +10235,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _on_select(self, interaction: discord.Interaction):
@@ -10146,12 +10303,15 @@ def _define_discord_view_classes() -> None:
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
             for index, choice in enumerate(self.choices):
@@ -10216,6 +10376,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: "discord.Interaction") -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         def _make_choice_callback(self, index: int, choice: str):

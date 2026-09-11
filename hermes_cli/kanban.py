@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import shlex
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -887,6 +888,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nlist.add_argument("task_id", nargs="?", default=None)
     p_nlist.add_argument("--json", action="store_true")
 
+    p_naudit = sub.add_parser("notify-audit", help="Report existing subscriptions outside current routing policy")
+    p_naudit.add_argument("--json", action="store_true")
+
     p_nrm = sub.add_parser(
         "notify-unsubscribe",
         help="Remove a gateway subscription from a task",
@@ -1184,6 +1188,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "assignees": _cmd_assignees,
             "notify-subscribe":   _cmd_notify_subscribe,
             "notify-list":        _cmd_notify_list,
+            "notify-audit":       _cmd_notify_audit,
             "notify-unsubscribe": _cmd_notify_unsubscribe,
             "context":  _cmd_context,
             "specify":  _cmd_specify,
@@ -1314,17 +1319,29 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
     return 2
 
 
+def _board_inventory_note() -> str | None:
+    override = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    if override:
+        return (
+            f"HERMES_KANBAN_DB is pinned to {override}; board inventory "
+            "below reads the real board DBs on disk."
+        )
+    return None
+
+
 def _board_task_counts(slug: str) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
-        path = kb.kanban_db_path(board=slug)
+        path = kb.board_db_path(slug)
         if not path.exists():
             return {}
-        with kb.connect_closing(board=slug) as conn:
+        with contextlib.closing(
+            sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        ) as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
             ).fetchall()
-        return {r["status"]: int(r["n"]) for r in rows}
+        return {status: int(n) for status, n in rows}
     except Exception:
         return {}
 
@@ -1345,6 +1362,9 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
     if not boards:
         print("(no boards — create one with `hermes kanban boards create <slug>`)")
         return 0
+    note = _board_inventory_note()
+    if note:
+        print(note)
     print(f"{'':2s}  {'SLUG':24s}  {'NAME':28s}  COUNTS")
     for b in boards:
         marker = "●" if b["is_current"] else " "
@@ -1444,7 +1464,10 @@ def _cmd_boards_show(args: argparse.Namespace) -> int:
     print(f"  Display name: {meta.get('name', '')}")
     if meta.get("description"):
         print(f"  Description:  {meta['description']}")
-    print(f"  DB path:      {meta['db_path']}")
+    print(f"  DB path:      {kb.board_db_path(current)}")
+    note = _board_inventory_note()
+    if note:
+        print(f"  Note:         {note}")
     print(f"  Tasks:        {total} total"
           + (f" ({', '.join(f'{k}={v}' for k, v in sorted(counts.items()))})"
              if counts else ""))
@@ -1646,8 +1669,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except argparse.ArgumentTypeError as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
-    if branch_name and ws_kind != "worktree":
-        print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
+    if branch_name and ws_kind not in {"dir", "worktree"}:
+        print("kanban: --branch is only valid with --workspace dir or worktree", file=sys.stderr)
         return 2
     try:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))
@@ -3042,7 +3065,8 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         if kb.get_task(conn, args.task_id) is None:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
-        kb.add_notify_sub(
+        from hermes_cli.kanban_notifications import subscribe_notify
+        target = subscribe_notify(
             conn, task_id=args.task_id,
             platform=args.platform, chat_id=args.chat_id,
             chat_type=args.chat_type,
@@ -3051,9 +3075,20 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
             notifier_profile=args.notifier_profile or _profile_author(),
             delivery_mode=getattr(args, "delivery_mode", None),
         )
-    print(f"Subscribed {args.platform}:{args.chat_id}"
-          + (f":{args.thread_id}" if args.thread_id else "")
+        if target is None:
+            print("Notification policy denied this destination", file=sys.stderr)
+            return 1
+    print(f"Subscribed {target['platform']}:{target['chat_id']}"
+          + (f":{target['thread_id']}" if target.get('thread_id') else "")
           + f" to {args.task_id}")
+    return 0
+
+
+def _cmd_notify_audit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_notifications import audit_notify_subs
+    with kb.connect_closing() as conn:
+        rows = audit_notify_subs(conn)
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
     return 0
 
 

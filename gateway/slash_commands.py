@@ -649,9 +649,10 @@ class GatewaySlashCommandsMixin:
                     if platform_str and chat_id:
                         def _sub():
                             from hermes_cli import kanban_db as _kb
+                            from hermes_cli.kanban_notifications import subscribe_notify
                             conn = _kb.connect(board=requested_board)
                             try:
-                                _kb.add_notify_sub(
+                                target = subscribe_notify(
                                     conn, task_id=task_id,
                                     platform=platform_str, chat_id=chat_id,
                                     chat_type=chat_type,
@@ -664,6 +665,8 @@ class GatewaySlashCommandsMixin:
                                     delivery_mode="notify+wake",
                                     delivery_metadata=delivery_metadata,
                                 )
+                                if target is None:
+                                    raise ValueError("Notification policy denied this destination")
                             finally:
                                 conn.close()
                         await asyncio.to_thread(_sub)
@@ -1818,9 +1821,13 @@ class GatewaySlashCommandsMixin:
         _under_service = is_gateway_supervisor_process()
         _in_container = is_container_restart_context()
         if _under_service or _in_container:
-            self.request_restart(detached=False, via_service=True)
+            self.request_restart(detached=False, via_service=True,
+                                 defer_until_session_delivered=self._session_key_for_source(event.source),
+                                 defer_until_delivery=getattr(event, "_hermes_response_delivered", None))
         else:
-            self.request_restart(detached=True, via_service=False)
+            self.request_restart(detached=True, via_service=False,
+                                 defer_until_session_delivered=self._session_key_for_source(event.source),
+                                 defer_until_delivery=getattr(event, "_hermes_response_delivered", None))
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
@@ -4649,7 +4656,6 @@ class GatewaySlashCommandsMixin:
         from hermes_cli.partial_compress import (
             extract_compress_flags,
             parse_partial_compress_args,
-            rejoin_compressed_head_and_tail,
             split_history_for_partial_compress,
             summarize_compress_preview,
         )
@@ -4852,8 +4858,9 @@ class GatewaySlashCommandsMixin:
                 # multiplexing.
                 compressed, _ = await self._run_in_executor_with_context(
                     lambda: tmp_agent._compress_context(
-                        head,
+                        msgs,
                         "",
+                        preserve_tail_count=len(tail) if partial else 0,
                         approx_tokens=approx_tokens,
                         focus_topic=focus_topic,
                         force=True,
@@ -4876,9 +4883,6 @@ class GatewaySlashCommandsMixin:
                     )
                     return describe_compression_lock_skip(_lock_skipped)
 
-                if partial and tail:
-                    compressed = rejoin_compressed_head_and_tail(compressed, tail)
-
                 # _compress_context either rotated (legacy: ended the old
                 # session, created a continuation id — write compressed messages
                 # into the NEW session so the original stays searchable) or
@@ -4888,42 +4892,11 @@ class GatewaySlashCommandsMixin:
                 rotated = new_session_id != session_entry.session_id
                 _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
 
-                # Persist the compressed transcript BEFORE repointing the live
-                # session onto the new session_id. Order matters: if we
-                # repointed first and the canonical DB write then failed (lock
-                # contention under concurrent writes, ENOSPC, a disk/IO error),
-                # the session entry would already reference a brand-new, empty
-                # session_id while the handler still reported success — the
-                # user's active conversation would silently vanish from view.
-                # Writing first, and treating a write failure as fatal, keeps
-                # the old history reachable (on rotation the entry still points
-                # at it; in place the original transcript is untouched) and lets
-                # the outer handler surface a "compress failed" banner instead.
-                #
-                # Only rewrite the transcript when rotation produced a NEW
-                # session id.  In-place compaction does NOT need a rewrite:
-                # archive_and_compact() has already soft-archived the previous
-                # active rows and inserted the compacted messages as the new
-                # active set inside _compress_context().  Calling
-                # rewrite_transcript() after in-place compaction would invoke
-                # replace_messages(active_only=False) which DELETEs ALL rows —
-                # including the archived turns that archive_and_compact()
-                # deliberately preserved (silent data loss, #61145).
-                #
-                # The third case: _compress_context could NOT rotate AND was
-                # not in-place (e.g. legacy mode but _session_db unavailable /
-                # the DB split raised) — there session_id is unchanged for a
-                # FAILURE reason, and rewrite_transcript() would DELETE the
-                # original messages and replace them with only the compressed
-                # summary (permanent data loss #44794, #39704).
+                # Core publication now commits the complete handoff (including
+                # an explicitly preserved tail) atomically. A second destructive
+                # rewrite can fail after publication or erase concurrent child
+                # appends. Adopt the canonical continuation without rewriting it.
                 if rotated:
-                    if not await self.async_session_store.rewrite_transcript(
-                        new_session_id, compressed
-                    ):
-                        raise RuntimeError(
-                            f"failed to persist compressed transcript for "
-                            f"session {new_session_id}"
-                        )
                     session_entry.session_id = new_session_id
                     await self.async_session_store._save()
                     await asyncio.to_thread(
@@ -4940,6 +4913,9 @@ class GatewaySlashCommandsMixin:
                         "(session_id unchanged) and in-place mode is off — "
                         "preserving original transcript instead of overwriting "
                         "it (#44794)."
+                    )
+                    raise RuntimeError(
+                        "compression did not create a durable continuation session"
                     )
                 # Reset stored token count — transcript changed, old value is stale
                 await self.async_session_store.update_session(

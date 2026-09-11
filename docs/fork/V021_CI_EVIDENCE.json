@@ -1,0 +1,276 @@
+{
+  "run_id": 34521202771,
+  "url": "https://github.com/brianfaires/hermes-agent/actions/runs/34521202771",
+  "tested_sha": "e36f3d76ff7464cf51a0a5881934e005fbbb9ee3",
+  "correction_source_candidate": "7abcbc9d82e4216da4242d75d599d43aafbb96fe",
+  "correction_hosted_status": "pending fresh staging run by Ang",
+  "new_file_count": 17,
+  "new_tests_passed": 51,
+  "python_slice_summaries": [
+    {
+      "job_log": "103019263043.txt",
+      "summary": "2026-09-10T19:39:40.4983384Z === Summary: 441 files, 5040 tests passed, 6 failed, 32 skipped (100% complete) in 214.8s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263068.txt",
+      "summary": "2026-09-10T19:40:51.8193775Z === Summary: 441 files, 5271 tests passed, 0 failed, 38 skipped (100% complete) in 292.7s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263101.txt",
+      "summary": "2026-09-10T19:39:45.2174915Z === Summary: 441 files, 4710 tests passed, 0 failed, 85 skipped (100% complete) in 223.2s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263102.txt",
+      "summary": "2026-09-10T19:41:56.0335957Z === Summary: 442 files, 5922 tests passed, 0 failed, 56 skipped (100% complete) in 352.2s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263210.txt",
+      "summary": "2026-09-10T19:39:09.4263077Z === Summary: 441 files, 5390 tests passed, 1 failed, 70 skipped (100% complete) in 188.8s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263223.txt",
+      "summary": "2026-09-10T19:40:25.0936118Z === Summary: 441 files, 5835 tests passed, 0 failed, 38 skipped (100% complete) in 260.6s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263331.txt",
+      "summary": "2026-09-10T19:40:09.6408217Z === Summary: 441 files, 4834 tests passed, 1 failed, 50 skipped (100% complete) in 242.0s (4 workers) ==="
+    },
+    {
+      "job_log": "103019263348.txt",
+      "summary": "2026-09-10T19:40:22.5842304Z === Summary: 442 files, 5754 tests passed, 0 failed, 50 skipped (100% complete) in 260.2s (4 workers) ==="
+    }
+  ],
+  "e2e": "60 passed, 1 failed, 7 skipped; plaintext Telegram restart assertion",
+  "indexed_failures": {
+    "ci-slice4-e36f3d7.txt": [
+      "tests/gateway/test_restart_service_detection.py::test_false_external_supervisor_marker_keeps_detached_path[0]",
+      "tests/gateway/test_restart_service_detection.py::test_false_external_supervisor_marker_keeps_detached_path[]",
+      "tests/gateway/test_restart_service_detection.py::test_false_external_supervisor_marker_keeps_detached_path[false]",
+      "tests/gateway/test_restart_service_detection.py::test_false_external_supervisor_marker_keeps_detached_path[off]",
+      "tests/gateway/test_restart_service_detection.py::test_restart_with_external_supervisor_marker_uses_service_path",
+      "tests/gateway/test_run_progress_topics.py::test_terminal_progress_renders_fenced_code_block"
+    ],
+    "ci-slice6-e36f3d7.txt": [
+      "tests/tools/test_tts_dotenv_fallback.py::TestDotenvFallbackPerProvider::test_elevenlabs_reads_dotenv_key"
+    ],
+    "ci-slice8-e36f3d7.txt": [
+      "tests/gateway/test_restart_drain.py::test_restart_command_while_busy_requests_drain_without_interrupt"
+    ],
+    "ci-e2e-e36f3d7.txt": [
+      "tests/e2e/test_platform_commands.py::TestSlashCommands::test_plaintext_restart_gateway_routes_to_safe_restart_command[telegram]"
+    ]
+  },
+  "selected_per_file_results": {
+    "tests/hermes_cli/test_doctor_command_install.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "5\u2713, 13.9s",
+      "line": "2026-09-10T19:37:55.2813313Z [ 48.3% |  2538/~5254 | \u27132820 | \u2717   0] \u2713 tests/hermes_cli/test_doctor_command_install.py (5\u2713, 13.9s)"
+    },
+    "tests/test_setup_hermes_worktree_safety.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 0.7s",
+      "line": "2026-09-10T19:39:05.7629825Z [ 70.3% |  3692/~5254 | \u27134078 | \u2717   0] \u2713 tests/test_setup_hermes_worktree_safety.py (1\u2713, 0.7s)"
+    },
+    "tests/agent/test_v021_retained_runtime.py": {
+      "log": "103019263101.txt",
+      "result": "\u2713",
+      "counts": "6\u2713, 3.9s",
+      "line": "2026-09-10T19:36:33.6160491Z [ 12.8% |   550/~4300 | \u2713631 | \u2717  0] \u2713 tests/agent/test_v021_retained_runtime.py (6\u2713, 3.9s)"
+    },
+    "tests/tools/test_v021_elevenlabs_settings.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "3\u2713, 1.5s",
+      "line": "2026-09-10T19:40:10.1901038Z [ 93.2% |  4578/~4914 | \u27135489 | \u2717   0] \u2713 tests/tools/test_v021_elevenlabs_settings.py (3\u2713, 1.5s)"
+    },
+    "tests/hermes_cli/test_tools_config.py": {
+      "log": "103019263331.txt",
+      "result": "\u2713",
+      "counts": "54\u2713 6s, 4.7s",
+      "line": "2026-09-10T19:38:06.1085817Z [ 55.2% |  2433/~4411 | \u27132744 | \u2717   0] \u2713 tests/hermes_cli/test_tools_config.py (54\u2713 6s, 4.7s)"
+    },
+    "tests/plugins/test_v021_cleanup_safety.py": {
+      "log": "103019263068.txt",
+      "result": "\u2713",
+      "counts": "2\u2713, 0.4s",
+      "line": "2026-09-10T19:38:33.6690139Z [ 59.0% |  2665/~4519 | \u27133233 | \u2717   0] \u2713 tests/plugins/test_v021_cleanup_safety.py (2\u2713, 0.4s)"
+    },
+    "tests/gateway/test_v021_webhook_process_cleanup.py": {
+      "log": "103019263068.txt",
+      "result": "\u2713",
+      "counts": "2\u2713, 1.7s",
+      "line": "2026-09-10T19:37:46.9652501Z [ 34.9% |  1577/~4519 | \u27131934 | \u2717   0] \u2713 tests/gateway/test_v021_webhook_process_cleanup.py (2\u2713, 1.7s)"
+    },
+    "tests/cron/test_v021_delivery_attention.py": {
+      "log": "103019263223.txt",
+      "result": "\u2713",
+      "counts": "4\u2713, 1.1s",
+      "line": "2026-09-10T19:36:45.8240651Z [ 17.6% |   765/~4337 | \u2713839 | \u2717  0] \u2713 tests/cron/test_v021_delivery_attention.py (4\u2713, 1.1s)"
+    },
+    "tests/cron/test_prompt_path_scanning_fc13.py": {
+      "log": "103019263068.txt",
+      "result": "\u2713",
+      "counts": "8\u2713, 1.7s",
+      "line": "2026-09-10T19:36:45.0822893Z [ 16.1% |   729/~4519 | \u2713813 | \u2717  0] \u2713 tests/cron/test_prompt_path_scanning_fc13.py (8\u2713, 1.7s)"
+    },
+    "tests/agent/test_v021_compact_display.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "3\u2713, 1.0s",
+      "line": "2026-09-10T19:36:37.1471343Z [ 16.7% |   875/~5254 | \u2713954 | \u2717  0] \u2713 tests/agent/test_v021_compact_display.py (3\u2713, 1.0s)"
+    },
+    "tests/gateway/test_v021_discord_text.py": {
+      "log": "103019263043.txt",
+      "result": "\u2713",
+      "counts": "4\u2713, 0.8s",
+      "line": "2026-09-10T19:37:20.3906995Z [ 39.0% |  1802/~4616 | \u27131980 | \u2717   5] \u2713 tests/gateway/test_v021_discord_text.py (4\u2713, 0.8s)"
+    },
+    "tests/gateway/test_discord_outbound_channel_fence.py": {
+      "log": "103019263223.txt",
+      "result": "\u2713",
+      "counts": "27\u2713, 1.3s",
+      "line": "2026-09-10T19:36:58.2056171Z [ 26.2% |  1135/~4337 | \u27131284 | \u2717   0] \u2713 tests/gateway/test_discord_outbound_channel_fence.py (27\u2713, 1.3s)"
+    },
+    "tests/hermes_cli/test_v021_board_inventory.py": {
+      "log": "103019263043.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 0.8s",
+      "line": "2026-09-10T19:37:57.7714948Z [ 58.9% |  2721/~4616 | \u27132983 | \u2717   6] \u2713 tests/hermes_cli/test_v021_board_inventory.py (1\u2713, 0.8s)"
+    },
+    "tests/gateway/test_v021_notifier_diagnostics.py": {
+      "log": "103019263223.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 0.6s",
+      "line": "2026-09-10T19:37:23.4639909Z [ 39.4% |  1709/~4337 | \u27131878 | \u2717   0] \u2713 tests/gateway/test_v021_notifier_diagnostics.py (1\u2713, 0.6s)"
+    },
+    "tests/agent/test_v021_worker_scope.py": {
+      "log": "103019263043.txt",
+      "result": "\u2713",
+      "counts": "4\u2713, 0.8s",
+      "line": "2026-09-10T19:36:26.4261408Z [ 13.7% |   632/~4616 | \u2713694 | \u2717  0] \u2713 tests/agent/test_v021_worker_scope.py (4\u2713, 0.8s)"
+    },
+    "tests/tools/test_delegate_kanban_isolation.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "6\u2713, 3.5s",
+      "line": "2026-09-10T19:39:29.7052787Z [ 70.2% |  3451/~4914 | \u27134105 | \u2717   0] \u2713 tests/tools/test_delegate_kanban_isolation.py (6\u2713, 3.5s)"
+    },
+    "tests/agent/test_context_compressor_voice_preservation.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "5\u2713, 0.7s",
+      "line": "2026-09-10T19:36:13.2242986Z [  3.2% |   158/~4914 | \u2713176 | \u2717  0] \u2713 tests/agent/test_context_compressor_voice_preservation.py (5\u2713, 0.7s)"
+    },
+    "tests/agent/test_context_compressor_summary_continuity.py": {
+      "log": "103019263210.txt",
+      "result": "\u2713",
+      "counts": "9\u2713, 0.6s",
+      "line": "2026-09-10T19:36:07.5254795Z [  2.4% |   121/~4963 | \u2713134 | \u2717  0] \u2713 tests/agent/test_context_compressor_summary_continuity.py (9\u2713, 0.6s)"
+    },
+    "tests/agent/test_compression_rotation_state.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "44\u2713, 46.5s",
+      "line": "2026-09-10T19:36:57.1902124Z [ 17.1% |   839/~4914 | \u27131072 | \u2717   0] \u2713 tests/agent/test_compression_rotation_state.py (44\u2713, 46.5s)"
+    },
+    "tests/gateway/test_v021_compression_failure.py": {
+      "log": "103019263101.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 2.2s",
+      "line": "2026-09-10T19:37:19.2590032Z [ 35.0% |  1505/~4300 | \u27131775 | \u2717   0] \u2713 tests/gateway/test_v021_compression_failure.py (1\u2713, 2.2s)"
+    },
+    "tests/agent/test_v021_external_skill_refresh.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "2\u2713, 0.7s",
+      "line": "2026-09-10T19:36:36.4492348Z [ 10.0% |   492/~4914 | \u2713560 | \u2717  0] \u2713 tests/agent/test_v021_external_skill_refresh.py (2\u2713, 0.7s)"
+    },
+    "tests/test_v021_dependency_floors.py": {
+      "log": "103019263210.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 0.6s",
+      "line": "2026-09-10T19:38:24.0251981Z [ 79.2% |  3933/~4963 | \u27134246 | \u2717   1] \u2713 tests/test_v021_dependency_floors.py (1\u2713, 0.6s)"
+    },
+    "tests/test_v021_runner_cleanup.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 0.5s",
+      "line": "2026-09-10T19:39:09.5216500Z [ 71.2% |  3743/~5254 | \u27134144 | \u2717   0] \u2713 tests/test_v021_runner_cleanup.py (1\u2713, 0.5s)"
+    },
+    "tests/gateway/test_v021_restart_delivery.py": {
+      "log": "103019263331.txt",
+      "result": "\u2713",
+      "counts": "5\u2713, 1.8s",
+      "line": "2026-09-10T19:37:31.6729606Z [ 38.8% |  1710/~4411 | \u27131975 | \u2717   0] \u2713 tests/gateway/test_v021_restart_delivery.py (5\u2713, 1.8s)"
+    },
+    "tests/gateway/test_v021_background_notify_retained.py": {
+      "log": "103019263102.txt",
+      "result": "\u2713",
+      "counts": "3\u2713, 0.9s",
+      "line": "2026-09-10T19:37:22.7793068Z [ 27.8% |  1367/~4914 | \u27131645 | \u2717   0] \u2713 tests/gateway/test_v021_background_notify_retained.py (3\u2713, 0.9s)"
+    },
+    "tests/agent/test_secret_scope.py": {
+      "log": "103019263331.txt",
+      "result": "\u2713",
+      "counts": "24\u2713, 1.0s",
+      "line": "2026-09-10T19:36:30.3168912Z [ 13.4% |   590/~4411 | \u2713647 | \u2717  0] \u2713 tests/agent/test_secret_scope.py (24\u2713, 1.0s)"
+    },
+    "tests/gateway/test_multiplex_background_task_scope.py": {
+      "log": "103019263223.txt",
+      "result": "\u2713",
+      "counts": "1\u2713, 1.1s",
+      "line": "2026-09-10T19:37:08.3207269Z [ 33.0% |  1433/~4337 | \u27131582 | \u2717   0] \u2713 tests/gateway/test_multiplex_background_task_scope.py (1\u2713, 1.1s)"
+    },
+    "tests/gateway/test_multiplex_lifecycle.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "10\u2713, 1.0s",
+      "line": "2026-09-10T19:37:09.7472333Z [ 32.1% |  1684/~5254 | \u27131847 | \u2717   0] \u2713 tests/gateway/test_multiplex_lifecycle.py (10\u2713, 1.0s)"
+    },
+    "tests/cron/test_cron_multiplex_profile_route_preflight.py": {
+      "log": "103019263043.txt",
+      "result": "\u2713",
+      "counts": "6\u2713, 0.8s",
+      "line": "2026-09-10T19:36:36.0150350Z [ 18.0% |   833/~4616 | \u2713905 | \u2717  0] \u2713 tests/cron/test_cron_multiplex_profile_route_preflight.py (6\u2713, 0.8s)"
+    },
+    "tests/agent/test_compression_concurrent_fork.py": {
+      "log": "103019263348.txt",
+      "result": "\u2713",
+      "counts": "48\u2713, 24.9s",
+      "line": "2026-09-10T19:36:34.3421927Z [ 15.3% |   802/~5254 | \u2713878 | \u2717  0] \u2713 tests/agent/test_compression_concurrent_fork.py (48\u2713, 24.9s)"
+    },
+    "tests/gateway/test_run_progress_topics.py": {
+      "log": "103019263043.txt",
+      "result": "\u2717",
+      "counts": "27\u2713 1\u2717, 26.3s",
+      "line": "2026-09-10T19:37:32.4690250Z [ 45.8% |  2113/~4616 | \u27132309 | \u2717   6] \u2717 tests/gateway/test_run_progress_topics.py (27\u2713 1\u2717, 26.3s)"
+    },
+    "tests/plugins/test_gateway_restart_tool.py": {
+      "log": "103019263068.txt",
+      "result": "\u2713",
+      "counts": "17\u2713, 2.6s",
+      "line": "2026-09-10T19:38:34.2349019Z [ 59.4% |  2683/~4519 | \u27133259 | \u2717   0] \u2713 tests/plugins/test_gateway_restart_tool.py (17\u2713, 2.6s)"
+    },
+    "tests/gateway/test_restart_drain.py": {
+      "log": "103019263210.txt",
+      "result": "\u2717",
+      "counts": "13\u2713 1\u2717 2s, 4.7s",
+      "line": "2026-09-10T19:36:51.1252915Z [ 32.4% |  1607/~4963 | \u27131759 | \u2717   1] \u2717 tests/gateway/test_restart_drain.py (13\u2713 1\u2717 2s, 4.7s)"
+    },
+    "tests/gateway/test_restart_service_detection.py": {
+      "log": "103019263043.txt",
+      "result": "\u2717",
+      "counts": "5\u2717, 3.0s",
+      "line": "2026-09-10T19:37:08.8920441Z [ 33.0% |  1523/~4616 | \u27131694 | \u2717   5] \u2717 tests/gateway/test_restart_service_detection.py (5\u2717, 3.0s)"
+    },
+    "tests/tools/test_tts_dotenv_fallback.py": {
+      "log": "103019263331.txt",
+      "result": "\u2717",
+      "counts": "5\u2713 1\u2717, 5.1s",
+      "line": "2026-09-10T19:39:59.2349288Z [ 96.0% |  4236/~4411 | \u27134647 | \u2717   1] \u2717 tests/tools/test_tts_dotenv_fallback.py (5\u2713 1\u2717, 5.1s)"
+    }
+  },
+  "qualification_note": "Results are exact hosted per-file receipts for the pre-correction tree, not untested equivalence or correction passes. \u2713 counts are passed; s counts are skipped."
+}

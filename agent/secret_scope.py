@@ -308,3 +308,41 @@ def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
         secrets[key] = value
 
     return secrets
+
+
+def refresh_profile_secret_scope(
+    hermes_home: Path, *, inherit_process_secrets: Optional[bool] = None,
+) -> Dict[str, str]:
+    """Reload one home's secrets privately; callers own set/reset token lifetime."""
+    from hermes_cli.env_loader import hydrate_profile_secret_sources
+
+    external = hydrate_profile_secret_sources(
+        hermes_home, refresh=True,
+        inherit_process_secrets=(not is_multiplex_active()
+                                 and inherit_process_secrets is not False),
+    )
+    # Use this refresh's returned snapshot, not the shared cache: a concurrent
+    # refresh of the same home may already have invalidated that cache.
+    secrets = load_env_file(Path(hermes_home) / ".env")
+    secrets.update({name: value for name, value in external.items()
+                    if not _is_global_env(name)})
+    return secrets
+
+
+def scoped_subprocess_environment(base_env: Mapping[str, str]) -> Dict[str, str]:
+    """Resolve child values like get_secret, before the caller's secret scrub.
+
+    In multiplex mode unknown inherited values are profile secrets, just as
+    they are for get_secret; a list of previously observed keys cannot safely
+    identify credentials belonging to a profile that has never been loaded.
+    """
+    scope = current_secret_scope()
+    if scope is None:
+        if is_multiplex_active():
+            raise UnscopedSecretError("Subprocess environment requires a profile scope")
+        return dict(base_env)
+    env = {name: value for name, value in base_env.items()
+           if not is_multiplex_active() or _is_global_env(name)}
+    env.update({name: value for name, value in scope.items()
+                if not _is_global_env(name)})
+    return env

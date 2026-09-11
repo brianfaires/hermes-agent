@@ -1,0 +1,312 @@
+{
+  "source_candidate": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+  "unique_new_tests": 36,
+  "independent_new_tests": 36,
+  "supplemental_existing_tests": 17,
+  "coverage_validator": 1,
+  "unique_focused_total": 54,
+  "limitations": "Repeated executions are not added to unique counts. Local unittest only; hosted pytest/full CI and human UAT pending. Named bot environment test mocks resolver/spawn, not mounted-root CLI startup.",
+  "integrity": {
+    "baseline": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+    "source_candidate": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+    "source_tree": "8379ce7036b86bb76c284d3a4a1dda8a01672207",
+    "row_counts": {
+      "unique_ids": 51,
+      "old_main": 37,
+      "archive_only": 14,
+      "historical_evidence_entries": 239
+    },
+    "subfeatures": 241,
+    "historical_fields_unchanged": true,
+    "subfeature_ids_unchanged": true,
+    "prior_source_receipts_unchanged": [
+      "docs/fork/V021_APPROVED_CONTINUATION.md",
+      "docs/fork/V021_APPROVED_REVIEW.md",
+      "docs/fork/V021_APPROVED_TESTS.json"
+    ],
+    "reviewed_file_sha256": {
+      "agent/secret_scope.py": "66a98f7670e875b980f1a5de1211d0b71cfa272c0fa929c937d81a4dc0369224",
+      "cron/scheduler.py": "858ad47fd4b5a3466a96aa136b50348da3139b1dd49e4bbc8a3d6db165ceecdd",
+      "gateway/authz_mixin.py": "aeea69961e52c59a16a5aef7b87a0680949db37103f0d77ba5d133485e24720d",
+      "gateway/platforms/base.py": "d0da778b63081ee6484a0472324bcd1ddb86d1b3f4a6a86d84997456e13b4d0b",
+      "gateway/run.py": "150c0ef1f3fb0eba651d38d80e75aec7b3bf4b16cac66f2fd99abb907ec12e70",
+      "gateway/session.py": "467bcc4f6b6ebb9c53a950df00c83c32a1e700a50226268c209871130c80cf2f",
+      "hermes_cli/env_loader.py": "2859447a0399ee2872ac10b566f734a213a46a93152e95120d251ecf7a00c4de",
+      "hermes_state.py": "c6a66029ebb18c6b7621cf8725310d653a9a34006ba8c837e7e223455d1d5280",
+      "plugins/platforms/discord/adapter.py": "5923213d42d05e7740ac9f00caf1eba02ee2b27c913423dd1c361786cc5e468d",
+      "tests/cron/test_v021_private_credentials.py": "48cc0f55743ba154f79f5f08f848e7c8c448c4ab636de5943f86360eb24f6118",
+      "tests/gateway/test_v021_durable_ownership.py": "601645d70ef0b7aef5eda7f84f088a4a982b7b9c4e218f4127ec87ad4faf0d80",
+      "tests/gateway/test_v021_transport_identity.py": "364428e2cd722f3972aebeea2c8ffeb609b8563cb012eb20f232dd0a6f751493"
+    },
+    "reviewed_hashes_match": true,
+    "changed_python_parsed": [
+      "agent/secret_scope.py",
+      "cron/scheduler.py",
+      "gateway/authz_mixin.py",
+      "gateway/platforms/base.py",
+      "gateway/run.py",
+      "gateway/session.py",
+      "hermes_cli/env_loader.py",
+      "hermes_state.py",
+      "plugins/platforms/discord/adapter.py",
+      "tests/cron/test_v021_private_credentials.py",
+      "tests/gateway/test_v021_durable_ownership.py",
+      "tests/gateway/test_v021_transport_identity.py"
+    ],
+    "landed_checklist_ids": 52,
+    "human_rows": 22,
+    "human_status": "all pending",
+    "remaining_approved_ids": [
+      "FC-10-E02",
+      "FC-11-E08",
+      "FC-14-E01",
+      "FC-14-E02",
+      "FC-15-E01",
+      "FC-17-E17",
+      "FC-17-E18",
+      "FC-17-E29",
+      "FC-18-E03",
+      "FC-18-E04",
+      "FC-18-E05",
+      "FC-19-E01",
+      "FC-19-E02",
+      "FC-19-E03",
+      "FC-19-E04",
+      "FC-19-E05",
+      "FC-20-E12",
+      "FC-25-E04",
+      "FC-26-default",
+      "FC-27-E01",
+      "FC-27-E02",
+      "FC-28-E02",
+      "FC-30-E01",
+      "FC-30-E03",
+      "FC-30-E04",
+      "FC-33-E01"
+    ],
+    "additional_pending": "G32 thread ceilings under FC-32-E01",
+    "canonical_launcher": "/home/brian/.hermes/hermes-agent/.venv/bin/hermes"
+  },
+  "receipts": {
+    "batch2-ownership-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_durable_ownership.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_durable_ownership.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_atomic_switch_preserves_compression_lineage_and_reset_children (test_v021_durable_ownership.DurableOwnershipTests.test_atomic_switch_preserves_compression_lineage_and_reset_children) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_database_failure_before_authorization_leaves_route (test_v021_durable_ownership.DurableOwnershipTests.test_database_failure_before_authorization_leaves_route) ... Gateway session switch failed for agent:main:telegram:dm:destination: fixture unavailable\nok\ntest_delayed_full_snapshot_cannot_overwrite_successful_switch (test_v021_durable_ownership.DurableOwnershipTests.test_delayed_full_snapshot_cannot_overwrite_successful_switch) ... ok\ntest_foreign_and_missing_switch_do_not_change_state (test_v021_durable_ownership.DurableOwnershipTests.test_foreign_and_missing_switch_do_not_change_state) ... ok\ntest_foreign_compression_ancestor_denies_entire_switch (test_v021_durable_ownership.DurableOwnershipTests.test_foreign_compression_ancestor_denies_entire_switch) ... ok\ntest_mirror_failure_keeps_committed_primary_and_memory (test_v021_durable_ownership.DurableOwnershipTests.test_mirror_failure_keeps_committed_primary_and_memory) ... Gateway switch legacy mirror failed: fixture mirror\nok\ntest_multiplex_ownerless_fails_closed (test_v021_durable_ownership.DurableOwnershipTests.test_multiplex_ownerless_fails_closed) ... ok\ntest_recovery_multiplex_uses_requested_profile_and_legacy_namespace (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_multiplex_uses_requested_profile_and_legacy_namespace) ... ok\ntest_recovery_rejects_foreign_stamp_even_exact_route (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_rejects_foreign_stamp_even_exact_route) ... Gateway session DB recovery ignored agent:main:telegram:dm:destination for agent:main:telegram:dm:destination because its durable profile ownership does not match the request\nGateway session DB recovery ignored agent:main:telegram:dm:destination for agent:main:telegram:dm:destination because its durable profile ownership does not match the request\nok\ntest_recovery_reopen_failure_does_not_publish_route (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_reopen_failure_does_not_publish_route) ... Gateway session DB reopen failed for agent:main:telegram:dm:destination: fixture reopen\nok\ntest_routing_failure_rolls_back_all_session_writes (test_v021_durable_ownership.DurableOwnershipTests.test_routing_failure_rolls_back_all_session_writes) ... Gateway session switch failed for agent:main:telegram:dm:destination: fixture routing rejection\nok\ntest_single_profile_legacy_ownerless_remains_resumable (test_v021_durable_ownership.DurableOwnershipTests.test_single_profile_legacy_ownerless_remains_resumable) ... ok\n\n----------------------------------------------------------------------\nRan 12 tests in 18.422s\n\nOK\n"
+      }
+    ],
+    "batch2-credentials-tests-final4.json": [
+      {
+        "file": "tests/cron/test_v021_private_credentials.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/cron",
+          "-p",
+          "test_v021_private_credentials.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile (test_v021_private_credentials.PrivateCredentialsTests.test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile) ... ok\ntest_child_scope_is_authoritative_and_unscoped_multiplex_refuses (test_v021_private_credentials.PrivateCredentialsTests.test_child_scope_is_authoritative_and_unscoped_multiplex_refuses) ... ok\ntest_direct_job_refresh_and_exception_restore_scope (test_v021_private_credentials.PrivateCredentialsTests.test_direct_job_refresh_and_exception_restore_scope) ... ok\ntest_external_refresh_is_per_home_and_op_bootstrap_private (test_v021_private_credentials.PrivateCredentialsTests.test_external_refresh_is_per_home_and_op_bootstrap_private) ... ok\ntest_private_refresh_observes_edits_without_environment_writes (test_v021_private_credentials.PrivateCredentialsTests.test_private_refresh_observes_edits_without_environment_writes) ... ok\ntest_real_script_jobs_share_executor_without_profile_bleed (test_v021_private_credentials.PrivateCredentialsTests.test_real_script_jobs_share_executor_without_profile_bleed) ... ok\ntest_scoped_late_loader_does_not_mutate_process_or_dotenv (test_v021_private_credentials.PrivateCredentialsTests.test_scoped_late_loader_does_not_mutate_process_or_dotenv) ... ok\ntest_single_profile_external_source_keeps_shell_bootstrap (test_v021_private_credentials.PrivateCredentialsTests.test_single_profile_external_source_keeps_shell_bootstrap) ... ok\ntest_single_profile_shell_credential_compatibility (test_v021_private_credentials.PrivateCredentialsTests.test_single_profile_shell_credential_compatibility) ... ok\n\n----------------------------------------------------------------------\nRan 9 tests in 0.464s\n\nOK\n"
+      }
+    ],
+    "batch2-credentials-tests-final.json": [
+      {
+        "file": "tests/cron/test_v021_private_credentials.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/cron",
+          "-p",
+          "test_v021_private_credentials.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile (test_v021_private_credentials.PrivateCredentialsTests.test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile) ... ok\ntest_child_scope_is_authoritative_and_unscoped_multiplex_refuses (test_v021_private_credentials.PrivateCredentialsTests.test_child_scope_is_authoritative_and_unscoped_multiplex_refuses) ... ok\ntest_direct_job_refresh_and_exception_restore_scope (test_v021_private_credentials.PrivateCredentialsTests.test_direct_job_refresh_and_exception_restore_scope) ... ok\ntest_external_refresh_is_per_home_and_op_bootstrap_private (test_v021_private_credentials.PrivateCredentialsTests.test_external_refresh_is_per_home_and_op_bootstrap_private) ... ok\ntest_private_refresh_observes_edits_without_environment_writes (test_v021_private_credentials.PrivateCredentialsTests.test_private_refresh_observes_edits_without_environment_writes) ... ok\ntest_real_script_jobs_share_executor_without_profile_bleed (test_v021_private_credentials.PrivateCredentialsTests.test_real_script_jobs_share_executor_without_profile_bleed) ... ok\ntest_scoped_late_loader_does_not_mutate_process_or_dotenv (test_v021_private_credentials.PrivateCredentialsTests.test_scoped_late_loader_does_not_mutate_process_or_dotenv) ... ok\ntest_single_profile_shell_credential_compatibility (test_v021_private_credentials.PrivateCredentialsTests.test_single_profile_shell_credential_compatibility) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.442s\n\nOK\n"
+      },
+      {
+        "file": "tests/cron/test_v021_profile_registry.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/cron",
+          "-p",
+          "test_v021_profile_registry.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_due_scan_recovers_own_recurring_error_despite_other_profile_run (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_recovers_own_recurring_error_despite_other_profile_run) ... cron.persisted_error.recovered job='fixture' id=same \u2014 recurring job wedged in stale last_status=error without re-firing for a full cadence; re-arming next_run_at to 2026-09-11T00:17:35.550690+00:00 so it re-dispatches without force-run/resume\nok\ntest_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer (test_v021_profile_registry.ProfileRegistryTests.test_due_scan_retires_own_exhausted_oneshot_without_deleting_live_peer) ... Job 'fixture': removed without a completed run \u2014 diagnostic written to its output directory\nok\ntest_equal_ids_local_precheck_global_count_and_captured_release (test_v021_profile_registry.ProfileRegistryTests.test_equal_ids_local_precheck_global_count_and_captured_release) ... ok\ntest_manual_run_dedupe_is_profile_local_and_always_releases (test_v021_profile_registry.ProfileRegistryTests.test_manual_run_dedupe_is_profile_local_and_always_releases) ... ok\ntest_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim (test_v021_profile_registry.ProfileRegistryTests.test_ownerless_interrupt_does_not_cross_profiles_or_poison_next_claim) ... Job 'same' interrupted before its durable fire owner was registered; leaving persisted state untouched\nok\ntest_real_tick_releases_after_copied_context_exits (test_v021_profile_registry.ProfileRegistryTests.test_real_tick_releases_after_copied_context_exits) ... cron/executions.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_shutdown_targets_exact_owner_and_profile (test_v021_profile_registry.ProfileRegistryTests.test_shutdown_targets_exact_owner_and_profile) ... ok\ntest_stale_sweep_uses_only_own_store_and_preserves_live_future (test_v021_profile_registry.ProfileRegistryTests.test_stale_sweep_uses_only_own_store_and_preserves_live_future) ... cron.inflight.forced_release event=forced_release reason=ledger-terminal job='same' id=same age=0s allowance=1800s future=finished \u2014 stale in-flight claim released; the job was skipping every fire with 'already running'\nok\n\n----------------------------------------------------------------------\nRan 8 tests in 1.841s\n\nOK\n"
+      }
+    ],
+    "batch2-transport-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_transport_identity.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_transport_identity.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_actual_approval_send_captures_transport_for_delayed_view (test_v021_transport_identity.TransportIdentityTests.test_actual_approval_send_captures_transport_for_delayed_view) ... ok\ntest_adapter_pairing_reads_own_store_under_foreign_runtime (test_v021_transport_identity.TransportIdentityTests.test_adapter_pairing_reads_own_store_under_foreign_runtime) ... ok\ntest_adapter_storage_stays_on_construction_home_after_routing (test_v021_transport_identity.TransportIdentityTests.test_adapter_storage_stays_on_construction_home_after_routing) ... ok\ntest_all_six_control_views_pin_pairing_and_authorization (test_v021_transport_identity.TransportIdentityTests.test_all_six_control_views_pin_pairing_and_authorization) ... ok\ntest_explicit_missing_profile_is_rejected_without_home_fallback (test_v021_transport_identity.TransportIdentityTests.test_explicit_missing_profile_is_rejected_without_home_fallback) ... ok\ntest_launch_home_and_signature_do_not_follow_ambient_profile (test_v021_transport_identity.TransportIdentityTests.test_launch_home_and_signature_do_not_follow_ambient_profile) ... ok\ntest_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure (test_v021_transport_identity.TransportIdentityTests.test_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure) ... ok\ntest_primary_transport_pairing_stays_on_launch_store (test_v021_transport_identity.TransportIdentityTests.test_primary_transport_pairing_stays_on_launch_store) ... ok\ntest_real_authorization_uses_transport_grant_not_routed_allow_all (test_v021_transport_identity.TransportIdentityTests.test_real_authorization_uses_transport_grant_not_routed_allow_all) ... ok\ntest_scope_setup_exception_restores_home_and_secrets (test_v021_transport_identity.TransportIdentityTests.test_scope_setup_exception_restores_home_and_secrets) ... ok\ntest_secondary_handler_routes_runtime_but_pins_transport_authorization (test_v021_transport_identity.TransportIdentityTests.test_secondary_handler_routes_runtime_but_pins_transport_authorization) ... ok\ntest_source_owner_is_stamped_before_session_key_and_route_still_wins (test_v021_transport_identity.TransportIdentityTests.test_source_owner_is_stamped_before_session_key_and_route_still_wins) ... ok\ntest_stopped_or_unregistered_transport_never_falls_through_to_routed_bot (test_v021_transport_identity.TransportIdentityTests.test_stopped_or_unregistered_transport_never_falls_through_to_routed_bot) ... ok\ntest_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed (test_v021_transport_identity.TransportIdentityTests.test_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed) ... ok\ntest_unauthorized_dm_policy_and_pairing_are_transport_scoped (test_v021_transport_identity.TransportIdentityTests.test_unauthorized_dm_policy_and_pairing_are_transport_scoped) ... ok\n\n----------------------------------------------------------------------\nRan 15 tests in 0.284s\n\nOK\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_discord_channel_precedence.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_discord_channel_precedence.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_connected_snapshot_and_deny_still_win (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_connected_snapshot_and_deny_still_win) ... ok\ntest_empty_explicit_channel_policy_is_not_replaced_by_environment (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_empty_explicit_channel_policy_is_not_replaced_by_environment) ... ok\ntest_explicit_policy_beats_preconnect_environment_before_send (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_explicit_policy_beats_preconnect_environment_before_send) ... ok\ntest_loader_plugin_bridges_channel_policies_for_all_config_layouts (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_loader_plugin_bridges_channel_policies_for_all_config_layouts) ... ok\ntest_other_gate_precedence_unchanged (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_other_gate_precedence_unchanged) ... ok\ntest_scoped_miss_never_borrows_another_profiles_environment (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_scoped_miss_never_borrows_another_profiles_environment) ... ok\ntest_standalone_policy_honors_explicit_empty_without_network (test_v021_discord_channel_precedence.ChannelPrecedenceTests.test_standalone_policy_honors_explicit_empty_without_network) ... ok\n\n----------------------------------------------------------------------\nRan 7 tests in 10.608s\n\nOK\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_profile_scope_qualification.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_profile_scope_qualification.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_heartbeat_uses_active_home_and_explicit_store_then_restores (test_v021_profile_scope_qualification.ProfileScopeQualification.test_heartbeat_uses_active_home_and_explicit_store_then_restores) ... Executing <Task finished name='Task-2' coro=<ProfileScopeQualification.test_heartbeat_uses_active_home_and_explicit_store_then_restores() done, defined at /home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source/tests/gateway/test_v021_profile_scope_qualification.py:37> result=None created at /home/brian/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/asyncio/runners.py:100> took 1.977 seconds\nok\ntest_nested_scopes_propagate_to_thread_and_reset_on_exception (test_v021_profile_scope_qualification.ProfileScopeQualification.test_nested_scopes_propagate_to_thread_and_reset_on_exception) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 2.006s\n\nOK\n"
+      }
+    ],
+    "batch2-transport-final-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_transport_identity.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_transport_identity.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_actual_approval_send_captures_transport_for_delayed_view (test_v021_transport_identity.TransportIdentityTests.test_actual_approval_send_captures_transport_for_delayed_view) ... ok\ntest_adapter_pairing_reads_own_store_under_foreign_runtime (test_v021_transport_identity.TransportIdentityTests.test_adapter_pairing_reads_own_store_under_foreign_runtime) ... ok\ntest_adapter_storage_stays_on_construction_home_after_routing (test_v021_transport_identity.TransportIdentityTests.test_adapter_storage_stays_on_construction_home_after_routing) ... ok\ntest_all_six_control_views_pin_pairing_and_authorization (test_v021_transport_identity.TransportIdentityTests.test_all_six_control_views_pin_pairing_and_authorization) ... ok\ntest_explicit_missing_profile_is_rejected_without_home_fallback (test_v021_transport_identity.TransportIdentityTests.test_explicit_missing_profile_is_rejected_without_home_fallback) ... ok\ntest_launch_home_and_signature_do_not_follow_ambient_profile (test_v021_transport_identity.TransportIdentityTests.test_launch_home_and_signature_do_not_follow_ambient_profile) ... ok\ntest_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure (test_v021_transport_identity.TransportIdentityTests.test_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure) ... ok\ntest_primary_transport_pairing_stays_on_launch_store (test_v021_transport_identity.TransportIdentityTests.test_primary_transport_pairing_stays_on_launch_store) ... ok\ntest_real_authorization_uses_transport_grant_not_routed_allow_all (test_v021_transport_identity.TransportIdentityTests.test_real_authorization_uses_transport_grant_not_routed_allow_all) ... ok\ntest_scope_setup_exception_restores_home_and_secrets (test_v021_transport_identity.TransportIdentityTests.test_scope_setup_exception_restores_home_and_secrets) ... ok\ntest_secondary_handler_routes_runtime_but_pins_transport_authorization (test_v021_transport_identity.TransportIdentityTests.test_secondary_handler_routes_runtime_but_pins_transport_authorization) ... ok\ntest_source_owner_is_stamped_before_session_key_and_route_still_wins (test_v021_transport_identity.TransportIdentityTests.test_source_owner_is_stamped_before_session_key_and_route_still_wins) ... ok\ntest_stopped_or_unregistered_transport_never_falls_through_to_routed_bot (test_v021_transport_identity.TransportIdentityTests.test_stopped_or_unregistered_transport_never_falls_through_to_routed_bot) ... ok\ntest_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed (test_v021_transport_identity.TransportIdentityTests.test_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed) ... ok\ntest_unauthorized_dm_policy_and_pairing_are_transport_scoped (test_v021_transport_identity.TransportIdentityTests.test_unauthorized_dm_policy_and_pairing_are_transport_scoped) ... ok\n\n----------------------------------------------------------------------\nRan 15 tests in 0.288s\n\nOK\n"
+      }
+    ],
+    "batch2-review-ownership-credentials-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_durable_ownership.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_durable_ownership.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_atomic_switch_preserves_compression_lineage_and_reset_children (test_v021_durable_ownership.DurableOwnershipTests.test_atomic_switch_preserves_compression_lineage_and_reset_children) ... state.db: linked SQLite 3.50.4 is vulnerable to the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug) \u2014 using journal_mode=DELETE instead of enabling WAL. Upgrade to SQLite 3.51.3+ (or backports 3.50.7 / 3.44.6); Hermes-managed installs can repair the embedded runtime with `hermes update`. See `hermes doctor`. This warning fires once per process per database.\nok\ntest_database_failure_before_authorization_leaves_route (test_v021_durable_ownership.DurableOwnershipTests.test_database_failure_before_authorization_leaves_route) ... Gateway session switch failed for agent:main:telegram:dm:destination: fixture unavailable\nok\ntest_delayed_full_snapshot_cannot_overwrite_successful_switch (test_v021_durable_ownership.DurableOwnershipTests.test_delayed_full_snapshot_cannot_overwrite_successful_switch) ... ok\ntest_foreign_and_missing_switch_do_not_change_state (test_v021_durable_ownership.DurableOwnershipTests.test_foreign_and_missing_switch_do_not_change_state) ... ok\ntest_foreign_compression_ancestor_denies_entire_switch (test_v021_durable_ownership.DurableOwnershipTests.test_foreign_compression_ancestor_denies_entire_switch) ... ok\ntest_mirror_failure_keeps_committed_primary_and_memory (test_v021_durable_ownership.DurableOwnershipTests.test_mirror_failure_keeps_committed_primary_and_memory) ... Gateway switch legacy mirror failed: fixture mirror\nok\ntest_multiplex_ownerless_fails_closed (test_v021_durable_ownership.DurableOwnershipTests.test_multiplex_ownerless_fails_closed) ... ok\ntest_recovery_multiplex_uses_requested_profile_and_legacy_namespace (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_multiplex_uses_requested_profile_and_legacy_namespace) ... ok\ntest_recovery_rejects_foreign_stamp_even_exact_route (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_rejects_foreign_stamp_even_exact_route) ... Gateway session DB recovery ignored agent:main:telegram:dm:destination for agent:main:telegram:dm:destination because its durable profile ownership does not match the request\nGateway session DB recovery ignored agent:main:telegram:dm:destination for agent:main:telegram:dm:destination because its durable profile ownership does not match the request\nok\ntest_recovery_reopen_failure_does_not_publish_route (test_v021_durable_ownership.DurableOwnershipTests.test_recovery_reopen_failure_does_not_publish_route) ... Gateway session DB reopen failed for agent:main:telegram:dm:destination: fixture reopen\nok\ntest_routing_failure_rolls_back_all_session_writes (test_v021_durable_ownership.DurableOwnershipTests.test_routing_failure_rolls_back_all_session_writes) ... Gateway session switch failed for agent:main:telegram:dm:destination: fixture routing rejection\nok\ntest_single_profile_legacy_ownerless_remains_resumable (test_v021_durable_ownership.DurableOwnershipTests.test_single_profile_legacy_ownerless_remains_resumable) ... ok\n\n----------------------------------------------------------------------\nRan 12 tests in 19.170s\n\nOK\n"
+      },
+      {
+        "file": "tests/cron/test_v021_private_credentials.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/cron",
+          "-p",
+          "test_v021_private_credentials.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile (test_v021_private_credentials.PrivateCredentialsTests.test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile) ... ok\ntest_child_scope_is_authoritative_and_unscoped_multiplex_refuses (test_v021_private_credentials.PrivateCredentialsTests.test_child_scope_is_authoritative_and_unscoped_multiplex_refuses) ... ok\ntest_direct_job_refresh_and_exception_restore_scope (test_v021_private_credentials.PrivateCredentialsTests.test_direct_job_refresh_and_exception_restore_scope) ... ok\ntest_external_refresh_is_per_home_and_op_bootstrap_private (test_v021_private_credentials.PrivateCredentialsTests.test_external_refresh_is_per_home_and_op_bootstrap_private) ... ok\ntest_private_refresh_observes_edits_without_environment_writes (test_v021_private_credentials.PrivateCredentialsTests.test_private_refresh_observes_edits_without_environment_writes) ... ok\ntest_real_script_jobs_share_executor_without_profile_bleed (test_v021_private_credentials.PrivateCredentialsTests.test_real_script_jobs_share_executor_without_profile_bleed) ... ok\ntest_scoped_late_loader_does_not_mutate_process_or_dotenv (test_v021_private_credentials.PrivateCredentialsTests.test_scoped_late_loader_does_not_mutate_process_or_dotenv) ... ok\ntest_single_profile_external_source_keeps_shell_bootstrap (test_v021_private_credentials.PrivateCredentialsTests.test_single_profile_external_source_keeps_shell_bootstrap) ... ok\ntest_single_profile_shell_credential_compatibility (test_v021_private_credentials.PrivateCredentialsTests.test_single_profile_shell_credential_compatibility) ... ok\n\n----------------------------------------------------------------------\nRan 9 tests in 0.443s\n\nOK\n"
+      }
+    ],
+    "batch2-review-transport-tests.json": [
+      {
+        "file": "tests/gateway/test_v021_transport_identity.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/gateway",
+          "-p",
+          "test_v021_transport_identity.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_actual_approval_send_captures_transport_for_delayed_view (test_v021_transport_identity.TransportIdentityTests.test_actual_approval_send_captures_transport_for_delayed_view) ... ok\ntest_adapter_pairing_reads_own_store_under_foreign_runtime (test_v021_transport_identity.TransportIdentityTests.test_adapter_pairing_reads_own_store_under_foreign_runtime) ... ok\ntest_adapter_storage_stays_on_construction_home_after_routing (test_v021_transport_identity.TransportIdentityTests.test_adapter_storage_stays_on_construction_home_after_routing) ... ok\ntest_all_six_control_views_pin_pairing_and_authorization (test_v021_transport_identity.TransportIdentityTests.test_all_six_control_views_pin_pairing_and_authorization) ... ok\ntest_explicit_missing_profile_is_rejected_without_home_fallback (test_v021_transport_identity.TransportIdentityTests.test_explicit_missing_profile_is_rejected_without_home_fallback) ... ok\ntest_launch_home_and_signature_do_not_follow_ambient_profile (test_v021_transport_identity.TransportIdentityTests.test_launch_home_and_signature_do_not_follow_ambient_profile) ... ok\ntest_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure (test_v021_transport_identity.TransportIdentityTests.test_nonmultiplex_agent_wrapper_pins_home_and_restores_on_failure) ... ok\ntest_primary_transport_pairing_stays_on_launch_store (test_v021_transport_identity.TransportIdentityTests.test_primary_transport_pairing_stays_on_launch_store) ... ok\ntest_real_authorization_uses_transport_grant_not_routed_allow_all (test_v021_transport_identity.TransportIdentityTests.test_real_authorization_uses_transport_grant_not_routed_allow_all) ... ok\ntest_scope_setup_exception_restores_home_and_secrets (test_v021_transport_identity.TransportIdentityTests.test_scope_setup_exception_restores_home_and_secrets) ... ok\ntest_secondary_handler_routes_runtime_but_pins_transport_authorization (test_v021_transport_identity.TransportIdentityTests.test_secondary_handler_routes_runtime_but_pins_transport_authorization) ... ok\ntest_source_owner_is_stamped_before_session_key_and_route_still_wins (test_v021_transport_identity.TransportIdentityTests.test_source_owner_is_stamped_before_session_key_and_route_still_wins) ... ok\ntest_stopped_or_unregistered_transport_never_falls_through_to_routed_bot (test_v021_transport_identity.TransportIdentityTests.test_stopped_or_unregistered_transport_never_falls_through_to_routed_bot) ... ok\ntest_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed (test_v021_transport_identity.TransportIdentityTests.test_transport_pairing_ignores_routed_runtime_and_missing_store_fails_closed) ... ok\ntest_unauthorized_dm_policy_and_pairing_are_transport_scoped (test_v021_transport_identity.TransportIdentityTests.test_unauthorized_dm_policy_and_pairing_are_transport_scoped) ... ok\n\n----------------------------------------------------------------------\nRan 15 tests in 0.262s\n\nOK\n"
+      }
+    ],
+    "batch2-checklist-tests.json": [
+      {
+        "file": "tests/test_v021_restoration_checklist.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-p",
+          "test_v021_restoration_checklist.py",
+          "-v"
+        ],
+        "returncode": 0,
+        "output": "test_every_landed_subfeature_has_exactly_one_human_check (test_v021_restoration_checklist.RestorationChecklistCoverageTests.test_every_landed_subfeature_has_exactly_one_human_check) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.016s\n\nOK\n"
+      }
+    ]
+  }
+}

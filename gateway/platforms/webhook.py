@@ -468,7 +468,8 @@ class WebhookAdapter(BasePlatformAdapter):
     def toolsets_for_source(self, source) -> Optional[List[str]]:
         """Per-route toolset override.
 
-        Webhook session chat_ids are ``webhook:{route}:{delivery_id}``.
+        Webhook session chat_ids encode ``[profile, route, delivery_id]`` as JSON;
+        legacy ``webhook:{route}:{delivery_id}`` sources remain readable.
         When the matching route config carries a ``toolsets`` list, that list
         replaces the platform-level ``platform_toolsets.webhook`` resolution
         for this run only. Routes without the key keep the platform default
@@ -486,7 +487,18 @@ class WebhookAdapter(BasePlatformAdapter):
         parts = chat_id.split(":", 2)
         if len(parts) < 2 or parts[0] != "webhook":
             return None
-        route_config = self._routes.get(parts[1])
+        route_name = parts[1]
+        if chat_id.startswith("webhook:["):
+            try:
+                identity = json.loads(chat_id[len("webhook:"):])
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(identity, list) or len(identity) != 3 or not all(
+                isinstance(item, str) for item in identity
+            ):
+                return None
+            route_name = identity[1]
+        route_config = self._routes.get(route_name)
         if not isinstance(route_config, dict):
             return None
         toolsets = route_config.get("toolsets")
@@ -725,9 +737,17 @@ class WebhookAdapter(BasePlatformAdapter):
                     {"error": "Invalid signature"}, status=401
                 )
 
+        # Adapter state is shared across profiles. Keep opaque, unambiguous
+        # keys separate from the provider's externally visible delivery ID.
+        profile_scope = next((value.strip() for value in (
+            profile, getattr(self.gateway_runner, "_launch_profile_name", None),
+            getattr(self, "_owner_profile", None), "default"
+        ) if isinstance(value, str) and value.strip()), "default")
+        route_scope = json.dumps([profile_scope, route_name], separators=(",", ":"))
+
         # ── Rate limiting (after auth) ───────────────────────────
         now = time.time()
-        if not self._record_rate_limit_hit(route_name, now):
+        if not self._record_rate_limit_hit(route_scope, now):
             return web.json_response(
                 {"error": "Rate limit exceeded"}, status=429
             )
@@ -854,7 +874,8 @@ class WebhookAdapter(BasePlatformAdapter):
         # ── Idempotency ─────────────────────────────────────────
         # Skip duplicate deliveries (webhook retries).
         now = time.time()
-        if not self._record_delivery_id(delivery_id, now):
+        delivery_scope = json.dumps([profile_scope, route_name, delivery_id], separators=(",", ":"))
+        if not self._record_delivery_id(delivery_scope, now):
             logger.info(
                 "[webhook] Skipping duplicate delivery %s", delivery_id
             )
@@ -923,7 +944,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         # Use delivery_id in session key so concurrent webhooks on the
         # same route get independent agent runs (not queued/interrupted).
-        session_chat_id = f"webhook:{route_name}:{delivery_id}"
+        session_chat_id = f"webhook:{delivery_scope}"
 
         # Store delivery info for send().  Read by every send() invocation
         # for this chat_id (interim status messages and the final response),

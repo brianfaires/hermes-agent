@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -824,35 +825,37 @@ def check_command_security(command: str) -> dict:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}
 
-    # Parse JSON for enrichment (never overrides the exit code verdict)
+    # Evaluate the entire finding set before applying the display limit. Malformed
+    # enrichment cannot remove an exit-code warning or block.
     findings = []
     summary = ""
+    valid_findings = False
     try:
         data = json.loads(result.stdout) if result.stdout.strip() else {}
         raw_findings = data.get("findings", [])
-        findings = raw_findings[:_MAX_FINDINGS]
-        summary = (data.get("summary", "") or "")[:_MAX_SUMMARY_LEN]
-    except (json.JSONDecodeError, AttributeError):
-        # JSON parse failure degrades findings/summary, not the verdict
+        if not isinstance(raw_findings, list) or not all(isinstance(f, dict) for f in raw_findings):
+            raise ValueError("malformed findings")
+        findings = raw_findings
+        valid_findings = True
+        summary = data.get("summary", "") or ""
+        if not isinstance(summary, str):
+            summary = ""
+        summary = summary[:_MAX_SUMMARY_LEN]
+    except (ValueError, AttributeError, TypeError):
         logger.debug("tirith JSON parse failed, using exit code only")
         if action == "block":
             summary = "security issue detected (details unavailable)"
         elif action == "warn":
             summary = "security warning detected (details unavailable)"
 
-    # Suppress warn verdicts that consist solely of a lookalike_tld finding for
-    # the .app TLD.  .app is a legitimate gTLD used by many production services
-    # and the "can be confused with file extensions" heuristic generates false
-    # positives for normal API calls.  Any other finding (including other
-    # lookalike_tld entries for non-.app TLDs) preserves the warn action.
-    if action == "warn" and findings:
-        non_suppressible = [f for f in findings if not _is_app_tld_finding(f)]
-        if not non_suppressible:
+    if action == "warn" and valid_findings and findings:
+        findings = [f for f in findings if not _is_exact_package_similarity_finding(f)]
+        if not findings or all(_is_app_tld_finding(f) for f in findings):
             action = "allow"
             findings = []
             summary = ""
 
-    return {"action": action, "findings": findings, "summary": summary}
+    return {"action": action, "findings": findings[:_MAX_FINDINGS], "summary": summary}
 
 
 def _is_app_tld_finding(finding: dict) -> bool:
@@ -867,6 +870,24 @@ def _is_app_tld_finding(finding: dict) -> bool:
         return False
     for field in ("value", "tld", "detail", "description", "message"):
         val = finding.get(field)
-        if val is not None and ".app" in str(val).lower():
+        if isinstance(val, str) and ".app" in val.lower():
             return True
     return False
+
+
+_PACKAGE_SIMILARITY_DESCRIPTION = re.compile(
+    r"Package\s+'{1,2}([^']+)'\s+in\s+[^\s]+\s+is\s+within\s+edit\s+distance\s+(\d+)\s+"
+    r"of\s+popular\s+package\s+'([^']+)'(?:\. This could indicate a typosquatting attempt\.)?",
+    re.IGNORECASE,
+)
+
+
+def _is_exact_package_similarity_finding(finding: dict) -> bool:
+    """Recognize identical package pairs without ecosystem normalization."""
+    if finding.get("rule_id") != "threat_package_similar_name":
+        return False
+    description = finding.get("description")
+    if not isinstance(description, str):
+        return False
+    match = _PACKAGE_SIMILARITY_DESCRIPTION.fullmatch(description.strip())
+    return match is not None and match.group(1) == match.group(3)

@@ -582,7 +582,7 @@ class TestProfileScopedPlatformEventHandler:
         resolver.assert_called_once_with(source)
         dispatch.assert_awaited_once_with({"event_type": "reaction"}, source)
 
-    def test_secondary_handler_stamps_profile_before_dispatch(self, monkeypatch):
+    def test_secondary_handler_stamps_profile_before_dispatch(self, monkeypatch, tmp_path):
         runner = object.__new__(GatewayRunner)
         captured = {}
 
@@ -591,8 +591,12 @@ class TestProfileScopedPlatformEventHandler:
             captured["profile"] = source.profile
 
         runner._handle_gateway_platform_event = dispatch
+        profile_home = tmp_path / "work"
+        profile_home.mkdir()
+        (profile_home / "config.yaml").write_text("{}\n")
+        runner._launch_profile_name = "default"
         monkeypatch.setattr(
-            "hermes_cli.profiles.get_profile_dir", lambda name: None,
+            "hermes_cli.profiles.get_profile_dir", lambda name: profile_home,
         )
         handler = runner._make_profile_platform_event_handler("work")
         source = _adapter()._source_from_reaction_for_auth(

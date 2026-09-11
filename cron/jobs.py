@@ -254,7 +254,7 @@ def _job_running_in_this_process(job_id: str) -> bool:
     """
     try:
         from cron.scheduler import get_running_job_ids
-        return job_id in get_running_job_ids()
+        return job_id in get_running_job_ids(current_profile_only=True)
     except Exception:
         logger.warning(
             "Cron running-set liveness check failed for job %r; keeping the "
@@ -521,6 +521,37 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
     normalized["skills"] = skills
     normalized["skill"] = skills[0] if skills else None
     return normalized
+
+
+def _normalize_toolset_list(value: Optional[Any]) -> Optional[List[str]]:
+    """Accept only plain toolset identifier strings; never stringify objects."""
+
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("enabled_toolsets must be a list of toolset names")
+    normalized: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("toolset names must be plain strings")
+        text = item.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", text) is None:
+            raise ValueError(f"invalid toolset name: {text!r}")
+        if text not in normalized:
+            normalized.append(text)
+    return normalized or None
+
+
+def _normalize_explicit_name(value: Any) -> Optional[str]:
+    """Normalize an explicit display name without coercing nested objects."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("cron job name must be a string")
+    return value.strip() or None
 
 
 def _coerce_job_text(value: Any, fallback: str = "") -> str:
@@ -2396,8 +2427,8 @@ def create_job(
     normalized_base_url = _normalize_job_optional_text(base_url, strip_trailing_slash=True)
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
-    normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
-    normalized_toolsets = normalized_toolsets or None
+    name = _normalize_explicit_name(name)
+    normalized_toolsets = _normalize_toolset_list(enabled_toolsets)
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
@@ -2446,6 +2477,13 @@ def create_job(
     combined_prompt = combine_prompt_sources(
         prompt_text, normalized_prompt_path, read_file=bool(normalized_prompt_path)
     )
+
+    # Scan the effective authored source at the persistence boundary, so
+    # CLI, API and tool callers share the same file-backed prompt checks.
+    from tools.cronjob_tools import _scan_cron_prompt
+    scan_error = _scan_cron_prompt(combined_prompt)
+    if scan_error:
+        raise ValueError(scan_error)
 
     # Reject cron jobs that schedule gateway-lifecycle commands. Prevents
     # agent-driven SIGTERM-respawn loops under launchd/systemd KeepAlive
@@ -2621,6 +2659,12 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
 
+    updates = dict(updates)
+    if "name" in updates:
+        updates["name"] = _normalize_explicit_name(updates["name"])
+    if "enabled_toolsets" in updates:
+        updates["enabled_toolsets"] = _normalize_toolset_list(updates["enabled_toolsets"])
+
     with _jobs_lock():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
@@ -2714,6 +2758,17 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     bool(updated.get("no_agent")),
                     _upd_script or None,
                 )
+
+            if {"prompt", "prompt_path", "skill", "skills"}.intersection(updates):
+                from tools.cronjob_tools import _scan_cron_prompt
+
+                # Include unchanged inline/file fields: a directive can span
+                # both sources, and maintained file contents may have changed.
+                scan_error = _scan_cron_prompt(combine_prompt_sources(
+                    updated.get("prompt"), updated.get("prompt_path")
+                ))
+                if scan_error:
+                    raise ValueError(scan_error)
 
             if any(k in updates for k in _PAYLOAD_FIELDS):
                 if job_payload_is_empty(updated):

@@ -144,24 +144,47 @@ def test_deliver_runs_canonical_bot_chat_lane():
     assert not any("the output" in str(a) for a in argv)
 
 
-def test_deliver_named_profile_uses_p_flag_and_clears_home():
+def test_deliver_named_profile_uses_p_flag_and_receiver_scope(tmp_path, monkeypatch):
+    from hermes_cli import profiles
+    from agent.secret_scope import current_secret_scope
+
+    root = tmp_path / 'root'
+    target = root / 'profiles' / 'research'
+    sender = root / 'profiles' / 'sender'
+    target.mkdir(parents=True)
+    sender.mkdir(parents=True)
+    (target / 'config.yaml').write_text('{}\n')
+    (target / '.env').write_text('RECEIVER_TOKEN=receiver-only\n')
+    monkeypatch.setattr(profiles, '_get_default_hermes_home', lambda: root)
+    monkeypatch.setenv('HERMES_HOME', str(sender))
+    monkeypatch.setenv('SENDER_TOKEN', 'sender-only')
+    assert profiles.profile_exists('research')
+    previous_scope = current_secret_scope()
     calls = {}
 
     def fake_run(argv, **kwargs):
-        calls["argv"] = argv
-        calls["kwargs"] = kwargs
+        calls['argv'] = argv
+        calls['kwargs'] = kwargs
         return _completed()
 
-    with mock.patch.object(sched.subprocess, "run", side_effect=fake_run), \
-         mock.patch.object(sched.shutil, "which", return_value="/usr/bin/hermes"), \
-         mock.patch.dict(sched.os.environ, {"HERMES_HOME": "/tmp/other-profile"}):
-        err = _deliver_to_bot_chat({"id": "j1", "name": "n"}, "out", "research")
-
+    with mock.patch.object(sched.subprocess, 'run', side_effect=fake_run), \
+         mock.patch.object(sched.shutil, 'which', return_value='/usr/bin/hermes'):
+        err = _deliver_to_bot_chat({'id': 'j1', 'name': 'n'}, 'out', 'research')
     assert err is None
-    argv = calls["argv"]
-    assert argv[1:3] == ["-p", "research"]
-    # -p owns resolution; the scheduler's own HERMES_HOME must not leak in.
-    assert "HERMES_HOME" not in calls["kwargs"]["env"]
+    assert calls['argv'][1:3] == ['-p', 'research']
+    env = calls['kwargs']['env']
+    assert env['HERMES_HOME'] == str(target)
+    assert env['RECEIVER_TOKEN'] == 'receiver-only'
+    assert 'SENDER_TOKEN' not in env
+    assert sched.os.environ['HERMES_HOME'] == str(sender)
+    assert 'RECEIVER_TOKEN' not in sched.os.environ
+    assert current_secret_scope() is previous_scope
+
+    with mock.patch.object(sched.subprocess, 'run') as spawn, \
+         mock.patch.object(sched.shutil, 'which', return_value='/usr/bin/hermes'):
+        error = _deliver_to_bot_chat({'id': 'j1', 'name': 'n'}, 'out', 'missing')
+    assert 'target profile no longer exists' in error
+    spawn.assert_not_called()
 
 
 def test_deliver_failure_returns_error_string():

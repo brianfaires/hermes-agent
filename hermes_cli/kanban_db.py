@@ -738,6 +738,11 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
+    return board_db_path(board)
+
+
+def board_db_path(board: Optional[str] = None) -> Path:
+    """Return a board's on-disk DB path, ignoring the worker task DB pin."""
     slug = _normalize_board_slug(board)
     if slug is None:
         slug = get_current_board()
@@ -979,7 +984,9 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     seen: set[str] = set()
 
     # Default board is always first.
-    entries.append(read_board_metadata(DEFAULT_BOARD))
+    default = read_board_metadata(DEFAULT_BOARD)
+    default["db_path"] = str(board_db_path(DEFAULT_BOARD))
+    entries.append(default)
     seen.add(DEFAULT_BOARD)
 
     root = boards_root()
@@ -1001,6 +1008,7 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
             if not (has_db or has_meta):
                 continue
             meta = read_board_metadata(normed)
+            meta["db_path"] = str(board_db_path(normed))
             if meta.get("archived") and not include_archived:
                 continue
             entries.append(meta)
@@ -3257,15 +3265,10 @@ def create_task(
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
         )
-    if workspace_kind not in VALID_WORKSPACE_KINDS:
-        raise ValueError(
-            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
-            f"got {workspace_kind!r}"
-        )
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
+    workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+        workspace_kind=workspace_kind, workspace_path=workspace_path,
+        branch_name=branch_name, require_dir_path=False,
+    )
 
     # Inherit the board's scoped project when the caller didn't name one, so a
     # project-scoped board anchors every new task to that project's repo
@@ -3509,6 +3512,14 @@ def create_task(
                             )
                         except Exception:
                             branch_name = None
+
+                # Validate after board/project derivation so valid inherited
+                # persistent paths remain supported and generated metadata is
+                # subject to the same rules as explicit input.
+                workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+                    workspace_kind=workspace_kind, workspace_path=workspace_path,
+                    branch_name=branch_name, require_dir_path=True,
+                )
 
                 conn.execute(
                     """
@@ -8327,9 +8338,15 @@ def set_workspace_path(
     conn: sqlite3.Connection, task_id: str, path: Path | str
 ) -> None:
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None:
+            raise ValueError(f"task {task_id} not found")
+        _, path, _ = normalize_workspace_metadata(
+            workspace_kind=task.workspace_kind, workspace_path=path,
+            branch_name=task.branch_name, require_dir_path=True,
+        )
         conn.execute(
-            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
-            (str(path), task_id),
+            "UPDATE tasks SET workspace_path = ? WHERE id = ?", (path, task_id),
         )
 
 
@@ -8337,9 +8354,15 @@ def set_branch_name(
     conn: sqlite3.Connection, task_id: str, branch_name: str
 ) -> None:
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None:
+            raise ValueError(f"task {task_id} not found")
+        _, _, branch_name = normalize_workspace_metadata(
+            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path,
+            branch_name=branch_name, require_dir_path=True,
+        )
         conn.execute(
-            "UPDATE tasks SET branch_name = ? WHERE id = ?",
-            (str(branch_name), task_id),
+            "UPDATE tasks SET branch_name = ? WHERE id = ?", (branch_name, task_id),
         )
 
 
