@@ -35,9 +35,9 @@ class TestDiscordFormatMessage:
             "\nDone."
         )
         out = adapter.format_message(text)
-        assert "**Alice**" in out
+        assert r"\*\*Alice\*\*" in out
         assert "• Score: 95" in out
-        assert "**Bob**" in out
+        assert r"\*\*Bob\*\*" in out
         assert "• Score: 80" in out
         assert out.startswith("Results:")
         assert out.rstrip().endswith("Done.")

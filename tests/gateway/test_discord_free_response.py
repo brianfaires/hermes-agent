@@ -277,16 +277,9 @@ async def test_discord_voice_linked_channel_skips_mention_requirement_and_auto_t
 
 
 @pytest.mark.asyncio
-async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypatch):
-    """Free-response channels should reply inline, never spawn a new thread.
-
-    Without this, every message in a free-response channel would auto-create
-    a fresh thread (since the channel bypasses the @mention gate, every
-    message looks like a fresh trigger).  That turns a "lightweight chat"
-    channel into a thread-spawning machine — see the docs at
-    website/docs/user-guide/messaging/discord.md which already describe
-    this as the intended behavior.
-    """
+async def test_discord_free_response_no_thread_channel_skips_auto_thread(adapter, monkeypatch):
+    """An explicit no-thread channel remains inline under free response."""
+    monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", "789")
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789")
     monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)  # default true

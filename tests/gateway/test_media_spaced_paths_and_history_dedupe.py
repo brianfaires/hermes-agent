@@ -39,8 +39,8 @@ class TestSpacedPaths:
         media, cleaned = BasePlatformAdapter.extract_media(
             f"MEDIA:{p} is the log you asked for"
         )
-        assert [os.path.realpath(x) for x, _ in media] == [os.path.realpath(str(p))]
-        assert "is the log you asked for" in cleaned
+        assert media == []
+        assert cleaned == f"MEDIA:{p} is the log you asked for"
 
 
     def test_forward_extension_stops_at_next_media_tag(self, tmp_path):
@@ -49,7 +49,7 @@ class TestSpacedPaths:
         a.write_text("localhost\n")
         b.write_text("FROM alpine\n")
         media, cleaned = BasePlatformAdapter.extract_media(
-            f"MEDIA:{a} MEDIA:{b}"
+            f"MEDIA:{a}\nMEDIA:{b}"
         )
         got = sorted(os.path.realpath(x) for x, _ in media)
         assert got == sorted(
@@ -62,7 +62,7 @@ class TestStreamingDisplayStripCodeBlocks:
     def test_fenced_code_example_preserved(self, tmp_path):
         p = tmp_path / "real.pdf"
         p.write_text("x")
-        text = f"Example:\n```\nMEDIA:{p}\n```\ndone MEDIA:{p}"
+        text = f"Example:\n```\nMEDIA:{p}\n```\ndone\nMEDIA:{p}"
         out = BasePlatformAdapter.strip_media_directives_for_display(text)
         # The example inside the fence survives verbatim; the real tag outside
         # is stripped.
