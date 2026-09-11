@@ -1,6 +1,18 @@
-# Brian decisions required — v0.21 restoration
+# Approved Critical restoration register — v0.21 restoration
 
-No approval is inferred from the kickoff. These slices are NOT implemented. Anchors below use OLD `2945588a014543d47c9e5e4a0d92ba6e361387c1` and BASE `cf62291dad2cd9c12de80bc5194ff76ef0f6ce55` (same audited source except the FC20 hotfix).
+Brian approved all documented restoration slices for source/tests/staging on
+2026-09-10 (root Kanban comment 16:51, recorded in the approved restoration
+brief). **The historical decision requests and “pending approval” language below
+are superseded. Do not request the same approval again.** Critical classifications
+and the described compatibility/security contracts remain. Human UAT is deferred
+and never gates development. Retired consumers, archive-only new features and
+Discord voice remain excluded; no live mutation, activation, push or main change.
+
+Implementation status and exact evidence live in V021_RESTORATION_LEDGER.json.
+The following anchors and original decision text are preserved as historical
+design provenance, not current approval holds. OLD is
+`2945588a014543d47c9e5e4a0d92ba6e361387c1`; BASE is
+`cf62291dad2cd9c12de80bc5194ff76ef0f6ce55`.
 
 ## G17 — profile identity, credentials, routing and durable ownership (FC17; related FC10)
 

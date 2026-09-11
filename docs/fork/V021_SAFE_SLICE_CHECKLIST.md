@@ -1,70 +1,47 @@
-# Cumulative safe-slice checklist — human UAT deferred
+# Cumulative restoration human checklist
 
-Continuation test/source candidate: `76d908a34804889c9c27cebd08619e71528070e4`.
-Final documentation-bound HEAD is in the task-only handoff `/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/continuation-result.md`. Previous
-exact `3c8f7d0` staging CI **passed**, run 34523897060, including 52 added tests.
-The prior pending-CI and partial-milestone language below is historical.
+All human checks are **pending**. Brian approved the documented remaining
+restoration for source/tests/staging on 2026-09-10; human testing is deferred
+and does not gate development. This replaces the partial milestone checklist
+and stale implementation approval holds. Critical risk classifications remain
+in [critical-gates.md](critical-gates.md). Automated inventory and receipts live
+in the restoration ledger and qualification documents, separately from this list.
 
-Brian is unavailable for human testing. Keep all separable safe development
-moving; human checks accumulate and are not development prerequisites. Existing
-[Critical gates](critical-gates.md) remain unchanged. No activation, main
-promotion, live restart/install/send/config/data/credential change is claimed.
+Candidate binding: each result must record the exact tested Git commit and tree,
+matching source checkout, disposable environment, operator/date, and evidence
+location. The ledger's `source_candidate` identifies its source checkpoint; the
+final task handoff binds any later documentation commit. No human pass is claimed
+for either checkpoint. Change a row's status to **pass** or **fail** only with
+that evidence; otherwise retain **pending**. Every ID in a grouped row is covered
+by its action, expected result and safety negative.
 
-## Current checkpoint and next integration check
+Run these only in a separately authorized disposable deployment with synthetic
+profiles/data and inert external boundaries where practical. This continuation
+authorizes no live activation, restart, delivery, install, configuration,
+credential or data mutation, main promotion or push. Voice restoration, retired
+consumers and archive-only new features stay excluded. As further approved
+subfeatures land, add their IDs and checks here in the same change as the ledger;
+approval alone is not implementation evidence.
 
-Ang accepted the eda8d0537b1b66000b5ade38855343634ddd4e75 review,
-independently reran seven tests and pushed that exact candidate to source-only
-staging. Hosted CI remains pending until Ang reports its actual result. The
-[finite compatibility tail](V021_COMPATIBILITY_TAIL.md) adds documentation-only
-resolution/classification evidence; deterministic checks replace a second broad
-code review. Ang next inspects and integrates this tail, then verifies CI.
+| Feature / landed subfeature IDs | Human action → expected result | Safety-sensitive negative | Status / candidate-bound evidence |
+| --- | --- | --- | --- |
+| TTS provider settings — `FC-04-E01`, `FC-04-E02` | In synthetic config, set bounded ElevenLabs voice controls and exercise normal and streaming synthesis → both use the configured values; unset settings preserve provider defaults. | Simulate unavailable SDK or failed synthesis → response text remains visible; no credential appears in output. | pending / — |
+| Cleanup — `FC-08-E01` | Preview and run cleanup on disposable aged/fresh wildcard fixtures → only eligible tracked files are removed. | Legacy directories, fresh files, symlinks and untracked descendants survive. | pending / — |
+| Webhook transform cleanup — `FC-10-E03`, `FC-30-E02` | Run a disposable JSON transform, then a deliberately timed-out child/grandchild fixture → success returns JSON; timeout leaves no fixture descendants. | Unrelated processes survive; this does not enable retired script-trigger mode. | pending / — |
+| Cron alert rendering — `FC-12-E01`, `FC-12-E02`, `FC-12-E03` | Produce a synthetic warning, failure and mismatched same-chat thread delivery → attention markers and relevant thread diagnostic appear. | A different platform/chat does not produce the same-thread warning; rendering does not reroute the destination. | pending / — |
+| File-backed cron prompts — `FC-13-E01`, `FC-13-E02`, `FC-13-E03`, `FC-13-E04`, `FC-13-E05` | Create/update file-backed jobs through tool and API, then edit the file before a disposable run → effective inline+file content reloads and is validated at each entrypoint. | Unsafe combined content is rejected even with skills; relative/missing/oversized/invalid UTF-8 files and invalid updates leave stored jobs unchanged. | pending / — |
+| Compact progress and Discord embeds — `FC-14-E03`, `FC-14-E04`, `FC-14-E05` | Show a long path and shell prologue in progress; exercise Discord send/edit/forum/overflow fixture paths → a bounded meaningful preview appears and progress embeds are suppressed. | Executed command arguments remain intact; existing channel policy still refuses prohibited destinations. | pending / — |
+| Profile cron registry and recovery — `FC-17-E12` | In two disposable profiles, dispatch equal job IDs, release one, then simulate stale/finished work and a drain → each profile runs/releases/reconciles only its own job; global drain counts both. | A live peer in another profile neither blocks stale recovery nor gets released/interrupted by a different owner; finite one-shots keep live records and exact owner fencing. | pending / — |
+| Discord channel policy precedence — `FC-17-E09` | Load synthetic top-level/nested channel settings, then compare pre-connect/standalone sends with connected snapshots → explicit allow/deny config (including empty values) wins before connection; connected nonempty profile snapshot remains authoritative. | Conflicting environment cannot bypass explicit denial; scoped misses never borrow another profile's environment, ignored channels still deny, and thread parent identity remains verified. | pending / — |
+| Kanban board inventory — `FC-18-E01`, `FC-18-E02` | List two disposable boards while a task DB pin names only one → each inventory row reports its own canonical DB path and counts. | Inventory is read-only and neither database changes. | pending / — |
+| Kanban notification diagnostics — `FC-19-E07` | Inject notification delivery failure → operator diagnostics include the exception traceback. | No destination or subscription policy changes merely to recover delivery; diagnostic evidence contains no credentials. | pending / — |
+| Delegated child lifecycle isolation — `FC-20-E06`, `FC-20-E07`, `FC-20-E08`, `FC-20-E09`, `FC-20-E11` | In a disposable worker task, compare parent with delegated child/cron context through initialization, stop/finalize and activity reporting → only the owning parent supplies worker guidance and lifecycle/activity updates. | Child cannot nudge, finalize or mutate the parent's board, nor acquire worker-only skills; existing conversation prompt bytes remain unchanged. | pending / — |
+| Compression bookkeeping — `FC-25-E05` | Simulate manual compression returning neither rotation nor in-place publication → operation reports failure and retains token/bookkeeping state. | No success/committed status for an unpublished result; this row does not claim published-child rollback coverage. | pending / — |
+| External skill cache and descriptions — `FC-26-E01`, `FC-26-E02` | Edit/add/delete an external skill and change its category; build a fresh prompt and request explicitly bounded descriptions → new builds reflect files/category and honor the requested bound. | An already-running conversation's prompt stays byte-stable; this row does not claim a changed automatic description default. | pending / — |
+| Core dependency floors — `FC-28-E01` | Inspect the exact candidate's source dependency resolution for supported core paths → Starlette and multipart satisfy the restored security floors. | Do not infer voice dependency/runtime qualification or install into a live environment. | pending / — |
+| Test-runner cleanup — `FC-32-E01` | Force test subprocess spawn failure in a disposable harness → failure is reported and its allocated temporary root is removed. | Unrelated temporary roots/files survive. | pending / — |
+| Gateway restart delivery barrier — `FC-36-E02`, `FC-36-E03`, `FC-36-E04`, `FC-36-E05`, `FC-36-E06`, `FC-36-E07` | In an authorized disposable gateway, request model-tool, ordinary slash and busy-inline slash restart while delaying caller response delivery → restart waits for the correct generation's delivery before draining/reconnecting intended profiles, even after active agent counts reach zero. | Denied/unauditable requests never restart; unrelated or stale callbacks cannot release the barrier. Use inert supervisor boundaries until disposable restart is separately authorized. | pending / — |
 
-Added future checks, only after the affected Critical implementation approval:
-
-- Validate approved explicit voice dependencies on supported runtime/platform
-  paths; wheels-only resolution is already completed and is not runtime proof.
-- Exercise approved process-command parser changes against the preserved G30
-  matrix, including current stronger timeout/env-unset refusals. Never execute
-  destructive matrix commands as part of this qualification.
-
-## Added future human checks (deferred)
-
-- In a separately authorized disposable deployment, select a model for a named
-  profile from a delayed picker; only that profile's settings should change.
-- Confirm allowlisted secondary cron profiles show their own heartbeat and
-  adapter identity; excluded profiles remain inactive.
-- Confirm a platform connected only for a secondary profile can deliver that
-  profile's task notification. G19 policy decisions must be resolved before
-  testing changed destination behavior; this continuation changes none.
-- Confirm shared restart preflight reports all active work and actual restart
-  waits for caller delivery, drains and reconnects the intended profiles under
-  its supervisor. Local tests used transport/process stubs, not a live restart.
-- Confirm linked-worktree setup leaves the canonical launcher/shell unchanged;
-  the automated fixture executed only extracted setup_path, never bootstrap.
-
-The original human checks and rollback groups remain below as an explicitly
-historical checklist, not current permission or a reason to stop development.
-
-## Historical correction checklist (superseded policy/status)
-
-# Restored safe slice — candidate-bound human checklist
-
-Source candidate: `7abcbc9d82e4216da4242d75d599d43aafbb96fe`. Documentation is committed afterward; bind this checklist to the exact final git HEAD in the correction report. **Do not run or activate this candidate now.** This is a source review and future isolated-validation checklist, not whole-scope readiness. Root initiative remains blocked on [precise Critical decisions](critical-gates.md).
-
-1. Confirm the final candidate descends from that source SHA and differs only by handoff documentation. Expected: exact source commit, clean status, all 51 audit IDs and 239 historical entries intact.
-2. Ang pushes that exact candidate to source-only staging and inspects the fresh hosted CI. Expected: restart service-detection, drain, progress, e2e plaintext restart and TTS dotenv failures clear; all original 51 new tests plus the added no-SDK case collect. The earlier run is evidence only for e36f3d7.
-3. Inspect the focused safe-slice receipts: cleanup preserves untracked descendants; strict cron prompts reject unsafe effective content without persistence; inventory ignores worker DB pins; children do not consume worker lifecycle. Expected: isolated tests pass with existing stronger refusals retained.
-4. Inspect provider/display/delivery receipts: configured ElevenLabs settings reach both paths; defaults omit SDK settings; progress selects a meaningful bounded command; model and busy slash restart wait for caller delivery without bypassing audit/drain. Expected: no live synthesis, sends or restart in validation.
-5. Inspect the compression/skills/process receipts: failed compression preserves bookkeeping; future skill builds refresh while conversation prompts remain frozen; timed-out transforms clean only their own test process tree. Expected: named isolated tests pass, no published-child rollback claim.
-6. After fresh CI passes, request a **separate activation decision** with exact SHA, disposable test environment and rollback selection. Any actual human runtime validation must wait for that approval. Main promotion is also excluded from this batch.
-
-Exclusions: canonical/main checkout, live state/configs/credentials/venvs, Kanban, all parked Discord voice work (FC24 and voice-specific FC17), archive-only features and intentional policy removals. General FC04 TTS and FC25 compression are the scoped exceptions already documented; they do not import the voice branch.
-
-Rollback groups (planned only; no rollback performed):
-
-- CI correction: revert `7abcbc9d82` as one cohesive source/test unit only if withdrawing the correction; it would restore the known CI failures.
-- Restart: initial delivery barrier plus prepend callback and busy-inline delivery fixes form one group; keep authorization/audit and drain safeguards together.
-- Strict cron scanner coverage: core create/update, tool/API and fire-time paths form one group.
-- Worker lifecycle and inventory: use the distinct owning commits in the ledger, preserving baseline FC20 task/tool hotfix and durable mutation refusals.
-- TTS/settings, compact display/Discord text, skill refresh, compression bookkeeping, cleanup/process handling: revert each ledger-owned slice with its tests and dependencies; consult cross-slice notes in the handoff.
-- Dependency floors: manifest and lockfile together. Documentation/evidence commits are separately reversible and should remain as historical records.
+Historical CI: exact `3c8f7d0` passed hosted run 34523897060, including 52 added
+tests. This remains a historical checkpoint, not evidence for later candidates.
+Future integration and full CI belong to Ang's exact-SHA staging verification.
