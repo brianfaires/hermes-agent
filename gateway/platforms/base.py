@@ -2156,6 +2156,26 @@ def _resolve_extensionless_candidate(path: str) -> Optional[str]:
     return validate_media_delivery_path(path)
 
 
+def _media_directive_scan_text(text: str) -> str:
+    """Mask protected spans without promoting inline tags into directives.
+
+    Code masking replaces characters with spaces. Check line eligibility on
+    the original text first, so a prefix such as `` `example` MEDIA:/file ``
+    cannot become a standalone directive after that masking.
+    """
+    eligible = []
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^[ \t]*(?:[-*][ \t]+)?[`\"'*_]{0,3}MEDIA:", line, re.IGNORECASE):
+            eligible.append(line)
+        else:
+            eligible.append("".join("\n" if char == "\n" else " " for char in line))
+    masked = BasePlatformAdapter._mask_protected_spans(text)
+    masked = BasePlatformAdapter._mask_json_string_media(masked)
+    eligibility = "".join(eligible)
+    return "".join(char if eligibility[index] != " " else " "
+                   for index, char in enumerate(masked))
+
+
 def _strip_media_tag_directives(text: str) -> str:
     """Remove MEDIA: tags and [[audio_as_voice]] / [[as_document]] markers.
 
@@ -2176,8 +2196,7 @@ def _strip_media_tag_directives(text: str) -> str:
     # exactly those spans from the unmasked text — same pattern as
     # extract_media. Import-cycle-free: BasePlatformAdapter is defined later
     # in this module, so resolve it lazily at call time.
-    masked = BasePlatformAdapter._mask_protected_spans(cleaned)
-    masked = BasePlatformAdapter._mask_json_string_media(masked)
+    masked = _media_directive_scan_text(cleaned)
 
     spans: list = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
     for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked):
@@ -5156,8 +5175,7 @@ class BasePlatformAdapter(ABC):
         #  - serialized JSON string values hold stored tool-result text (#34375)
         # Both maskers are offset-preserving (chars -> spaces) so match offsets
         # stay valid; chaining them masks the union of both protected regions.
-        scan_content = BasePlatformAdapter._mask_protected_spans(content)
-        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+        scan_content = _media_directive_scan_text(content)
         # Dedupe on the expanded path (first occurrence wins) so the same file
         # referenced twice in one response — e.g. a MEDIA tag inline AND in a
         # summary footer — is uploaded once, not twice (#29131).
@@ -5206,8 +5224,7 @@ class BasePlatformAdapter(ABC):
         # ``cleaned`` (not ``content``) keeps offsets valid after the
         # [[audio_as_voice]] / [[as_document]] directives are removed.
         if media:
-            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
-            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
+            masked_cleaned = _media_directive_scan_text(cleaned)
             spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
             for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked_cleaned):
                 path = _normalize_media_tag_path(match.group("path"))
