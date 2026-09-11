@@ -67,7 +67,7 @@ class TestRunningJobGuard:
         }
 
         # Simulate the job already running.
-        sched._running_job_ids.add("guard-job")
+        sched._running_job_ids.add(sched._running_job_key("guard-job"))
 
         dispatched = []
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
@@ -81,7 +81,7 @@ class TestRunningJobGuard:
         assert n == 0  # skipped, not dispatched
         assert dispatched == []
 
-        sched._running_job_ids.discard("guard-job")
+        sched._running_job_ids.discard(sched._running_job_key("guard-job"))
         sched._shutdown_parallel_pool()
 
 
@@ -132,7 +132,7 @@ class TestRunningJobGuard:
         future.set_result(result)
 
         assert claim_calls == [("queued-job", {"return_job": True})]
-        assert "queued-job" not in sched._running_job_ids
+        assert sched._running_job_key("queued-job") not in sched._running_job_ids
 
 
     def test_create_execution_failure_does_not_wedge_running_set(self, tmp_path, monkeypatch):
@@ -194,8 +194,8 @@ class TestRunningJobGuard:
 
         assert n == 1
         assert called == ["healthy-job"]
-        assert "failing-job" not in sched._running_job_ids
-        assert "healthy-job" not in sched._running_job_ids
+        assert sched._running_job_key("failing-job") not in sched._running_job_ids
+        assert sched._running_job_key("healthy-job") not in sched._running_job_ids
 
         sched._shutdown_parallel_pool()
 
@@ -340,7 +340,7 @@ class TestWorkdirParallelPool:
         }
 
         # Simulate the job already running.
-        sched._running_job_ids.add("guard-seq")
+        sched._running_job_ids.add(sched._running_job_key("guard-seq"))
 
         dispatched = []
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
@@ -354,7 +354,7 @@ class TestWorkdirParallelPool:
         assert n == 0  # skipped, not dispatched
         assert dispatched == []
 
-        sched._running_job_ids.discard("guard-seq")
+        sched._running_job_ids.discard(sched._running_job_key("guard-seq"))
         sched._shutdown_parallel_pool()
 
 class TestTickBatchAdvance:

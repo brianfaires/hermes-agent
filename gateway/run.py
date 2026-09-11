@@ -9250,8 +9250,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         can't be imported (e.g. a minimal test double for this class).
         """
         try:
-            from cron.scheduler import get_running_job_ids
-            return len(get_running_job_ids())
+            from cron.scheduler import get_running_job_keys
+            return len(get_running_job_keys())
         except Exception:
             return 0
 
@@ -9480,9 +9480,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # mid-job freeze. Here an unreadable source counts as work (sentinel 1)
         # so the machine stays awake until the source is readable again.
         try:
-            from cron.scheduler import get_running_job_ids
+            from cron.scheduler import get_running_job_keys
 
-            cron_count = len(get_running_job_ids())
+            cron_count = len(get_running_job_keys())
         except Exception:  # noqa: BLE001 - unreadable source => assume busy
             logger.debug("scale-to-zero: cron work count unreadable — staying awake", exc_info=True)
             cron_count = 1

@@ -994,6 +994,7 @@ def _run_claimed_job(
     fire_owner = None
     try:
         from cron.scheduler import (
+            _running_job_key,
             release_running_job,
             run_one_job,
             try_register_running_job,
@@ -1006,6 +1007,7 @@ def _run_claimed_job(
         # running set — the same guard _submit_with_guard uses — which also
         # makes this run visible to the gateway shutdown drain
         # (get_running_job_ids, #60432) and mark_running_jobs_interrupted.
+        running_home = _running_job_key(job_id)[0]
         if not try_register_running_job(job_id):
             return {
                 "claimed": True,
@@ -1108,7 +1110,7 @@ def _run_claimed_job(
                     _heartbeat_thread.join(timeout=_CRON_RUN_HEARTBEAT_INTERVAL + 1)
         finally:
             _registered = False
-            release_running_job(job_id)
+            release_running_job(job_id, profile_home=running_home)
         refreshed = get_job(job_id) or {}
         ok = refreshed.get("last_status") == "ok"
         return {
@@ -1127,7 +1129,7 @@ def _run_claimed_job(
             try:
                 from cron.scheduler import release_running_job as _release
 
-                _release(job_id)
+                _release(job_id, profile_home=running_home)
             except Exception:
                 pass
         try:
@@ -1280,7 +1282,7 @@ def _try_dispatch_background_run(
         try:
             from cron.scheduler import get_running_job_ids
 
-            if job_id in get_running_job_ids():
+            if job_id in get_running_job_ids(current_profile_only=True):
                 return {
                     "claimed": False,
                     "success": False,

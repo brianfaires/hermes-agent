@@ -291,7 +291,7 @@ class TestDispatchGuardReleasedAfterHang:
                 n2 = sched.tick(verbose=False)
                 assert n2 == 1
         finally:
-            sched._running_job_ids.discard("guard-sessiondb-hang")
+            sched._running_job_ids.discard(sched._running_job_key("guard-sessiondb-hang"))
             sched._shutdown_parallel_pool()
 
 

@@ -254,7 +254,7 @@ def _job_running_in_this_process(job_id: str) -> bool:
     """
     try:
         from cron.scheduler import get_running_job_ids
-        return job_id in get_running_job_ids()
+        return job_id in get_running_job_ids(current_profile_only=True)
     except Exception:
         logger.warning(
             "Cron running-set liveness check failed for job %r; keeping the "
