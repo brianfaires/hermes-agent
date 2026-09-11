@@ -166,6 +166,8 @@ class TestReasoningCommand:
 
         _CapturingAgent.last_init = None
         runner = _make_runner()
+        runner._launch_profile_home = hermes_home
+        runner._launch_profile_name = "default"
 
         source = SessionSource(
             platform=Platform.LOCAL,

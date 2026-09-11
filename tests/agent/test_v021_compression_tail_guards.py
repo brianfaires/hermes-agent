@@ -2,7 +2,7 @@
 import copy
 import unittest
 from unittest.mock import patch
-import test_v021_compression_publication as fixtures
+from tests.agent import test_v021_compression_publication as fixtures
 from agent.conversation_compression import CompressionCommitFence
 
 class PreservedTailGuards(unittest.TestCase):

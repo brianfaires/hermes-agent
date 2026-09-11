@@ -85,10 +85,8 @@ class TestMissingProfileWarning:
                 with patch("hermes_cli.profiles.profile_exists", return_value=False):
                     with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                         with caplog.at_level(logging.WARNING):
-                            result = mock_runner._resolve_profile_home_for_source(discord_source)
-                            
-                            # Should fall back to global HERMES_HOME
-                            assert result == Path("/hermes")
+                            with pytest.raises(ProfileRouteRejected, match="nonexistent"):
+                                mock_runner._resolve_profile_home_for_source(discord_source)
                             
                             # Should have logged a warning
                             assert len(caplog.records) == 1
@@ -113,10 +111,9 @@ class TestExceptionHandling:
             with patch("hermes_cli.profiles.get_profile_dir", side_effect=ValueError("Invalid profile name")):
                 with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                     with caplog.at_level(logging.WARNING):
-                        result = mock_runner._resolve_profile_home_for_source(discord_source)
-                        
-                        # Should fall back to global HERMES_HOME
-                        assert result == Path("/hermes")
+                        with pytest.raises(ProfileRouteRejected, match="bad-profile") as rejected:
+                            mock_runner._resolve_profile_home_for_source(discord_source)
+                        assert isinstance(rejected.value.__cause__, ValueError)
                         
                         # Should have logged a warning with exception info
                         assert len(caplog.records) == 1
@@ -129,18 +126,22 @@ class TestExceptionHandling:
 class TestRoutingConsultation:
     """Tests that _profile_name_for_source is consulted when source.profile is empty."""
     
-    def test_routing_consulted_when_source_profile_empty(self, mock_runner, discord_source):
+    def test_routing_consulted_when_source_profile_empty(self, mock_runner, discord_source, tmp_path):
         """_profile_name_for_source should be called when source.profile is empty."""
         discord_source.profile = None
-        
+        profile_home = tmp_path / "routed"
+        profile_home.mkdir()
+        (profile_home / "config.yaml").write_text("{}\n")
+
         with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
             with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
-                mock_get_dir.return_value = Path("/hermes/profiles/routed")
+                mock_get_dir.return_value = profile_home
                 
                 mock_runner._profile_name_for_source = MagicMock(return_value="routed")
                 
-                mock_runner._resolve_profile_home_for_source(discord_source)
-                
+                result = mock_runner._resolve_profile_home_for_source(discord_source)
+                assert result == profile_home
+
                 # Should have called routing
                 mock_runner._profile_name_for_source.assert_called_once_with(discord_source)
     

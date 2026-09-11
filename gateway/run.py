@@ -30226,11 +30226,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return self._launch_home()
         try:
             if not profile_exists(name):
+                logger.warning(
+                    "Rejecting profile %r for %s/%s: profile does not exist",
+                    name, source.platform.value, source.chat_id,
+                )
                 raise ProfileRouteRejected(name)
             return get_profile_dir(name)
         except ProfileRouteRejected:
             raise
         except Exception as exc:
+            logger.warning(
+                "Failed to resolve profile directory %r for %s/%s; rejecting route",
+                name, source.platform.value, source.chat_id, exc_info=True,
+            )
             raise ProfileRouteRejected(name) from exc
 
     async def _run_agent_inner(
