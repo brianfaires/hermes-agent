@@ -4,7 +4,7 @@
   "base": "cf62291dad2cd9c12de80bc5194ff76ef0f6ce55",
   "old_main": "2945588a014543d47c9e5e4a0d92ba6e361387c1",
   "audited_main": "31bb2aed2f65d8d4193b97d57a11770009fba656",
-  "source_candidate": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
+  "source_candidate": "3604efe12408fc50157e4e0e40198ebe06e8387c",
   "historical_audit_unchanged": true,
   "row_counts": {
     "unique_ids": 51,
@@ -26,7 +26,7 @@
     "focused_receipt": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/qualification-final.json [task-only provenance] (outside source, task evidence)",
     "independent_review": "independent-review.md (durable original native review; closed R1/R2 retained)",
     "critical_decisions": "critical-gates.md (historical design register; Brian approval supersedes old holds, classifications retained)",
-    "local_pytest_limitation": "Canonical interpreter lacks pytest; no installs. Host limitation, not a Critical approval blocker. Existing fixtures were executed by hosted CI.",
+    "local_pytest_limitation": "Canonical interpreter remains read-only. Ang installed/verified pytest9.1.1, pytest-asyncio1.3.0 and packaging26.0 only in task target test-deps-pinned; authorized per-file run-pytest-focused.py uses it without any canonical/live install. Prior unittest receipts remain historical.",
     "correction_review": "CI_CORRECTION_REVIEW.md",
     "hosted_ci": "V021_CI_EVIDENCE.json",
     "correction_tests": "Exact 3c8f7d0 run 34523897060 succeeded, including 52 added tests and corrected existing fixtures; supersedes pending correction CI.",
@@ -44,15 +44,21 @@
     "approved_batch2_tests": "V021_APPROVED_BATCH2_TESTS.json",
     "approved_batch2_review": "V021_APPROVED_BATCH2_REVIEW.md",
     "latest_approved_ci": {
-      "sha": "4cef65cada7ac1e483d117949862784beb8dc7aa",
-      "run_id": 34545497788,
+      "sha": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
+      "run_id": 34547488980,
       "status": "completed",
       "conclusion": "failure",
-      "source": "Ang completed-run report; raw slice7 receipt confirms one failing case,19 passing tests in file",
-      "failed_case": "tests/cron/test_execution_ledger.py::test_execution_ledger_follows_the_current_profile_home",
-      "job_id": 103097319943,
-      "raw_sha256": "4a3ccd44fbf6529e48cd4648dca08ec1b80b4f707444e406df4da1d2c9557b89",
-      "next_ci": "Fresh exact candidate full hosted CI required after Ang integrates batch2 plus correction; no success inferred"
+      "failed_unique_cases": 26,
+      "failed_python_shards": [
+        1,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "source": "Ang correction brief and read-only gh run view final-correction-hosted-ci.json",
+      "next_ci": "Fresh exact integrated corrected candidate full hosted CI required; no green result inferred"
     },
     "approved_ci_correction": "V021_APPROVED_CI_CORRECTION.md; V021_APPROVED_CI_CORRECTION_TESTS.json; V021_APPROVED_CI_CORRECTION_REVIEW.md",
     "approved_batch3_tests": "V021_APPROVED_BATCH3_TESTS.json",
@@ -60,8 +66,16 @@
     "latest_staging_checkpoint": {
       "sha": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
       "source": "Ang user report: all12 batch2 hashes/correction bindings verified;47 focused tests independently passed",
-      "ci": "Fresh full hosted CI starting per Ang; no green result supplied",
+      "ci": "Hosted34547488980 completed FAILURE with26 indexed cases; supersedes starting status. Source7581ed1325 was preserved without staging integration. Corrected source now passed focused actual pytest; fresh exact integrated candidate hosted CI required.",
       "authority": "Ang may integrate and push staging; source workers do not push. Main/live remain excluded."
+    },
+    "approved_final_correction": "V021_APPROVED_FINAL_CORRECTION.md; V021_APPROVED_FINAL_CORRECTION_TESTS.json; V021_APPROVED_FINAL_CORRECTION_REVIEW.md",
+    "approved_final_correction_counts": {
+      "unique_passed": 544,
+      "files": 41,
+      "hosted_failed_cases_now_covered": 26,
+      "batch3_changed_test_files": 21,
+      "review": "V021_APPROVED_FINAL_CORRECTION_REVIEW.md"
     }
   },
   "limitations": [
@@ -246,6 +260,30 @@
     {
       "sha": "31bf95b85160ec4b205b28b01f5f4b99a2caa802",
       "subject": "fix(compression): preserve explicit tail through adoption and commit transforms"
+    },
+    {
+      "sha": "eae10f0131e0ea44be5f96a635e191856f054f45",
+      "subject": "test(cron): verify private refresh and receiver ownership contracts"
+    },
+    {
+      "sha": "5a1986b8acd5430a22480905f56a7bffa5eeb7ad",
+      "subject": "fix(gateway): retain rejection diagnostics and qualify owned lifecycle fixtures"
+    },
+    {
+      "sha": "54b8162265593dba7203b3ff1c6ccfd0166b70f0",
+      "subject": "test(discord): preserve pinned homes and view lifecycle in pytest fixtures"
+    },
+    {
+      "sha": "e37a0cc62bbc73b20267b2a65010ac20d9bb7d2c",
+      "subject": "fix(release): preserve historical cron observation and isolated lifecycle tests"
+    },
+    {
+      "sha": "b3fbe551fbcc18e20138476068ff54eea155e289",
+      "subject": "test(release): synchronize ticker fault injection with real marker writes"
+    },
+    {
+      "sha": "3604efe12408fc50157e4e0e40198ebe06e8387c",
+      "subject": "test(cron): separate process startup from job refresh measurement"
     }
   ],
   "rows": [
@@ -9771,6 +9809,20 @@
       "source_candidate": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
       "status": "Ang independently verified batch2+CI correction and47 focused tests; exact origin/staging accepted",
       "ci": "Fresh full hosted CI starting per Ang; first-batch34545497788 failed. No final green result inferred."
+    },
+    {
+      "kind": "superseded_first_batch_ci",
+      "ci": {
+        "sha": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+        "run_id": 34545497788,
+        "status": "completed",
+        "conclusion": "failure",
+        "source": "Ang completed-run report; raw slice7 receipt confirms one failing case,19 passing tests in file",
+        "failed_case": "tests/cron/test_execution_ledger.py::test_execution_ledger_follows_the_current_profile_home",
+        "job_id": 103097319943,
+        "raw_sha256": "4a3ccd44fbf6529e48cd4648dca08ec1b80b4f707444e406df4da1d2c9557b89",
+        "next_ci": "Fresh exact candidate full hosted CI required after Ang integrates batch2 plus correction; no success inferred"
+      }
     }
   ],
   "approved_continuation_base": "c0a3098235b47d88090966e38837953dc95ddf30",
@@ -9782,5 +9834,6 @@
     "source": "../approved-restoration-brief.md (task evidence)"
   },
   "approved_batch2_base": "4cef65cada7ac1e483d117949862784beb8dc7aa",
-  "approved_batch3_base": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8"
+  "approved_batch3_base": "75a30e9809eb2db9edd40fb741c6a43d717c8fb8",
+  "approved_final_correction_base": "7581ed1325074e7e979d2f0fb00d74dd9ebfa464"
 }
