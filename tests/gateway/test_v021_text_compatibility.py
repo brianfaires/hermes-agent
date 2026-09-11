@@ -19,7 +19,7 @@ class TextCompatibility(unittest.TestCase):
         self.assertIn('a\\_b', result)
 
     def test_standalone_media_extract_and_cleanup_agree(self):
-        for directive in ['MEDIA:/tmp/a.pdf', '  MEDIA:"/tmp/a b.pdf"', '- **MEDIA:/tmp/a.pdf**']:
+        for directive in ['MEDIA:/tmp/a.pdf', 'MEDIA:/tmp/a.xlsx[[as_document]]', '  MEDIA:"/tmp/a b.pdf"', '- **MEDIA:/tmp/a.pdf**']:
             with self.subTest(directive=directive):
                 media, cleaned = BasePlatformAdapter.extract_media(directive)
                 self.assertEqual(len(media), 1)
