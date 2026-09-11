@@ -80,10 +80,11 @@ Use the same candidate/operator/evidence fields and disposable-activation gate a
 
 ## Candidate and rollback boundaries
 
-Implementation/actual-pytest checkpoint: `38c54fbb1b733e6c98e93f9e03f3332f8f5e974f`.
-This checklist-only follow-up does not change its source/test bytes. The exact
-integrated commit/tree and fresh full CI are bound in Ang's task handoff and the
-commit-specific link to this file; record that final identity when testing.
+Earlier implementation/actual-pytest checkpoint: `38c54fbb1b733e6c98e93f9e03f3332f8f5e974f`.
+Subsequent reviewed fixture and packaging corrections are recorded with code.
+The exact integrated commit/tree and fresh full CI are bound in Ang's task
+handoff and the commit-specific link to this file; record that final identity
+when testing. Earlier checkpoints alone do not qualify the final candidate.
 
 Rollback is not authorized here. Use the ledger's owning commits, keeping each
 feature and its corrective commits/tests together. In particular: registry and
