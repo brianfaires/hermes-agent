@@ -2557,25 +2557,25 @@ def _profile_runtime_scope(profile_home: "Path"):
 
     Only used on the multiplexed inbound path. Single-profile gateways never
     enter this scope, so their behavior is unchanged. Loading the profile's
-    ``.env`` here does NOT mutate ``os.environ`` — ``build_profile_secret_scope``
+    ``.env`` here does NOT mutate ``os.environ`` — ``refresh_profile_secret_scope``
     returns an isolated dict — which is what keeps subprocesses (MCP, kanban)
     from inheriting cross-profile secrets.
     """
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from agent.secret_scope import (
-        build_profile_secret_scope,
+        refresh_profile_secret_scope,
         set_secret_scope,
         reset_secret_scope,
     )
-    from hermes_cli.env_loader import hydrate_profile_secret_sources
 
     home_token = set_hermes_home_override(str(profile_home))
-    hydrate_profile_secret_sources(Path(profile_home))
-    secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
     try:
-        yield
+        secret_token = set_secret_scope(refresh_profile_secret_scope(Path(profile_home)))
+        try:
+            yield
+        finally:
+            reset_secret_scope(secret_token)
     finally:
-        reset_secret_scope(secret_token)
         reset_hermes_home_override(home_token)
 
 
@@ -5999,6 +5999,7 @@ class TurnRunner:
             user_id=getattr(ctx.source, "user_id", None),
             user_id_alt=getattr(ctx.source, "user_id_alt", None),
             skip_context_files=skip_context_files,
+            profile_home=str(Path(get_hermes_home()).resolve()),
         )
         agent = None
         reused_cached_agent = False
@@ -7426,6 +7427,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
+        self._launch_profile_home = Path(get_hermes_home()).resolve()
+        from hermes_cli.profiles import get_active_profile_name
+        self._launch_profile_name = get_active_profile_name() or "default"
         # When multiplex_profiles is on, load under the default profile secret
         # scope so bot tokens in that profile's .env resolve the same way
         # secondary profiles do (#64674). Explicit config= injection (tests)
@@ -15503,6 +15507,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _active_profile_name(self) -> str:
         """Return the profile name this gateway represents."""
+        pinned = getattr(self, "_launch_profile_name", None)
+        if isinstance(pinned, str) and pinned:
+            return pinned
         try:
             from hermes_cli.profiles import get_active_profile_name
             return get_active_profile_name() or "default"
@@ -17163,9 +17170,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 pass
             if profile_home is not None:
-                with _profile_runtime_scope(profile_home):
+                event.source._authorization_profile_home = profile_home
+                runtime_home = self._resolve_profile_home_for_source(event.source)
+                with _profile_runtime_scope(runtime_home):
                     return await self._handle_message(event)
-            return await self._handle_message(event)
+            return None
 
         return _handler
 
@@ -17198,7 +17207,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         bypass adapter routing are resolved here; genuinely unrouted events retain
         the gateway's launch/default home.
         """
-        default_home = Path(get_hermes_home())
+        default_home = self._launch_home()
 
         async def _handler(event):
             source = event.source
@@ -17265,15 +17274,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
             if profile_home is not None:
-                with _profile_runtime_scope(profile_home):
+                source._authorization_profile_home = profile_home
+                with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                     return await self._handle_gateway_platform_event(event, source)
-            return await self._handle_gateway_platform_event(event, source)
+            return None
 
         return _handler
 
     def _make_default_profile_platform_event_handler(self):
         """Scope primary-transport events to their routed multiplex profile."""
-        default_home = Path(get_hermes_home())
+        default_home = self._launch_home()
 
         async def _handler(event, source):
             source._authorization_profile_home = default_home
@@ -17281,6 +17291,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler
+
+    def _unauthorized_dm_behavior_for_source(self, source: SessionSource) -> str:
+        """Resolve pairing policy under the receiving transport's home."""
+        adapter = self._registered_transport_adapter(source)
+        home = getattr(adapter, "runtime_profile_home", None)
+        if home is None:
+            home = getattr(source, "_authorization_profile_home", None)
+        def resolve():
+            return self._get_unauthorized_dm_behavior(
+                source.platform, profile=self._adapter_profile_for_source(source),
+            )
+        if home is not None:
+            with _profile_runtime_scope(home):
+                return resolve()
+        return resolve()
 
     def _is_user_authorized_for_source(
         self,
@@ -18267,10 +18292,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # In DMs: offer pairing code. In groups: silently ignore.
             if (
                 source.chat_type == "dm"
-                and self._get_unauthorized_dm_behavior(
-                    source.platform,
-                    profile=source.profile,
-                )
+                and self._unauthorized_dm_behavior_for_source(source)
                 == "pair"
             ):
                 platform_name = source.platform.value if source.platform else "unknown"
@@ -28309,6 +28331,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user_id: str | None = None,
         user_id_alt: str | None = None,
         skip_context_files: bool = False,
+        profile_home: str | None = None,
     ) -> str:
         """Compute a stable string key from agent config values.
 
@@ -28316,6 +28339,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         discarded and rebuilt.  When it stays the same, the cached agent is
         reused — preserving the frozen system prompt and tool schemas for
         prompt cache hits.
+
+        ``profile_home`` separates runtime ownership without changing the
+        signature for successive turns in the same home. Identical model/user
+        settings cannot authorize reuse of an agent built under another home.
 
         ``cache_keys`` is an optional flat dict of additional config values
         that should invalidate the cache when they change.  Callers pass
@@ -28368,6 +28395,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # (context files in vs out) — a toggled config edit must
                 # rebuild the cached agent, not silently reuse it.
                 bool(skip_context_files),
+                str(profile_home or ""),
             ],
             sort_keys=True,
             default=str,
@@ -30058,16 +30086,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         change for single-profile gateways.
         """
         if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
-            return await self._run_agent_inner(
-                message, context_prompt, history, source, session_id,
-                session_key=session_key, run_generation=run_generation,
-                _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                channel_prompt=channel_prompt, moa_config=moa_config,
-                persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-                persist_user_display_kind=persist_user_display_kind,
-                message_type=message_type,
-            )
+            from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+            home_token = set_hermes_home_override(self._launch_home())
+            try:
+                return await self._run_agent_inner(
+                    message, context_prompt, history, source, session_id,
+                    session_key=session_key, run_generation=run_generation,
+                    _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
+                    channel_prompt=channel_prompt, moa_config=moa_config,
+                    persist_user_message=persist_user_message,
+                    persist_user_timestamp=persist_user_timestamp,
+                    persist_user_display_kind=persist_user_display_kind,
+                    message_type=message_type,
+                )
+            finally:
+                reset_hermes_home_override(home_token)
 
         profile_home = self._resolve_profile_home_for_source(source)
         with _profile_runtime_scope(profile_home):
@@ -30147,64 +30180,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         return None
 
-    def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
-        """Resolve which profile's HERMES_HOME should serve this inbound source.
+    def _launch_home(self) -> "Path":
+        home = getattr(self, "_launch_profile_home", None)
+        return Path(home) if home is not None else Path(get_hermes_home()).resolve()
 
-        Resolution order:
-          1. ``source.profile`` — set by /p/<profile>/ URL prefix, per-credential
-             adapter ownership, OR profile_routes matching at ``build_source`` time.
-          2. ``_profile_name_for_source`` — re-run routing here as a defensive
-             fallback for sources that bypass ``build_source``.
-          3. The active profile (the multiplexer's own home).
-        """
+    def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
+        """Resolve runtime home without borrowing an ambient routed profile."""
         from gateway.profile_routing import ProfileRouteRejected
-        from hermes_cli.profiles import (
-            get_active_profile_name,
-            get_profile_dir,
-            profile_exists,
-        )
-        from hermes_constants import get_hermes_home
-        
-        # Track whether a profile was explicitly requested (vs. falling back to default)
-        explicit_profile = None
+        from hermes_cli.profiles import get_profile_dir, profile_exists
+
+        name = (getattr(source, "profile", None) or "").strip()
+        if not name:
+            name = self._profile_name_for_source(source)
+        if not name or name == self._active_profile_name():
+            return self._launch_home()
         try:
-            name = (source.profile or "").strip()
-            if name:
-                explicit_profile = name  # User explicitly set this profile
-            if not name:
-                name = self._profile_name_for_source(source)
-                if name:
-                    explicit_profile = name  # Routing explicitly set this profile
-            if not name:
-                name = get_active_profile_name() or "default"
-            
-            profile_dir = get_profile_dir(name)
-            # Warn if an explicit profile doesn't exist on disk
-            if explicit_profile and not profile_exists(name):
-                logger.warning(
-                    "Profile %r does not exist for source %s/%s (guild_id=%s), "
-                    "falling back to global HERMES_HOME",
-                    explicit_profile,
-                    source.platform.value,
-                    source.chat_id,
-                    getattr(source, "guild_id", None),
-                )
-                return get_hermes_home()
-            return profile_dir
+            if not profile_exists(name):
+                raise ProfileRouteRejected(name)
+            return get_profile_dir(name)
         except ProfileRouteRejected:
             raise
-        except Exception:
-            # Catch normalization errors, path errors, etc.
-            logger.warning(
-                "Failed to resolve profile directory for source %s/%s (guild_id=%s), "
-                "falling back to global HERMES_HOME: %s",
-                source.platform.value,
-                source.chat_id,
-                getattr(source, "guild_id", None),
-                explicit_profile or "(no profile)",
-                exc_info=True,
-            )
-            return get_hermes_home()
+        except Exception as exc:
+            raise ProfileRouteRejected(name) from exc
 
     async def _run_agent_inner(
         self,
