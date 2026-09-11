@@ -888,6 +888,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nlist.add_argument("task_id", nargs="?", default=None)
     p_nlist.add_argument("--json", action="store_true")
 
+    p_naudit = sub.add_parser("notify-audit", help="Report existing subscriptions outside current routing policy")
+    p_naudit.add_argument("--json", action="store_true")
+
     p_nrm = sub.add_parser(
         "notify-unsubscribe",
         help="Remove a gateway subscription from a task",
@@ -1185,6 +1188,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "assignees": _cmd_assignees,
             "notify-subscribe":   _cmd_notify_subscribe,
             "notify-list":        _cmd_notify_list,
+            "notify-audit":       _cmd_notify_audit,
             "notify-unsubscribe": _cmd_notify_unsubscribe,
             "context":  _cmd_context,
             "specify":  _cmd_specify,
@@ -3061,7 +3065,8 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         if kb.get_task(conn, args.task_id) is None:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
-        kb.add_notify_sub(
+        from hermes_cli.kanban_notifications import subscribe_notify
+        target = subscribe_notify(
             conn, task_id=args.task_id,
             platform=args.platform, chat_id=args.chat_id,
             chat_type=args.chat_type,
@@ -3070,9 +3075,20 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
             notifier_profile=args.notifier_profile or _profile_author(),
             delivery_mode=getattr(args, "delivery_mode", None),
         )
-    print(f"Subscribed {args.platform}:{args.chat_id}"
-          + (f":{args.thread_id}" if args.thread_id else "")
+        if target is None:
+            print("Notification policy denied this destination", file=sys.stderr)
+            return 1
+    print(f"Subscribed {target['platform']}:{target['chat_id']}"
+          + (f":{target['thread_id']}" if target.get('thread_id') else "")
           + f" to {args.task_id}")
+    return 0
+
+
+def _cmd_notify_audit(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_notifications import audit_notify_subs
+    with kb.connect_closing() as conn:
+        rows = audit_notify_subs(conn)
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
     return 0
 
 

@@ -1594,8 +1594,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                 delivery_metadata["telegram_reply_to_message_id"] = str(message_id)
 
         # Lazy-import to keep the module-level dependency light
-        from hermes_cli import kanban_db as _kb
-        _kb.add_notify_sub(
+        from hermes_cli.kanban_notifications import subscribe_notify
+        target = subscribe_notify(
             conn, task_id=task_id,
             platform=platform, chat_id=chat_id,
             thread_id=thread_id, user_id=user_id, user_id_alt=user_id_alt,
@@ -1604,7 +1604,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             delivery_mode=delivery_mode,
             delivery_metadata=delivery_metadata or None,
         )
-        return True
+        return target is not None
     except Exception as _exc:
         logger.warning(
             "_maybe_auto_subscribe failed: %r (platform=%r key_set=%r)",

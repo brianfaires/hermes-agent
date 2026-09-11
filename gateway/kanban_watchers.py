@@ -221,6 +221,17 @@ class GatewayKanbanWatchersMixin:
         self._kanban_dispatcher_lock_handle = None
         _release_singleton_lock(handle)
 
+    def _kanban_policy_subscription(self, sub: dict) -> Optional[dict]:
+        from hermes_cli.kanban_notifications import policy_subscription
+        owner = sub.get("notifier_profile")
+        profile_adapters = getattr(self, "_profile_adapters", {}).get(owner, {})
+        home = next((getattr(adapter, "runtime_profile_home", None)
+                     for adapter in profile_adapters.values()
+                     if getattr(adapter, "runtime_profile_home", None) is not None), None)
+        if home is None and (not owner or owner == self._active_profile_name()):
+            home = getattr(self, "_launch_profile_home", None)
+        return policy_subscription(sub, profile_home=home)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 
@@ -475,7 +486,10 @@ class GatewayKanbanWatchersMixin:
                                                 sub.get("task_id"), owner_profile, notifier_profile,
                                             )
                                             continue
-                                    platform = (sub.get("platform") or "").lower()
+                                    target_sub = self._kanban_policy_subscription(sub)
+                                    if target_sub is None:
+                                        continue
+                                    platform = (target_sub.get("platform") or "").lower()
                                     if platform not in active_platforms:
                                         logger.debug(
                                             "kanban notifier: subscription for %s on %s skipped; adapter not connected",
@@ -519,7 +533,17 @@ class GatewayKanbanWatchersMixin:
 
                 deliveries = await asyncio.to_thread(_collect)
                 for d in deliveries:
-                    sub = d["sub"]
+                    original_sub = d["sub"]
+                    # Recheck after collection so edits between claim and send
+                    # cannot bypass policy. Keep cursor writes on the stored row.
+                    sub = self._kanban_policy_subscription(original_sub)
+                    if sub is None:
+                        await _to_thread_process_service(
+                            self._kanban_rewind, original_sub, d["cursor"],
+                            d.get("old_cursor", 0), d.get("board"),
+                        )
+                        continue
+                    sub["_cursor_sub"] = original_sub
                     task = d["task"]
                     board_slug = d.get("board")
                     tick_context.update(operation="deliver_subscription", board=board_slug, task_id=sub.get("task_id"))
@@ -1122,6 +1146,7 @@ class GatewayKanbanWatchersMixin:
         ``board`` scopes the DB connection to the board that owns this
         subscription. Unsub cursors in one board can't touch another's.
         """
+        sub = sub.get("_cursor_sub", sub)
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
@@ -1137,6 +1162,7 @@ class GatewayKanbanWatchersMixin:
             conn.close()
 
     def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
+        sub = sub.get("_cursor_sub", sub)
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
@@ -1158,6 +1184,7 @@ class GatewayKanbanWatchersMixin:
         board: Optional[str] = None,
     ) -> None:
         """Sync helper: undo a claimed notification cursor after send failure."""
+        sub = sub.get("_cursor_sub", sub)
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
