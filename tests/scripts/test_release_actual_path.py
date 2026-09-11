@@ -37,8 +37,11 @@ def wait(check, timeout=90):
     raise AssertionError(f'bounded readiness failed: {error}')
 
 
-@pytest.fixture(scope='module')
+@pytest.fixture
 def dependency_manifest(tmp_path_factory):
+    # Each disposable launch owns its own reviewed snapshot. A module-scoped
+    # snapshot has no dependency hold across intervening tests/imports and
+    # correctly triggers production drift refusal when those bytes change.
     root = tmp_path_factory.mktemp('deps')
     paths = list(dict.fromkeys(str(Path(p).resolve()) for p in sys.path
                                if p and ('site-packages' in p or '/lib/python3.' in p) and Path(p).is_dir()))
@@ -63,7 +66,47 @@ def test_actual_gateway_root_helper_allocates_unique_short_roots(tmp_path_factor
     assert len({root.parent for root in roots}) == 1
     assert all(root.is_dir() for root in roots)
     assert all(root.name[0] in {'c', 'r'} and len(root.name) <= 4 for root in roots)
-    assert all(len(str(root / 'profiles/secondary/gateway.sock')) < 104 for root in roots)
+    from gateway.control_socket import resolve_server_socket_path
+    for root in roots:
+        home = root / 'profiles/secondary'
+        socket_path, pointer = resolve_server_socket_path(home)
+        assert len(str(socket_path).encode('utf-8')) <= 104
+        if socket_path != home / 'gateway.sock':
+            assert pointer == home / 'gateway.sock.path'
+
+
+def test_long_home_control_socket_pointer_roundtrip_and_cleanup(tmp_path, monkeypatch):
+    import asyncio
+    from gateway.control_socket import GatewayControlServer, resolve_client_socket_path
+    home = tmp_path / ('long-home-' + 'x' * 110)
+    home.mkdir()
+    pointer = home / 'gateway.sock.path'
+    # A short procfs alias keeps the actual socket inside this test's root,
+    # even when its absolute path exceeds sun_path. No external symlink.
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    alias = Path(f'/proc/{os.getpid()}/fd/{directory_fd}')
+    import tempfile
+    monkeypatch.setattr(tempfile, 'tempdir', str(alias))
+
+    async def exercise():
+        server = GatewayControlServer(home, verb_handlers={'status': lambda: {'fixture': True}})
+        assert resolve_client_socket_path(home) is None
+        try:
+            assert await server.start()
+            target = Path(pointer.read_text())
+            assert len(str(target).encode('utf-8')) <= 104
+            assert resolve_client_socket_path(home) == target
+            assert target.resolve().parent == tmp_path.resolve()
+            assert await asyncio.to_thread(health._query_socket, home, 'status') == {'fixture': True}
+        finally:
+            await server.stop()
+        assert resolve_client_socket_path(home) is None
+        assert not pointer.exists()
+        assert not target.exists()
+    try:
+        asyncio.run(exercise())
+    finally:
+        os.close(directory_fd)
 
 
 @pytest.fixture
@@ -113,9 +156,18 @@ def actual_gateway(tmp_path_factory, dependency_manifest, request):
             '--repo', str(repo), '--startup-json', str(startup),
             '--dependencies', str(dependency_manifest), '--dependencies-sha256', c.digest(dependency_manifest.read_bytes()),
             '--', '-m', 'hermes_cli.main', 'gateway', 'run']
-    env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'HERMES_HOME': str(home), 'LANG': 'C.UTF-8'}
+    # Hold the directory until child cleanup; tempfile preserves this short
+    # alias instead of falling back to an outside-task /tmp socket path.
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    temp_alias = f'/proc/{os.getpid()}/fd/{directory_fd}'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'HERMES_HOME': str(home),
+           'TMPDIR': temp_alias, 'LANG': 'C.UTF-8'}
     with (root / 'gateway.log').open('w') as log:
-        process = subprocess.Popen(argv, env=env, stdout=log, stderr=log, cwd=root)
+        try:
+            process = subprocess.Popen(argv, env=env, stdout=log, stderr=log, cwd=root)
+        except BaseException:
+            os.close(directory_fd)
+            raise
         process.rollback_fixture = bool(getattr(request, 'param', None))
         try:
             yield root, home, secondary, startup, process
@@ -126,6 +178,8 @@ def actual_gateway(tmp_path_factory, dependency_manifest, request):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+            finally:
+                os.close(directory_fd)
 
 
 def test_final_launch_real_runner_collect_drain(actual_gateway, monkeypatch):
@@ -133,12 +187,31 @@ def test_final_launch_real_runner_collect_drain(actual_gateway, monkeypatch):
     # Only systemd ownership lookup is substituted; PID/starttime and all
     # application health are obtained from the actual disposable child.
     monkeypatch.setattr(health_contract, 'show', lambda unit: {'ActiveState': 'active', 'MainPID': str(process.pid)})
-    def collect():
+    def collect(max_age=90):
         if process.poll() is not None:
             pytest.fail((root / 'gateway.log').read_text()[-6000:])
-        return health.collect(startup, root / 'live.json', 'disposable.service', home, 90)
-    result = wait(collect)
+        return health.collect(startup, root / 'live.json', 'disposable.service', home, max_age)
+    try:
+        result = wait(collect)
+    except AssertionError as exc:
+        # Preserve the actual server refusal in disposable test output; the
+        # production health client's retry deliberately reports only its type.
+        import socket
+        from gateway.control_socket import resolve_client_socket_path
+        detail = None
+        target = resolve_client_socket_path(home)
+        if target is not None:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(3)
+                client.connect(str(target))
+                client.sendall(b'{"verb":"status","id":1,"protocol":1}\n')
+                detail = client.recv(512 * 1024).decode()
+        pytest.fail(f'{exc}; actual status: {detail}; gateway log: '
+                    + (root / 'gateway.log').read_text()[-6000:])
     assert result['healthy']
+    socket_pointer = home / 'gateway.sock.path'
+    if socket_pointer.exists():
+        assert Path(socket_pointer.read_text().strip()).resolve().is_relative_to(root.resolve())
     assert {'gateway.run', 'hermes_cli.main', 'cron.scheduler'} <= {row['module'] for row in result['loaded']}
     live = c.loads((root / 'live.json').read_bytes())
     assert live['served_profile_homes'] == {'default': str(home), 'secondary': str(secondary)}
@@ -197,8 +270,12 @@ def test_final_launch_real_runner_collect_drain(actual_gateway, monkeypatch):
     genuine_marker = success_marker.read_text()
     started = health._query_socket(home, 'status')['release_observation']['started']
     success_marker.write_text(str(started - 1))
+    # Isolate generation ownership from age: a slow real lifecycle can already
+    # be older than the normal90s freshness window. This negative must reject
+    # a marker that is recent under its own finite window but predates startup.
+    generation_window = max(90, int(time.time() - started) + 30)
     with pytest.raises(c.Refusal, match='predates'):
-        collect()
+        collect(max_age=generation_window)
     success_marker.write_text(genuine_marker)  # restore actual producer bytes
     # Genuine ticker created this file; stale secondary must block health.
     (secondary / 'cron/ticker_last_success').write_text(str(time.time() - 1000))
@@ -768,3 +845,37 @@ def test_actual_api_startup_maintenance_preserves_idle_and_busy(observation_runt
             await adapter.cancel_background_tasks()
             await adapter.disconnect()
     asyncio.run(exercise())
+
+
+def test_observer_cron_prefers_profile_keys_and_supports_legacy_snapshot(tmp_path):
+    from types import SimpleNamespace
+    current = SimpleNamespace(
+        get_running_job_keys=lambda: frozenset({(tmp_path / 'a', 'same'), (tmp_path / 'b', 'same')}),
+        get_running_job_ids=lambda: pytest.fail('current observer must not use collapsed legacy IDs'))
+    assert observation.cron_running_count(current) == 2
+    legacy = SimpleNamespace(get_running_job_ids=lambda: frozenset({'active'}))
+    assert observation.cron_running_count(legacy) == 1
+    legacy.get_running_job_ids = lambda: frozenset()
+    assert observation.cron_running_count(legacy) == 0
+
+
+def test_observer_cron_never_falls_back_on_current_getter_failure():
+    from types import SimpleNamespace
+    def broken():
+        raise RuntimeError('snapshot unavailable')
+    current = SimpleNamespace(get_running_job_keys=broken,
+                              get_running_job_ids=lambda: pytest.fail('must not fallback'))
+    with pytest.raises(RuntimeError, match='snapshot unavailable'):
+        observation.cron_running_count(current)
+
+
+@pytest.mark.parametrize('attributes', [
+    {}, {'get_running_job_keys': None, 'get_running_job_ids': lambda: frozenset()},
+    {'get_running_job_ids': None}, {'get_running_job_keys': lambda: []},
+    {'get_running_job_keys': lambda: frozenset({'raw-id'})},
+    {'get_running_job_ids': lambda: frozenset({None})},
+])
+def test_observer_cron_refuses_unreadable_snapshots(attributes):
+    from types import SimpleNamespace
+    with pytest.raises(RuntimeError, match='cron'):
+        observation.cron_running_count(SimpleNamespace(**attributes))
