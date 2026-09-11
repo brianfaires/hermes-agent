@@ -930,3 +930,23 @@ def test_bounded_voice_controls_preserve_unknown_speech_and_explicit_aliases():
     assert voice_control_transcripts('Can you stop by the store?') == ('Can you stop by the store?',)
     assert voice_control_transcripts('/queue Keep CASE') == ('/queue Keep CASE',)
     assert voice_control_transcripts('Correction: Keep CASE') == ('/stop', 'Keep CASE')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transcript', ['Old speech pending echo.', 'Replacement correction pending echo.'])
+async def test_new_onset_during_transcript_echo_drops_old_dispatch(tmp_path, transcript):
+    adapter = _discord_adapter_for_voice_dispatch()
+    adapter.config.extra['auto_voice_text_channel_id'] = 789
+    runner = _bare_runner(tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def echo(_):
+        entered.set()
+        await release.wait()
+    adapter._client = SimpleNamespace(get_channel=lambda _: SimpleNamespace(send=echo))
+    adapter.handle_message = AsyncMock()
+    task = asyncio.create_task(runner._handle_voice_channel_input(42, 123, transcript, adapter=adapter))
+    await asyncio.wait_for(entered.wait(), 2)
+    await adapter.stop_voice_playback(42)
+    release.set()
+    await asyncio.wait_for(task, 2)
+    adapter.handle_message.assert_not_awaited()

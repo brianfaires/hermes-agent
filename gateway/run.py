@@ -24612,6 +24612,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter = self.adapters.get(Platform.DISCORD)
         if not adapter:
             return
+        generation_getter = getattr(adapter, "_voice_output_generation", None)
+        input_generation = generation_getter(guild_id) if callable(generation_getter) else None
 
         text_ch_id = adapter._voice_text_channels.get(guild_id)
         if not text_ch_id:
@@ -24675,6 +24677,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt = resolved if isinstance(resolved, str) else None
             except Exception:
                 channel_prompt = None
+        if (input_generation is not None
+                and generation_getter(guild_id) != input_generation):
+            return
         model_text = transcript
         latch = getattr(adapter, "_voice_interruption_latches", {}).get(guild_id)
         if latch is not None and latch.take() and not transcript.startswith("/"):

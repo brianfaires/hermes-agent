@@ -617,6 +617,8 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_output_generation = MagicMock(return_value=0)
+        mock_adapter._voice_interruption_latches = {}
         mock_adapter._voice_sources = {}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -637,6 +639,8 @@ class TestVoiceChannelCommands:
         from gateway.config import Platform
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_output_generation = MagicMock(return_value=0)
+        mock_adapter._voice_interruption_latches = {}
         mock_adapter._voice_sources = {}
         mock_adapter._client = MagicMock()
         mock_adapter._client.get_channel = MagicMock(return_value=AsyncMock())
@@ -665,6 +669,8 @@ class TestVoiceChannelCommands:
 
         mock_adapter = AsyncMock()
         mock_adapter._voice_text_channels = {111: 123}
+        mock_adapter._voice_output_generation = MagicMock(return_value=0)
+        mock_adapter._voice_interruption_latches = {}
         mock_adapter._voice_sources = {111: bound_source.to_dict()}
         mock_channel = AsyncMock()
         mock_adapter._client = MagicMock()
@@ -1223,24 +1229,13 @@ class TestPlayInVoiceChannelUsesRunningLoop:
 class TestSendVoiceReplyFilename:
     """_send_voice_reply uses uuid for unique filenames."""
 
-    def test_filename_uses_uuid(self):
-        """The path builder uses uuid in the filename, not time-based.
-
-        Filename construction moved into build_auto_tts_output_path
-        (gateway/platforms/base.py) when the path became platform-aware;
-        the uniqueness contract lives there now.
-        """
-        import inspect
+    def test_concurrent_reply_paths_are_unique(self):
+        from gateway.config import Platform
         from gateway.platforms.base import build_auto_tts_output_path
-        from gateway.run import GatewayRunner
-        source = inspect.getsource(build_auto_tts_output_path)
-        assert "uuid" in source, \
-            "build_auto_tts_output_path should use uuid for unique filenames"
-        assert "int(time.time())" not in source, \
-            "build_auto_tts_output_path should not use int(time.time()) — collision risk"
-        runner_source = inspect.getsource(GatewayRunner._send_voice_reply)
-        assert "build_auto_tts_output_path" in runner_source, \
-            "_send_voice_reply should build its path via build_auto_tts_output_path"
+        with patch("time.time", return_value=1000):
+            paths = [build_auto_tts_output_path(Platform.DISCORD) for _ in range(10)]
+        assert len(set(paths)) == len(paths)
+        assert all(path.endswith(".mp3") for path in paths)
 
 
 # =====================================================================
@@ -1383,24 +1378,24 @@ class TestPlaybackTimeout:
 class TestSendVoiceReplyCleanup:
     """_send_voice_reply must clean up temp files even on exception."""
 
-    def test_cleanup_in_finally(self):
-        """The method has cleanup in a finally block, not inside try."""
-        import inspect, textwrap, ast
-        from gateway.run import GatewayRunner
-        source = textwrap.dedent(inspect.getsource(GatewayRunner._send_voice_reply))
-        tree = ast.parse(source)
-        func = tree.body[0]
-
-        has_finally_unlink = False
-        for node in ast.walk(func):
-            if isinstance(node, ast.Try) and node.finalbody:
-                finally_source = ast.dump(node.finalbody[0])
-                if "unlink" in finally_source or "remove" in finally_source:
-                    has_finally_unlink = True
-                    break
-
-        assert has_finally_unlink, \
-            "_send_voice_reply must have os.unlink in a finally block"
+    @pytest.mark.asyncio
+    async def test_cleanup_after_transport_exception(self, tmp_path):
+        from pathlib import Path
+        runner = _make_runner(tmp_path)
+        event = _make_event("hello", MessageType.VOICE)
+        adapter = SimpleNamespace(send_voice=AsyncMock(side_effect=RuntimeError("transport failed")))
+        runner.adapters[event.source.platform] = adapter
+        produced = []
+        def synthesize(*, text, output_path):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"fixture audio")
+            produced.append(Path(output_path))
+            return json.dumps({"success": True, "file_path": output_path})
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=synthesize):
+            await runner._send_voice_reply(event, "User-facing response.")
+        assert produced
+        adapter.send_voice.assert_awaited_once()
+        assert all(not path.exists() for path in produced)
 
 
 # =====================================================================
