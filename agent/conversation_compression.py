@@ -3088,6 +3088,7 @@ def compress_context(
     force: bool = False,
     defer_context_engine_notification: bool = False,
     commit_fence: Optional[CompressionCommitFence] = None,
+    preserve_tail_count: int = 0,
 ) -> Tuple[list, str]:
     """Compress conversation context and split the session in SQLite.
 
@@ -3151,6 +3152,10 @@ def compress_context(
     # rule; set by the breaker gates below when a TRANSIENT guard (cooldown /
     # structural backoff) no-ops this pass.
     agent._compression_blocked_transient = None
+
+    if (type(preserve_tail_count) is not int or preserve_tail_count < 0
+            or (preserve_tail_count and preserve_tail_count >= len(messages))):
+        raise ValueError("preserve_tail_count must leave a nonempty compression head")
 
     _attempt_started_at = time.monotonic()
     _attempt_id = uuid.uuid4().hex
@@ -3956,7 +3961,21 @@ def compress_context(
                 with aux_progress_hook(_progress_hook), aux_interrupt_protection(
                     cancel_event=_hard_cancel_event
                 ):
-                    compressed = compress_fn(messages, **compress_kwargs)
+                    if preserve_tail_count:
+                        # Keep the full input for all commit/rollback/watermark
+                        # guards; only the summarizer sees the requested head.
+                        from hermes_cli.partial_compress import rejoin_compressed_head_and_tail
+                        head = copy.deepcopy(messages[:-preserve_tail_count])
+                        tail = copy.deepcopy(messages[-preserve_tail_count:])
+                        compressed_head = compress_fn(head, **compress_kwargs)
+                        if compressed_head == messages_before_compression[:-preserve_tail_count]:
+                            compressed = copy.deepcopy(messages_before_compression)
+                        elif not compressed_head:
+                            compressed = []  # preserve the existing empty-result refusal
+                        else:
+                            compressed = rejoin_compressed_head_and_tail(compressed_head, tail)
+                    else:
+                        compressed = compress_fn(messages, **compress_kwargs)
                     # Freeze a hard stop that arrived after the final provider
                     # attempt unwound but before this transaction can rotate
                     # session state.
