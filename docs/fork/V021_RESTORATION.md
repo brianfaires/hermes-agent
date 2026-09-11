@@ -1,3 +1,20 @@
+# Current checkpoint: finite pytest/CI compatibility correction
+
+Hosted **34547488980 completed FAILURE** for `75a30e9809`, with26 indexed
+cases across six Python shards plus the aggregate. This supersedes previous
+starting/queued status. Source `7581ed1325` was preserved without staging
+integration. All approved scope remains implemented; this is a finite correction
+of actual product/fixture contracts and pytest compatibility, with no new features.
+
+[Correction evidence](V021_APPROVED_FINAL_CORRECTION.md),
+[actual pytest receipts](V021_APPROVED_FINAL_CORRECTION_TESTS.json) and
+[independent review](V021_APPROVED_FINAL_CORRECTION_REVIEW.md) bind the corrected
+candidate. Prior reviewed receipts remain immutable. The cumulative human checklist
+remains78 IDs, all pending; no additional UAT gate. Ang owns staging integration/push
+and fresh exact-candidate hosted CI. Workers do not push; main/live remain excluded.
+
+---
+
 # Current checkpoint: approved batch 3 locally qualified
 
 All 26 remaining approved IDs plus G32 are implemented and independently reviewed.
