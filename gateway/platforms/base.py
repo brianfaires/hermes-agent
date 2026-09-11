@@ -2071,11 +2071,12 @@ _MEDIA_EXT_ALTERNATION = "|".join(
 _MEDIA_CJK_TERMINATORS = "（）〈〉《》：，。；！？、\u201c\u201d\u2018\u2019【】"
 
 MEDIA_TAG_CLEANUP_RE = re.compile(
-    r'''[`"'*_]{0,3}MEDIA:\s*'''
+    r'''^[ \t]*(?:[-*][ \t]+)?[`"'*_]{0,3}MEDIA:(?![^\n]*MEDIA:)[ \t]*'''
     r'''(?P<path>`[^`\n]+?`|"[^"\n]+?"|'[^'\n]+?'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])\S+?(?:[^\S\n]+\S+?)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?''',
-    re.IGNORECASE,
+    r'''(?=[\s`"'*_,;:)\]}\[''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|\.(?:\s|$)|$)[`"'*_]{0,3}\.?'''
+    r'''[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Paths NOT covered by MEDIA_TAG_CLEANUP_RE's extension alternation — both
@@ -2089,73 +2090,27 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
 # prompt-injection paths that do not validate are left visible instead of
 # silently dropped.
 #
-# The path class uses a tempered-greedy token (``[^\s\n`"']+?`` followed by
-# a ``(?=...)`` lookahead) instead of the prior ``[^\s\n`"']+`` so a
-# tag glued to the next ``MEDIA:`` keyword (``MEDIA:/a.pngMEDIA:/b.png``)
-# or to arbitrary following text (``MEDIA:/a.pngSome text``) cannot
-# silently absorb the next path — that earlier behavior merged the two
-# paths into one invalid string and dropped the file (#68773).
-#
-# The bare form stays non-greedy and whitespace-bounded — spaced paths are
-# NOT absorbed at the regex level, because greedy space-tolerance would
-# reintroduce the #68773 bug class (gluing the next MEDIA: tag or trailing
-# prose into one invalid path). Instead, unknown-extension paths containing
-# spaces (``MEDIA:/data/map data.kmz``, ``C:\...\My Documents\x.log``) are
-# recovered by ``_match_extensionless_path`` (#24032): when the bare match
-# fails validation, the candidate is progressively extended forward across
-# single spaces — bounded, stopping at newline / the next ``MEDIA:`` keyword
-# — and the first extension that validates on disk wins. Validation is the
-# oracle, so prose never rides along and non-existent paths stay visible.
+# A directive occupies its own line. Bare paths may contain spaces; the
+# complete captured path must validate. Never shorten a prose suffix into a
+# valid file, or join adjacent MEDIA directives into one path.
 MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
-    r'''[`"'*_]{0,3}MEDIA:\s*'''
+    r'''^[ \t]*(?:[-*][ \t]+)?[`"'*_]{0,3}MEDIA:(?![^\n]*MEDIA:)[ \t]*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
-    r'''(?:~/|/|[A-Za-z]:[/\\])[^\s\n`"']+?)'''
+    r'''(?:~/|/|[A-Za-z]:[/\\])[^\n`"']+?)'''
     r'''(?=[`"'\s,;:)\]}''' + _MEDIA_CJK_TERMINATORS + r''']|MEDIA:|$)'''
-    r'''[`"'*_]{0,3}\s*''',
-    re.IGNORECASE,
+    r'''[`"'*_]{0,3}'''
+    r'''[ \t]*$''',
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
 def _match_extensionless_path(scan_text: str, match: "re.Match") -> Optional[Tuple[str, int]]:
-    """Resolve an extensionless MEDIA tag match to a validated on-disk path.
-
-    Tries the regex-captured path first. When that fails validation, the
-    candidate is progressively extended forward across single spaces
-    (validation-gated, bounded at 8 tokens, never past a newline or a
-    subsequent ``MEDIA:`` keyword) so unknown-extension paths containing
-    spaces deliver (#24032). Returns ``(safe_path, end_offset)`` where
-    ``end_offset`` is the index in ``scan_text`` just past the matched path,
-    or ``None`` when nothing validates.
-    """
-    raw = match.group("path")
-    path = _normalize_media_tag_path(raw)
+    """Validate the complete standalone tag path; never consume prose prefixes."""
+    path = _normalize_media_tag_path(match.group("path"))
     if not path:
         return None
     safe = validate_media_delivery_path(path)
-    if safe:
-        return safe, match.end("path")
-    start = match.start("path")
-    nl = scan_text.find("\n", start)
-    limit = nl if nl != -1 else len(scan_text)
-    segment = scan_text[start:limit]
-    nxt = segment.find("MEDIA:", 1)
-    if nxt != -1:
-        segment = segment[:nxt]
-    pos = match.end("path") - start
-    for _ in range(8):
-        while pos < len(segment) and segment[pos] in " \t":
-            pos += 1
-        if pos >= len(segment):
-            break
-        tok_end = pos
-        while tok_end < len(segment) and segment[tok_end] not in " \t":
-            tok_end += 1
-        candidate = _normalize_media_tag_path(segment[:tok_end])
-        safe = validate_media_delivery_path(candidate)
-        if safe:
-            return safe, start + tok_end
-        pos = tok_end
-    return None
+    return (safe, match.end()) if safe else None
 
 
 def _merge_spans(spans: list) -> list:
