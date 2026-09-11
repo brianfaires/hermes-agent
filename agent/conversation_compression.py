@@ -3157,6 +3157,11 @@ def compress_context(
             or (preserve_tail_count and preserve_tail_count >= len(messages))):
         raise ValueError("preserve_tail_count must leave a nonempty compression head")
 
+    # Bind the caller's boundary before a newer durable parent is adopted.
+    # Its newly appended suffix must be preserved as well, never summarized.
+    _manual_original = copy.deepcopy(messages) if preserve_tail_count else None
+    _manual_head_count = len(messages) - preserve_tail_count
+
     _attempt_started_at = time.monotonic()
     _attempt_id = uuid.uuid4().hex
     _trigger_source = "manual" if force else "auto"
@@ -3819,6 +3824,13 @@ def compress_context(
                         # run_agent.py keeps both views aligned.
                         agent._persist_user_message_idx = len(messages)
 
+        if preserve_tail_count and (
+            len(messages) < len(_manual_original)
+            or _strip_marker_for_comparison(messages[:len(_manual_original)])
+            != _strip_marker_for_comparison(_manual_original)
+        ):
+            raise RuntimeError("partial compression boundary changed; retry with current history")
+
         # Notify external memory provider before compression discards context.
         # The provider's on_pre_compress() may return a string of insights it
         # wants surfaced inside the compression summary; capture and forward it
@@ -3965,10 +3977,10 @@ def compress_context(
                         # Keep the full input for all commit/rollback/watermark
                         # guards; only the summarizer sees the requested head.
                         from hermes_cli.partial_compress import rejoin_compressed_head_and_tail
-                        head = copy.deepcopy(messages[:-preserve_tail_count])
-                        tail = copy.deepcopy(messages[-preserve_tail_count:])
+                        head = copy.deepcopy(messages[:_manual_head_count])
+                        tail = copy.deepcopy(messages[_manual_head_count:])
                         compressed_head = compress_fn(head, **compress_kwargs)
-                        if compressed_head == messages_before_compression[:-preserve_tail_count]:
+                        if _strip_marker_for_comparison(compressed_head) == _strip_marker_for_comparison(messages_before_compression[:_manual_head_count]):
                             compressed = copy.deepcopy(messages_before_compression)
                         elif not compressed_head:
                             compressed = []  # preserve the existing empty-result refusal
@@ -4275,6 +4287,11 @@ def compress_context(
                 _release_lock()
                 return messages, _existing_sp
 
+        if preserve_tail_count:
+            # Todo/user-turn refresh belongs to the summarized head. Rejoin
+            # only after those transforms so preserved user/tool rows survive.
+            compressed = compressed_head
+
         summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
         if summary_error:
             if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
@@ -4410,8 +4427,10 @@ def compress_context(
                     "_todo_snapshot_synthetic": True,
                 })
         compressed_user_turn_outcome = _ensure_compressed_has_user_turn(
-            messages, compressed
+            messages[:_manual_head_count] if preserve_tail_count else messages, compressed
         )
+        if preserve_tail_count:
+            compressed = rejoin_compressed_head_and_tail(compressed, tail)
 
         cached_system_prompt = agent._cached_system_prompt
         agent._invalidate_system_prompt()
@@ -4517,7 +4536,10 @@ def compress_context(
                     # candidate over. Give it one mechanical salvage pass.
                     from agent.context_compressor import salvage_grown_transcript
 
-                    _salvaged = salvage_grown_transcript(
+                    # The explicit tail is a user-selected preservation
+                    # boundary. Generic salvage may strip its reasoning/tool
+                    # rows; refuse growth instead of relaxing that contract.
+                    _salvaged = None if preserve_tail_count else salvage_grown_transcript(
                         messages, compressed, budget=_rough_in
                     )
                     if _salvaged is not None:
