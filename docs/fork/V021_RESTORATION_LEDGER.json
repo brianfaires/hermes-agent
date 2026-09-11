@@ -4,7 +4,7 @@
   "base": "cf62291dad2cd9c12de80bc5194ff76ef0f6ce55",
   "old_main": "2945588a014543d47c9e5e4a0d92ba6e361387c1",
   "audited_main": "31bb2aed2f65d8d4193b97d57a11770009fba656",
-  "source_candidate": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
+  "source_candidate": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
   "historical_audit_unchanged": true,
   "row_counts": {
     "unique_ids": 51,
@@ -40,7 +40,9 @@
       "ci": "pending; no new result reported"
     },
     "approved_tests": "V021_APPROVED_TESTS.json (new isolated focused tests only)",
-    "approved_review": "V021_APPROVED_REVIEW.md (candidate/hash-bound native review)"
+    "approved_review": "V021_APPROVED_REVIEW.md (candidate/hash-bound native review)",
+    "approved_batch2_tests": "V021_APPROVED_BATCH2_TESTS.json",
+    "approved_batch2_review": "V021_APPROVED_BATCH2_REVIEW.md"
   },
   "limitations": [
     "No live activation, delivery, restart, install, data migration, pushes or Kanban mutation.",
@@ -144,6 +146,18 @@
     {
       "sha": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
       "subject": "fix(discord): honor explicit channel policy before connection"
+    },
+    {
+      "sha": "43407c957e86052cb08995bc97dd55f294a5a3ec",
+      "subject": "fix(gateway): authorize durable ownership before atomic session resume"
+    },
+    {
+      "sha": "38a634aee34952f3e66d7b2bceba95b438650526",
+      "subject": "fix(cron): refresh profile credentials without process environment mutation"
+    },
+    {
+      "sha": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+      "subject": "fix(gateway): bind transport authorization and state to owning profiles"
     }
   ],
   "rows": [
@@ -2395,16 +2409,20 @@
           },
           "candidate_source": {
             "path": "gateway/run.py",
-            "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "ccfbaf1187b33a37579bcd178cc028329a1efd9a"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Pinned launch-home wrapper/cache component removed.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Launch home/name pinned; resolved runtime home participates in stable agent cache identity. Explicit missing runtimes fail closed.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2412,7 +2430,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E04",
@@ -2435,16 +2454,20 @@
           },
           "candidate_source": {
             "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "d317d99104af379c1359e619cf967ac7a8a2dcd5"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Durable state paths now derive dynamic get_hermes_home; adapter immutable-home storage absent.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Discord durable tracker, command sync and pairing paths use adapter construction home.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2452,7 +2475,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E05",
@@ -2474,17 +2498,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/authz_mixin.py",
-            "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "gateway/run.py",
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "ccfbaf1187b33a37579bcd178cc028329a1efd9a"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Inherited NEW resolver preserves transport but lacks old running-state guard and keyword.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Retained transport must be registered and running; stale transport cannot fall through to a routed peer.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2492,7 +2520,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E06",
@@ -2515,16 +2544,20 @@
           },
           "candidate_source": {
             "path": "gateway/platforms/base.py",
-            "git_blob": "49cd652001e2625643741540b5a058610682a1aa",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "c67265ab4a3c9aeba671151dceecfe524b82b494"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW owner-profile stamping replaces old explicit runtime-home setter.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Adapter captures immutable runtime home and stamps owner at source construction while preserving explicit route priority.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2532,7 +2565,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E07",
@@ -2827,16 +2861,18 @@
           },
           "candidate_source": {
             "path": "cron/scheduler.py",
-            "git_blob": "d39140e4b7841ff52a1a636f47655766439f8594",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "e17a11ba465c079aad52af794fa99cbad5049924"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Home-keyed pools replaced by global pool.",
+          "disposition": "verified_retained_or_already_fixed",
+          "decision": "Compatible shared bounded executor retained and runtime-qualified with simultaneous profile-scoped safe scripts. Historical home-keyed pools/fairness are not restored; isolation is supplied by context copies and private scopes.",
           "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "runtime_tests": [
+            "tests/cron/test_v021_private_credentials.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2844,7 +2880,11 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md",
+          "qualification_commits": [
+            "38a634aee34952f3e66d7b2bceba95b438650526"
+          ]
         },
         {
           "id": "FC-17-E14",
@@ -2867,16 +2907,20 @@
           },
           "candidate_source": {
             "path": "cron/scheduler.py",
-            "git_blob": "d39140e4b7841ff52a1a636f47655766439f8594",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "e17a11ba465c079aad52af794fa99cbad5049924"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current run_job loads home .env with override=True then restores process HERMES_HOME; old private refresh contract removed.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Direct run_job and worker execution privately refresh scoped credentials with token cleanup; no per-job process dotenv reload.",
+          "owning_commits": [
+            "38a634aee34952f3e66d7b2bceba95b438650526"
+          ],
+          "runtime_tests": [
+            "tests/cron/test_v021_private_credentials.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2884,7 +2928,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E15",
@@ -2907,16 +2952,20 @@
           },
           "candidate_source": {
             "path": "agent/secret_scope.py",
-            "git_blob": "86f18f52193934e20aabfb38fa5f674eb9c2625e",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "7411d27dc4b015e36cef1c6cd4bfa7aa72ad5dc3"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Old refresh_profile_secret_scope and scoped_subprocess_environment absent; current profile scope still built from per-home values.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Private refresh and subprocess environment helpers preserve single-profile overlay and fail-closed multiplex behavior; destination bot environment is scoped before sanitized delivery.",
+          "owning_commits": [
+            "38a634aee34952f3e66d7b2bceba95b438650526"
+          ],
+          "runtime_tests": [
+            "tests/cron/test_v021_private_credentials.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2924,7 +2973,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E16",
@@ -2947,16 +2997,20 @@
           },
           "candidate_source": {
             "path": "hermes_cli/env_loader.py",
-            "git_blob": "f926c6ed4e514e44442983d97477443912966249",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "348e252db52a1a85dc70ebc0ee361b7d03a27fad"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Private environ-only refresh interface removed; scopes hydrate source cache separately.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Per-home hydrate refresh returns its own snapshot under lock; scoped dotenv imports do not mutate process environment.",
+          "owning_commits": [
+            "38a634aee34952f3e66d7b2bceba95b438650526"
+          ],
+          "runtime_tests": [
+            "tests/cron/test_v021_private_credentials.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -2964,7 +3018,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E17",
@@ -3105,17 +3160,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/authz_mixin.py",
-            "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "gateway/run.py",
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "ccfbaf1187b33a37579bcd178cc028329a1efd9a"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD explicit transport profile; NEW source.profile/global fallback.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Pairing store selection follows receiving transport provenance and fails closed for absent secondary stores.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3123,7 +3182,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E21",
@@ -3146,16 +3206,20 @@
           },
           "candidate_source": {
             "path": "gateway/authz_mixin.py",
-            "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "cb2964e79b8e05b3f9946758ff84f0231095f44b"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Approval consumer now source-only.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Authorization consumers use transport-owned pairing grants independent of routed runtime profile.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3163,7 +3227,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E22",
@@ -3185,17 +3250,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/run.py",
-            "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "gateway/authz_mixin.py",
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "cb2964e79b8e05b3f9946758ff84f0231095f44b"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. DM policy, code generation and rate-limit use routed profile/current store.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Unauthorized DM policy, pairing request and rate-limit use receiving transport ownership.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3203,7 +3272,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E23",
@@ -3226,16 +3296,20 @@
           },
           "candidate_source": {
             "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "d317d99104af379c1359e619cf967ac7a8a2dcd5"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW helper/component surface lacks pairing_profile.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "All six nonvoice Discord control views capture pairing home and authorization flags from the sending adapter; delayed controls preserve existing user/role/admin gates.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3243,7 +3317,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E24",
@@ -3265,17 +3340,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "gateway/platforms/base.py",
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "c67265ab4a3c9aeba671151dceecfe524b82b494"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Mention parsing remains; old explicit source.profile override has no same-call-site replacement.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "build_source stamps route or adapter owner before session/busy dispatch; transport provenance remains in-process only.",
+          "owning_commits": [
+            "59b7ab83634cdf1e57c091e9072002b18b7eba3b"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_transport_identity.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3283,7 +3362,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E25",
@@ -3306,16 +3386,20 @@
           },
           "candidate_source": {
             "path": "gateway/session.py",
-            "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "35521ad0caa43baef04bd58cb0da91702449c4fd"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Probe OLD false / NEW true for foreign-owner row.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Durable sessions.profile_name governs exact and fallback recovery, with legacy key fallback; unattributable multiplex rows fail closed.",
+          "owning_commits": [
+            "43407c957e86052cb08995bc97dd55f294a5a3ec"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_durable_ownership.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3323,7 +3407,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E26",
@@ -3345,17 +3430,21 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/session.py",
-            "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "hermes_state.py",
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "ae5d65650f8c1f512d0113be50b3a04b4342c855"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW switch lacks I126 durable owner reconciliation.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Explicit resume validates target and rebound compression ancestry and publishes existing full metadata, outgoing reset, reopen and route within one write transaction before memory publication.",
+          "owning_commits": [
+            "43407c957e86052cb08995bc97dd55f294a5a3ec"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_durable_ownership.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3363,7 +3452,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-E27",
@@ -3500,16 +3590,20 @@
           },
           "candidate_source": {
             "path": "gateway/session.py",
-            "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "59b7ab83634cdf1e57c091e9072002b18b7eba3b",
+            "git_blob": "35521ad0caa43baef04bd58cb0da91702449c4fd"
           },
-          "disposition": "approved_pending_implementation",
-          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Known owner predicate difference does not prove every failure-path outcome.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
-          "blocker_kind": "approved_implementation_pending",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Real SQL failure/owner/missing-row cases preserve old route and rows; delayed snapshots cannot overwrite committed switch, and mirror failure cannot undo durable success.",
+          "owning_commits": [
+            "43407c957e86052cb08995bc97dd55f294a5a3ec"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_durable_ownership.py"
+          ],
+          "qualification_limit": "Only named isolated assertions qualified; no live provider/platform calls, hosted full CI or human UAT. Named bot test checks destination environment, not mounted-root child CLI startup.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_APPROVED_BATCH2.md (pre-mutation contracts reproduced; Critical classification retained)",
           "risk_classification": "Critical",
           "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
           "staging_approval": {
@@ -3517,7 +3611,8 @@
             "date": "2026-09-10",
             "evidence": "approved-restoration-brief.md; root comment 16:51",
             "scope": "source/tests/staging only; live-state exclusions unchanged"
-          }
+          },
+          "qualification_evidence": "V021_APPROVED_BATCH2.md; V021_APPROVED_BATCH2_TESTS.json; V021_APPROVED_BATCH2_REVIEW.md"
         },
         {
           "id": "FC-17-voice",
@@ -9413,6 +9508,12 @@
       "source_candidate": "7abcbc9d82e4216da4242d75d599d43aafbb96fe",
       "status": "safe_slice_correction_ready_for_fresh_staging_ci_root_blocked",
       "superseded_by": "Exact 3c8f7d0 CI success and bounded continuation policy; no activation."
+    },
+    {
+      "source_candidate": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+      "status": "Ang accepted batch 1; source clean; inspected production and 22 hashes; independently reran 16 tests",
+      "ci": "Ang reported run 34545497788 queued; no success or current status inferred",
+      "staging": "Ang reported exact origin/staging at accepted commit; batch 2 makes no staging or remote writes"
     }
   ],
   "approved_continuation_base": "c0a3098235b47d88090966e38837953dc95ddf30",
@@ -9422,5 +9523,6 @@
     "quote": "I approve of all features added to staging. Keep the list of manual human tests. Keep it lean, but cover every feature.",
     "scope": "Documented restoration gates for source/tests/staging; Ang integrates. No live mutation, push, voice, retired consumers or archive-only new features.",
     "source": "../approved-restoration-brief.md (task evidence)"
-  }
+  },
+  "approved_batch2_base": "4cef65cada7ac1e483d117949862784beb8dc7aa"
 }
