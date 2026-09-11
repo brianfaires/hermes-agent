@@ -21,10 +21,11 @@ from gateway.run import GatewayRunner
 
 class _ProfileAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        self._running = True
         return True
 
     async def disconnect(self):
-        pass
+        self._running = False
 
     async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
         return SendResult(success=True)
@@ -93,6 +94,7 @@ async def _load_profile_snapshot(
 
     assert await runner._start_one_profile_adapters("research", profile_home, {}) == 0
     adapter = _adapter()
+    assert await adapter.connect()
     runner._profile_adapters["research"][Platform.TELEGRAM] = adapter
     runner._configure_profile_adapter(adapter, "research", Platform.TELEGRAM)
     return adapter

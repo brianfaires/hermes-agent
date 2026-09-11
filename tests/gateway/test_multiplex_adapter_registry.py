@@ -74,7 +74,7 @@ class TestCredentialFingerprint:
 
 class TestProfileMessageHandler:
     @pytest.mark.asyncio
-    async def test_stamps_profile_on_unstamped_source(self):
+    async def test_stamps_profile_on_unstamped_source(self, tmp_path, monkeypatch):
         runner = GatewayRunner.__new__(GatewayRunner)
         seen = {}
 
@@ -82,6 +82,11 @@ class TestProfileMessageHandler:
             seen["profile"] = event.source.profile
             return "ok"
 
+        profile_home = tmp_path / "coder"
+        profile_home.mkdir()
+        (profile_home / "config.yaml").write_text("{}\n")
+        monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda name: profile_home)
+        runner._launch_profile_name = "default"
         runner._handle_message = _fake_handle
         handler = runner._make_profile_message_handler("coder")
 
