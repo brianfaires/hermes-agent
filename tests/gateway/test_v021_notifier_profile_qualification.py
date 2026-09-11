@@ -1,5 +1,6 @@
 """Qualify secondary adapter collection/delivery using a disposable board."""
 import asyncio
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -37,7 +38,14 @@ class NotifierProfileQualification(unittest.IsolatedAsyncioTestCase):
                     kb.complete_task(conn, tid, summary='fixture complete')
                 finally:
                     conn.close()
+                home = Path(tmp) / 'profiles' / 'secondary'
+                home.mkdir(parents=True)
+                (home / 'config.yaml').write_text(json.dumps({'kanban': {
+                    'notification_policy': {'mode': 'deny', 'allowed_platforms': ['telegram'],
+                                            'preserve_tui': False},
+                }}))
                 adapter = RecordingAdapter()
+                adapter.runtime_profile_home = home
                 runner = object.__new__(GatewayRunner)
                 runner._running = True
                 runner.adapters = {}

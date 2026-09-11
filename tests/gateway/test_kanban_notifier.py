@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -53,6 +54,19 @@ def _make_runner(adapter):
     # singleton lock. Tests for startup or non-owner gateways clear this.
     runner._kanban_dispatcher_lock_handle = object()
     return runner
+
+
+def _pin_notification_owner(runner, tmp_path, name):
+    """Model the immutable home captured by a real named gateway."""
+    home = tmp_path / "profiles" / name
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(json.dumps({"kanban": {
+        "notification_policy": {"mode": "deny", "allowed_platforms": ["telegram"],
+                                "preserve_tui": False},
+    }}))
+    runner._launch_profile_home = home
+    runner._launch_profile_name = name
+    runner._active_profile_name = lambda: name
 
 
 def _create_completed_subscription(summary="done once"):
@@ -158,7 +172,7 @@ def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "main"
+    _pin_notification_owner(runner, tmp_path, "main")
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
@@ -205,7 +219,7 @@ def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "writer"
+    _pin_notification_owner(runner, tmp_path, "writer")
     runner._kanban_dispatcher_lock_handle = None
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
@@ -387,7 +401,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "reviewer"
+    _pin_notification_owner(runner, tmp_path, "reviewer")
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1
@@ -408,7 +422,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     # A quiet tick proves the completed event cannot replay after its cursor
     # was advanced, even though the subscription now remains present.
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "reviewer"
+    _pin_notification_owner(runner, tmp_path, "reviewer")
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert len(adapter.sent) == 1
     assert len(adapter.handled) == 1
@@ -423,7 +437,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
         conn.close()
 
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "reviewer"
+    _pin_notification_owner(runner, tmp_path, "reviewer")
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     # The reopen status and second completion each deliver once, while only
@@ -444,7 +458,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
         conn.close()
 
     runner = _make_runner(adapter)
-    runner._active_profile_name = lambda: "reviewer"
+    _pin_notification_owner(runner, tmp_path, "reviewer")
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     # Archive itself is intentionally silent, but consumes its event and

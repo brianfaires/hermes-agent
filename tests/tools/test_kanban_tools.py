@@ -48,8 +48,12 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 def worker_env(monkeypatch, tmp_path):
     """Simulate being a worker: HERMES_HOME isolated, HERMES_KANBAN_TASK set
     after we've created the task."""
-    home = tmp_path / ".hermes"
-    home.mkdir()
+    home = tmp_path / ".hermes" / "profiles" / "test-worker"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(json.dumps({"kanban": {
+        "notification_policy": {"mode": "deny", "allowed_platforms": ["telegram", "tui"],
+                                "preserve_tui": False},
+    }}))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
