@@ -2,7 +2,7 @@
   "$comment": "GENERATED — do not hand-edit. Regenerate with hermes-agent scripts/generate_conformance_vectors.py; the native renderers are the oracle (executable spec).",
   "oracle": {
     "repo": "NousResearch/hermes-agent",
-    "commit": "40eebc7d70f3d8e95c429c8aa482f31ba6c867f6",
+    "commit": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
     "generator": "scripts/generate_conformance_vectors.py",
     "generator_version": 1
   },
@@ -20,28 +20,28 @@
       "category": "grid",
       "expect": "parity",
       "input": "This is **bold** text.",
-      "native_output": "This is **bold** text."
+      "native_output": "This is \\*\\*bold\\*\\* text."
     },
     {
       "id": "italic",
       "category": "grid",
       "expect": "parity",
       "input": "This is *italic* text.",
-      "native_output": "This is *italic* text."
+      "native_output": "This is \\*italic\\* text."
     },
     {
       "id": "bold-italic",
       "category": "grid",
       "expect": "parity",
       "input": "Mix of **bold** and *italic* in one line.",
-      "native_output": "Mix of **bold** and *italic* in one line."
+      "native_output": "Mix of \\*\\*bold\\*\\* and \\*italic\\* in one line."
     },
     {
       "id": "strikethrough",
       "category": "grid",
       "expect": "parity",
       "input": "This is ~~struck~~ text.",
-      "native_output": "This is ~~struck~~ text."
+      "native_output": "This is \\~\\~struck\\~\\~ text."
     },
     {
       "id": "inline-code",
@@ -76,7 +76,7 @@
       "category": "grid",
       "expect": "parity",
       "input": "See [spec](https://example.com/a_(b)) here.",
-      "native_output": "See [spec](https://example.com/a_(b)) here."
+      "native_output": "See [spec](https://example.com/a\\_(b)) here."
     },
     {
       "id": "header-h1",
@@ -125,7 +125,7 @@
       "category": "grid",
       "expect": "parity",
       "input": "> quoted wisdom\nregular line",
-      "native_output": "> quoted wisdom\nregular line"
+      "native_output": "\\> quoted wisdom\nregular line"
     },
     {
       "id": "hrule",
@@ -139,7 +139,7 @@
       "category": "grid",
       "expect": "divergent",
       "input": "| name | value |\n|------|-------|\n| a    | 1     |\n| b    | 2     |",
-      "native_output": "**a**\n• value: 1\n\n**b**\n• value: 2",
+      "native_output": "\\*\\*a\\*\\*\n• value: 1\n\n\\*\\*b\\*\\*\n• value: 2",
       "note": "native converts GFM tables to bullet groups; connector passes raw markdown through (port deferred — parity report Phase 4/oracle section)"
     },
     {
@@ -154,7 +154,7 @@
       "category": "grid",
       "expect": "parity",
       "input": "中文测试：**粗体** 和 `代码` 混排。",
-      "native_output": "中文测试：**粗体** 和 `代码` 混排。"
+      "native_output": "中文测试：\\*\\*粗体\\*\\* 和 `代码` 混排。"
     },
     {
       "id": "bare-url",
@@ -168,21 +168,21 @@
       "category": "grid",
       "expect": "parity",
       "input": "## Report\n\nStatus: **green**. Details in `runbook.md`.\n\n- item *one*\n- item **two**\n\n```sh\nmake deploy\n```\n\nSee [dashboard](https://grafana.example.com/d/x).",
-      "native_output": "## Report\n\nStatus: **green**. Details in `runbook.md`.\n\n- item *one*\n- item **two**\n\n```sh\nmake deploy\n```\n\nSee [dashboard](https://grafana.example.com/d/x)."
+      "native_output": "## Report\n\nStatus: \\*\\*green\\*\\*. Details in `runbook.md`.\n\n- item \\*one\\*\n- item \\*\\*two\\*\\*\n\n```sh\nmake deploy\n```\n\nSee [dashboard](https://grafana.example.com/d/x)."
     },
     {
       "id": "mdv2-reserved-chars",
       "category": "scar",
       "expect": "parity",
       "input": "Price is 3.50 (was 4.00) — save ~12%! #deal +tax = win.",
-      "native_output": "Price is 3.50 (was 4.00) — save ~12%! #deal +tax = win."
+      "native_output": "Price is 3.50 (was 4.00) — save \\~12%! #deal +tax = win."
     },
     {
       "id": "mdv2-underscores",
       "category": "scar",
       "expect": "parity",
       "input": "snake_case_name and file_name.py in prose.",
-      "native_output": "snake_case_name and file_name.py in prose."
+      "native_output": "snake\\_case\\_name and file\\_name.py in prose."
     },
     {
       "id": "mdv2-brackets",
@@ -196,7 +196,7 @@
       "category": "scar",
       "expect": "parity",
       "input": "**important** word",
-      "native_output": "**important** word"
+      "native_output": "\\*\\*important\\*\\* word"
     },
     {
       "id": "slack-link-conversion",
@@ -210,7 +210,7 @@
       "category": "scar",
       "expect": "parity",
       "input": "Hey <!everyone> and <!channel> and <!here>!",
-      "native_output": "Hey <!everyone> and <!channel> and <!here>!"
+      "native_output": "Hey <!everyone\\> and <!channel\\> and <!here\\>!"
     },
     {
       "id": "fence-lang-tag-slack",
@@ -238,14 +238,14 @@
       "category": "scar",
       "expect": "parity",
       "input": "## The **Real** Deal",
-      "native_output": "## The **Real** Deal"
+      "native_output": "## The \\*\\*Real\\*\\* Deal"
     },
     {
       "id": "table-cjk",
       "category": "scar",
       "expect": "divergent",
       "input": "| 名前 | 値 |\n|------|----|\n| 中文 | 42 |\n| b    | 2  |",
-      "native_output": "**中文**\n• 値: 42\n\n**b**\n• 値: 2",
+      "native_output": "\\*\\*中文\\*\\*\n• 値: 42\n\n\\*\\*b\\*\\*\n• 値: 2",
       "note": "same as table-simple"
     },
     {
@@ -274,7 +274,7 @@
       "category": "adversarial",
       "expect": "parity",
       "input": "**bold *italic ~~struck `code` struck~~ italic* bold**",
-      "native_output": "**bold *italic ~~struck `code` struck~~ italic* bold**"
+      "native_output": "\\*\\*bold \\*italic \\~\\~struck `code` struck\\~\\~ italic\\* bold\\*\\*"
     },
     {
       "id": "placeholder-injection",
@@ -288,7 +288,7 @@
       "category": "adversarial",
       "expect": "parity",
       "input": "***what is this*** and ____that____",
-      "native_output": "***what is this*** and ____that____"
+      "native_output": "\\*\\*\\*what is this\\*\\*\\* and \\_\\_\\_\\_that\\_\\_\\_\\_"
     },
     {
       "id": "empty-string",

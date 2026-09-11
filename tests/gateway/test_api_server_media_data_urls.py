@@ -7,6 +7,8 @@ data URLs before crossing the HTTP boundary.
 
 import base64
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -26,21 +28,34 @@ class TestResolveMediaToDataUrls(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        d = Path(tempfile.mkdtemp(prefix=tmpdir_name))
+        directory = tempfile.TemporaryDirectory(prefix=tmpdir_name)
+        self.addCleanup(directory.cleanup)
+        d = Path(directory.name)
         p = d / "shot.png"
         p.write_bytes(_PNG_BYTES)
         return p
 
     def test_media_tag_inlined(self):
         p = self._write_png()
-        out = _resolve_media_to_data_urls(f"Here you go: MEDIA:{p}")
+        out = _resolve_media_to_data_urls(f"Here you go:\nMEDIA:{p}")
         self.assertIn("data:image/png;base64,", out)
         self.assertNotIn("MEDIA:", out)
+        self.assertEqual(out, "Here you go:\n![image](data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode() + ")")
 
     def test_backtick_wrapped_tag(self):
         p = self._write_png()
         out = _resolve_media_to_data_urls(f"See `MEDIA:{p}` above")
-        self.assertIn("data:image/png;base64,", out)
+        text = f"See `MEDIA:{p}` above"
+        self.assertEqual(out, text)
+        # Existing files in examples must never be read or embedded.
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("literal example read")):
+            self.assertEqual(_resolve_media_to_data_urls(text), text)
+
+    def test_prose_tag_remains_literal_with_existing_file(self):
+        p = self._write_png()
+        text = f"Here you go: MEDIA:{p}"
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("literal example read")):
+            self.assertEqual(_resolve_media_to_data_urls(text), text)
 
     def test_missing_file_left_untouched(self):
         text = "MEDIA:/nonexistent/path/shot.png"
