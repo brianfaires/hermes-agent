@@ -5093,6 +5093,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             vc = await channel.connect()
             self._voice_clients[guild_id] = vc
+            # Pending flush/response tasks from a departed connection must
+            # never acquire the replacement connection's playback lane.
+            if not hasattr(self, "_voice_output_generations"):
+                self._voice_output_generations = {}
+            self._voice_output_generations[guild_id] = self._voice_output_generation(guild_id) + 1
             self._voice_session_generations[guild_id] = (
                 self._voice_session_generations.get(guild_id, 0) + 1
             )

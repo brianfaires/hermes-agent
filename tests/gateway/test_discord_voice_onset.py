@@ -94,3 +94,21 @@ async def test_stt_older_than_new_onset_is_not_dispatched(monkeypatch):
     release.set()
     await asyncio.wait_for(task, 3)
     obj._voice_input_callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejoin_invalidates_response_from_departed_connection(monkeypatch):
+    obj = adapter()
+    old_client = obj._voice_clients.pop(42)
+    channel = SimpleNamespace(guild=SimpleNamespace(id=42), connect=AsyncMock(return_value=old_client))
+    obj._voice_listen_loop = AsyncMock()
+    obj._schedule_stt_warmup = AsyncMock()
+    monkeypatch.setattr('plugins.platforms.discord.adapter.VoiceReceiver', MagicMock())
+    token = output_scope.set((obj, 42, obj._voice_output_generation(42)))
+    try:
+        assert await obj.join_voice_channel(channel, text_channel_id=789)
+        assert not obj.voice_output_current(42)
+        assert await obj.play_in_voice_channel(42, 'departed-response.wav') is False
+    finally:
+        output_scope.reset(token)
+    await asyncio.gather(*obj._voice_listen_tasks.values())
