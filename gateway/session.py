@@ -1993,19 +1993,21 @@ class SessionStore:
         requested_session_key: str,
         recovered: Dict[str, Any],
     ) -> bool:
-        """Prevent non-multiplexed gateways from reviving another profile's row."""
-        if getattr(self.config, "multiplex_profiles", False):
-            return True
+        """Validate durable ownership before accepting even an exact route match."""
+        from hermes_state import SessionDB
 
-        recovered_key = str(recovered.get("session_key") or "")
-        if not recovered_key or recovered_key == requested_session_key:
-            return True
-
-        recovered_profile = self._profile_from_session_key(recovered_key)
-        if recovered_profile is None:
-            return True
-
-        return recovered_profile == self._active_profile_name()
+        multiplex = getattr(self.config, "multiplex_profiles", False)
+        requested_profile = (
+            self._profile_from_session_key(requested_session_key)
+            if multiplex else self._active_profile_name()
+        )
+        owner = SessionDB.gateway_session_owner({
+            "profile_name": recovered.get("profile_name"),
+            "session_key": recovered.get("session_key"),
+        })
+        return requested_profile is not None and (
+            owner == requested_profile or (owner is None and not multiplex)
+        )
 
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
@@ -2211,8 +2213,7 @@ class SessionStore:
         ):
             logger.warning(
                 "Gateway session DB recovery ignored %s for %s because "
-                "multiplex_profiles is disabled and the row belongs to a "
-                "different profile",
+                "its durable profile ownership does not match the request",
                 recovered.get("session_key"),
                 session_key,
             )
@@ -2241,7 +2242,8 @@ class SessionStore:
         try:
             self._db.reopen_session(entry.session_id)
         except Exception as exc:
-            logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
+            logger.warning("Gateway session DB reopen failed for %s: %s", session_key, exc)
+            raise
         if migrated_legacy:
             self._record_gateway_session_peer(
                 entry.session_id,
@@ -2288,8 +2290,7 @@ class SessionStore:
         ):
             logger.warning(
                 "Gateway session DB recovery ignored %s for %s because "
-                "multiplex_profiles is disabled and the row belongs to a "
-                "different profile",
+                "its durable profile ownership does not match the request",
                 recovered.get("session_key"),
                 session_key,
             )
@@ -2898,6 +2899,8 @@ class SessionStore:
                             session_key,
                             exc,
                         )
+                        # Never publish a route whose durable reopen failed.
+                        raise
                     with self._lock:
                         published = self._entries.get(session_key)
                         if published is None:
@@ -3558,66 +3561,71 @@ class SessionStore:
         old transcript is loaded on the next message. If the target session was
         previously ended, re-open it so gateway resume semantics match the CLI.
         """
-        db_end_session_id = None
-        new_entry = None
-
         with self._lock:
             self._ensure_loaded_locked()
-
-            if session_key not in self._entries:
+            old_entry = self._entries.get(session_key)
+            if old_entry is None:
                 return None
-
-            old_entry = self._entries[session_key]
-
-            # Don't switch if already on that session
             if old_entry.session_id == target_session_id:
                 return old_entry
 
-            db_end_session_id = old_entry.session_id
-
+            multiplex = getattr(self.config, "multiplex_profiles", False)
+            requested_profile = (
+                self._profile_from_session_key(session_key)
+                if multiplex else self._active_profile_name()
+            )
+            db = self._db
+            if requested_profile is None or (db is None and multiplex):
+                return None
             now = _now()
             new_entry = SessionEntry(
-                session_key=session_key,
-                session_id=target_session_id,
-                created_at=now,
-                updated_at=now,
-                origin=old_entry.origin,
-                display_name=old_entry.display_name,
-                platform=old_entry.platform,
+                session_key=session_key, session_id=target_session_id,
+                created_at=now, updated_at=now, origin=old_entry.origin,
+                display_name=old_entry.display_name, platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
             )
-
+            if db is not None:
+                source = old_entry.origin
+                if source is None:
+                    return None
+                try:
+                    with self._save_lock:
+                        switched = db.switch_gateway_session_route(
+                            old_session_id=old_entry.session_id,
+                            target_session_id=target_session_id,
+                            session_key=session_key, entry_json=json.dumps(new_entry.to_dict()),
+                            scope=self._routing_scope(), requested_profile=requested_profile,
+                            allow_ownerless=not multiplex,
+                            target_peer=dict(
+                                source=source.platform.value, user_id=source.user_id,
+                                session_key=session_key, chat_id=source.chat_id,
+                                chat_type=source.chat_type, thread_id=source.thread_id,
+                                display_name=new_entry.display_name or source.chat_name,
+                                origin_json=json.dumps(source.to_dict()),
+                            ),
+                        )
+                        if not switched:
+                            return None
+                        revision = self._next_routing_generation_locked()
+                        self._fast_persisted_entries[session_key] = (
+                            revision, json.dumps(new_entry.to_dict())
+                        )
+                except Exception as exc:
+                    logger.warning("Gateway session switch failed for %s: %s", session_key, exc)
+                    return None
             self._entries[session_key] = new_entry
-            self._save()
-
-        if self._db and db_end_session_id:
-            try:
-                # Promote (not plain end_session): a stale agent_close /
-                # ws_orphan_reap end on the outgoing session must be upgraded
-                # to the explicit switch boundary, or recovery can resurrect
-                # it over the user's /resume choice (#61220 bug class).
-                _promote = getattr(self._db, "promote_to_session_reset", None)
-                if callable(_promote):
-                    _promote(db_end_session_id, "session_switch")
-                else:
-                    self._db.end_session(db_end_session_id, "session_switch")
-            except Exception as e:
-                logger.debug("Session DB end_session failed: %s", e)
-
-        if self._db:
-            try:
-                self._db.reopen_session(target_session_id)
-            except Exception as e:
-                logger.debug("Session DB reopen_session failed: %s", e)
-            self._record_gateway_session_peer(
-                target_session_id,
-                session_key,
-                new_entry.origin if new_entry else None,
-                display_name=new_entry.display_name if new_entry else None,
-                include_compression_ancestors=True,
-            )
-
-        return new_entry
+            if db is None:
+                try:
+                    self._save()
+                except Exception:
+                    self._entries[session_key] = old_entry
+                    return None
+            elif getattr(self, "_write_sessions_json", True):
+                try:
+                    self._save_sessions_json({key: entry.to_dict() for key, entry in self._entries.items()})
+                except Exception as exc:
+                    logger.warning("Gateway switch legacy mirror failed: %s", exc)
+            return new_entry
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
         """List all sessions, optionally filtered by activity."""
