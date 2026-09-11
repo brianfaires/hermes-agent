@@ -107,34 +107,38 @@ def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
     assert "RAM 92% on host" in doc
 
 
-def test_run_job_no_agent_reloads_dotenv_before_script(hermes_env, monkeypatch):
-    """Regression: a standalone cron tick process starts without home-channel
-    vars in its environment, and the agent path's per-run dotenv reload never
-    executes for no_agent jobs — delivery home channels stayed unresolved.
-    run_job must load .env at the top of the no_agent branch."""
-    import hermes_cli.env_loader as env_loader
+def test_run_job_no_agent_refreshes_private_dotenv_before_script(hermes_env, monkeypatch):
+    """Direct script jobs see fresh per-home values without changing process env."""
+    import os
+    from agent.secret_scope import current_secret_scope, get_secret
     from cron.jobs import create_job
     from cron.scheduler import run_job
+    from cron import scheduler
 
-    loaded_homes: list = []
-
-    def fake_load(*, hermes_home=None, project_env=None):
-        loaded_homes.append(hermes_home)
-        return []
-
-    monkeypatch.setattr(env_loader, "load_hermes_dotenv", fake_load)
-
-    script_path = hermes_env / "scripts" / "probe.sh"
-    script_path.write_text('#!/bin/bash\necho "ok"\n')
-
-    job = create_job(
-        prompt=None, schedule="every 5m", script="probe.sh", no_agent=True, deliver="local"
-    )
-    success, doc, final_response, error = run_job(job)
-    assert success is True
-    assert error is None
-    assert loaded_homes, "load_hermes_dotenv was not called on the no_agent path"
-    assert str(loaded_homes[0]) == str(hermes_env)
+    monkeypatch.setenv('CRON_FIXTURE_VALUE', 'ambient-stale')
+    monkeypatch.delenv('TELEGRAM_HOME_CHANNEL', raising=False)
+    script_path = hermes_env / 'scripts' / 'probe.sh'
+    script_path.write_text('#!/bin/bash\nprintf "%s|%s" "$CRON_FIXTURE_VALUE" "$TELEGRAM_HOME_CHANNEL"\n')
+    job = create_job(prompt=None, schedule='every 5m', script='probe.sh', no_agent=True, deliver='local')
+    previous_scope = current_secret_scope()
+    actual_script = scheduler._run_job_script
+    seen_channels = []
+    def observe_script(*args, **kwargs):
+        seen_channels.append(get_secret('TELEGRAM_HOME_CHANNEL'))
+        return actual_script(*args, **kwargs)
+    for value, channel in [('first', 'home-one'), ('rotated', 'home-two')]:
+        (hermes_env / '.env').write_text(f'CRON_FIXTURE_VALUE={value}\nTELEGRAM_HOME_CHANNEL={channel}\n')
+        with patch.object(scheduler, '_run_job_script', side_effect=observe_script):
+            success, doc, final_response, error = run_job(job)
+        assert success is True
+        assert error is None
+        assert seen_channels[-1] == channel
+        # The real script sanitizer deliberately strips delivery destinations.
+        assert final_response == f'{value}|'
+        assert f'{value}|' in doc
+        assert os.environ['CRON_FIXTURE_VALUE'] == 'ambient-stale'
+        assert 'TELEGRAM_HOME_CHANNEL' not in os.environ
+        assert current_secret_scope() is previous_scope
 
 
 def test_timed_out_no_agent_script_delivery_is_not_mislabeled_as_provider_failure(
