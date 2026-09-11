@@ -7,6 +7,10 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import unittest
+from contextlib import closing, contextmanager
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -39,22 +43,75 @@ def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     assert persisted == [completed]
 
 
-def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):
-    import cron.executions as executions
+@contextmanager
+def _profile_home(home):
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
-    current_home = {"path": tmp_path / "default"}
-    monkeypatch.setattr(executions, "EXECUTIONS_FILE", None)
-    monkeypatch.setattr(executions, "get_hermes_home", lambda: current_home["path"])
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
 
-    default_row = executions.create_execution("default-job", source="builtin")
-    current_home["path"] = tmp_path / "worker"
-    worker_row = executions.create_execution("worker-job", source="builtin")
 
-    assert executions.list_executions() == [worker_row]
-    current_home["path"] = tmp_path / "default"
-    assert executions.list_executions() == [default_row]
-    assert (tmp_path / "default" / "cron" / "executions.db").is_file()
-    assert (tmp_path / "worker" / "cron" / "executions.db").is_file()
+class ExecutionLedgerProfileTests(unittest.TestCase):
+    """Exercise real profile/store resolution, not an unused imported alias."""
+
+    def setUp(self):
+        import cron.executions as executions
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        override = patch.object(executions, "EXECUTIONS_FILE", None)
+        override.start()
+        self.addCleanup(override.stop)
+
+    def test_execution_ledger_follows_the_current_profile_home(self):
+        from cron import executions
+
+        default, worker = self.home / "default", self.home / "worker"
+        with _profile_home(default):
+            default_row = executions.create_execution("same-job", source="builtin")
+            with _profile_home(worker):
+                worker_row = executions.create_execution("same-job", source="builtin")
+                self.assertEqual(executions.list_executions(), [worker_row])
+                self.assertIsNone(executions.mark_execution_running(default_row["id"]))
+                self.assertEqual(executions.list_executions(), [worker_row])
+            self.assertEqual(executions.list_executions(), [default_row])
+            self.assertIsNone(executions.finish_execution(worker_row["id"], success=True))
+            self.assertEqual(executions.list_executions(), [default_row])
+        self.assertTrue((default / "cron" / "executions.db").is_file())
+        self.assertTrue((worker / "cron" / "executions.db").is_file())
+
+    def test_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error(self):
+        from cron import executions, jobs
+
+        ambient, selected, nested = (self.home / n for n in ("ambient", "selected", "nested"))
+        with _profile_home(ambient):
+            ambient_row = executions.create_execution("same-job", source="builtin")
+            with jobs.use_cron_store(selected):
+                jobs.save_jobs([{"id": "same-job", "name": "selected"}])
+                selected_row = executions.create_execution("same-job", source="builtin")
+                with self.assertRaisesRegex(RuntimeError, "fixture exit"):
+                    with jobs.use_cron_store(nested):
+                        jobs.save_jobs([{"id": "same-job", "name": "nested"}])
+                        nested_row = executions.create_execution("same-job", source="builtin")
+                        self.assertEqual(executions.list_executions(), [nested_row])
+                        self.assertEqual(jobs.load_jobs()[0]["name"], "nested")
+                        self.assertIsNone(executions.mark_execution_running(selected_row["id"]))
+                        raise RuntimeError("fixture exit")
+                self.assertEqual(executions.list_executions(), [selected_row])
+                self.assertEqual(jobs.load_jobs()[0]["name"], "selected")
+                self.assertIsNone(executions.finish_execution(nested_row["id"], success=True))
+            self.assertEqual(executions.list_executions(), [ambient_row])
+            self.assertFalse((ambient / "cron" / "jobs.json").exists())
+        for home, expected in ((selected, selected_row), (nested, nested_row)):
+            self.assertTrue((home / "cron" / "jobs.json").is_file())
+            # Read the physical database independently of the resolver under test.
+            with closing(sqlite3.connect(home / "cron" / "executions.db")) as conn:
+                self.assertEqual(conn.execute("SELECT id, status FROM executions").fetchall(),
+                                 [(expected["id"], "claimed")])
 
 
 def test_terminal_execution_cannot_be_rewritten(monkeypatch, tmp_path):
