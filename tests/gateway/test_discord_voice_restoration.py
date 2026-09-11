@@ -864,3 +864,69 @@ async def test_voice_progress_close_cancels_pending_commentary_speech():
 
     assert speaker.spoken_text_keys() == set()
     assert runner._send_voice_reply.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_spoken_status_uses_control_dispatch_without_cancelling(tmp_path):
+    adapter = _discord_adapter_for_voice_dispatch()
+    runner = _dispatcher_runner(tmp_path, adapter)
+    runner._wire_discord_voice_callbacks(adapter)
+    adapter.set_message_handler(runner._handle_message)
+    source = SessionSource.from_dict(adapter._voice_sources[42])
+    source.user_id = "123"
+    key = runner._session_key_for_source(source)
+    adapter._active_sessions[key] = asyncio.Event()
+    agent = MagicMock()
+    runner._running_agents[key] = agent
+    runner._handle_status_command = AsyncMock(return_value="Still running.")
+    with patch.object(__import__('plugins.platforms.discord.adapter', fromlist=['VoiceReceiver']).VoiceReceiver, 'pcm_to_wav'), \
+         patch('tools.transcription_tools.transcribe_audio', return_value={'success': True, 'transcript': 'Are you still working?'}):
+        await adapter._process_voice_input(42, 123, b'\0' * 96000)
+        await adapter._process_voice_input(42, 123, b'\0' * 96000)
+    assert runner._handle_status_command.await_count == 2
+    agent.interrupt.assert_not_called()
+    assert runner._running_agents[key] is agent
+    assert not adapter._active_sessions[key].is_set()
+
+
+@pytest.mark.asyncio
+async def test_spoken_correction_runs_authorized_stop_then_fresh_request(tmp_path):
+    adapter = _discord_adapter_for_voice_dispatch()
+    runner = _dispatcher_runner(tmp_path, adapter)
+    runner._wire_discord_voice_callbacks(adapter)
+    adapter.set_message_handler(runner._handle_message)
+    runner._handle_message_with_agent = AsyncMock(return_value='Replacement accepted')
+    runner._interrupt_and_clear_session = AsyncMock()
+    # Real idle /stop handler still calls the real adapter stop method.
+    with patch('plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav'), \
+         patch('tools.transcription_tools.transcribe_audio', return_value={'success': True, 'transcript': 'Correction: Keep CASE, please!'}):
+        await adapter._process_voice_input(42, 123, b'\0' * 96000)
+    await asyncio.gather(*list(adapter._background_tasks))
+    assert runner._is_user_authorized.call_count >= 2
+    event = runner._handle_message_with_agent.await_args.args[0]
+    assert event.text == 'Keep CASE, please!'
+    assert event.source.profile == 'ops' and event.source.user_id == '123'
+    assert adapter._voice_output_generation(42) == 1
+
+
+@pytest.mark.asyncio
+async def test_denied_spoken_stop_and_correction_do_not_dispatch(tmp_path):
+    adapter = _discord_adapter_for_voice_dispatch()
+    runner = _dispatcher_runner(tmp_path, adapter)
+    runner._is_user_authorized.return_value = False
+    runner._wire_discord_voice_callbacks(adapter)
+    adapter.set_message_handler(runner._handle_message)
+    runner._handle_message_with_agent = AsyncMock()
+    with patch('plugins.platforms.discord.adapter.VoiceReceiver.pcm_to_wav'), \
+         patch('tools.transcription_tools.transcribe_audio', return_value={'success': True, 'transcript': 'Correction: bypass permission'}):
+        await adapter._process_voice_input(42, 123, b'\0' * 96000)
+    runner._handle_message_with_agent.assert_not_awaited()
+    assert adapter._voice_output_generation(42) == 0
+
+
+def test_bounded_voice_controls_preserve_unknown_speech_and_explicit_aliases():
+    from plugins.platforms.discord.voice_output import voice_control_transcripts
+    assert voice_control_transcripts('Stop talking!') == ('/stop',)
+    assert voice_control_transcripts('Can you stop by the store?') == ('Can you stop by the store?',)
+    assert voice_control_transcripts('/queue Keep CASE') == ('/queue Keep CASE',)
+    assert voice_control_transcripts('Correction: Keep CASE') == ('/stop', 'Keep CASE')

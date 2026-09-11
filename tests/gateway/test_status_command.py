@@ -589,3 +589,23 @@ async def test_context_all_appends_expanded_listings():
     assert "hermes-agent" in result
     # Expanded view drops the hint
     assert "Use /context all" not in result
+
+
+@pytest.mark.asyncio
+async def test_busy_discord_voice_status_speaks_state_without_interrupting():
+    from gateway.platforms.base import MessageType
+    source = _make_source(Platform.DISCORD)
+    key = build_session_key(source)
+    entry = SessionEntry(session_key=key, session_id='voice-status',
+                         created_at=datetime.now(), updated_at=datetime.now(),
+                         platform=Platform.DISCORD, chat_type='dm')
+    runner = _make_runner(entry, platform=Platform.DISCORD)
+    agent = SimpleNamespace(model='fixture', provider='fixture', interrupt=MagicMock())
+    runner._running_agents[key] = agent
+    runner._should_send_voice_progress_reply = lambda *args: True
+    event = MessageEvent(text='/status', source=source, message_type=MessageType.VOICE)
+    result = await runner._handle_status_command(event)
+    assert result
+    runner._send_voice_reply.assert_awaited_once_with(event, "I'm still working on your request.")
+    agent.interrupt.assert_not_called()
+    assert runner._running_agents[key] is agent

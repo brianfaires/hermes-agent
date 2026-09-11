@@ -5673,11 +5673,25 @@ class DiscordAdapter(BasePlatformAdapter):
             transcript = self._rewrite_stt_alias(transcript)
 
             if self._voice_input_callback:
+                from plugins.platforms.discord.voice_output import voice_control_transcripts
+                controls = voice_control_transcripts(transcript)
                 await self._voice_input_callback(
                     guild_id=guild_id,
                     user_id=user_id,
-                    transcript=transcript,
+                    transcript=controls[0],
                 )
+                if len(controls) == 2:
+                    # /stop must have gone through normal authorization and
+                    # stopped this guild exactly once. A newer onset during
+                    # its await invalidates this replacement too.
+                    if self._voice_output_generation(guild_id) != utterance_generation + 1:
+                        return
+                    if (session_generation is not None and
+                            self._voice_session_generations.get(guild_id, 0) != session_generation):
+                        return
+                    await self._voice_input_callback(
+                        guild_id=guild_id, user_id=user_id, transcript=controls[1],
+                    )
         except Exception as e:
             # CalledProcessError from pcm_to_wav carries ffmpeg's captured
             # stderr — surface it, or the log only says "exit status N".

@@ -24639,17 +24639,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return
 
-        if self._is_duplicate_voice_transcript(
+        if transcript not in {"/stop", "/status"} and self._is_duplicate_voice_transcript(
             guild_id,
             user_id,
             transcript,
             profile=getattr(source, "profile", None),
         ):
             logger.info(
-                "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
-                guild_id,
-                user_id,
-                transcript[:100],
+                "Suppressing duplicate voice transcript",
             )
             return
 
@@ -24678,15 +24675,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt = resolved if isinstance(resolved, str) else None
             except Exception:
                 channel_prompt = None
+        model_text = transcript
+        latch = getattr(adapter, "_voice_interruption_latches", {}).get(guild_id)
+        if latch is not None and latch.take() and not transcript.startswith("/"):
+            from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE
+            model_text = SPEECH_INTERRUPTED_NOTE + "\n" + transcript
         event = MessageEvent(
             source=source,
-            text=transcript,
+            text=model_text,
             message_type=MessageType.VOICE,
             raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
             channel_prompt=channel_prompt,
         )
 
+        # Idle commands use the adapter's background dispatcher; a correction
+        # must await its authorized /stop before submitting the replacement.
+        key = self._session_key_for_source(source) if transcript == "/stop" else None
+        was_active = key in getattr(adapter, "_active_sessions", {}) if key else False
         await adapter.handle_message(event)
+        if key and not was_active:
+            task = getattr(adapter, "_session_tasks", {}).get(key)
+            if isinstance(task, asyncio.Task) and task is not asyncio.current_task():
+                await asyncio.shield(task)
 
     def _should_send_voice_reply(
         self,

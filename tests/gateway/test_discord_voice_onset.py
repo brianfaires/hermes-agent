@@ -16,6 +16,7 @@ def adapter():
     obj._voice_clients[42] = MagicMock()
     obj._voice_clients[42].is_connected.return_value = True
     obj._voice_clients[42].is_playing.return_value = True
+    obj._voice_clients[42].stop.side_effect = lambda: setattr(obj._voice_clients[42].is_playing, "return_value", False)
     obj._is_voice_speaker_allowed = MagicMock(return_value=True)
     obj._reset_voice_timeout = MagicMock()
     return obj

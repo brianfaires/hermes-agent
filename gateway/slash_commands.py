@@ -701,7 +701,7 @@ class GatewaySlashCommandsMixin:
         is_running = agent is not None and agent is not _AGENT_PENDING_SENTINEL
 
         # Count pending /queue follow-ups (slot + overflow).
-        adapter = self.adapters.get(source.platform) if source else None
+        adapter = self._adapter_for_source(source) if source else None
         queue_depth = self._queue_depth(session_key, adapter=adapter)
 
         def _clean_str(value: Any) -> str:
@@ -879,6 +879,14 @@ class GatewaySlashCommandsMixin:
             t("gateway.status.platforms", platforms=', '.join(connected_platforms)),
         ])
 
+        # Busy voice controls bypass BasePlatformAdapter's auto-TTS path.
+        # Speak only a short fact from the existing session state, after normal
+        # command authorization. The ongoing agent remains untouched.
+        if (source.platform == Platform.DISCORD and event.message_type == MessageType.VOICE
+                and agent is not None):
+            spoken = "I'm still working on your request." if is_running else "Your request is starting."
+            if self._should_send_voice_progress_reply(event, spoken):
+                await self._send_voice_reply(event, spoken)
         return "\n".join(lines)
 
     @staticmethod
