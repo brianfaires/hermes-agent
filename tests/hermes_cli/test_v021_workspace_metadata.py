@@ -38,6 +38,16 @@ class MetadataTests(unittest.TestCase):
             with self.assertRaises(ValueError): kb.create_task(self.conn,title='bad',**kwargs)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM tasks').fetchone()[0],count)
 
+    def test_branch_setter_rejects_invalid_legacy_workspace_atomically(self):
+        tid = kb.create_task(self.conn,title='legacy',workspace_kind='dir',workspace_path=str(self.root),branch_name='feature/old')
+        with kb.write_txn(self.conn):
+            self.conn.execute("UPDATE tasks SET workspace_path='relative' WHERE id=?",(tid,))
+        with self.assertRaises(ValueError): kb.set_branch_name(self.conn,tid,'feature/new')
+        self.assertEqual(kb.get_task(self.conn,tid).branch_name,'feature/old')
+        kb.set_workspace_path(self.conn,tid,self.root)
+        kb.set_branch_name(self.conn,tid,'feature/new')
+        self.assertEqual(kb.get_task(self.conn,tid).branch_name,'feature/new')
+
     def test_dashboard_forwards_branch_and_real_db_rejects_invalid(self):
         result = api.create_task(api.CreateTaskBody(title='api',workspace_kind='dir',workspace_path=str(self.root),branch_name=' feature/api '),board='default')
         self.assertEqual(result['task']['branch_name'],'feature/api')
