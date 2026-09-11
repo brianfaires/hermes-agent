@@ -19,12 +19,20 @@ class TextCompatibility(unittest.TestCase):
         self.assertIn('a\\_b', result)
 
     def test_standalone_media_extract_and_cleanup_agree(self):
-        for directive in ['MEDIA:/tmp/a.pdf', 'MEDIA:/tmp/a.xlsx[[as_document]]', '  MEDIA:"/tmp/a b.pdf"', '- **MEDIA:/tmp/a.pdf**']:
+        for directive in ['MEDIA:/tmp/a.pdf', '  MEDIA:"/tmp/a b.pdf"', '- **MEDIA:/tmp/a.pdf**']:
             with self.subTest(directive=directive):
                 media, cleaned = BasePlatformAdapter.extract_media(directive)
                 self.assertEqual(len(media), 1)
                 self.assertEqual(cleaned.strip(), '')
                 self.assertEqual(_strip_media_tag_directives(directive).strip(), '')
+
+    def test_document_marker_agrees_with_delivery_without_promoting_code_prefix(self):
+        text = 'MEDIA:/tmp/a.xlsx[[as_document]]'
+        self.assertEqual(BasePlatformAdapter.extract_media(text), ([('/tmp/a.xlsx', False)], ''))
+        self.assertEqual(_strip_media_tag_directives(text), '')
+        example = '`code` ' + text
+        self.assertEqual(BasePlatformAdapter.extract_media(example), ([], '`code` MEDIA:/tmp/a.xlsx'))
+        self.assertEqual(_strip_media_tag_directives(example), '`code` MEDIA:/tmp/a.xlsx')
 
     def test_prose_code_json_and_adjacent_tags_stay_literal(self):
         for text in ['See MEDIA:/tmp/a.pdf now', '`code` MEDIA:/tmp/a.pdf', 'MEDIA:/tmp/a.pdf is an example', '`example MEDIA:/tmp/a.pdf`', '```\nMEDIA:/tmp/a.pdf\n```', '> MEDIA:/tmp/a.pdf', '{"x":"MEDIA:/tmp/a.pdf"}', 'MEDIA:/tmp/a.pdfMEDIA:/tmp/b.pdf']:
