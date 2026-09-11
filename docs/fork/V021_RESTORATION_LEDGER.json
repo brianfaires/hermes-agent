@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "status": "bounded_source_qualification_complete_human_uat_deferred_critical_slices_parked",
+  "status": "approved_restoration_in_progress_human_uat_deferred",
   "base": "cf62291dad2cd9c12de80bc5194ff76ef0f6ce55",
   "old_main": "2945588a014543d47c9e5e4a0d92ba6e361387c1",
   "audited_main": "31bb2aed2f65d8d4193b97d57a11770009fba656",
-  "source_candidate": "76d908a34804889c9c27cebd08619e71528070e4",
+  "source_candidate": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
   "historical_audit_unchanged": true,
   "row_counts": {
     "unique_ids": 51,
@@ -18,13 +18,14 @@
     "intentionally_retired_policy_retained",
     "discord_deferred",
     "archive_only_out_of_scope",
-    "approval_or_blocker_required"
+    "approval_or_blocker_required",
+    "approved_pending_implementation"
   ],
   "qualification": {
     "command_template": "env -i HOME=<task-temp> HERMES_HOME=<task-temp>/hermes PATH=/usr/bin:/bin PYTHONPATH=<worktree> PYTHONDONTWRITEBYTECODE=1 TZ=UTC LANG=C.UTF-8 <canonical>/.venv/bin/python -B -m unittest discover -s <test-dir> -p <test-file> -v",
     "focused_receipt": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/qualification-final.json [task-only provenance] (outside source, task evidence)",
     "independent_review": "independent-review.md (durable original native review; closed R1/R2 retained)",
-    "critical_decisions": "critical-gates.md (verbatim precise decisions)",
+    "critical_decisions": "critical-gates.md (historical design register; Brian approval supersedes old holds, classifications retained)",
     "local_pytest_limitation": "Canonical interpreter lacks pytest; no installs. Host limitation, not a Critical approval blocker. Existing fixtures were executed by hosted CI.",
     "correction_review": "CI_CORRECTION_REVIEW.md",
     "hosted_ci": "V021_CI_EVIDENCE.json",
@@ -37,11 +38,13 @@
       "sha": "eda8d0537b1b66000b5ade38855343634ddd4e75",
       "source": "Ang report in compatibility-tail-brief.md",
       "ci": "pending; no new result reported"
-    }
+    },
+    "approved_tests": "V021_APPROVED_TESTS.json (new isolated focused tests only)",
+    "approved_review": "V021_APPROVED_REVIEW.md (candidate/hash-bound native review)"
   },
   "limitations": [
     "No live activation, delivery, restart, install, data migration, pushes or Kanban mutation.",
-    "Named qualification assertions are not blanket historical parity. All ten source-qualification entries resolved; existing Critical decisions and gated design follow-ups remain.",
+    "Named qualification assertions are not blanket historical parity. All ten source-qualification entries resolved; approved implementation follow-ups remain.",
     "Windows transform cleanup not locally exercised; strict current security restrictions preserved.",
     "Compression published-child rollback and other gated subfeatures remain unimplemented."
   ],
@@ -133,6 +136,14 @@
     {
       "sha": "76d908a34804889c9c27cebd08619e71528070e4",
       "subject": "test(migration): qualify launcher profile cron notifier and restart boundaries"
+    },
+    {
+      "sha": "d97ba560254c93c14704b13b64fbdd5bb31ecd6a",
+      "subject": "fix(cron): qualify active registry and recovery by profile store"
+    },
+    {
+      "sha": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
+      "subject": "fix(discord): honor explicit channel policy before connection"
     }
   ],
   "rows": [
@@ -961,7 +972,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_LOW_VALUE",
       "historical_summary": "Intentional trigger omission also dropped independently useful multiplex isolation and transform process-tree cleanup. Prior low-value rationale did not account for retained non-trigger consumers.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-10-E01",
@@ -1017,13 +1028,21 @@
             "git_blob": "1ff741f1e257cafef589c1d8a86707d29043a483",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Shared adapter rate/idempotency/delivery-cache identities omit profile namespace; source.profile is still set on downstream event. This is adapter-state collision exposure, not absence of every session profile gate.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-10-E03",
@@ -1106,7 +1125,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "REWRITE",
       "historical_summary": "REWRITE is real but deliberately changes lifecycle/config/schedule/output semantics and omits generic hooks/event bus. Additional compatibility losses: legacy Calendar adoption/duration learning, pre-upgrade output replay and strict job name/toolset validation. No live enablement claim.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-11-E01",
@@ -1342,13 +1361,21 @@
             "git_blob": "d09c5a4fe3b34ed472b830d453d248034c9e777a",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G11 ancillary validation compatibility; Calendar lifecycle/configuration replacement remains intentional.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. I110 ancillary plain-string name/toolset validation is not preserved: create stringifies toolsets and update has no prior strict list/name normalizers.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G11 ancillary validation compatibility; Calendar lifecycle/configuration replacement remains intentional.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-11-E09",
@@ -1747,7 +1774,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM overstates parity: literal prose escaping, standalone-only MEDIA recognition, display path/shell shortening and progress embed suppression were lost; table conversion and bounded previews remain.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-14-E01",
@@ -1773,13 +1800,21 @@
             "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Prose markdown escaping removed; table conversion remains.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-14-E02",
@@ -1805,13 +1840,21 @@
             "git_blob": "49cd652001e2625643741540b5a058610682a1aa",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Unanchored MEDIA patterns consume prose mentions; inline/fenced-code mask still applies.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G14: literal formatting and standalone MEDIA interpretation require compatibility/privacy decision.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-14-E03",
@@ -1969,7 +2012,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Slash-sync retry semantics are equivalent; free-response auto-threading was removed. Responded-thread participation is a different behavior and does not supply it.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-15-E01",
@@ -1995,13 +2038,21 @@
             "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G15: free-response auto-threading changes routing policy.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW explicitly adds or is_free_channel to skip_thread, disabling auto-thread for free-response channels.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G15: free-response auto-threading changes routing policy.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-15-E02",
@@ -2226,7 +2277,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM only partly justified. Multiplex core, delayed picker scope, transport selection and PID scope survive; fork home pinning, transport pairing, cron registries, config bridge and durable-owner guards do not fully migrate. I140 is branch-only. Context-dependent outcomes explicitly unresolved.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-17-E01",
@@ -2347,13 +2398,21 @@
             "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Pinned launch-home wrapper/cache component removed.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E04",
@@ -2379,13 +2438,21 @@
             "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Durable state paths now derive dynamic get_hermes_home; adapter immutable-home storage absent.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E05",
@@ -2411,13 +2478,21 @@
             "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Inherited NEW resolver preserves transport but lacks old running-state guard and keyword.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E06",
@@ -2443,13 +2518,21 @@
             "git_blob": "49cd652001e2625643741540b5a058610682a1aa",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW owner-profile stamping replaces old explicit runtime-home setter.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E07",
@@ -2509,17 +2592,31 @@
             "same_blob_as_audited_main": true
           },
           "candidate_source": {
-            "path": "gateway/config.py",
-            "git_blob": "7feafd095e6ed084ddca4b0613bcf7f4c7e3559a",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "path": "plugins/platforms/discord/adapter.py",
+            "ref": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
+            "git_blob": "f7d584947e6a2400c6181142091b4c856702d91f"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "verified_retained_or_already_fixed",
+          "decision": "Qualified retained replacement: plugin-owned YAML bridge is called by real gateway loader for top-level/nested Discord channel settings; no duplicate core bridge needed.",
           "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "runtime_tests": [
+            "tests/gateway/test_v021_discord_channel_precedence.py"
+          ],
+          "qualification_limit": "Seven isolated tests passed. Real YAML loader covers three layouts and empty lists; adapter/HTTP effects are fakes. No live connection or delivery; unrelated authorization gates retain precedence. Full hosted CI pending Ang integration.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          },
+          "implementation_evidence": "V021_APPROVED_CONTINUATION.md; V021_APPROVED_REVIEW.md",
+          "qualification_commits": [
+            "aba1042c5c72c58c3e33f9b8a979405f8069f82e"
+          ]
         },
         {
           "id": "FC-17-E09",
@@ -2542,16 +2639,29 @@
           },
           "candidate_source": {
             "path": "plugins/platforms/discord/adapter.py",
-            "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "aba1042c5c72c58c3e33f9b8a979405f8069f82e",
+            "git_blob": "f7d584947e6a2400c6181142091b4c856702d91f"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "Restored explicit channel extra precedence before connection, including empty values. Connected nonempty snapshot remains authoritative, scoped misses stay fail closed, other authorization gate precedence unchanged.",
+          "owning_commits": [
+            "aba1042c5c72c58c3e33f9b8a979405f8069f82e"
+          ],
+          "runtime_tests": [
+            "tests/gateway/test_v021_discord_channel_precedence.py"
+          ],
+          "qualification_limit": "Seven isolated tests passed. Real YAML loader covers three layouts and empty lists; adapter/HTTP effects are fakes. No live connection or delivery; unrelated authorization gates retain precedence. Full hosted CI pending Ang integration.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          },
+          "implementation_evidence": "V021_APPROVED_CONTINUATION.md; V021_APPROVED_REVIEW.md"
         },
         {
           "id": "FC-17-E10",
@@ -2672,16 +2782,29 @@
           },
           "candidate_source": {
             "path": "cron/scheduler.py",
-            "git_blob": "d39140e4b7841ff52a1a636f47655766439f8594",
-            "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
+            "ref": "d97ba560254c93c14704b13b64fbdd5bb31ecd6a",
+            "git_blob": "7528253c833a0a2b7bb6af0d35e8e820919d15ef"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
-          "owning_commits": [],
-          "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "disposition": "restoration_implemented_with_tests",
+          "decision": "G17R implemented: profile-qualified claims, captured executor/manual release, profile-local stale/one-shot recovery and execution ledger, global qualified drain counts; token/fire-owner fences preserved.",
+          "owning_commits": [
+            "d97ba560254c93c14704b13b64fbdd5bb31ecd6a"
+          ],
+          "runtime_tests": [
+            "tests/cron/test_v021_profile_registry.py"
+          ],
+          "qualification_limit": "Eight isolated real-store tests passed; changed existing pytest fixtures require hosted CI. No real models, transport, shutdown or live data. Pools and credentials remain separate pending work.",
+          "blocker_kind": null,
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          },
+          "implementation_evidence": "V021_APPROVED_CONTINUATION.md; V021_APPROVED_REVIEW.md (independent G17R review, initial P1 corrected)"
         },
         {
           "id": "FC-17-E13",
@@ -2707,13 +2830,21 @@
             "git_blob": "d39140e4b7841ff52a1a636f47655766439f8594",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Home-keyed pools replaced by global pool.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E14",
@@ -2739,13 +2870,21 @@
             "git_blob": "d39140e4b7841ff52a1a636f47655766439f8594",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current run_job loads home .env with override=True then restores process HERMES_HOME; old private refresh contract removed.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E15",
@@ -2771,13 +2910,21 @@
             "git_blob": "86f18f52193934e20aabfb38fa5f674eb9c2625e",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Old refresh_profile_secret_scope and scoped_subprocess_environment absent; current profile scope still built from per-home values.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E16",
@@ -2803,13 +2950,21 @@
             "git_blob": "f926c6ed4e514e44442983d97477443912966249",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Private environ-only refresh interface removed; scopes hydrate source cache separately.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E17",
@@ -2835,12 +2990,12 @@
             "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Served-profile publication remains; Kanban runtime-owner mixin absent.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
           "supplemental_existing_ci_evidence": [
             {
               "file": "tests/gateway/test_multiplex_lifecycle.py",
@@ -2850,7 +3005,15 @@
             }
           ],
           "supplemental_evidence_limit": "Existing related tests are evidence only for their assertions. Broader historical contract remains unresolved; no new Critical approval is required to qualify unchanged code.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E18",
@@ -2876,13 +3039,21 @@
             "git_blob": "569c759835b4b3411b66da5c6a5e50cbb0b29b68",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. No served-by-multiplex reader replacement in assigned CLI files.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E19",
@@ -2938,13 +3109,21 @@
             "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD explicit transport profile; NEW source.profile/global fallback.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E21",
@@ -2970,13 +3149,21 @@
             "git_blob": "e80435d9827f9efad41f0c2c5ba87d194e483e21",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Approval consumer now source-only.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E22",
@@ -3002,13 +3189,21 @@
             "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. DM policy, code generation and rate-limit use routed profile/current store.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E23",
@@ -3034,13 +3229,21 @@
             "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW helper/component surface lacks pairing_profile.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E24",
@@ -3066,13 +3269,21 @@
             "git_blob": "1cd541d992b4c8612e78feb7095abfda5f9875cc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Mention parsing remains; old explicit source.profile override has no same-call-site replacement.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E25",
@@ -3098,13 +3309,21 @@
             "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Probe OLD false / NEW true for foreign-owner row.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E26",
@@ -3130,13 +3349,21 @@
             "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW switch lacks I126 durable owner reconciliation.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E27",
@@ -3192,13 +3419,16 @@
             "git_blob": "2b086ce4f04db73d4924c1654bccc40ee5b9f968",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "archive_only_out_of_scope",
+          "decision": "Excluded by approved brief: historical evidence is explicitly branch-only target lookup, an archive-only new feature. No restoration or new approval request.",
           "owning_commits": [],
           "runtime_tests": [],
           "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "blocker_kind": "scope_exclusion",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "approval_scope_exclusion": "Historical branch-only target lookup remains outside approval for archive-only new features; no implementation authorized.",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval."
         },
         {
           "id": "FC-17-E29",
@@ -3224,12 +3454,12 @@
             "git_blob": "366dfd785f5d9fede4c49d39b28544052b77e236",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Configured homes replace successful _served_profiles bookkeeping used by old status and cron.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
           "supplemental_existing_ci_evidence": [
             {
               "file": "tests/gateway/test_multiplex_lifecycle.py",
@@ -3239,7 +3469,15 @@
             }
           ],
           "supplemental_evidence_limit": "Existing related tests are evidence only for their assertions. Broader historical contract remains unresolved; no new Critical approval is required to qualify unchanged code.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-E30",
@@ -3265,13 +3503,21 @@
             "git_blob": "32a343cced8571bf2ef6dc249233143890f41499",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Known owner predicate difference does not prove every failure-path outcome.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G17/G17R: identity, credentials, routing, durable ownership and registry/shutdown contracts require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-17-voice",
@@ -3290,7 +3536,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: generic workspace/project storage remains, but board inventory again follows the task-DB override and omits its warning; dir-branch metadata/dashboard fields and normal write-boundary validation regressed. Validation helpers are used only by decomposition.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-18-E01",
@@ -3400,13 +3646,21 @@
             "git_blob": "7574800ac30fbe270df53cbc981451371e944ee9",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Persistent dir branches accepted in OLD, only worktree accepted in NEW.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-18-E04",
@@ -3432,13 +3686,21 @@
             "git_blob": "9a76f1d8523048dc23a06af5a3adf6875d92a657",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW create model and forwarding have no branch_name; search of whole NEW API finds no branch_name.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-18-E05",
@@ -3464,13 +3726,21 @@
             "git_blob": "6518f487074e77528f97f0c7f3511ae6af07de64",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD create/set invoke shared normalizers; NEW only decomposition invokes normalize_workspace_metadata, setters are direct SQL.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "FC18: persistent-dir/dashboard interface and normal-write validation compatibility.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         }
       ]
     },
@@ -3481,7 +3751,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: subscriptions and multi-profile notifier exist, but the origin/Telegram-home routing policy, fail-closed validation and notify-audit interface are absent; detailed outer tick diagnostics also regressed.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-19-E01",
@@ -3507,13 +3777,21 @@
             "git_blob": "d6f7cc72bd8947bb75ff8d1878f76855b65c917f",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD resolves/denies policy-approved target; NEW uses subscription platform directly. Fixed-tree grep finds no notification_policy/telegram_home_only consumer.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-19-E02",
@@ -3539,13 +3817,21 @@
             "git_blob": "7574800ac30fbe270df53cbc981451371e944ee9",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW add_notify_sub receives requested destination directly.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-19-E03",
@@ -3571,13 +3857,21 @@
             "git_blob": "1fe0f204fc2a51fed3bd27b0bffd6769411658fd",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Policy resolution removed from tool auto-subscribe.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-19-E04",
@@ -3603,13 +3897,21 @@
             "git_blob": "70724f695f2bf80cf41cda9411276df8a91d63b0",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Policy resolution removed from slash subscription.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-19-E05",
@@ -3635,13 +3937,21 @@
             "git_blob": "9a76f1d8523048dc23a06af5a3adf6875d92a657",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Dashboard no longer filters home targets by policy.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G19: notification destinations and fail-closed policy require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-19-E06",
@@ -3735,7 +4045,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect. I045 task-plus-tool prompt gating is lost. Replacement delegation guards preserve mutation isolation but leave child stop nudges and raw-env lifecycle attempts; ContextVar worker exposure and disposable-board semantics differ.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-20-E01",
@@ -4262,13 +4572,21 @@
             "git_blob": "9b8bce97597a964e01507a744d9b67a0a41762bc",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "Broad environment scrubbing/identity replacement gated.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. OLD strips every HERMES_KANBAN_* and assigns scratch roots. NEW scrubs listed keys and stamps lineage.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "Broad environment scrubbing/identity replacement gated.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-20-E13",
@@ -6003,7 +6321,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "KEEP",
       "historical_summary": "Spoken compression and protected-handoff replacement retained. Atomic core publication is stronger, but I031 gateway follow-up rollback and explicit no-rotation failure guard were lost; prior ledger claim of full atomic equivalence is too broad.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-25-E01",
@@ -6161,13 +6479,21 @@
             "git_blob": "70724f695f2bf80cf41cda9411276df8a91d63b0",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G25: published-child rollback conflicts with current atomic lineage/concurrent-tail safeguards.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. After core publication, gateway follow-up rewrite failure no longer discards child/reopens parent; only raises.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G25: published-child rollback conflicts with current atomic lineage/concurrent-tail safeguards.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-25-E05",
@@ -6220,7 +6546,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: in-process external-skill cache keys reverted to paths only and return cached prompts before rescanning. Skill index descriptions reverted from 1024 to 60 chars, and explicit max_chars API (including small limits) was removed.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-26-E01",
@@ -6308,13 +6634,21 @@
         },
         {
           "id": "FC-26-default",
-          "disposition": "approval_or_blocker_required",
-          "decision": "G26: automatic description default footprint remains 60 pending cost decision.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. ",
           "owning_commits": [],
           "runtime_tests": [],
-          "blocker_kind": "critical_decision",
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "blocker_kind": "approved_implementation_pending",
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G26: automatic description default footprint remains 60 pending cost decision.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         }
       ]
     },
@@ -6325,7 +6659,7 @@
       "historical_status": "missing",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM substitutes generic persistence for the actual bounded policy. Target gpt-5.6-sol/terra models no longer receive one-verification/proportional-stop/avoid-adjacent-work guidance. Generic mandatory-tool and prerequisite verification remain.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-27-E01",
@@ -6351,13 +6685,21 @@
             "git_blob": "b9d6f7c0e09f0301e4a249519ca7f835e6e549a8",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G27: model-specific execution/cost policy requires explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Bounded persistence replaced by keep-calling-tools guidance.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G27: model-specific execution/cost policy requires explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-27-E02",
@@ -6383,13 +6725,21 @@
             "git_blob": "666d54132091de8c1eed26bb7501a4d21a5cdb51",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G27: model-specific execution/cost policy requires explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. New independent execution_guidance gate invokes generic text rather than variant resolver.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G27: model-specific execution/cost policy requires explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         }
       ]
     },
@@ -6400,7 +6750,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Lock regeneration retains/advances most old security selections, but does not replace core-install ASGI floors or explicit PyNaCl packaging on all installers. Supplemental h2 4.4.1 protection is absent (current lock remains 4.3.0, same as OLD main). Do not equate this source-policy audit with deployed vulnerability/exploit verification.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-28-E01",
@@ -6468,17 +6818,25 @@
             "git_blob": "64d4f2ec3128fda37557d2d1622b563aa2dbddb7",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G28: pip-compatible Discord crypto packaging requires compatibility qualification.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Discord lazy specs revert to upstream voice extra; pip fallback has no uv override.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
           "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
           "prerequisite_qualification": {
             "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
             "status": "completed_with_results_and_limits",
             "approval": "Critical decision unchanged; no affected implementation"
+          },
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G28: pip-compatible Discord crypto packaging requires compatibility qualification.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
           }
         },
         {
@@ -6685,7 +7043,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Fork CI parity is incomplete: wrapper-aware process-killer parsing and webhook process-tree cleanup regressed. The fork-specific SARIF publication gate is also absent, confirmed against the exact pinned reusable workflow. Historical test-baseline equivalence remains source-reviewed with the limitations below; no broad hosted result is claimed.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-30-E01",
@@ -6711,17 +7069,25 @@
             "git_blob": "ffa5e7b9282ca6189d3eda1177a26d30a948284e",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current wrapper token scanning reintroduces harmless-argument false positives and loses command wrapper detection.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
           "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
           "prerequisite_qualification": {
             "evidence": "V021_COMPATIBILITY_TAIL.md; V021_COMPATIBILITY_TAIL_RECEIPTS.json",
             "status": "completed_with_results_and_limits",
             "approval": "Critical decision unchanged; no affected implementation"
+          },
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
           }
         },
         {
@@ -6790,13 +7156,21 @@
             "git_blob": "671eecb9474a387df05c6c1fa8a9ee591bf90720",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Unconditional scanner invocation remains; explicit local fork-only SARIF publication separation no longer visible.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         },
         {
           "id": "FC-30-E04",
@@ -6822,13 +7196,21 @@
             "git_blob": "671eecb9474a387df05c6c1fa8a9ee591bf90720",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. NEW does not pass upload-sarif; pinned reusable workflow defaults it true (lines42-46) and directly uses it for upload (125-129). The old fork-only publication gate is not reproduced. Exact external source: https://github.com/google/osv-scanner-action/blob/9a498708959aeaef5ef730655706c5a1df1edbc2/.github/workflows/osv-scanner-reusable.yml. No hosted run was triggered.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G30: SARIF publication and process-guard classification require explicit approval; broad test equivalence unresolved.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         }
       ]
     },
@@ -6910,7 +7292,7 @@
       "historical_status": "partial",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "Per-file pytest temp isolation survives via PYTEST_DEBUG_TEMPROOT instead of --basetemp, including normal/timeout/interrupt cleanup. Popen failure cleanup and standalone thread-limit injection were dropped. Historical multi-profile fixture/mirror parser patches are largely absent or superseded by removed consumers; current suite parity was not executed.",
-      "disposition": "restoration_implemented_with_tests",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-32-E01",
@@ -6937,7 +7319,7 @@
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
           "disposition": "restoration_implemented_with_tests",
-          "decision": "Spawn-failure temp cleanup restored. Normal/timeout/interrupt paths retained but full pytest execution blocked.",
+          "decision": "Spawn-failure temp cleanup restored and previously CI-qualified. G32 standalone thread ceilings are a separate approved pending contract within this historical runner entry; no thread-policy implementation claimed.",
           "owning_commits": [
             "56c972bdc11b504da71ece6e25f6f53ab073e9f1"
           ],
@@ -6952,7 +7334,21 @@
               "job_log": "103019263348.txt",
               "tested_sha": "e36f3d76ff7464cf51a0a5881934e005fbbb9ee3"
             }
-          ]
+          ],
+          "remaining_approved_work": {
+            "gate": "G32",
+            "contract": "Standalone runner BLAS/OMP thread ceilings",
+            "status": "approved_pending_implementation",
+            "risk_classification": "Critical",
+            "staging_approval": {
+              "by": "Brian",
+              "recorded_at": "2026-09-10 16:51 (root Kanban comment, per approved brief)",
+              "quote": "I approve of all features added to staging. Keep the list of manual human tests. Keep it lean, but cover every feature.",
+              "scope": "Documented restoration gates for source/tests/staging; Ang integrates. No live mutation, push, voice, retired consumers or archive-only new features.",
+              "source": "../approved-restoration-brief.md (task evidence)"
+            },
+            "evidence": "critical-gates.md G32; no additional subfeature ID created (preserve original 241)."
+          }
         },
         {
           "id": "FC-32-E02",
@@ -7040,7 +7436,7 @@
       "historical_status": "missing",
       "historical_prior_decision": "DROP_UPSTREAM",
       "historical_summary": "DROP_UPSTREAM is incorrect: exact identical-package warning suppression and filter-before-display-cap were removed. Distinct package warnings remain naturally; historical canonical-name normalization was already superseded in OLD by exact comparison.",
-      "disposition": "approval_or_blocker_required",
+      "disposition": "approved_pending_implementation",
       "subfeatures": [
         {
           "id": "FC-33-E01",
@@ -7066,13 +7462,21 @@
             "git_blob": "a284c6d4007cd99521673a41b92a465cd17edc1b",
             "ref": "3c8f7d0d160883dc48a169d12f7e3cdca203b58d"
           },
-          "disposition": "approval_or_blocker_required",
-          "decision": "G33: scanner warn/allow verdict changes require explicit approval.",
+          "disposition": "approved_pending_implementation",
+          "decision": "Brian approved documented restoration on 2026-09-10; implementation pending. Preserve Critical design, security, ownership and cache invariants. Current parser truncates before .app filtering and has no exact-package filter.",
           "owning_commits": [],
           "runtime_tests": [],
-          "qualification_limit": "Historical observations are provenance, not blanket parity. Previous exact 3c8f7d0 CI succeeded (V021_FINAL_CI_3c8f7d0.json); continuation evidence is limited to named assertions in V021_CONTINUATION_QUALIFICATION.md. New tests await hosted collection after Ang integrates.",
-          "blocker_kind": "critical_decision",
-          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)"
+          "qualification_limit": "Approval is not implementation evidence. Earlier source/CI receipts remain historical; no runtime parity claimed for this pending slice.",
+          "blocker_kind": "approved_implementation_pending",
+          "continuation_design_evidence": "V021_CONTINUATION_QUALIFICATION.md (scope-limited design/matrix; classification unchanged)",
+          "risk_classification": "Critical",
+          "prior_approval_hold": "G33: scanner warn/allow verdict changes require explicit approval.",
+          "staging_approval": {
+            "by": "Brian",
+            "date": "2026-09-10",
+            "evidence": "approved-restoration-brief.md; root comment 16:51",
+            "scope": "source/tests/staging only; live-state exclusions unchanged"
+          }
         }
       ]
     },
@@ -9010,5 +9414,13 @@
       "status": "safe_slice_correction_ready_for_fresh_staging_ci_root_blocked",
       "superseded_by": "Exact 3c8f7d0 CI success and bounded continuation policy; no activation."
     }
-  ]
+  ],
+  "approved_continuation_base": "c0a3098235b47d88090966e38837953dc95ddf30",
+  "staging_approval": {
+    "by": "Brian",
+    "recorded_at": "2026-09-10 16:51 (root Kanban comment, per approved brief)",
+    "quote": "I approve of all features added to staging. Keep the list of manual human tests. Keep it lean, but cover every feature.",
+    "scope": "Documented restoration gates for source/tests/staging; Ang integrates. No live mutation, push, voice, retired consumers or archive-only new features.",
+    "source": "../approved-restoration-brief.md (task evidence)"
+  }
 }

@@ -1,3 +1,20 @@
+# Approved restoration continuation
+
+Brian's 2026-09-10 staging approval supersedes historical implementation holds
+in this document, critical-gates.md, and prior continuation/tail records.
+Implementation is in progress; human UAT stays deferred and never blocks dev.
+Critical classifications remain. G17R is the first approved implementation batch;
+exact commits, tests and remaining steps are recorded in
+[V021_APPROVED_CONTINUATION.md](V021_APPROVED_CONTINUATION.md) and the ledger.
+No source push, staging integration, main change or live mutation is authorized
+here. Ang owns independent staging integration and exact-SHA hosted CI.
+
+The previous handoff below is preserved as a historical checkpoint. Its parked,
+approval-required and next-integration statements are superseded by this section;
+its actual CI results remain valid only for their named commits.
+
+---
+
 # v0.21 restoration source handoff
 
 **Bounded continuation: source qualification complete; human UAT deferred; affected Critical slices remain parked.** Test/source candidate is `76d908a34804889c9c27cebd08619e71528070e4`, on branch `ang/v021-restoration-t_4a31a31b`, continuing from `3c8f7d0d160883dc48a169d12f7e3cdca203b58d`. Final documentation-bound HEAD is recorded in the continuation handoff.
