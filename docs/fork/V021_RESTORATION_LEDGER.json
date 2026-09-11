@@ -42,7 +42,19 @@
     "approved_tests": "V021_APPROVED_TESTS.json (new isolated focused tests only)",
     "approved_review": "V021_APPROVED_REVIEW.md (candidate/hash-bound native review)",
     "approved_batch2_tests": "V021_APPROVED_BATCH2_TESTS.json",
-    "approved_batch2_review": "V021_APPROVED_BATCH2_REVIEW.md"
+    "approved_batch2_review": "V021_APPROVED_BATCH2_REVIEW.md",
+    "latest_approved_ci": {
+      "sha": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+      "run_id": 34545497788,
+      "status": "completed",
+      "conclusion": "failure",
+      "source": "Ang completed-run report; raw slice7 receipt confirms one failing case,19 passing tests in file",
+      "failed_case": "tests/cron/test_execution_ledger.py::test_execution_ledger_follows_the_current_profile_home",
+      "job_id": 103097319943,
+      "raw_sha256": "4a3ccd44fbf6529e48cd4648dca08ec1b80b4f707444e406df4da1d2c9557b89",
+      "next_ci": "Fresh exact candidate full hosted CI required after Ang integrates batch2 plus correction; no success inferred"
+    },
+    "approved_ci_correction": "V021_APPROVED_CI_CORRECTION.md; V021_APPROVED_CI_CORRECTION_TESTS.json; V021_APPROVED_CI_CORRECTION_REVIEW.md"
   },
   "limitations": [
     "No live activation, delivery, restart, install, data migration, pushes or Kanban mutation.",
@@ -9514,6 +9526,13 @@
       "status": "Ang accepted batch 1; source clean; inspected production and 22 hashes; independently reran 16 tests",
       "ci": "Ang reported run 34545497788 queued; no success or current status inferred",
       "staging": "Ang reported exact origin/staging at accepted commit; batch 2 makes no staging or remote writes"
+    },
+    {
+      "source_candidate": "4cef65cada7ac1e483d117949862784beb8dc7aa",
+      "status": "Hosted CI completed FAILURE: one failing case plus aggregate per Ang",
+      "ci_run": 34545497788,
+      "supersedes": "Previously reported queued status; original receipts retained",
+      "fresh_candidate_ci": "Required after fixture correction and batch2 integration"
     }
   ],
   "approved_continuation_base": "c0a3098235b47d88090966e38837953dc95ddf30",

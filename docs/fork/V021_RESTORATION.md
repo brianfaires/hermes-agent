@@ -1,3 +1,16 @@
+# Current CI correction checkpoint
+
+First-batch CI **34545497788 completed FAILURE** for `4cef65cada`: one failing
+execution-ledger profile fixture plus aggregate, per Ang's completed-run report.
+[Correction decision and qualification](V021_APPROVED_CI_CORRECTION.md) supersede
+previously reported queued status. Batch 2 production remains unchanged; this
+narrow correction strengthens the real store/profile test. **Fresh exact-candidate
+hosted CI is required** after Ang integrates batch 2 plus correction. No push,
+live changes or remaining feature work in this bounded turn; stop quiescent for
+Ang's independent verification. Existing human/pending feature counts unchanged.
+
+---
+
 # Current approved checkpoint — batch 2
 
 [Batch 2](V021_APPROVED_BATCH2.md) continues accepted `4cef65cada` with source
