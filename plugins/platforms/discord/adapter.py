@@ -338,15 +338,15 @@ class _DiscordNonConversationalMessageTracker:
 
     _MAX_TRACKED = 2000
 
-    def __init__(self, max_tracked: int = _MAX_TRACKED):
+    def __init__(self, max_tracked: int = _MAX_TRACKED, *, home=None):
+        from hermes_constants import get_hermes_home
+        self._profile_home = _Path(home or get_hermes_home()).resolve()
         self._max_tracked = max_tracked
         self._ids: dict[str, None] = dict.fromkeys(self._load())
 
     def _state_path(self) -> _Path:
-        from hermes_constants import get_hermes_home
-
         return (
-            get_hermes_home()
+            self._profile_home
             / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
             / _DISCORD_NONCONVERSATIONAL_STATE_FILENAME
         )
@@ -1159,7 +1159,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._missed_message_backfill_task: Optional[asyncio.Task] = None
         from hermes_constants import get_hermes_home
         from plugins.platforms.discord.recovery import DiscordRecoveryStore
-        self._discord_recovery_store = DiscordRecoveryStore(get_hermes_home())
+        self._discord_recovery_store = DiscordRecoveryStore(self.runtime_profile_home)
         # Dedup cache: prevents duplicate bot responses when Discord
         # RESUME replays events after reconnects.
         self._dedup = MessageDeduplicator()
@@ -1173,7 +1173,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._last_self_message_id: Dict[str, str] = {}
         # Persistent set of bot-authored lifecycle/status message IDs that
         # should not act as conversational history boundaries after restart.
-        self._nonconversational_messages = _DiscordNonConversationalMessageTracker()
+        self._nonconversational_messages = _DiscordNonConversationalMessageTracker(home=self.runtime_profile_home)
         # Last truncated mid-stream preview delivered per (chat_id, message_id).
         # Once an oversized streaming edit saturates at the 2000-char preview
         # cap, every subsequent progressive edit truncates to the SAME text;
@@ -2217,9 +2217,7 @@ class DiscordAdapter(BasePlatformAdapter):
         logger.info("[%s] Disconnected", self.name)
 
     def _command_sync_state_path(self) -> _Path:
-        from hermes_constants import get_hermes_home
-
-        directory = get_hermes_home() / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+        directory = self.runtime_profile_home / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -5029,9 +5027,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not user_id:
             return False
         try:
-            from gateway.pairing import PairingStore
-
-            return bool(PairingStore().is_approved("discord", user_id))
+            return _pairing_approved_at_home(self.runtime_profile_home, user_id)
         except Exception:
             return False
 
@@ -7643,6 +7639,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
                 require_admin=require_admin,
                 admin_user_ids=admin_user_ids,
                 allow_permanent=allow_permanent,
@@ -7708,6 +7706,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 confirm_id=confirm_id,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(content=content, embed=embed, view=view)
@@ -7820,6 +7820,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    pairing_home=self.runtime_profile_home,
+                    auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
                 )
             else:
                 embed.add_field(
@@ -7881,6 +7883,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
             # Mirror the prompt in plain content — embeds are invisible on
             # some clients (see send_exec_approval).
@@ -7952,6 +7956,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_model_selected=on_model_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -8005,6 +8011,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 on_choice_selected=on_choice_selected,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                pairing_home=self.runtime_profile_home,
+                auth_env={key: self._gate_env(key) for key in _COMPONENT_AUTH_KEYS},
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -8794,10 +8802,38 @@ class DiscordAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 
+_COMPONENT_AUTH_KEYS = (
+    "DISCORD_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS",
+)
+
+
+def _capture_component_auth(pairing_home=None, auth_env=None):
+    from hermes_constants import get_hermes_home
+    return (
+        _Path(pairing_home or get_hermes_home()).resolve(),
+        dict(auth_env) if auth_env is not None else {
+            key: _scoped_gate_env(key) for key in _COMPONENT_AUTH_KEYS
+        },
+    )
+
+
+def _pairing_approved_at_home(home, user_id):
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from gateway.pairing import PairingStore
+    token = set_hermes_home_override(home)
+    try:
+        return bool(PairingStore().is_approved("discord", user_id))
+    finally:
+        reset_hermes_home_override(token)
+
+
 def _component_check_auth(
     interaction,
     allowed_user_ids: Optional[set],
     allowed_role_ids: Optional[set],
+    *,
+    pairing_home=None,
+    auth_env=None,
 ) -> bool:
     """Shared user-or-role OR semantics for component view button clicks.
 
@@ -8817,6 +8853,9 @@ def _component_check_auth(
       - user is approved in the pairing store -> allow
       - otherwise -> reject
     """
+    def auth_value(key):
+        return auth_env.get(key, "") if auth_env is not None else _scoped_gate_env(key)
+
     user = getattr(interaction, "user", None)
     if user is None or getattr(user, "id", None) is None:
         return False
@@ -8826,15 +8865,15 @@ def _component_check_auth(
     # profile's runtime scope, so the profile's secret-scope contextvar is
     # inherited here. Under multiplex a raw os.getenv could return ANOTHER
     # profile's allow-all flag and authorize a click on this profile's bot.
-    if _scoped_gate_env("DISCORD_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
+    if auth_value("DISCORD_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
         return True
-    if _scoped_gate_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
+    if auth_value("GATEWAY_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
         return True
 
     user_set = {str(uid).strip() for uid in (allowed_user_ids or set()) if str(uid).strip()}
     global_allowed = {
         uid.strip()
-        for uid in _scoped_gate_env("GATEWAY_ALLOWED_USERS").split(",")
+        for uid in auth_value("GATEWAY_ALLOWED_USERS").split(",")
         if uid.strip()
     }
     user_set.update(global_allowed)
@@ -8872,9 +8911,8 @@ def _component_check_auth(
     # component buttons even without DISCORD_ALLOWED_USERS set.
     if uid:
         try:
-            from gateway.pairing import PairingStore
-            store = PairingStore()
-            if store.is_approved("discord", uid):
+            from hermes_constants import get_hermes_home
+            if _pairing_approved_at_home(pairing_home or get_hermes_home(), uid):
                 return True
         except Exception:
             pass
@@ -8950,11 +8988,14 @@ def _define_discord_view_classes() -> None:
             allow_permanent: bool = True,
             allow_session: bool = True,
             smart_denied: bool = False,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             # Opt-in admin gate for exec approval (default off → user-scope,
             # the v0.16-restored behavior). When on, the clicker must be in
             # ``admin_user_ids`` on top of passing the base admission check.
@@ -8981,6 +9022,7 @@ def _define_discord_view_classes() -> None:
             """
             if not _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             ):
                 return False
             if not self.require_admin:
@@ -9117,17 +9159,21 @@ def _define_discord_view_classes() -> None:
             confirm_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.confirm_id = confirm_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _resolve(
@@ -9222,16 +9268,20 @@ def _define_discord_view_classes() -> None:
             session_key: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.session_key = session_key
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _respond(
@@ -9321,6 +9371,8 @@ def _define_discord_view_classes() -> None:
             on_model_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=120)
             self.providers = providers
@@ -9330,6 +9382,7 @@ def _define_discord_view_classes() -> None:
             self.on_model_selected = on_model_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
             self._selected_provider: str = ""
             self._pending_expensive_model: str = ""
@@ -9339,6 +9392,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         def _build_provider_select(self):
@@ -9681,12 +9735,15 @@ def _define_discord_view_classes() -> None:
             on_choice_selected,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=120)
             self.choices = list(choices)[:_DISCORD_SELECT_MAX_OPTIONS]
             self.on_choice_selected = on_choice_selected
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
             self._message = None
 
@@ -9712,6 +9769,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         async def _on_select(self, interaction: discord.Interaction):
@@ -9779,12 +9837,15 @@ def _define_discord_view_classes() -> None:
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            pairing_home=None,
+            auth_env=None,
         ):
             super().__init__(timeout=_read_discord_prompt_timeout())
             self.choices = list(choices)[:24]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
+            self._pairing_home, self._auth_env = _capture_component_auth(pairing_home, auth_env)
             self.resolved = False
 
             for index, choice in enumerate(self.choices):
@@ -9849,6 +9910,7 @@ def _define_discord_view_classes() -> None:
         def _check_auth(self, interaction: "discord.Interaction") -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
+                pairing_home=self._pairing_home, auth_env=self._auth_env,
             )
 
         def _make_choice_callback(self, index: int, choice: str):

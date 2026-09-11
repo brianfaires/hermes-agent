@@ -3152,6 +3152,8 @@ class BasePlatformAdapter(ABC):
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
+        from hermes_constants import get_hermes_home
+        self._runtime_profile_home = get_hermes_home().resolve()
         self._message_handler: Optional[MessageHandler] = None
         # Optional gateway-supplied fan-out for platform-native emoji
         # reaction events (see ``set_reaction_handler``).
@@ -3959,6 +3961,13 @@ class BasePlatformAdapter(ABC):
         thread replies without explicit mentions).
         """
         self._session_store = session_store
+
+    @property
+    def runtime_profile_home(self) -> Path:
+        """Construction-time transport home, independent of routed turn context."""
+        from hermes_constants import get_hermes_home
+        home = getattr(self, "_runtime_profile_home", None)
+        return Path(home) if home is not None else get_hermes_home().resolve()
 
     def set_owner_profile(self, profile_name: Optional[str]) -> None:
         """Declare which multiplex profile owns this adapter.
@@ -7453,7 +7462,7 @@ class BasePlatformAdapter(ABC):
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
-            profile=profile,
+            profile=profile or getattr(self, "_owner_profile", None),
             role_authorized=role_authorized,
             auto_thread_created=auto_thread_created,
             auto_thread_initial_name=auto_thread_initial_name,
@@ -7462,6 +7471,7 @@ class BasePlatformAdapter(ABC):
         # SessionSource.to_dict(). The live receiving adapter is authoritative
         # for this turn even when profile_routes selects a different runtime.
         source._transport_adapter_ref = weakref.ref(self)
+        source._authorization_profile_home = self.runtime_profile_home
         # Keep this transport-only fail-closed signal out of SessionSource
         # serialization/session identity. The shared gateway handler consumes it
         # before auth, hooks, or session setup, so every adapter drops matched
