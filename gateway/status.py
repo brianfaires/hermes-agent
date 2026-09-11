@@ -1180,6 +1180,7 @@ def write_runtime_status(
     needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    connected_profiles: Any = _UNSET,
     session_store: Any = _UNSET,
     clear_profile_platforms: bool = False,
 ) -> None:
@@ -1226,6 +1227,8 @@ def write_runtime_status(
         # for a single-profile gateway. Lets `hermes status` show per-profile
         # coverage without a second probe.
         payload["served_profiles"] = list(served_profiles or [])
+    if connected_profiles is not _UNSET:
+        payload["connected_profiles"] = list(connected_profiles or [])
     if session_store is not _UNSET:
         state = "unknown"
         if isinstance(session_store, dict):

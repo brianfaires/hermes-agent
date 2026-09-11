@@ -9181,6 +9181,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # itself as "existing" during the await below and disconnect()
             # the same object twice.
             self.adapters.pop(adapter.platform, None)
+            self._publish_profile_coverage()
             self.delivery_router.adapters = self.adapters
 
         # Queue retryable failures BEFORE any disconnect await (#80598).
@@ -13601,6 +13602,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 gateway_state="starting",
                 exit_reason=None,
                 clear_profile_platforms=True,
+                served_profiles=[],
+                connected_profiles=[],
             )
         except Exception:
             pass
@@ -15779,6 +15782,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if success:
                         self.adapters[platform] = adapter
+                        self._publish_profile_coverage()
                         self._sync_voice_mode_state_to_adapter(adapter)
                         # Wire voice input callback on reconnect as well (#60623).
                         if hasattr(adapter, "_voice_input_callback"):
@@ -16400,6 +16404,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _amap.clear()
             if hasattr(self, "_profile_adapters"):
                 self._profile_adapters.clear()
+            self._publish_profile_coverage(clear=True)
             logger.info(
                 "Shutdown phase: all adapters disconnected at +%.2fs",
                 _phase_elapsed(),
@@ -16607,6 +16612,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()
 
+    def _publish_profile_coverage(self, *, clear: bool = False) -> None:
+        """Publish adapter ownership without changing configured routing eligibility."""
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        from gateway.status import write_runtime_status
+
+        connected = set()
+        if not clear and getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            if getattr(self, "adapters", None):
+                connected.add(self._active_profile_name())
+            connected.update(
+                name for name, adapters in getattr(self, "_profile_adapters", {}).items()
+                if adapters
+            )
+        token = set_hermes_home_override(self._launch_home())
+        try:
+            write_runtime_status(connected_profiles=sorted(connected))
+        except Exception:
+            logger.debug("could not publish connected profile coverage", exc_info=True)
+        finally:
+            reset_hermes_home_override(token)
+
     async def _start_secondary_profile_adapters(self) -> int:
         """Bring up adapters for every non-active profile this gateway serves.
 
@@ -16623,14 +16649,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         only point that sees every profile's resolved credentials together.
         """
         if not getattr(self.config, "multiplex_profiles", False):
+            self._publish_profile_coverage(clear=True)
             return 0
 
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-        except Exception:
-            return 0
-
-        active = get_active_profile_name() or "default"
+        active = self._active_profile_name()
         connected = 0
         # Resource claim -> profile that owns it. Credential claims prevent two
         # profiles polling the same account; listener claims prevent sidecars
@@ -16695,10 +16717,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if name == active
                         else PairingStore(profile=name)
                     )
-            write_runtime_status(served_profiles=served)
+            from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+            token = set_hermes_home_override(self._launch_home())
+            try:
+                write_runtime_status(served_profiles=served)
+            finally:
+                reset_hermes_home_override(token)
         except Exception:
             logger.debug("could not record served_profiles", exc_info=True)
 
+        self._publish_profile_coverage()
         return connected
 
     async def _start_one_profile_adapters(
@@ -16946,6 +16974,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         profile_map = self._profile_adapters.setdefault(profile_name, {})
                         if platform not in profile_map:
                             profile_map[platform] = adapter
+                            self._publish_profile_coverage()
                             self._sync_voice_mode_state_to_adapter(adapter)
                             logger.info(
                                 "✓ %s reconnected (profile: %s)",
@@ -17135,6 +17164,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return
         profile_map.pop(platform, None)
+        self._publish_profile_coverage()
         await self._safe_adapter_disconnect(adapter, platform)
         if not self._running:
             return

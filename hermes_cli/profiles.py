@@ -805,6 +805,40 @@ def _seed_model_config(profile_dir: Path) -> None:
         pass
 
 
+@dataclass(frozen=True)
+class MultiplexGatewayCoverage:
+    """Connected adapter coverage advertised by a validated live multiplexer."""
+
+    gateway_home: Path
+    pid: int
+    served_profiles: tuple[str, ...]
+
+
+def get_multiplex_gateway_coverage(profile_name: str) -> Optional[MultiplexGatewayCoverage]:
+    """Configured routing eligibility alone never proves a connected adapter."""
+    try:
+        name = normalize_profile_name(profile_name or "default")
+        home = _get_default_hermes_home().resolve()
+        from gateway.status import read_runtime_status, get_runtime_status_running_pid
+        runtime = read_runtime_status(home / "gateway_state.json")
+        if not isinstance(runtime, dict):
+            return None
+        connected = runtime.get("connected_profiles")
+        served = runtime.get("served_profiles")
+        if not isinstance(connected, list) or not isinstance(served, list):
+            return None
+        if not all(isinstance(item, str) for item in connected + served):
+            return None
+        if name not in connected or name not in served:
+            return None
+        pid = get_runtime_status_running_pid(runtime, expected_home=home)
+        if pid is None:
+            return None
+        return MultiplexGatewayCoverage(home, pid, tuple(connected))
+    except Exception:
+        return None
+
+
 def _check_gateway_running(profile_dir: Path) -> bool:
     """Check if a gateway is running for a given profile directory.
 
