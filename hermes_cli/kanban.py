@@ -1665,8 +1665,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
     except argparse.ArgumentTypeError as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
-    if branch_name and ws_kind != "worktree":
-        print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
+    if branch_name and ws_kind not in {"dir", "worktree"}:
+        print("kanban: --branch is only valid with --workspace dir or worktree", file=sys.stderr)
         return 2
     try:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))

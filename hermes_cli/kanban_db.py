@@ -3265,15 +3265,10 @@ def create_task(
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
         )
-    if workspace_kind not in VALID_WORKSPACE_KINDS:
-        raise ValueError(
-            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
-            f"got {workspace_kind!r}"
-        )
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
+    workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+        workspace_kind=workspace_kind, workspace_path=workspace_path,
+        branch_name=branch_name, require_dir_path=True,
+    )
 
     # Inherit the board's scoped project when the caller didn't name one, so a
     # project-scoped board anchors every new task to that project's repo
@@ -8335,9 +8330,15 @@ def set_workspace_path(
     conn: sqlite3.Connection, task_id: str, path: Path | str
 ) -> None:
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None:
+            raise ValueError(f"task {task_id} not found")
+        _, path, _ = normalize_workspace_metadata(
+            workspace_kind=task.workspace_kind, workspace_path=path,
+            branch_name=task.branch_name, require_dir_path=True,
+        )
         conn.execute(
-            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
-            (str(path), task_id),
+            "UPDATE tasks SET workspace_path = ? WHERE id = ?", (path, task_id),
         )
 
 
@@ -8345,9 +8346,12 @@ def set_branch_name(
     conn: sqlite3.Connection, task_id: str, branch_name: str
 ) -> None:
     with write_txn(conn):
+        task = get_task(conn, task_id)
+        if task is None:
+            raise ValueError(f"task {task_id} not found")
+        branch_name = normalize_branch_name(branch_name, workspace_kind=task.workspace_kind)
         conn.execute(
-            "UPDATE tasks SET branch_name = ? WHERE id = ?",
-            (str(branch_name), task_id),
+            "UPDATE tasks SET branch_name = ? WHERE id = ?", (branch_name, task_id),
         )
 
 
