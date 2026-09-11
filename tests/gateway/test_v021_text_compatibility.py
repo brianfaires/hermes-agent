@@ -27,7 +27,7 @@ class TextCompatibility(unittest.TestCase):
                 self.assertEqual(_strip_media_tag_directives(directive).strip(), '')
 
     def test_prose_code_json_and_adjacent_tags_stay_literal(self):
-        for text in ['See MEDIA:/tmp/a.pdf now', 'MEDIA:/tmp/a.pdf is an example', '`example MEDIA:/tmp/a.pdf`', '```\nMEDIA:/tmp/a.pdf\n```', '> MEDIA:/tmp/a.pdf', '{"x":"MEDIA:/tmp/a.pdf"}', 'MEDIA:/tmp/a.pdfMEDIA:/tmp/b.pdf']:
+        for text in ['See MEDIA:/tmp/a.pdf now', '`code` MEDIA:/tmp/a.pdf', 'MEDIA:/tmp/a.pdf is an example', '`example MEDIA:/tmp/a.pdf`', '```\nMEDIA:/tmp/a.pdf\n```', '> MEDIA:/tmp/a.pdf', '{"x":"MEDIA:/tmp/a.pdf"}', 'MEDIA:/tmp/a.pdfMEDIA:/tmp/b.pdf']:
             with self.subTest(text=text):
                 media, cleaned = BasePlatformAdapter.extract_media(text)
                 self.assertEqual(media, [])
