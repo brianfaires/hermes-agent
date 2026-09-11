@@ -907,6 +907,10 @@ class TestRunJobSessionPersistence:
 
     def test_run_job_refreshes_private_sources_without_clearing_sibling_cache(self, tmp_path, monkeypatch):
         """Every agent run sees rotated external secrets; other homes stay cached."""
+        # Complete process startup before measuring per-job source hydration.
+        # A cold run_agent import loads dotenv; it is not a scheduled job.
+        import run_agent
+
         from agent.secret_scope import current_secret_scope, get_secret
         from agent.secret_sources.base import FetchResult
         from agent.secret_sources.registry import AppliedVar, ApplyReport, SourceReport
@@ -946,7 +950,7 @@ class TestRunJobSessionPersistence:
                  'api_key': '***', 'base_url': 'https://example.invalid/v1',
                  'provider': 'openrouter', 'api_mode': 'chat_completions',
              }), \
-             patch('run_agent.AIAgent') as agent:
+             patch.object(run_agent, 'AIAgent') as agent:
             agent.return_value.run_conversation.side_effect = conversation
             for value in ('first', 'rotated'):
                 version['value'] = value
