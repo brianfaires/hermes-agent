@@ -649,9 +649,10 @@ class GatewaySlashCommandsMixin:
                     if platform_str and chat_id:
                         def _sub():
                             from hermes_cli import kanban_db as _kb
+                            from hermes_cli.kanban_notifications import subscribe_notify
                             conn = _kb.connect(board=requested_board)
                             try:
-                                _kb.add_notify_sub(
+                                target = subscribe_notify(
                                     conn, task_id=task_id,
                                     platform=platform_str, chat_id=chat_id,
                                     chat_type=chat_type,
@@ -664,6 +665,8 @@ class GatewaySlashCommandsMixin:
                                     delivery_mode="notify+wake",
                                     delivery_metadata=delivery_metadata,
                                 )
+                                if target is None:
+                                    raise ValueError("Notification policy denied this destination")
                             finally:
                                 conn.close()
                         await asyncio.to_thread(_sub)
