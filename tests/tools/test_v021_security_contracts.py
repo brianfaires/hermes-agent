@@ -30,6 +30,8 @@ class ProcessClassifierTests(unittest.TestCase):
             ['flock', '/tmp/fixture.lock', '-c', 'pkill -f hermes'],
             ['bash', '-lc', 'echo harmless; env -u KEY pkill --full python'],
             'echo harmless && timeout 5 pkill -f hermes',
+            'echo harmless\npkill --full python',
+            ['sh', '-c', 'if true; then pkill -f hermes; fi'],
             ['env', '-S', 'pkill -f hermes'],
         ]
         for command in blocked:
