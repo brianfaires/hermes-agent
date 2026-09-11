@@ -399,6 +399,12 @@ def _run_one_file_once(
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
     env = os.environ.copy()
+    # Bound native math pools in each pytest child, even if the caller requests
+    # larger pools. The controller's own environment remains untouched.
+    env.update({key: "1" for key in (
+        "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+    )})
     temproot = tempfile.mkdtemp(prefix="hermes-pytest-tmproot-")
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
 

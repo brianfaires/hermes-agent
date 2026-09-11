@@ -1422,13 +1422,6 @@ def _live_system_guard(request, monkeypatch):
         "reset-failed", "enable", "disable", "mask", "unmask",
         "daemon-reload", "try-restart", "reload-or-restart",
     )
-    _PROCESS_KILLERS = ("pkill", "killall", "taskkill", "skill", "fuser")
-    # Shell/launcher executables whose arguments are themselves commands —
-    # argv[0]-only scanning must not exempt what they wrap.
-    _WRAPPER_COMMANDS = (
-        "sh", "bash", "zsh", "dash", "env", "nohup", "setsid",
-        "timeout", "sudo", "xargs", "nice", "ionice", "stdbuf", "flock",
-    )
 
     def _cmd_to_string(cmd) -> str:
         if cmd is None:
@@ -1463,38 +1456,7 @@ def _live_system_guard(request, monkeypatch):
             tokens = cmd_str.split()
         return any(verb in tokens for verb in _MUTATING_VERBS)
 
-    def _is_process_killer(cmd) -> bool:
-        cmd_str = _cmd_to_string(cmd)
-        try:
-            tokens = _shlex.split(cmd_str)
-        except ValueError:
-            tokens = cmd_str.split()
-        if not tokens:
-            return False
-
-        # For argv-style calls only argv[0] is the executable; scanning every
-        # argument blocked innocent commands like ``cat /tmp/.../skill``
-        # ("skill" is in _PROCESS_KILLERS).  Wrapper executables still get
-        # full-token scanning so ``["bash", "-c", "pkill ..."]`` stays caught.
-        if isinstance(cmd, (list, tuple)):
-            head0 = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            killer_tokens = tokens if head0 in _WRAPPER_COMMANDS else tokens[:1]
-        else:
-            killer_tokens = tokens
-        for tok in killer_tokens:
-            head = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            if head in _PROCESS_KILLERS:
-                low = cmd_str.lower()
-                # pkill -f pattern: catch hermes-themed patterns + a
-                # plain "python" -f which would catch the live gateway
-                # whose cmdline contains "python -m hermes_cli.main".
-                if (
-                    "hermes" in low
-                    or "gateway" in low
-                    or ("python" in low and "-f" in tokens)
-                ):
-                    return True
-        return False
+    from scripts.process_guard import is_process_killer as _is_process_killer
 
     def _check_subprocess_cmd(name, cmd):
         if _is_blocked_systemctl(cmd):
