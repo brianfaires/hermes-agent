@@ -30,9 +30,9 @@ _PROCESS_ID = uuid.uuid4().hex
 
 
 def _connect() -> sqlite3.Connection:
-    from cron.jobs import _ensure_cron_dir
+    from cron.jobs import _current_cron_store, _ensure_cron_dir
 
-    path = EXECUTIONS_FILE or (get_hermes_home().resolve() / "cron" / "executions.db")
+    path = EXECUTIONS_FILE or (_current_cron_store().cron_dir / "executions.db")
     _ensure_cron_dir(path.parent)
     return sqlite3.connect(path, timeout=5)
 

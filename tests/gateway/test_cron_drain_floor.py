@@ -49,11 +49,11 @@ class TestDrainWaitsForCronOnDefaultConfig:
         import cron.scheduler as sched
 
         runner, _adapter = make_restart_runner()
-        sched._running_job_ids.add("be62d36a9914")
+        sched._running_job_ids.add(sched._running_job_key("be62d36a9914"))
 
         async def finish_job():
             await asyncio.sleep(0.12)
-            sched._running_job_ids.discard("be62d36a9914")
+            sched._running_job_ids.discard(sched._running_job_key("be62d36a9914"))
 
         task = asyncio.create_task(finish_job())
         # restart_drain_timeout=0 (the shipped default) with a 2s cron floor.
@@ -74,7 +74,7 @@ class TestDrainWaitsForCronOnDefaultConfig:
         import cron.scheduler as sched
 
         runner, _adapter = make_restart_runner()
-        sched._running_job_ids.add("never-finishes")
+        sched._running_job_ids.add(sched._running_job_key("never-finishes"))
 
         _snapshot, timed_out = await runner._drain_active_agents(0.0, 0.2)
 
@@ -102,7 +102,7 @@ class TestDrainWaitsForCronOnDefaultConfig:
         import cron.scheduler as sched
 
         runner, _adapter = make_restart_runner()
-        sched._running_job_ids.add("job-1")
+        sched._running_job_ids.add(sched._running_job_key("job-1"))
 
         _snapshot, timed_out = await runner._drain_active_agents(0.0)
 

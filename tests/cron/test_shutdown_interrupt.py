@@ -41,8 +41,8 @@ class TestGetRunningJobIds:
     def test_reflects_in_flight_jobs(self):
         import cron.scheduler as sched
 
-        sched._running_job_ids.add("job-1")
-        sched._running_job_ids.add("job-2")
+        sched._running_job_ids.add(sched._running_job_key("job-1"))
+        sched._running_job_ids.add(sched._running_job_key("job-2"))
 
         result = sched.get_running_job_ids()
 
@@ -54,9 +54,9 @@ class TestGetRunningJobIds:
         on this to safely count in a tight polling loop."""
         import cron.scheduler as sched
 
-        sched._running_job_ids.add("job-1")
+        sched._running_job_ids.add(sched._running_job_key("job-1"))
         snapshot = sched.get_running_job_ids()
-        sched._running_job_ids.add("job-2")
+        sched._running_job_ids.add(sched._running_job_key("job-2"))
 
         assert snapshot == frozenset({"job-1"})
 
@@ -74,7 +74,9 @@ class TestMarkRunningJobsInterrupted:
     def test_marks_every_in_flight_job(self):
         import cron.scheduler as sched
 
-        sched._running_job_ids.update({"job-1", "job-2"})
+        sched._running_job_ids.update(
+            sched._running_job_key(job_id) for job_id in ("job-1", "job-2")
+        )
         profile_home = sched._get_hermes_home().resolve()
         sched._running_fire_owners.update(
             {
@@ -99,12 +101,12 @@ class TestMarkRunningJobsInterrupted:
     def test_sets_interrupted_flag_for_consumption_by_run_one_job(self):
         import cron.scheduler as sched
 
-        sched._running_job_ids.add("job-1")
+        sched._running_job_ids.add(sched._running_job_key("job-1"))
 
         with patch("cron.scheduler.mark_job_run"):
             sched.mark_running_jobs_interrupted("shutdown")
 
-        assert "job-1" in sched._interrupted_job_ids
+        assert sched._running_job_key("job-1") in sched._interrupted_job_ids
 
     def test_one_job_marking_failure_does_not_block_the_others(self):
         """mark_job_run raising for one job (e.g. a jobs.json write race)
@@ -112,7 +114,9 @@ class TestMarkRunningJobsInterrupted:
         shutdown, there's no retry window."""
         import cron.scheduler as sched
 
-        sched._running_job_ids.update({"job-1", "job-2"})
+        sched._running_job_ids.update(
+            sched._running_job_key(job_id) for job_id in ("job-1", "job-2")
+        )
         profile_home = sched._get_hermes_home().resolve()
         sched._running_fire_owners.update(
             {
@@ -150,7 +154,7 @@ class TestMarkRunningJobsInterrupted:
             replacement = {**claimed, "fire_claim": replacement_claim}
             jobs.save_jobs([replacement])
 
-            sched._running_job_ids.add(created["id"])
+            sched._running_job_ids.add(sched._running_job_key(created["id"]))
             sched._running_fire_owners[created["id"]] = {
                 object(): (stale_owner, profile_home)
             }
@@ -266,20 +270,20 @@ class TestIsInterrupted:
     def test_true_when_marked(self):
         import cron.scheduler as sched
 
-        sched._interrupted_job_ids.add("job-1")
+        sched._interrupted_job_ids.add(sched._running_job_key("job-1"))
 
         assert sched._is_interrupted("job-1") is True
 
     def test_does_not_clear_the_flag(self):
         import cron.scheduler as sched
 
-        sched._interrupted_job_ids.add("job-1")
+        sched._interrupted_job_ids.add(sched._running_job_key("job-1"))
 
         sched._is_interrupted("job-1")
 
         # Still set -- the later, authoritative check before mark_job_run
         # must still see it.
-        assert "job-1" in sched._interrupted_job_ids
+        assert sched._running_job_key("job-1") in sched._interrupted_job_ids
         assert sched._is_interrupted("job-1") is True
 
 
@@ -288,7 +292,7 @@ class TestConsumeInterruptedFlag:
     def test_true_and_clears_when_marked(self):
         import cron.scheduler as sched
 
-        sched._interrupted_job_ids.add("job-1")
+        sched._interrupted_job_ids.add(sched._running_job_key("job-1"))
 
         assert sched._consume_interrupted_flag("job-1") is True
         # Consumed -- a second check (e.g. a later, unrelated fire of the
@@ -548,7 +552,7 @@ class TestRunOneJobHonoursInterruptedFlag:
         import cron.scheduler as sched
 
         job = self._make_job()
-        sched._interrupted_job_ids.add(job["id"])
+        sched._interrupted_job_ids.add(sched._running_job_key(job["id"]))
 
         with patch("cron.scheduler.claim_dispatch", return_value=True), \
              patch("agent.secret_scope.set_secret_scope", return_value=None), \
@@ -570,7 +574,7 @@ class TestRunOneJobHonoursInterruptedFlag:
         mock_mark.assert_not_called()
         # Flag is consumed so a later, unrelated fire of the same job ID
         # isn't permanently silenced.
-        assert job["id"] not in sched._interrupted_job_ids
+        assert sched._running_job_key(job["id"]) not in sched._interrupted_job_ids
 
     def test_interrupted_job_delivers_failure_summary_not_raw_response(self):
         """The status-write guard alone isn't enough: delivery happens
@@ -583,7 +587,7 @@ class TestRunOneJobHonoursInterruptedFlag:
         import cron.scheduler as sched
 
         job = self._make_job()
-        sched._interrupted_job_ids.add(job["id"])
+        sched._interrupted_job_ids.add(sched._running_job_key(job["id"]))
 
         with patch("cron.scheduler.claim_dispatch", return_value=True), \
              patch("agent.secret_scope.set_secret_scope", return_value=None), \
@@ -617,7 +621,7 @@ class TestRunOneJobHonoursInterruptedFlag:
         import cron.scheduler as sched
 
         job = self._make_job()
-        sched._interrupted_job_ids.add(job["id"])
+        sched._interrupted_job_ids.add(sched._running_job_key(job["id"]))
 
         with patch("cron.scheduler.claim_dispatch", return_value=True), \
              patch("agent.secret_scope.set_secret_scope", return_value=None), \

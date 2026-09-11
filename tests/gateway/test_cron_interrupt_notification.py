@@ -174,7 +174,7 @@ class TestShutdownDeliversNoticeBeforeDisconnect:
 
         runner, adapter = make_restart_runner()
         runner._restart_drain_timeout = 0.01  # force the interrupt path
-        sched._running_job_ids.add("be62d36a9914")
+        sched._running_job_ids.add(sched._running_job_key("be62d36a9914"))
 
         monkeypatch.setattr(_pr.process_registry, "kill_all", lambda task_id=None: 1)
         monkeypatch.setattr(_tt, "cleanup_all_environments", lambda: None)

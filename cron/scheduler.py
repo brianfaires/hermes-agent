@@ -837,7 +837,7 @@ _INFLIGHT_MIN_ALLOWANCE_MINUTES = 30.0
 # (#60432). Token keying keeps an interruption scoped to that exact
 # execution: a later run of the same job ID (recurring jobs reuse the ID
 # every fire) must not inherit the stale flag. Legacy dispatch paths without
-# a registered fire owner fall back to storing the bare job ID.
+# a registered fire owner use a profile-qualified job key.
 _interrupted_job_ids: set = set()
 
 
@@ -869,61 +869,59 @@ class _CombinedCancelEvent:
             event.set()
 
 
-def get_running_job_ids() -> "frozenset[str]":
-    """Thread-safe snapshot of cron job IDs currently executing.
+def _running_job_key(job_id: str, profile_home: Optional[Path] = None) -> tuple[Path, str]:
+    """Capture the durable cron store identity, never a process-global job ID."""
+    if profile_home is None:
+        from cron.jobs import _current_cron_store
 
-    A job ID is a member from the moment ``_submit_with_guard`` dispatches
-    it onto the parallel/sequential pool until ``_process_job`` returns —
-    i.e. for the job's *entire* run, tool calls included, not just the
-    ticker's dispatch instant.
+        profile_home = _current_cron_store().cron_dir.parent
+    return (Path(profile_home).expanduser().resolve(), job_id)
 
-    The gateway shutdown path (``gateway/run.py::GatewayRunner.
-    _drain_active_agents``) reads this to treat in-flight cron work as
-    active the same way it already treats in-flight chat sessions via
-    ``_running_agents`` — cron jobs run through their own thread pool here,
-    entirely outside that dict, so without this the drain is structurally
-    blind to them (#60432).
-    """
+
+def get_running_job_keys() -> frozenset[tuple[Path, str]]:
+    """Global drain snapshot, including equal IDs in distinct profiles."""
     with _running_lock:
-        return frozenset(_running_job_ids | _running_fire_owners.keys())
+        return frozenset(_running_job_ids | {
+            (home, job_id)
+            for job_id, executions in _running_fire_owners.items()
+            for _owner, home in executions.values()
+        })
+
+
+def get_running_job_ids(*, current_profile_only: bool = False) -> frozenset[str]:
+    """Legacy global raw IDs, or current-store IDs for manual-run prechecks.
+
+    Global drain/count consumers must use get_running_job_keys so equal IDs
+    in distinct profiles count separately. The default preserves existing
+    callers that only need a global raw-ID snapshot.
+    """
+    home = _running_job_key("")[0] if current_profile_only else None
+    return frozenset(job_id for profile, job_id in get_running_job_keys()
+                     if home is None or profile == home)
 
 
 def try_register_running_job(job_id: str) -> bool:
-    """Atomically add ``job_id`` to the in-flight running set.
-
-    Returns False (without registering) when the job is already mid-run —
-    the caller must skip the fire. This is the single dedupe owner shared by
-    the ticker's ``_submit_with_guard`` and manual runs
-    (``tools/cronjob_tools``): the fire claim alone cannot prevent a
-    double-fire because its TTL (300s) is routinely outlived by real jobs,
-    after which a manual ``cronjob(action='run')`` would claim successfully
-    and run the same job concurrently (idea from #53395 by @izumi0uu).
-
-    Registration also makes the run visible to ``get_running_job_ids`` (the
-    gateway shutdown drain, #60432) and ``mark_running_jobs_interrupted``.
-    Callers MUST pair a successful registration with
-    ``release_running_job`` in a ``finally`` block.
-    """
+    """Atomically claim a job in the current store; pair with release in finally."""
+    key = _running_job_key(job_id)
     with _running_lock:
-        if job_id in _running_job_ids:
+        if key in _running_job_ids:
             return False
-        _running_job_ids.add(job_id)
-        # Claim timestamp + pending-future sentinel are recorded in the SAME
-        # critical section as the add, so there is never a window where an
-        # id is in-flight without an age the stale sweep can bound it by
-        # (t_3778a491).  The sentinel is replaced by the real owning future
-        # once ``pool.submit`` returns.
-        _running_since[job_id] = time.time()
-        _running_futures[job_id] = _FUTURE_PENDING
+        _running_job_ids.add(key)
+        _running_since[key] = time.time()
+        _running_futures[key] = _FUTURE_PENDING
+        # A new claim must not inherit an ownerless shutdown flag from a
+        # previous occurrence. Registered executions retain their own tokens.
+        _interrupted_job_ids.discard(key)
         return True
 
 
-def release_running_job(job_id: str) -> None:
-    """Remove ``job_id`` from the in-flight running set (idempotent)."""
+def release_running_job(job_id: str, *, profile_home: Optional[Path] = None) -> None:
+    """Release in the captured store, even after the worker context exits."""
+    key = _running_job_key(job_id, profile_home)
     with _running_lock:
-        _running_job_ids.discard(job_id)
-        _running_since.pop(job_id, None)
-        _running_futures.pop(job_id, None)
+        _running_job_ids.discard(key)
+        _running_since.pop(key, None)
+        _running_futures.pop(key, None)
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -1040,12 +1038,13 @@ def get_inflight_guard_stats() -> dict:
     recovered without a gateway restart.
     """
     now = time.time()
+    home = _running_job_key("")[0]
     with _running_lock:
         return {
-            "running": sorted(_running_job_ids),
+            "running": sorted(jid for profile, jid in _running_job_ids if profile == home),
             "running_ages_seconds": {
                 jid: round(now - started, 1)
-                for jid, started in _running_since.items()
+                for (profile, jid), started in _running_since.items() if profile == home
             },
             "forced_releases": _forced_release_count,
             "recent_forced_releases": list(_forced_releases),
@@ -1065,7 +1064,7 @@ def _record_forced_release(job_id: str, name: str, age_seconds: float, allowance
         _forced_releases.append(entry)
         del _forced_releases[:-_FORCED_RELEASE_HISTORY]
     try:
-        path = _get_hermes_home() / "cron" / "inflight_forced_releases.jsonl"
+        path = _running_job_key(job_id)[0] / "cron" / "inflight_forced_releases.jsonl"
         _ensure_cron_dir(path.parent)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
@@ -1093,6 +1092,7 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     """
     global _forced_release_count
 
+    home = _running_job_key("")[0]
     by_id = {j.get("id"): j for j in (due_jobs or []) if isinstance(j, dict)}
     floor_seconds = _inflight_min_allowance_minutes() * 60.0
     now = time.time()
@@ -1115,7 +1115,8 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
 
     with _running_lock:
         _claim_futures = {
-            job_id: _running_futures.get(job_id) for job_id in _running_job_ids
+            job_id: _running_futures.get((profile, job_id))
+            for profile, job_id in _running_job_ids if profile == home
         }
     _ledger_candidates = [
         job_id
@@ -1157,19 +1158,22 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     _intervals = {jid: _job_interval_minutes(j) for jid, j in by_id.items()}
 
     with _running_lock:
-        for job_id in list(_running_job_ids):
-            started = _running_since.get(job_id)
+        for key in list(_running_job_ids):
+            profile, job_id = key
+            if profile != home:
+                continue
+            started = _running_since.get(key)
             if started is None:
                 # Claim predates this guard (or was injected directly) — adopt
                 # it now so it becomes sweepable one allowance from here.
-                _running_since[job_id] = now
+                _running_since[key] = now
                 continue
             age = now - started
             interval_minutes = _intervals.get(job_id)
             allowance = floor_seconds
             if interval_minutes:
                 allowance = max(allowance, 2.0 * interval_minutes * 60.0)
-            fut = _running_futures.get(job_id)
+            fut = _running_futures.get(key)
             if fut is _FUTURE_PENDING:
                 # The claim is past its allowance and the owning future still
                 # has not been installed — the submit path itself (SessionDB
@@ -1205,9 +1209,9 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
                 reason = "age"
             else:
                 continue
-            _running_job_ids.discard(job_id)
-            _running_since.pop(job_id, None)
-            _running_futures.pop(job_id, None)
+            _running_job_ids.discard(key)
+            _running_since.pop(key, None)
+            _running_futures.pop(key, None)
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
@@ -1319,15 +1323,15 @@ def mark_running_jobs_interrupted(
                 fire for fire in active_fires
                 if (fire[1], fire[2]) in only_owners
             ]
-        registered_ids = {job_id for _t, job_id, _o, _p in active_fires}
+        registered_ids = {(home, job_id) for _t, job_id, _o, home in active_fires}
         if only_owners is None:
             active_fires.extend(
-                (None, job_id, None, _get_hermes_home())
-                for job_id in _running_job_ids - registered_ids
+                (None, job_id, None, home)
+                for home, job_id in _running_job_ids - registered_ids
             )
         _interrupted_job_ids.update(
-            token if token is not None else job_id
-            for token, job_id, _owner, _profile_home in active_fires
+            token if token is not None else (home, job_id)
+            for token, job_id, _owner, home in active_fires
         )
     marked = []
     for _token, job_id, fire_owner, profile_home in active_fires:
@@ -1371,13 +1375,13 @@ def _is_interrupted(job_id: str, token: Optional[object] = None) -> bool:
     written) still needs to see it. ``token`` scopes the check to one
     exact execution: owner-registered runs are matched by token, so a
     fresh run reusing the same job ID is not poisoned by a flag that
-    targeted its dead predecessor. The bare job ID is only ever stored
+    targeted its dead predecessor. A profile-qualified job key is stored
     for legacy dispatch paths with no registered fire owner.
     """
     with _running_lock:
         if token is not None and token in _interrupted_job_ids:
             return True
-        return job_id in _interrupted_job_ids
+        return _running_job_key(job_id) in _interrupted_job_ids
 
 
 def _consume_interrupted_flag(job_id: str, token: Optional[object] = None) -> bool:
@@ -1393,8 +1397,8 @@ def _consume_interrupted_flag(job_id: str, token: Optional[object] = None) -> bo
         if token is not None and token in _interrupted_job_ids:
             _interrupted_job_ids.discard(token)
             hit = True
-        if job_id in _interrupted_job_ids:
-            _interrupted_job_ids.discard(job_id)
+        if _running_job_key(job_id) in _interrupted_job_ids:
+            _interrupted_job_ids.discard(_running_job_key(job_id))
             hit = True
         return hit
 
@@ -7171,7 +7175,7 @@ def run_one_job(
     claim = job.get("fire_claim")
     fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     execution_token = object()
-    profile_home = _get_hermes_home().resolve()
+    profile_home = _running_job_key(job["id"])[0]
     with _running_lock:
         _running_fire_owners.setdefault(job["id"], {})[execution_token] = (
             fire_owner or None,
@@ -8049,7 +8053,7 @@ def tick(
         if _running_job_ids:
             _sweep_jobs = due_jobs
             try:
-                _inflight_ids = set(_running_job_ids)
+                _inflight_ids = get_running_job_ids(current_profile_only=True)
                 _due_ids = {j.get("id") for j in due_jobs if isinstance(j, dict)}
                 if not _inflight_ids <= _due_ids:
                     from cron.jobs import load_jobs as _load_all_jobs
@@ -8162,6 +8166,7 @@ def tick(
             membership is released in the worker's finally block.
             """
             job_id = job["id"]
+            running_key = _running_job_key(job_id)
 
             def _clear_run_claim_best_effort() -> None:
                 """Best-effort claim cleanup on the dispatch-failure paths.
@@ -8218,7 +8223,7 @@ def tick(
                 # retry instead of wedging on 'already running' forever (the
                 # audit requirement: every add is paired with guaranteed
                 # cleanup).
-                release_running_job(job_id)
+                release_running_job(job_id, profile_home=running_key[0])
                 _clear_run_claim_best_effort()
                 logger.exception(
                     "Job '%s' not dispatched: execution creation failed: %s",
@@ -8231,12 +8236,12 @@ def tick(
                 try:
                     return ctx.run(_process_job, j)
                 finally:
-                    release_running_job(j["id"])
+                    release_running_job(j["id"], profile_home=running_key[0])
 
             try:
                 fut = pool.submit(_run_and_release)
             except Exception as submit_err:
-                release_running_job(job_id)
+                release_running_job(job_id, profile_home=running_key[0])
                 _clear_run_claim_best_effort()
                 finish_execution(
                     execution["id"],
@@ -8261,8 +8266,8 @@ def tick(
             # Record the owning future so the stale sweep can distinguish
             # "still executing" from "claim leaked before/after the future".
             with _running_lock:
-                if job_id in _running_job_ids:
-                    _running_futures[job_id] = fut
+                if running_key in _running_job_ids:
+                    _running_futures[running_key] = fut
             return fut
 
 
