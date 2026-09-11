@@ -1,6 +1,6 @@
 # Discord voice source milestones — September 11, 2026
 
-All six finite source milestones are implemented. This is a **source release candidate**, not a deployed release or acoustic acceptance. Corrected candidate: the single correction commit containing this ledger, directly after `bd75c81ffe2edfc72180dfadf07ec77f57eaa8f4` on isolated `dev/discord-voice`. Its subject is `fix(discord): retain sparse progress between streamed clauses`; the exact post-commit SHA is recorded in `../PROGRESS-FIX-RESULT.md`. See [independent review](DISCORD_VOICE_REVIEW.md), [human UAT](DISCORD_VOICE_UAT.md), and [handoff](DISCORD_VOICE_HANDOFF.md).
+All six finite source milestones are implemented and published. This is a **source release candidate**, not a deployed release or acoustic acceptance. Corrected and tagged candidate: `c1219b13de8d685fd52f4a315a63765888894a1f` on isolated `dev/discord-voice`; later commits only record publication documentation. See [independent review](DISCORD_VOICE_REVIEW.md), [human UAT](DISCORD_VOICE_UAT.md), and [handoff](DISCORD_VOICE_HANDOFF.md).
 
 ## Bounded milestone 2/5 acceptance correction
 
@@ -31,11 +31,11 @@ Read-only GitHub API checks confirmed main `cf62291dad2cd9c12de80bc5194ff76ef0f6
 
 Rollback instructions describe **source composition**, not runtime operations. These commits form a dependency chain; reverse-order reverts on an isolated branch are reviewable. Do not cherry-pick an early feature SHA while omitting its listed safety corrections. Runtime rollback must be established separately from the then-current known-good deployment/data state.
 
-## Proposed annotated tags — parent publication only
+## Published annotated source-RC tags
 
-No tags were created. Local `discord-voice/` namespace remains empty; prior remote inspection is historical. Parent must recheck collisions immediately before publication and must never move an existing tag. **All six proposed source-RC tags target the same correction commit containing this ledger**, directly after `bd75c81ffe2edfc72180dfadf07ec77f57eaa8f4`, with the exact target SHA in `../PROGRESS-FIX-RESULT.md`. Resolve that SHA after the single correction commit; do not target `bd75c81ffe2edfc72180dfadf07ec77f57eaa8f4`, `4557bc6034`, or the original feature SHAs. This avoids a self-referential commit hash inside its own documentation.
+Ang published all six tags below and independently read back each annotated object plus peeled commit. **Every tag targets cumulative corrected source `c1219b13de8d685fd52f4a315a63765888894a1f`**, tree `8bbcf45a0a8fb059aea945ce8a8000fdcae2d045`. The exact committed candidate passed Ang's 24-file rerun: 326 passed, 0 failed; reviewed Python-delta checksum and added-line security scan passed. Original feature commits remain provenance, not standalone qualified RCs. No tag was moved/deleted; no main/staging change or deployment occurred. Earlier no-publication statements elsewhere in this ledger describe implementation-harness evidence before Ang's publication, not current state.
 
-| Proposed annotated source-RC tag | Proposed target |
+| Published annotated source-RC tag | Verified target |
 |---|---|
 | `discord-voice/20260911-m1-restored-progressfix-rc2` | Corrected cumulative commit described above |
 | `discord-voice/20260911-m2-progress-progressfix-rc2` | Same corrected cumulative commit |
@@ -73,4 +73,4 @@ Historical evidence for milestones 1/2: accepted candidate `fe99ce625b1ca46e6096
 - **Model/voice A-B:** defer until explicitly authorized measurement runs; selected provider/model/voice/settings untouched.
 - **Separate conversation/front runtime:** conditional only if measurements prove model latency remains the bottleneck. No demonstrated need, no implementation required, no new front agent/orchestrator/monitor.
 
-Proposed interrupt p95≤300ms and warm first meaningful speech median≤2s/p95≤4s remain **unmeasured targets**. Source scope is complete; remaining gates are publication by parent, separately authorized integration/CI/runtime activation, and human acoustic UAT.
+Proposed interrupt p95≤300ms and warm first meaningful speech median≤2s/p95≤4s remain **unmeasured targets**. Source scope is complete and published; remaining gates are separately authorized integration/CI/runtime activation and human acoustic UAT.
