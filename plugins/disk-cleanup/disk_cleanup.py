@@ -84,7 +84,7 @@ def _is_safe_wildcard_policy_parent(parent: Path) -> bool:
     """Return True when *parent* is safe to use as a recursive policy root."""
     if not parent.is_dir() or parent.is_symlink():
         return False
-    if not is_safe_path(parent):
+    if not is_safe_path(parent) or _is_worktree_path(parent):
         return False
 
     hermes_home = get_hermes_home()
@@ -174,6 +174,7 @@ def _iter_safe_wildcard_files(
             continue
         if (
             not is_safe_path(resolved)
+            or _is_worktree_path(child)
             or _is_durable_script_path(resolved)
             or _is_protected_cron_path(resolved)
         ):
@@ -214,6 +215,38 @@ def _remove_empty_wildcard_dirs(parent: Path) -> int:
 # ---------------------------------------------------------------------------
 # Path safety
 # ---------------------------------------------------------------------------
+
+_WORKTREE_DIR_NAMES = frozenset({".worktrees", "worktrees"})
+
+
+def _is_worktree_path(path: Path) -> bool:
+    """Protect exact directory components, including resolved symlink targets."""
+    try:
+        for candidate in (path.absolute(), path.resolve()):
+            if _WORKTREE_DIR_NAMES.intersection(candidate.parts[:-1]):
+                return True
+            if candidate.name in _WORKTREE_DIR_NAMES and candidate.is_dir():
+                return True
+    except (OSError, RuntimeError):
+        return True  # An unresolved path is not safe to delete.
+    return False
+
+
+def _would_remove_worktree(path: Path) -> bool:
+    """Also prevent recursive deletion through an ancestor directory.
+
+    This guard does not apply to empty-directory pruning, which remains enabled.
+    """
+    if _is_worktree_path(path):
+        return True
+    try:
+        return path.is_dir() and any(
+            child.name in _WORKTREE_DIR_NAMES and child.is_dir()
+            for child in path.rglob("*")
+        )
+    except OSError:
+        return True
+
 
 def is_safe_path(path: Path) -> bool:
     """Accept only paths under HERMES_HOME or ``/tmp/hermes-*``.
@@ -398,6 +431,9 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         path = Path(path_str).resolve()
         stored_path = str(path)
 
+    if _is_worktree_path(Path(path_str)):
+        return False
+
     if not path.exists():
         _log(f"SKIP: {stored_path} (does not exist)")
         return False
@@ -481,7 +517,7 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
             continue
         if _is_at_or_below_valid_wildcard_root(p, wildcard_roots):
             continue
-        if _is_durable_script_path(p):
+        if _is_durable_script_path(p) or _would_remove_worktree(p):
             continue
         age = (now - datetime.fromisoformat(item["timestamp"])).days
         cat = item["category"]
@@ -567,6 +603,10 @@ def quick() -> Dict[str, Any]:
 
         if _is_at_or_below_valid_wildcard_root(p, wildcard_sweep_roots):
             _log(f"SKIP wildcard-managed path: {p} (removed from tracking)")
+            continue
+
+        if _would_remove_worktree(p):
+            _log(f"SKIP protected worktree: {p} (removed from tracking)")
             continue
 
         if _is_durable_script_path(p):
@@ -719,7 +759,7 @@ def deep(
 
     for item in tracked:
         p = Path(item["path"])
-        if not p.exists():
+        if not p.exists() or _would_remove_worktree(p):
             continue
         age = (now - datetime.fromisoformat(item["timestamp"])).days
         cat = item["category"]
@@ -742,6 +782,8 @@ def deep(
             if confirm(item):
                 try:
                     p = Path(item["path"])
+                    if _would_remove_worktree(p):
+                        continue
                     if p.is_file():
                         p.unlink()
                     elif p.is_dir():
@@ -830,7 +872,7 @@ def guess_category(path: Path) -> Optional[str]:
 
     Used by the ``post_tool_call`` hook to auto-track ephemeral files.
     """
-    if not is_safe_path(path):
+    if not is_safe_path(path) or _is_worktree_path(path):
         return None
 
     # Skip the state dir itself, logs, memory files, sessions, config.

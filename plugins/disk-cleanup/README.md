@@ -66,6 +66,12 @@ trees are ignored or rejected.
 
 ## Safety
 
+- Files beneath an exact directory component named `.worktrees` or `worktrees`
+  are excluded at any depth, including resolved symlink targets. This applies
+  to automatic/manual tracking, stale entries, dry-run, quick/deep deletion,
+  and wildcard files. Recursive deletion of an ancestor containing a worktree
+  is skipped. Empty-directory pruning and the session-end hook remain enabled.
+
 - `is_safe_path()` rejects anything outside `HERMES_HOME` or `/tmp/hermes-*`
 - Windows mounts (`/mnt/c` etc.) are rejected
 - The state directory `$HERMES_HOME/disk-cleanup/` is itself excluded
