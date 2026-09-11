@@ -4,7 +4,7 @@
   "base": "cf62291dad2cd9c12de80bc5194ff76ef0f6ce55",
   "old_main": "2945588a014543d47c9e5e4a0d92ba6e361387c1",
   "audited_main": "31bb2aed2f65d8d4193b97d57a11770009fba656",
-  "source_candidate": "3604efe12408fc50157e4e0e40198ebe06e8387c",
+  "source_candidate": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
   "historical_audit_unchanged": true,
   "row_counts": {
     "unique_ids": 51,
@@ -76,6 +76,25 @@
       "hosted_failed_cases_now_covered": 26,
       "batch3_changed_test_files": 21,
       "review": "V021_APPROVED_FINAL_CORRECTION_REVIEW.md"
+    },
+    "approved_ci_tail": {
+      "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+      "source_candidate": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
+      "source_tree": "e407f1261ac2748e5a6fa44158a7d02a850d00b3",
+      "superseding_hosted_ci": {
+        "run_id": 34553356412,
+        "sha": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+        "conclusion": "failure",
+        "unique_cases": 20,
+        "shards": 6
+      },
+      "unique_passed": 403,
+      "files": 22,
+      "all20_qualified": true,
+      "fresh_exact_ci_required": true,
+      "evidence": "V021_APPROVED_CI_TAIL.md",
+      "tests": "V021_APPROVED_CI_TAIL_TESTS.json",
+      "review": "V021_APPROVED_CI_TAIL_REVIEW.md"
     }
   },
   "limitations": [
