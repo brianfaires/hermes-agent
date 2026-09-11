@@ -89,8 +89,27 @@ def adapter_busy(adapter):
                    for task in adapter._background_tasks))
 
 
+def cron_running_count(scheduler):
+    """Read the current global keys, or the admitted older global-ID snapshot."""
+    absent = object()
+    getter = getattr(scheduler, 'get_running_job_keys', absent)
+    legacy = getter is absent
+    if legacy:
+        getter = getattr(scheduler, 'get_running_job_ids', None)
+    check(callable(getter), 'cron running snapshot unavailable')
+    jobs = getter()  # Errors must refuse, never fall back to an idle snapshot.
+    check(type(jobs) is frozenset, 'cron running snapshot unreadable')
+    if legacy:
+        check(all(type(job) is str for job in jobs), 'cron legacy IDs unreadable')
+    else:
+        check(all(type(job) is tuple and len(job) == 2
+                  and isinstance(job[0], Path) and type(job[1]) is str for job in jobs),
+              'cron running keys unreadable')
+    return len(jobs)
+
+
 async def observe(runner, homes, primary, started):
-    from cron.scheduler import get_running_job_keys
+    from cron import scheduler
     from tools.async_delegation import active_count
     from tools.process_registry import process_registry
     from gateway.control_socket import build_status_payload
@@ -107,7 +126,7 @@ async def observe(runner, homes, primary, started):
         check(type(adapters) is dict, 'adapter state unreadable')
         owned.update(adapters.values())
     adapter_work = any(adapter_busy(adapter) for adapter in owned)
-    cron = len(get_running_job_keys())  # exceptions must not turn into zero
+    cron = cron_running_count(scheduler)
     api = 0
     profiles = {}
     for name, home in homes.items():
