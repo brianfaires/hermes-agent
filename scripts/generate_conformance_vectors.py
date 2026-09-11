@@ -16,7 +16,7 @@ Oracles (all imported, never reimplemented):
   whatsapp  gateway.platforms.whatsapp_common.WhatsAppBehaviorMixin
             .format_message (standard markdown → WhatsApp formatting)
   discord   plugins.platforms.discord.adapter.DiscordAdapter.format_message
-            (GFM tables → bullet groups; otherwise identity)
+            (GFM tables → bullet groups; prose markdown escaped, code preserved)
 
 Expect semantics (consumed by the gg runner):
   parity    connector render must BYTE-EQUAL native_output

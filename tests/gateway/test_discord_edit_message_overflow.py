@@ -238,8 +238,16 @@ class TestFinalOverflowSplits:
         result = await adapter.edit_message("555", "42", body, finalize=True)
 
         assert result.success is True
-        delivered = "".join(edits + [s["content"] for s in sends])
-        assert "END_MARKER_XYZ" in delivered
+        chunks = edits + [s["content"] for s in sends]
+        assert len(chunks) > 1
+        payloads = []
+        for index, chunk in enumerate(chunks, 1):
+            suffix = f" ({index}/{len(chunks)})"
+            assert chunk.endswith(suffix)
+            assert len(chunk) <= MAX
+            payloads.append(chunk[:-len(suffix)])
+        # The only added bytes are escaping and explicit chunk counters.
+        assert "".join(payloads) == "a" * 5000 + r"END\_MARKER\_XYZ"
 
 
 # --------------------------------------------------------------------------- #

@@ -38,12 +38,13 @@ class TestCleanForDisplay:
 
 
     def test_media_tag_single_quoted_stripped(self):
-        """A single-quote-wrapped tag matches the known-ext cleanup pattern
-        and is removed (delivery attempts it too — consistent)."""
+        """Only a standalone quoted directive is delivered and hidden."""
         result = GatewayStreamConsumer._clean_for_display(
-            "Result: 'MEDIA:/path/file.png'"
+            "Result:\n'MEDIA:/path/file.png'"
         )
-        assert "MEDIA:" not in result
+        assert result == "Result:"
+        example = "Result: 'MEDIA:/path/file.png'"
+        assert GatewayStreamConsumer._clean_for_display(example) == example
 
     def test_media_tag_double_quoted_json_context_stays_visible(self):
         """A double-quoted tag preceded by a colon sits in a JSON value
