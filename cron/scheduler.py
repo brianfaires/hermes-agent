@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
+from agent.secret_scope import get_secret as _get_profile_value
 from hermes_cli.config import (
     _expand_env_vars,
     cron_model_drift_axes,
@@ -2686,12 +2687,39 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
         except Exception:
             return "bot-chat delivery failed: hermes CLI not resolvable"
 
-    env = os.environ.copy()
+    from agent.secret_scope import (
+        _is_global_env, refresh_profile_secret_scope, reset_secret_scope,
+        scoped_subprocess_environment, set_secret_scope,
+    )
+    from tools.environments.local import build_subprocess_env
+
     if profile:
+        from hermes_cli.profiles import get_profile_dir, profile_exists
+
+        if not profile_exists(profile):
+            return "bot-chat delivery failed: target profile no longer exists"
+        # A named receiver must never inherit the sending profile's secrets,
+        # even when this scheduler is running in single-profile mode.
+        target_home = get_profile_dir(profile)
+        token = set_secret_scope(refresh_profile_secret_scope(
+            target_home, inherit_process_secrets=False,
+        ))
+        try:
+            env = scoped_subprocess_environment(
+                {name: value for name, value in os.environ.items() if _is_global_env(name)}
+            )
+        finally:
+            reset_secret_scope(token)
         argv += ["-p", profile]
-        # -p owns profile resolution in the child; a leftover HERMES_HOME
-        # from THIS scheduler's profile must not shadow it.
-        env.pop("HERMES_HOME", None)
+        # Keep the resolved destination home so custom/mounted profile roots
+        # survive the child's -p resolution. Never carry the sender's home.
+        env["HERMES_HOME"] = str(target_home)
+        env.pop("HERMES_PROFILE", None)
+    else:
+        env = build_subprocess_env(
+            scoped_subprocess_environment(os.environ), scrub_secrets=False,
+            extra={"HERMES_HOME": str(_get_hermes_home())},
+        )
 
     # The prefix tells the receiving bot this is scheduled output, not the
     # human typing — mirrors the Bot Mode sender-attribution convention.
@@ -4453,7 +4481,9 @@ def _run_job_script(
                 "encoding": "utf-8",
                 "errors": "replace",
             }
-        env = build_subprocess_env()
+        from agent.secret_scope import scoped_subprocess_environment
+
+        env = build_subprocess_env(scoped_subprocess_environment(os.environ))
         env.update(env_overlay)
         # Use the job's workdir as the subprocess cwd when configured,
         # otherwise default to the scripts-dir parent (back-compat).
@@ -5187,7 +5217,7 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
         or str((_cron_cfg or {}).get("model_provider") or "").strip()
         or None
     )
-    model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+    model = job.get("model") or _get_profile_value("HERMES_MODEL") or ""
 
     from hermes_cli.auth import AuthError
 
@@ -5559,6 +5589,30 @@ def run_job(
     cancel_event: Optional[_CancelEventLike] = None,
     execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
+    """Run with fresh private credentials, including direct/script-only callers."""
+    from agent.secret_scope import (
+        refresh_profile_secret_scope, reset_secret_scope, set_secret_scope,
+    )
+
+    token = set_secret_scope(refresh_profile_secret_scope(_get_hermes_home()))
+    try:
+        return _run_job_scoped(
+            job, defer_agent_teardown=defer_agent_teardown,
+            extra_prompt=extra_prompt, cancel_event=cancel_event,
+            execution_id=execution_id,
+        )
+    finally:
+        reset_secret_scope(token)
+
+
+def _run_job_scoped(
+    job: dict,
+    *,
+    defer_agent_teardown: Optional[list] = None,
+    extra_prompt: Optional[str] = None,
+    cancel_event: Optional[_CancelEventLike] = None,
+    execution_id: Optional[str] = None,
+) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
 
@@ -5601,22 +5655,6 @@ def run_job(
     #                               the whole point of no_agent is that there
     #                               is no agent to wake
     if job.get("no_agent"):
-        # Load .env before the script runs so auto-delivery can resolve home
-        # channels. A standalone cron tick process typically starts WITHOUT
-        # TELEGRAM_HOME_CHANNEL/DISCORD_HOME_CHANNEL in its environment, and
-        # the agent path's per-run dotenv reload below never executes for
-        # no_agent jobs — every deliver=telegram/all script job failed with
-        # "no delivery target resolved". load_hermes_dotenv does not override
-        # already-set vars, so the gateway's in-process tick is unaffected.
-        try:
-            from hermes_cli.env_loader import load_hermes_dotenv
-
-            load_hermes_dotenv(hermes_home=_get_hermes_home())
-        except Exception:
-            logger.debug(
-                "Job '%s': no_agent .env reload failed", job_id, exc_info=True
-            )
-
         script_path = job.get("script")
         # Legacy/hand-edited records can still carry no_agent with a missing or
         # whitespace-only script. Erroring alone left the job enabled, so it
@@ -5969,25 +6007,6 @@ def run_job(
         if _job_workdir:
             logger.info("Job '%s': using task-scoped workdir %s", job_id, _job_workdir)
 
-        # Re-read .env and config.yaml fresh every run so provider/key
-        # changes take effect without a gateway restart. Route through
-        # load_hermes_dotenv (not a bare load_dotenv) and reset the secret-
-        # source cache first: startup already applied external secrets and
-        # recorded this HERMES_HOME in _APPLIED_HOMES, so a naive reload would
-        # re-apply only the .env placeholder and never re-resolve a Bitwarden/
-        # BSM-backed secret — leaving cron jobs 401'ing on the placeholder
-        # (#33465). Clearing the cache forces the re-pull; the resolved secret
-        # overrides the placeholder only when secrets.bitwarden.override_existing
-        # is set (mirrors startup), and the Bitwarden value-cache keeps the
-        # forced re-pull off the network. load_hermes_dotenv also handles the
-        # utf-8/latin-1 encoding fallback internally.
-        from hermes_cli.env_loader import (
-            load_hermes_dotenv,
-            reset_secret_source_cache,
-        )
-        reset_secret_source_cache()
-        load_hermes_dotenv(hermes_home=_get_hermes_home())
-
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set(delivery_target["platform"])
@@ -6004,7 +6023,7 @@ def run_job(
         # re-read from storage every tick so a ``hermes cron edit --model``
         # after a failed run takes effect on the next tick — there is no
         # in-memory cache.
-        model = job.get("model") or os.getenv("HERMES_MODEL") or ""
+        model = job.get("model") or _get_profile_value("HERMES_MODEL") or ""
 
         # cron.model / cron.model_provider: a deliberate cron-fleet default
         # so unattended jobs stop shadowing chat `/model` switches. When an
@@ -6062,7 +6081,7 @@ def run_job(
             raise RuntimeError(
                 f"Cron job '{job_name}' has no model configured "
                 f"(job.model={job.get('model')!r}, "
-                f"HERMES_MODEL={os.getenv('HERMES_MODEL', '')!r}, "
+                f"HERMES_MODEL={_get_profile_value('HERMES_MODEL', '')!r}, "
                 "config.yaml model.default missing or empty). "
                 f"Set a per-job model via "
                 f"`hermes cron edit {job_id} --model <name>` or set a "
@@ -6089,7 +6108,7 @@ def run_job(
         prefill_messages = None
         agent_cfg = _cfg.get("agent", {}) if isinstance(_cfg.get("agent", {}), dict) else {}
         prefill_file = (
-            os.getenv("HERMES_PREFILL_MESSAGES_FILE", "")
+            _get_profile_value("HERMES_PREFILL_MESSAGES_FILE", "")
             or _cfg.get("prefill_messages_file", "")
             or agent_cfg.get("prefill_messages_file", "")
         )
@@ -7258,7 +7277,7 @@ def _run_one_job_body(
     incident_acked = False
     failure_incident_id = None
     from agent.secret_scope import (
-        build_profile_secret_scope,
+        refresh_profile_secret_scope,
         reset_secret_scope,
         set_secret_scope,
     )
@@ -7295,7 +7314,7 @@ def _run_one_job_body(
         # _deliver_result unscoped. Mirrors gateway/run.py's per-turn pattern.
 
         _scope_token = set_secret_scope(
-            build_profile_secret_scope(_get_hermes_home())
+            refresh_profile_secret_scope(_get_hermes_home())
         )
         # Defer the cron agent's async-resource teardown until AFTER delivery.
         # run_job normally closes the agent (and reaps stale async clients) in

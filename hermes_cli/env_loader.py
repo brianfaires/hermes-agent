@@ -168,6 +168,9 @@ def get_secret_source_values(
 
 def hydrate_profile_secret_sources(
     hermes_home: str | os.PathLike,
+    *,
+    refresh: bool = False,
+    inherit_process_secrets: bool = False,
 ) -> dict[str, str]:
     """Resolve one profile's configured sources without mutating ``os.environ``.
 
@@ -176,16 +179,28 @@ def hydrate_profile_secret_sources(
     sources against a private mapping seeded from its own ``.env`` and record
     the usual per-home snapshot for ``build_profile_secret_scope()``.
 
+    ``refresh`` invalidates only this home under the cache lock. Explicit
+    ``inherit_process_secrets`` preserves shell bootstrap credentials for a
+    single-profile runtime; multiplex callers must leave it disabled.
+
     Fail-open and once-per-home semantics intentionally mirror
     ``_apply_external_secret_sources``.  The returned mapping contains only
     values actually contributed by external sources, never the profile's
     plaintext ``.env`` entries.
     """
     with _SECRET_SOURCE_CACHE_LOCK:
-        return _hydrate_profile_secret_sources(Path(hermes_home))
+        if refresh:
+            home_key = str(Path(hermes_home).resolve())
+            _APPLIED_HOMES.discard(home_key)
+            _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
+        return _hydrate_profile_secret_sources(
+            Path(hermes_home), inherit_process_secrets=inherit_process_secrets,
+        )
 
 
-def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
+def _hydrate_profile_secret_sources(
+    home: Path, *, inherit_process_secrets: bool = False,
+) -> dict[str, str]:
     """Locked implementation for :func:`hydrate_profile_secret_sources`."""
     home_key = str(home.resolve())
     if home_key in _APPLIED_HOMES:
@@ -205,7 +220,7 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
         local_env = {
             name: value
             for name, value in os.environ.items()
-            if _is_global_env(name)
+            if inherit_process_secrets or _is_global_env(name)
         }
         local_env.update(load_env_file(home / ".env"))
         # Mirror load_hermes_dotenv()'s .op.env bootstrap: the 1Password
@@ -484,6 +499,17 @@ def load_hermes_dotenv(
       ``load_external_secrets=False`` to avoid loading optional secret-manager
       dependencies into the process that replaces that same environment.
     """
+    # Late imports during a scoped turn must not reload another profile into
+    # the process environment. Runtime scope owners refresh their private maps.
+    from agent.secret_scope import current_secret_scope, is_multiplex_active
+    from hermes_constants import get_hermes_home
+
+    if current_secret_scope() is not None or is_multiplex_active():
+        home_path = Path(hermes_home) if hermes_home is not None else get_hermes_home()
+        if load_external_secrets:
+            hydrate_profile_secret_sources(home_path)
+        return [home_path / ".env"] if (home_path / ".env").is_file() else []
+
     loaded: list[Path] = []
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
