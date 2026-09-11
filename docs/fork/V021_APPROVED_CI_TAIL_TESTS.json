@@ -1,0 +1,2140 @@
+{
+  "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+  "source_candidate": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
+  "source_tree": "e407f1261ac2748e5a6fa44158a7d02a850d00b3",
+  "final_results": {
+    "tests/conformance/test_vector_generator.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/conformance/test_vector_generator.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/conformance/test_vector_generator.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-345pm8g0/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "....                                                                     [100%]\n=============================== warnings summary ===============================\ntests/conformance/test_vector_generator.py::test_oracles_importable_and_self_free\n  /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n    import audioop\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n4 passed, 1 warning in 3.52s\n"
+    },
+    "tests/gateway/test_stream_consumer.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_stream_consumer.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_stream_consumer.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-5eggt1xe/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "..................................................................       [100%]\n66 passed in 11.59s\n"
+    },
+    "tests/gateway/test_api_server_media_data_urls.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_api_server_media_data_urls.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_api_server_media_data_urls.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-dl_5986v/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".....                                                                    [100%]\n5 passed in 2.82s\n"
+    },
+    "tests/gateway/test_platform_base.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_platform_base.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_platform_base.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-s7vnbzo9/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "........................................................................ [ 69%]\n..................s.............                                         [100%]\n103 passed, 1 skipped in 7.27s\n"
+    },
+    "tests/gateway/test_v021_discord_text.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_v021_discord_text.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_discord_text.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-mi2b7kks/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "....                                                                     [100%]\n4 passed in 2.14s\n"
+    },
+    "tests/gateway/test_discord_edit_message_overflow.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_discord_edit_message_overflow.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_discord_edit_message_overflow.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-j6sj_mae/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "........                                                                 [100%]\n8 passed in 2.32s\n"
+    },
+    "tests/gateway/test_v021_text_compatibility.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_v021_text_compatibility.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_text_compatibility.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-ek74g9ul/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "........                                                      [100%]\n8 passed, 11 subtests passed in 2.78s\n"
+    },
+    "tests/gateway/test_discord_format.py": {
+      "receipt": "ci-tail-text-pytest.json",
+      "file": "tests/gateway/test_discord_format.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_discord_format.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-cdd5qd3d/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".......                                                                  [100%]\n7 passed in 2.78s\n"
+    },
+    "tests/gateway/test_v021_notifier_profile_qualification.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/gateway/test_v021_notifier_profile_qualification.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_notifier_profile_qualification.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-67_dhcmx/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".                                                                        [100%]\n1 passed in 4.98s\n"
+    },
+    "tests/gateway/test_kanban_notifier.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/gateway/test_kanban_notifier.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_kanban_notifier.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-z3s4wazw/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "............                                                             [100%]\n12 passed in 19.04s\n"
+    },
+    "tests/tools/test_kanban_tools.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/tools/test_kanban_tools.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/tools/test_kanban_tools.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-c8149bpq/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "................................                                         [100%]\n32 passed in 33.74s\n"
+    },
+    "tests/hermes_cli/test_kanban_notify.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/hermes_cli/test_kanban_notify.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/hermes_cli/test_kanban_notify.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-7869x8qv/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "..........................                                               [100%]\n26 passed in 29.35s\n"
+    },
+    "tests/gateway/test_v021_notification_policy.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/gateway/test_v021_notification_policy.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_notification_policy.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-ehrw_mey/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "............                                                             [100%]\n12 passed in 23.10s\n"
+    },
+    "tests/gateway/test_v021_notifier_diagnostics.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/gateway/test_v021_notifier_diagnostics.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_notifier_diagnostics.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-cvzek_34/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.62s\n"
+    },
+    "tests/gateway/test_v021_background_notify_retained.py": {
+      "receipt": "ci-tail-notify-pytest.json",
+      "file": "tests/gateway/test_v021_background_notify_retained.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_background_notify_retained.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-pqm2ny7h/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "...                                                          [100%]\n3 passed, 12 subtests passed in 3.75s\n"
+    },
+    "tests/test_packaging_metadata.py": {
+      "receipt": "ci-tail-core-corrected.json",
+      "file": "tests/test_packaging_metadata.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/test_packaging_metadata.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-def0ogmo/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "..........                                                               [100%]\n10 passed in 1.81s\n"
+    },
+    "tests/tools/test_skill_linter.py": {
+      "receipt": "ci-tail-core-final.json",
+      "file": "tests/tools/test_skill_linter.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/tools/test_skill_linter.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-_psde7wk/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "...................                                                      [100%]\n19 passed in 2.88s\n"
+    },
+    "tests/tools/test_skill_manager_tool.py": {
+      "receipt": "ci-tail-skill-manager-final.json",
+      "file": "tests/tools/test_skill_manager_tool.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/tools/test_skill_manager_tool.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-07b2xaq5/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".................................................................        [100%]\n65 passed in 10.50s\n"
+    },
+    "tests/gateway/test_shutdown_cache_cleanup.py": {
+      "receipt": "ci-tail-core-final.json",
+      "file": "tests/gateway/test_shutdown_cache_cleanup.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_shutdown_cache_cleanup.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-r6amjxim/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "...                                                                      [100%]\n3 passed in 4.08s\n"
+    },
+    "tests/tools/test_v021_discord_packaging.py": {
+      "receipt": "ci-tail-core-final.json",
+      "file": "tests/tools/test_v021_discord_packaging.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/tools/test_v021_discord_packaging.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-nbf6kwr9/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": ".                                                                        [100%]\n1 passed in 1.49s\n"
+    },
+    "tests/agent/test_v021_prompt_contracts.py": {
+      "receipt": "ci-tail-core-final.json",
+      "file": "tests/agent/test_v021_prompt_contracts.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/agent/test_v021_prompt_contracts.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-q5r2la0x/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "...                                                                 [100%]\n3 passed, 5 subtests passed in 8.38s\n"
+    },
+    "tests/gateway/test_v021_served_coverage.py": {
+      "receipt": "ci-tail-core-final.json",
+      "file": "tests/gateway/test_v021_served_coverage.py",
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/gateway/test_v021_served_coverage.py",
+        "-o",
+        "addopts=",
+        "-q",
+        "--tb=short",
+        "--basetemp",
+        "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-75a0ucfp/hermes-pytest-base",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "timeout_seconds": 150,
+      "returncode": 0,
+      "output": "..........                                                               [100%]\n10 passed in 4.44s\n"
+    }
+  },
+  "unique_passing_total": 403,
+  "file_count": 22,
+  "passing_subtests": 28,
+  "existing_optional_skips": 1,
+  "new_skips": 0,
+  "all20_hosted_failures": [
+    {
+      "hosted_case": "tests/conformance/test_vector_generator.py::test_committed_vectors_match_regeneration",
+      "qualified_case": "tests/conformance/test_vector_generator.py::test_committed_vectors_match_regeneration",
+      "hosted_raw_log": "ci-bdc5d6d-slice1.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_stream_consumer.py::TestCleanForDisplay::test_media_tag_single_quoted_stripped",
+      "qualified_case": "tests/gateway/test_stream_consumer.py::TestCleanForDisplay::test_media_tag_single_quoted_stripped",
+      "hosted_raw_log": "ci-bdc5d6d-slice1.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag",
+      "qualified_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag",
+      "hosted_raw_log": "ci-bdc5d6d-slice2.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined",
+      "qualified_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined",
+      "hosted_raw_log": "ci-bdc5d6d-slice2.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_v021_notifier_profile_qualification.py::NotifierProfileQualification::test_secondary_only_platform_delivers_through_secondary_adapter",
+      "qualified_case": "tests/gateway/test_v021_notifier_profile_qualification.py::NotifierProfileQualification::test_secondary_only_platform_delivers_through_secondary_adapter",
+      "hosted_raw_log": "ci-bdc5d6d-slice2.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer",
+      "qualified_case": "tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer",
+      "hosted_raw_log": "ci-bdc5d6d-slice2.txt",
+      "qualified_by": "ci-tail-core-corrected.json"
+    },
+    {
+      "hosted_case": "tests/tools/test_skill_linter.py::test_description_too_long_is_warning",
+      "qualified_case": "tests/tools/test_skill_linter.py::test_description_too_long_is_warning",
+      "hosted_raw_log": "ci-bdc5d6d-slice2.txt",
+      "qualified_by": "ci-tail-core-final.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_platform_base.py::TestExtractMedia::test_inline_code_survives_when_real_media_present",
+      "qualified_case": "tests/gateway/test_platform_base.py::TestExtractMedia::test_inline_code_survives_when_real_media_present",
+      "hosted_raw_log": "ci-bdc5d6d-slice3.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered",
+      "qualified_case": "tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions",
+      "qualified_case": "tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive",
+      "qualified_case": "tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_gateway_session",
+      "qualified_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_gateway_session",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_tui_session_via_session_key",
+      "qualified_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_tui_session_via_session_key",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_still_allowed_with_preview",
+      "qualified_case": "tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_retains_full_approved_prompt_budget",
+      "hosted_raw_log": "ci-bdc5d6d-slice5.txt",
+      "qualified_by": "ci-tail-skill-manager-final.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown",
+      "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown",
+      "hosted_raw_log": "ci-bdc5d6d-slice6.txt",
+      "qualified_by": "ci-tail-core-final.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down",
+      "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down",
+      "hosted_raw_log": "ci-bdc5d6d-slice6.txt",
+      "qualified_by": "ci-tail-core-final.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once",
+      "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once",
+      "hosted_raw_log": "ci-bdc5d6d-slice6.txt",
+      "qualified_by": "ci-tail-core-final.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_v021_discord_text.py::DiscordTextTests::test_current_table_and_intentional_markdown_preserved",
+      "qualified_case": "tests/gateway/test_v021_discord_text.py::DiscordTextTests::test_current_table_and_intentional_markdown_preserved",
+      "hosted_raw_log": "ci-bdc5d6d-slice6.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    },
+    {
+      "hosted_case": "tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id",
+      "qualified_case": "tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id",
+      "hosted_raw_log": "ci-bdc5d6d-slice6.txt",
+      "qualified_by": "ci-tail-notify-pytest.json"
+    },
+    {
+      "hosted_case": "tests/gateway/test_discord_edit_message_overflow.py::TestFinalOverflowSplits::test_byte_coverage_preserved",
+      "qualified_case": "tests/gateway/test_discord_edit_message_overflow.py::TestFinalOverflowSplits::test_byte_coverage_preserved",
+      "hosted_raw_log": "ci-bdc5d6d-slice7.txt",
+      "qualified_by": "ci-tail-text-pytest.json"
+    }
+  ],
+  "raw": {
+    "ci-tail-text-pytest.json": [
+      {
+        "file": "tests/conformance/test_vector_generator.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/conformance/test_vector_generator.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-345pm8g0/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "....                                                                     [100%]\n=============================== warnings summary ===============================\ntests/conformance/test_vector_generator.py::test_oracles_importable_and_self_free\n  /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n    import audioop\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n4 passed, 1 warning in 3.52s\n"
+      },
+      {
+        "file": "tests/gateway/test_stream_consumer.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_stream_consumer.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-5eggt1xe/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "..................................................................       [100%]\n66 passed in 11.59s\n"
+      },
+      {
+        "file": "tests/gateway/test_api_server_media_data_urls.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_api_server_media_data_urls.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-dl_5986v/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".....                                                                    [100%]\n5 passed in 2.82s\n"
+      },
+      {
+        "file": "tests/gateway/test_platform_base.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_platform_base.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-s7vnbzo9/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "........................................................................ [ 69%]\n..................s.............                                         [100%]\n103 passed, 1 skipped in 7.27s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_discord_text.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_discord_text.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-mi2b7kks/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "....                                                                     [100%]\n4 passed in 2.14s\n"
+      },
+      {
+        "file": "tests/gateway/test_discord_edit_message_overflow.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_discord_edit_message_overflow.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-j6sj_mae/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "........                                                                 [100%]\n8 passed in 2.32s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_text_compatibility.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_text_compatibility.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-ek74g9ul/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "........                                                      [100%]\n8 passed, 11 subtests passed in 2.78s\n"
+      },
+      {
+        "file": "tests/gateway/test_discord_format.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_discord_format.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-cdd5qd3d/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".......                                                                  [100%]\n7 passed in 2.78s\n"
+      }
+    ],
+    "ci-tail-notify-pytest.json": [
+      {
+        "file": "tests/gateway/test_v021_notifier_profile_qualification.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_notifier_profile_qualification.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-67_dhcmx/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".                                                                        [100%]\n1 passed in 4.98s\n"
+      },
+      {
+        "file": "tests/gateway/test_kanban_notifier.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_kanban_notifier.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-z3s4wazw/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "............                                                             [100%]\n12 passed in 19.04s\n"
+      },
+      {
+        "file": "tests/tools/test_kanban_tools.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_kanban_tools.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-c8149bpq/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "................................                                         [100%]\n32 passed in 33.74s\n"
+      },
+      {
+        "file": "tests/hermes_cli/test_kanban_notify.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/hermes_cli/test_kanban_notify.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-7869x8qv/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "..........................                                               [100%]\n26 passed in 29.35s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_notification_policy.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_notification_policy.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-ehrw_mey/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "............                                                             [100%]\n12 passed in 23.10s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_notifier_diagnostics.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_notifier_diagnostics.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-cvzek_34/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".                                                                        [100%]\n1 passed in 1.62s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_background_notify_retained.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_background_notify_retained.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-pqm2ny7h/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "...                                                          [100%]\n3 passed, 12 subtests passed in 3.75s\n"
+      }
+    ],
+    "ci-tail-core-final.json": [
+      {
+        "file": "tests/test_packaging_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/test_packaging_metadata.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-s73y2qe4/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".........                                                                [100%]\n9 passed in 1.42s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_linter.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_linter.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-_psde7wk/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "...................                                                      [100%]\n19 passed in 2.88s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_manager_tool.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_manager_tool.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-9edt7l6l/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": ".............F.................................................          [100%]\n=================================== FAILURES ===================================\n________ TestCreateSkill.test_edit_long_desc_still_allowed_with_preview ________\ntests/tools/test_skill_manager_tool.py:187: in test_edit_long_desc_still_allowed_with_preview\n    assert result[\"success\"] is True\nE   assert False is True\n=========================== short test summary info ============================\nFAILED tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_still_allowed_with_preview\n1 failed, 62 passed in 11.18s\n"
+      },
+      {
+        "file": "tests/gateway/test_shutdown_cache_cleanup.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_shutdown_cache_cleanup.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-r6amjxim/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "...                                                                      [100%]\n3 passed in 4.08s\n"
+      },
+      {
+        "file": "tests/tools/test_v021_discord_packaging.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_v021_discord_packaging.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-nbf6kwr9/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".                                                                        [100%]\n1 passed in 1.49s\n"
+      },
+      {
+        "file": "tests/agent/test_v021_prompt_contracts.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/agent/test_v021_prompt_contracts.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-q5r2la0x/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "...                                                                 [100%]\n3 passed, 5 subtests passed in 8.38s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_served_coverage.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_served_coverage.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-75a0ucfp/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "..........                                                               [100%]\n10 passed in 4.44s\n"
+      }
+    ],
+    "ci-tail-core-corrected.json": [
+      {
+        "file": "tests/test_packaging_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/test_packaging_metadata.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-def0ogmo/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "..........                                                               [100%]\n10 passed in 1.81s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_manager_tool.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_manager_tool.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-d491kvt2/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": "..............................................................FF.        [100%]\n=================================== FAILURES ===================================\n_ TestCuratorConsolidationDeleteGuard.test_background_review_read_survives_copied_tool_contexts _\ntests/tools/test_skill_manager_tool.py:1147: in test_background_review_read_survives_copied_tool_contexts\n    patched = copy_context().run(\nE   TypeError: skill_manage() got multiple values for argument 'action'\n_ TestCuratorConsolidationDeleteGuard.test_background_review_read_marks_stay_isolated_between_reviews _\ntests/tools/test_skill_manager_tool.py:1178: in test_background_review_read_marks_stay_isolated_between_reviews\n    blocked = second_review.run(\nE   TypeError: skill_manage() got multiple values for argument 'action'\n=========================== short test summary info ============================\nFAILED tests/tools/test_skill_manager_tool.py::TestCuratorConsolidationDeleteGuard::test_background_review_read_survives_copied_tool_contexts\nFAILED tests/tools/test_skill_manager_tool.py::TestCuratorConsolidationDeleteGuard::test_background_review_read_marks_stay_isolated_between_reviews\n2 failed, 63 passed in 10.72s\n"
+      }
+    ],
+    "ci-tail-skill-manager-final.json": [
+      {
+        "file": "tests/tools/test_skill_manager_tool.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_manager_tool.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-07b2xaq5/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".................................................................        [100%]\n65 passed in 10.50s\n"
+      }
+    ],
+    "ci-tail-core-before.json": [
+      {
+        "file": "tests/test_packaging_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/test_packaging_metadata.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-p_nz7_qi/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": "......F..                                                                [100%]\n=================================== FAILURES ===================================\n_______________ test_exact_pinned_deps_exempt_from_exclude_newer _______________\ntests/test_packaging_metadata.py:317: in test_exact_pinned_deps_exempt_from_exclude_newer\n    assert not missing, (\nE   AssertionError: exact-pinned packages are subject to the exclude-newer cutoff but missing from the [tool.uv].exclude-newer-package whitelist \u2014 release-day updates brick while the pinned version is younger than the cutoff: ['davey', 'pynacl']\nE   assert not ['davey', 'pynacl']\n=========================== short test summary info ============================\nFAILED tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer\n1 failed, 8 passed in 1.49s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_linter.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_linter.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-i_5nhsyf/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": ".F................                                                       [100%]\n=================================== FAILURES ===================================\n_____________________ test_description_too_long_is_warning _____________________\ntests/tools/test_skill_linter.py:56: in test_description_too_long_is_warning\n    assert \"description-length\" in _rules(findings)\nE   AssertionError: assert 'description-length' in set()\nE    +  where set() = _rules([])\n=========================== short test summary info ============================\nFAILED tests/tools/test_skill_linter.py::test_description_too_long_is_warning\n1 failed, 17 passed in 2.12s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_manager_tool.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_manager_tool.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-qz1hu38n/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": ".............F.................................................          [100%]\n=================================== FAILURES ===================================\n________ TestCreateSkill.test_edit_long_desc_still_allowed_with_preview ________\ntests/tools/test_skill_manager_tool.py:188: in test_edit_long_desc_still_allowed_with_preview\n    assert \"system_prompt_preview\" in result\nE   assert 'system_prompt_preview' in {'success': True, 'message': \"Skill 'my-skill' updated (full rewrite).\", 'path': '/home/brian/.hermes/kanban/boards/en...nge': {'description': 'Use when deploying multi-region Kubernetes clusters with custom CNI plugins and service mesh.'}}\n=========================== short test summary info ============================\nFAILED tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_still_allowed_with_preview\n1 failed, 62 passed in 10.29s\n"
+      },
+      {
+        "file": "tests/gateway/test_shutdown_cache_cleanup.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_shutdown_cache_cleanup.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-phluvqbu/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 1,
+        "output": "FFF                                                                      [100%]\n=================================== FAILURES ===================================\n_ TestCachedAgentCleanupOnShutdown.test_cached_agent_memory_provider_shut_down _\ntests/gateway/test_shutdown_cache_cleanup.py:145: in test_cached_agent_memory_provider_shut_down\n    await gw_mod.GatewayRunner.stop(gw)\ngateway/run.py:16609: in stop\n    await self._stop_task\ngateway/run.py:16108: in _stop_impl\n    await _stop_impl_body(\ngateway/run.py:16407: in _stop_impl_body\n    self._publish_profile_coverage(clear=True)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   AttributeError: '_FakeGateway' object has no attribute '_publish_profile_coverage'\n______ TestCachedAgentCleanupOnShutdown.test_cache_cleared_after_shutdown ______\ntests/gateway/test_shutdown_cache_cleanup.py:156: in test_cache_cleared_after_shutdown\n    await gw_mod.GatewayRunner.stop(gw)\ngateway/run.py:16609: in stop\n    await self._stop_task\ngateway/run.py:16108: in _stop_impl\n    await _stop_impl_body(\ngateway/run.py:16407: in _stop_impl_body\n    self._publish_profile_coverage(clear=True)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   AttributeError: '_FakeGateway' object has no attribute '_publish_profile_coverage'\n_ TestRunningAgentsNotDoubleCleaned.test_running_and_cached_agent_cleaned_at_least_once _\ntests/gateway/test_shutdown_cache_cleanup.py:174: in test_running_and_cached_agent_cleaned_at_least_once\n    await gw_mod.GatewayRunner.stop(gw)\ngateway/run.py:16609: in stop\n    await self._stop_task\ngateway/run.py:16108: in _stop_impl\n    await _stop_impl_body(\ngateway/run.py:16407: in _stop_impl_body\n    self._publish_profile_coverage(clear=True)\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE   AttributeError: '_FakeGateway' object has no attribute '_publish_profile_coverage'\n=========================== short test summary info ============================\nFAILED tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down\nFAILED tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown\nFAILED tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once\n3 failed in 9.90s\n"
+      }
+    ],
+    "ci-tail-resolver-check.json": {
+      "command": [
+        "/home/brian/.local/bin/uv",
+        "lock",
+        "--check",
+        "--offline",
+        "--python",
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python"
+      ],
+      "returncode": 0,
+      "output": "Using CPython 3.11.15 interpreter at: /home/brian/.hermes/hermes-agent/.venv/bin/python\nResolved 255 packages in 6ms\n",
+      "environment": "fresh task-local HOME/HERMES_HOME/TMPDIR/UV_CACHE_DIR; downloads never; offline; canonical Python read-only"
+    },
+    "ci-tail-lock-integrity.json": {
+      "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+      "new_exceptions": {
+        "davey": false,
+        "pynacl": false
+      },
+      "all_other_lock_data_unchanged": true,
+      "global_cutoff": "P14D",
+      "scan_policy_unchanged": true
+    },
+    "ci-tail-vectors-generation.json": {
+      "command": [
+        "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+        "-B",
+        "scripts/generate_conformance_vectors.py"
+      ],
+      "env": {
+        "HOME": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/ci-tail-vectors-xphy4io6",
+        "HERMES_HOME": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/ci-tail-vectors-xphy4io6/hermes",
+        "HERMES_BUNDLES_DIR": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/ci-tail-vectors-xphy4io6/bundles",
+        "TMPDIR": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/ci-tail-vectors-xphy4io6",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/test-deps-pinned:/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/source",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LANG": "C.UTF-8"
+      },
+      "returncode": 0,
+      "stdout": "discord: 44 vectors\nslack: 44 vectors\ntelegram: 44 vectors\nwhatsapp: 44 vectors\n",
+      "stderr": ""
+    },
+    "ci-tail-text-bindings.json": {
+      "commit": "b8310a6c9dd1a659ef5cc2e3b16d89e9ff819cf1",
+      "tree": "25a79baf31057d4438f8da145c814546ae6d25b9",
+      "paths": {
+        "scripts/generate_conformance_vectors.py": {
+          "sha256": "704517a15a46f0d41c6cb1a05399580ef7914da527f4215d18f4d2a707d27aab",
+          "git_blob": "f60bd4a60c30cf5a8fe560f74db8fac420f6f982"
+        },
+        "tests/conformance/vectors/discord.json": {
+          "sha256": "47f0c98c8db930b11d7f5e2b5338e71e50ef4dfaf4b3d1a49e54356ad6bbd5e5",
+          "git_blob": "760cb3d9c3c7762aae519648183241f45d18c504"
+        },
+        "tests/conformance/vectors/slack.json": {
+          "sha256": "a6cfc4bd0b6d84e0c269843f485ff28e2fbe1860f089527d9cb72f41cbd6512c",
+          "git_blob": "bd0671510fc883a7ab634e906db3e84917bee87c"
+        },
+        "tests/conformance/vectors/telegram.json": {
+          "sha256": "664b836de4675808a8f861edccb28ef34092a7c73bd538b7d8fa71a478a315b1",
+          "git_blob": "de3e26c6184603f07f8d8d3f1d7374266578011d"
+        },
+        "tests/conformance/vectors/whatsapp.json": {
+          "sha256": "fc643bc7e304e3f0182f4dcf493113e0b824098228f4eba1adc6ffd787a5af16",
+          "git_blob": "1b2d819cb6fb80ec9013b3797d7852e7711d30e8"
+        },
+        "tests/gateway/test_api_server_media_data_urls.py": {
+          "sha256": "c1bdf0d544be5bb39479b1702d833e456e468ad00b52596b6d26b924d26d201d",
+          "git_blob": "7877f11eed13e91ad41fea2cfcd0fe766632c902"
+        },
+        "tests/gateway/test_discord_edit_message_overflow.py": {
+          "sha256": "d1e040a0ff74e8a35bb66f7df9cf11b8583ab62d74fa808c1adb2dbfe87fa525",
+          "git_blob": "3110fa0b97e9fcab6a80b8f0d2fef70cd2a917d4"
+        },
+        "tests/gateway/test_platform_base.py": {
+          "sha256": "b8e3c7adfc8a6272b9d346270b62127f26c467d08826279c015620e71c51c357",
+          "git_blob": "750045c2b0632ceee9871a71f358424f39820de7"
+        },
+        "tests/gateway/test_stream_consumer.py": {
+          "sha256": "54646b0c334502bd71b144a8ece1f5788e1b55134577c439795978740de0716d",
+          "git_blob": "64e457d011f088d108f8efd34caa5178c2afe9cf"
+        },
+        "tests/gateway/test_v021_discord_text.py": {
+          "sha256": "d13ac64d0ad97c8995911982a4a7413ccc7fdead4eecec955dd7e3fa61688e0f",
+          "git_blob": "c824b339db3b00a595f23f2f4a608b623ff56c32"
+        }
+      },
+      "receipts": {
+        "ci-tail-text-pytest.json": "7deb37be89c13887be827743168455b97667e77f540f822ce0c1f1cd632c55d8",
+        "ci-tail-vectors-generation.json": "f578f958e191dc0bcd27da227fdad0428ba15d2d2343a3b7b9373ce2bf739655"
+      }
+    },
+    "ci-tail-notify-bindings.json": {
+      "commit": "88fa75f2137c79216a71ec5fc5486a8be31d5af6",
+      "tree": "7e267fb54c7a05f51feff0dda7139129eb4b5716",
+      "files": {
+        "tests/gateway/test_v021_notifier_profile_qualification.py": {
+          "sha256": "5368cc45caca2ee781fccf71e9a9a30448fd2a6deebea4c0a7cbec6221880791",
+          "blob": "2740384d6e7602505252ab3f8584772d7a4151a8"
+        },
+        "tests/gateway/test_kanban_notifier.py": {
+          "sha256": "afc9f2bad651d0f492ea339ffc1f4ecc9da56f1967bf7a38fdb5355cf92d2a3c",
+          "blob": "fbb3dad9b698255c81c9ac6e274bf4928a778bd5"
+        },
+        "tests/tools/test_kanban_tools.py": {
+          "sha256": "82c415c682d8dc606bf12bf5912e2cd5ceec7e718d98c3d42b7ab61b2d147e37",
+          "blob": "449f11bcd5163314233c820d5962c8ba94aa745b"
+        },
+        "tests/hermes_cli/test_kanban_notify.py": {
+          "sha256": "223496942e56bd66e68b73c681ce6838a3fb73cbc342166cb603b299cf4c58d2",
+          "blob": "281ec6c30d32cd1bbf91ca832a6edd5dc65b0a56"
+        }
+      },
+      "pytest_receipt": "ci-tail-notify-pytest.json",
+      "pytest_receipt_sha256": "e6085f921d63bd54f8f616279476cbfdfd71a3a021298df699b0060be616937f",
+      "result": "87 passed, plus 12 subtests; seven whole files, seven indexed failure cases covered; each file isolated; runner exit 0",
+      "observed_combined_head": "29ffab0af5ae088c0040ffaaa95b68c551b72012"
+    },
+    "ci-tail-candidate-bindings.json": {
+      "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+      "head": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
+      "tree": "e407f1261ac2748e5a6fa44158a7d02a850d00b3",
+      "paths": {
+        "pyproject.toml": {
+          "sha256": "e7137d8aa3ca256d747b6806d5b27683a6a5b08375c0cf0274d38d808590c164",
+          "git_blob": "072e371fb13f3ac955a3c2edfd28b97352a659c4"
+        },
+        "scripts/generate_conformance_vectors.py": {
+          "sha256": "704517a15a46f0d41c6cb1a05399580ef7914da527f4215d18f4d2a707d27aab",
+          "git_blob": "f60bd4a60c30cf5a8fe560f74db8fac420f6f982"
+        },
+        "tests/conformance/vectors/discord.json": {
+          "sha256": "47f0c98c8db930b11d7f5e2b5338e71e50ef4dfaf4b3d1a49e54356ad6bbd5e5",
+          "git_blob": "760cb3d9c3c7762aae519648183241f45d18c504"
+        },
+        "tests/conformance/vectors/slack.json": {
+          "sha256": "a6cfc4bd0b6d84e0c269843f485ff28e2fbe1860f089527d9cb72f41cbd6512c",
+          "git_blob": "bd0671510fc883a7ab634e906db3e84917bee87c"
+        },
+        "tests/conformance/vectors/telegram.json": {
+          "sha256": "664b836de4675808a8f861edccb28ef34092a7c73bd538b7d8fa71a478a315b1",
+          "git_blob": "de3e26c6184603f07f8d8d3f1d7374266578011d"
+        },
+        "tests/conformance/vectors/whatsapp.json": {
+          "sha256": "fc643bc7e304e3f0182f4dcf493113e0b824098228f4eba1adc6ffd787a5af16",
+          "git_blob": "1b2d819cb6fb80ec9013b3797d7852e7711d30e8"
+        },
+        "tests/gateway/test_api_server_media_data_urls.py": {
+          "sha256": "c1bdf0d544be5bb39479b1702d833e456e468ad00b52596b6d26b924d26d201d",
+          "git_blob": "7877f11eed13e91ad41fea2cfcd0fe766632c902"
+        },
+        "tests/gateway/test_discord_edit_message_overflow.py": {
+          "sha256": "d1e040a0ff74e8a35bb66f7df9cf11b8583ab62d74fa808c1adb2dbfe87fa525",
+          "git_blob": "3110fa0b97e9fcab6a80b8f0d2fef70cd2a917d4"
+        },
+        "tests/gateway/test_kanban_notifier.py": {
+          "sha256": "afc9f2bad651d0f492ea339ffc1f4ecc9da56f1967bf7a38fdb5355cf92d2a3c",
+          "git_blob": "fbb3dad9b698255c81c9ac6e274bf4928a778bd5"
+        },
+        "tests/gateway/test_platform_base.py": {
+          "sha256": "b8e3c7adfc8a6272b9d346270b62127f26c467d08826279c015620e71c51c357",
+          "git_blob": "750045c2b0632ceee9871a71f358424f39820de7"
+        },
+        "tests/gateway/test_shutdown_cache_cleanup.py": {
+          "sha256": "65038bb2cce02a02bceafff5642a5c84d120b0e71f12f527eb24b8b25a9ef3fb",
+          "git_blob": "c44634a7298cf802e122ffad4aafdb945ec5c689"
+        },
+        "tests/gateway/test_stream_consumer.py": {
+          "sha256": "54646b0c334502bd71b144a8ece1f5788e1b55134577c439795978740de0716d",
+          "git_blob": "64e457d011f088d108f8efd34caa5178c2afe9cf"
+        },
+        "tests/gateway/test_v021_discord_text.py": {
+          "sha256": "d13ac64d0ad97c8995911982a4a7413ccc7fdead4eecec955dd7e3fa61688e0f",
+          "git_blob": "c824b339db3b00a595f23f2f4a608b623ff56c32"
+        },
+        "tests/gateway/test_v021_notifier_profile_qualification.py": {
+          "sha256": "5368cc45caca2ee781fccf71e9a9a30448fd2a6deebea4c0a7cbec6221880791",
+          "git_blob": "2740384d6e7602505252ab3f8584772d7a4151a8"
+        },
+        "tests/hermes_cli/test_kanban_notify.py": {
+          "sha256": "223496942e56bd66e68b73c681ce6838a3fb73cbc342166cb603b299cf4c58d2",
+          "git_blob": "281ec6c30d32cd1bbf91ca832a6edd5dc65b0a56"
+        },
+        "tests/test_packaging_metadata.py": {
+          "sha256": "e98be93c83666c37899c22b8bc08568141b8dc1894571d95b71334f2c2879b38",
+          "git_blob": "5fe6fa016250298db87641c5f521895c5b494983"
+        },
+        "tests/tools/test_kanban_tools.py": {
+          "sha256": "82c415c682d8dc606bf12bf5912e2cd5ceec7e718d98c3d42b7ab61b2d147e37",
+          "git_blob": "449f11bcd5163314233c820d5962c8ba94aa745b"
+        },
+        "tests/tools/test_skill_linter.py": {
+          "sha256": "43cadfcca533a66cc54687b12797b0f240291a7768db9937bf148f7629f89073",
+          "git_blob": "d94e6d276f7ea447d11e6ffdb932a7fb6f9a4ea7"
+        },
+        "tests/tools/test_skill_manager_tool.py": {
+          "sha256": "a5b0fc83cf45b830e4c04c073519f5a1c45f80aaca3c35a4dad8fc85fce79e45",
+          "git_blob": "63fadfdff9906438b932d3a8322f33c8ebfb1709"
+        },
+        "uv.lock": {
+          "sha256": "c388af0a046293e008946b5a616f0e3834cbed788d66fab27a57a643f9745f25",
+          "git_blob": "2f2348f96c1701056cf99317c4a71d1e39e02d95"
+        }
+      },
+      "runner_sha256": "dc7da76e8c006baabd9c4f3974058196193294ac402bc6ae31ea673d560b8930"
+    },
+    "ci-tail-integrity.json": {
+      "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+      "feature_rows_unchanged": true,
+      "historical_checkpoints_unchanged": true,
+      "checklist_followup_bytes_unchanged": true,
+      "checklist_sha256": "b649ac07a12879e478b806fd71967a8226b2b5931c43866602d4bccac0bdbf54",
+      "prior_source_receipts_unchanged": [
+        "docs/fork/V021_APPROVED_BATCH2.md",
+        "docs/fork/V021_APPROVED_BATCH2_METADATA_REVIEW.md",
+        "docs/fork/V021_APPROVED_BATCH2_REVIEW.md",
+        "docs/fork/V021_APPROVED_BATCH2_TESTS.json",
+        "docs/fork/V021_APPROVED_BATCH3.md",
+        "docs/fork/V021_APPROVED_BATCH3_REVIEW.md",
+        "docs/fork/V021_APPROVED_BATCH3_TESTS.json",
+        "docs/fork/V021_APPROVED_CI_CORRECTION.md",
+        "docs/fork/V021_APPROVED_CI_CORRECTION_REVIEW.md",
+        "docs/fork/V021_APPROVED_CI_CORRECTION_TESTS.json",
+        "docs/fork/V021_APPROVED_CONTINUATION.md",
+        "docs/fork/V021_APPROVED_FINAL_CORRECTION.md",
+        "docs/fork/V021_APPROVED_FINAL_CORRECTION_REVIEW.md",
+        "docs/fork/V021_APPROVED_FINAL_CORRECTION_TESTS.json",
+        "docs/fork/V021_APPROVED_REVIEW.md",
+        "docs/fork/V021_APPROVED_TESTS.json"
+      ],
+      "feature_ids": 78,
+      "pending_restoration_ids": [],
+      "manual_checks": "all pending, including five original retained checks and rollback boundaries"
+    },
+    "ci-bdc5d6d-failures.json": [
+      {
+        "log": "ci-bdc5d6d-slice1.txt",
+        "cases": [
+          "tests/conformance/test_vector_generator.py::test_committed_vectors_match_regeneration",
+          "tests/gateway/test_stream_consumer.py::TestCleanForDisplay::test_media_tag_single_quoted_stripped"
+        ]
+      },
+      {
+        "log": "ci-bdc5d6d-slice2.txt",
+        "cases": [
+          "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag",
+          "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined",
+          "tests/gateway/test_v021_notifier_profile_qualification.py::NotifierProfileQualification::test_secondary_only_platform_delivers_through_secondary_adapter",
+          "tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer",
+          "tests/tools/test_skill_linter.py::test_description_too_long_is_warning"
+        ]
+      },
+      {
+        "log": "ci-bdc5d6d-slice3.txt",
+        "cases": [
+          "tests/gateway/test_platform_base.py::TestExtractMedia::test_inline_code_survives_when_real_media_present"
+        ]
+      },
+      {
+        "log": "ci-bdc5d6d-slice5.txt",
+        "cases": [
+          "tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered",
+          "tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions",
+          "tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive",
+          "tests/tools/test_kanban_tools.py::test_create_subscribes_gateway_session",
+          "tests/tools/test_kanban_tools.py::test_create_subscribes_tui_session_via_session_key",
+          "tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_still_allowed_with_preview"
+        ]
+      },
+      {
+        "log": "ci-bdc5d6d-slice6.txt",
+        "cases": [
+          "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown",
+          "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down",
+          "tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once",
+          "tests/gateway/test_v021_discord_text.py::DiscordTextTests::test_current_table_and_intentional_markdown_preserved",
+          "tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id"
+        ]
+      },
+      {
+        "log": "ci-bdc5d6d-slice7.txt",
+        "cases": [
+          "tests/gateway/test_discord_edit_message_overflow.py::TestFinalOverflowSplits::test_byte_coverage_preserved"
+        ]
+      }
+    ],
+    "ci-tail-independent-pytest.json": [
+      {
+        "file": "tests/gateway/test_api_server_media_data_urls.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_api_server_media_data_urls.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-dr5s27fu/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".....                                                                    [100%]\n5 passed in 3.25s\n"
+      },
+      {
+        "file": "tests/gateway/test_discord_edit_message_overflow.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_discord_edit_message_overflow.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-755p2eco/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "........                                                                 [100%]\n8 passed in 3.50s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_notification_policy.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_notification_policy.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-oec_nw67/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "............                                                             [100%]\n12 passed in 26.78s\n"
+      },
+      {
+        "file": "tests/gateway/test_v021_notifier_profile_qualification.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_v021_notifier_profile_qualification.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-mlbyds2t/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".                                                                        [100%]\n1 passed in 5.96s\n"
+      },
+      {
+        "file": "tests/gateway/test_shutdown_cache_cleanup.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/gateway/test_shutdown_cache_cleanup.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-3ckrj728/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "...                                                                      [100%]\n3 passed in 5.04s\n"
+      },
+      {
+        "file": "tests/tools/test_skill_manager_tool.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/tools/test_skill_manager_tool.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-fyy_a3hq/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": ".................................................................        [100%]\n65 passed in 13.53s\n"
+      },
+      {
+        "file": "tests/test_packaging_metadata.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/test_packaging_metadata.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-fvfje5oe/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "..........                                                               [100%]\n10 passed in 2.50s\n"
+      },
+      {
+        "file": "tests/conformance/test_vector_generator.py",
+        "command": [
+          "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "tests/conformance/test_vector_generator.py",
+          "-o",
+          "addopts=",
+          "-q",
+          "--tb=short",
+          "--basetemp",
+          "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-j60evg0c/hermes-pytest-base",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "timeout_seconds": 150,
+        "returncode": 0,
+        "output": "....                                                                     [100%]\n=============================== warnings summary ===============================\ntests/conformance/test_vector_generator.py::test_oracles_importable_and_self_free\n  /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n    import audioop\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n4 passed, 1 warning in 3.53s\n"
+      }
+    ],
+    "ci-tail-independent-bindings.json": {
+      "base": "bdc5d6de3541d2deb95bf12198113ecea493c3a0",
+      "reviewed_head": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
+      "reviewed_tree": "e407f1261ac2748e5a6fa44158a7d02a850d00b3",
+      "paths": [
+        {
+          "path": "pyproject.toml",
+          "sha256": "e7137d8aa3ca256d747b6806d5b27683a6a5b08375c0cf0274d38d808590c164",
+          "git_blob": "072e371fb13f3ac955a3c2edfd28b97352a659c4"
+        },
+        {
+          "path": "scripts/generate_conformance_vectors.py",
+          "sha256": "704517a15a46f0d41c6cb1a05399580ef7914da527f4215d18f4d2a707d27aab",
+          "git_blob": "f60bd4a60c30cf5a8fe560f74db8fac420f6f982"
+        },
+        {
+          "path": "tests/conformance/vectors/discord.json",
+          "sha256": "47f0c98c8db930b11d7f5e2b5338e71e50ef4dfaf4b3d1a49e54356ad6bbd5e5",
+          "git_blob": "760cb3d9c3c7762aae519648183241f45d18c504"
+        },
+        {
+          "path": "tests/conformance/vectors/slack.json",
+          "sha256": "a6cfc4bd0b6d84e0c269843f485ff28e2fbe1860f089527d9cb72f41cbd6512c",
+          "git_blob": "bd0671510fc883a7ab634e906db3e84917bee87c"
+        },
+        {
+          "path": "tests/conformance/vectors/telegram.json",
+          "sha256": "664b836de4675808a8f861edccb28ef34092a7c73bd538b7d8fa71a478a315b1",
+          "git_blob": "de3e26c6184603f07f8d8d3f1d7374266578011d"
+        },
+        {
+          "path": "tests/conformance/vectors/whatsapp.json",
+          "sha256": "fc643bc7e304e3f0182f4dcf493113e0b824098228f4eba1adc6ffd787a5af16",
+          "git_blob": "1b2d819cb6fb80ec9013b3797d7852e7711d30e8"
+        },
+        {
+          "path": "tests/gateway/test_api_server_media_data_urls.py",
+          "sha256": "c1bdf0d544be5bb39479b1702d833e456e468ad00b52596b6d26b924d26d201d",
+          "git_blob": "7877f11eed13e91ad41fea2cfcd0fe766632c902"
+        },
+        {
+          "path": "tests/gateway/test_discord_edit_message_overflow.py",
+          "sha256": "d1e040a0ff74e8a35bb66f7df9cf11b8583ab62d74fa808c1adb2dbfe87fa525",
+          "git_blob": "3110fa0b97e9fcab6a80b8f0d2fef70cd2a917d4"
+        },
+        {
+          "path": "tests/gateway/test_kanban_notifier.py",
+          "sha256": "afc9f2bad651d0f492ea339ffc1f4ecc9da56f1967bf7a38fdb5355cf92d2a3c",
+          "git_blob": "fbb3dad9b698255c81c9ac6e274bf4928a778bd5"
+        },
+        {
+          "path": "tests/gateway/test_platform_base.py",
+          "sha256": "b8e3c7adfc8a6272b9d346270b62127f26c467d08826279c015620e71c51c357",
+          "git_blob": "750045c2b0632ceee9871a71f358424f39820de7"
+        },
+        {
+          "path": "tests/gateway/test_shutdown_cache_cleanup.py",
+          "sha256": "65038bb2cce02a02bceafff5642a5c84d120b0e71f12f527eb24b8b25a9ef3fb",
+          "git_blob": "c44634a7298cf802e122ffad4aafdb945ec5c689"
+        },
+        {
+          "path": "tests/gateway/test_stream_consumer.py",
+          "sha256": "54646b0c334502bd71b144a8ece1f5788e1b55134577c439795978740de0716d",
+          "git_blob": "64e457d011f088d108f8efd34caa5178c2afe9cf"
+        },
+        {
+          "path": "tests/gateway/test_v021_discord_text.py",
+          "sha256": "d13ac64d0ad97c8995911982a4a7413ccc7fdead4eecec955dd7e3fa61688e0f",
+          "git_blob": "c824b339db3b00a595f23f2f4a608b623ff56c32"
+        },
+        {
+          "path": "tests/gateway/test_v021_notifier_profile_qualification.py",
+          "sha256": "5368cc45caca2ee781fccf71e9a9a30448fd2a6deebea4c0a7cbec6221880791",
+          "git_blob": "2740384d6e7602505252ab3f8584772d7a4151a8"
+        },
+        {
+          "path": "tests/hermes_cli/test_kanban_notify.py",
+          "sha256": "223496942e56bd66e68b73c681ce6838a3fb73cbc342166cb603b299cf4c58d2",
+          "git_blob": "281ec6c30d32cd1bbf91ca832a6edd5dc65b0a56"
+        },
+        {
+          "path": "tests/test_packaging_metadata.py",
+          "sha256": "e98be93c83666c37899c22b8bc08568141b8dc1894571d95b71334f2c2879b38",
+          "git_blob": "5fe6fa016250298db87641c5f521895c5b494983"
+        },
+        {
+          "path": "tests/tools/test_kanban_tools.py",
+          "sha256": "82c415c682d8dc606bf12bf5912e2cd5ceec7e718d98c3d42b7ab61b2d147e37",
+          "git_blob": "449f11bcd5163314233c820d5962c8ba94aa745b"
+        },
+        {
+          "path": "tests/tools/test_skill_linter.py",
+          "sha256": "43cadfcca533a66cc54687b12797b0f240291a7768db9937bf148f7629f89073",
+          "git_blob": "d94e6d276f7ea447d11e6ffdb932a7fb6f9a4ea7"
+        },
+        {
+          "path": "tests/tools/test_skill_manager_tool.py",
+          "sha256": "a5b0fc83cf45b830e4c04c073519f5a1c45f80aaca3c35a4dad8fc85fce79e45",
+          "git_blob": "63fadfdff9906438b932d3a8322f33c8ebfb1709"
+        },
+        {
+          "path": "uv.lock",
+          "sha256": "c388af0a046293e008946b5a616f0e3834cbed788d66fab27a57a643f9745f25",
+          "git_blob": "2f2348f96c1701056cf99317c4a71d1e39e02d95"
+        }
+      ],
+      "case_bindings": [
+        {
+          "hosted_case": "tests/conformance/test_vector_generator.py::test_committed_vectors_match_regeneration",
+          "qualified_case": "tests/conformance/test_vector_generator.py::test_committed_vectors_match_regeneration",
+          "raw_hosted_log": "ci-bdc5d6d-slice1.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_stream_consumer.py::TestCleanForDisplay::test_media_tag_single_quoted_stripped",
+          "qualified_case": "tests/gateway/test_stream_consumer.py::TestCleanForDisplay::test_media_tag_single_quoted_stripped",
+          "raw_hosted_log": "ci-bdc5d6d-slice1.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag",
+          "qualified_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_backtick_wrapped_tag",
+          "raw_hosted_log": "ci-bdc5d6d-slice2.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined",
+          "qualified_case": "tests/gateway/test_api_server_media_data_urls.py::TestResolveMediaToDataUrls::test_media_tag_inlined",
+          "raw_hosted_log": "ci-bdc5d6d-slice2.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_v021_notifier_profile_qualification.py::NotifierProfileQualification::test_secondary_only_platform_delivers_through_secondary_adapter",
+          "qualified_case": "tests/gateway/test_v021_notifier_profile_qualification.py::NotifierProfileQualification::test_secondary_only_platform_delivers_through_secondary_adapter",
+          "raw_hosted_log": "ci-bdc5d6d-slice2.txt"
+        },
+        {
+          "hosted_case": "tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer",
+          "qualified_case": "tests/test_packaging_metadata.py::test_exact_pinned_deps_exempt_from_exclude_newer",
+          "raw_hosted_log": "ci-bdc5d6d-slice2.txt"
+        },
+        {
+          "hosted_case": "tests/tools/test_skill_linter.py::test_description_too_long_is_warning",
+          "qualified_case": "tests/tools/test_skill_linter.py::test_description_too_long_is_warning",
+          "raw_hosted_log": "ci-bdc5d6d-slice2.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_platform_base.py::TestExtractMedia::test_inline_code_survives_when_real_media_present",
+          "qualified_case": "tests/gateway/test_platform_base.py::TestExtractMedia::test_inline_code_survives_when_real_media_present",
+          "raw_hosted_log": "ci-bdc5d6d-slice3.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered",
+          "qualified_case": "tests/gateway/test_kanban_notifier.py::test_active_named_profile_subscription_is_delivered",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions",
+          "qualified_case": "tests/gateway/test_kanban_notifier.py::test_non_dispatch_gateway_claims_only_its_profile_subscriptions",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive",
+          "qualified_case": "tests/gateway/test_kanban_notifier.py::test_notifier_subscription_survives_done_reopen_until_archive",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_gateway_session",
+          "qualified_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_gateway_session",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_tui_session_via_session_key",
+          "qualified_case": "tests/tools/test_kanban_tools.py::test_create_subscribes_tui_session_via_session_key",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_still_allowed_with_preview",
+          "qualified_case": "tests/tools/test_skill_manager_tool.py::TestCreateSkill::test_edit_long_desc_retains_full_approved_prompt_budget",
+          "raw_hosted_log": "ci-bdc5d6d-slice5.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown",
+          "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cache_cleared_after_shutdown",
+          "raw_hosted_log": "ci-bdc5d6d-slice6.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down",
+          "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestCachedAgentCleanupOnShutdown::test_cached_agent_memory_provider_shut_down",
+          "raw_hosted_log": "ci-bdc5d6d-slice6.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once",
+          "qualified_case": "tests/gateway/test_shutdown_cache_cleanup.py::TestRunningAgentsNotDoubleCleaned::test_running_and_cached_agent_cleaned_at_least_once",
+          "raw_hosted_log": "ci-bdc5d6d-slice6.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_v021_discord_text.py::DiscordTextTests::test_current_table_and_intentional_markdown_preserved",
+          "qualified_case": "tests/gateway/test_v021_discord_text.py::DiscordTextTests::test_current_table_and_intentional_markdown_preserved",
+          "raw_hosted_log": "ci-bdc5d6d-slice6.txt"
+        },
+        {
+          "hosted_case": "tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id",
+          "qualified_case": "tests/hermes_cli/test_kanban_notify.py::test_notifier_wake_forwards_persisted_chat_type_and_user_id",
+          "raw_hosted_log": "ci-bdc5d6d-slice6.txt"
+        },
+        {
+          "hosted_case": "tests/gateway/test_discord_edit_message_overflow.py::TestFinalOverflowSplits::test_byte_coverage_preserved",
+          "qualified_case": "tests/gateway/test_discord_edit_message_overflow.py::TestFinalOverflowSplits::test_byte_coverage_preserved",
+          "raw_hosted_log": "ci-bdc5d6d-slice7.txt"
+        }
+      ],
+      "unchanged_at_review": {
+        "docs/fork/V021_SAFE_SLICE_CHECKLIST.md": "b649ac07a12879e478b806fd71967a8226b2b5931c43866602d4bccac0bdbf54",
+        "docs/fork/V021_RESTORATION_LEDGER.json": "ce4de5ffcd0724beac58edb0e149a274820080c0a74afd85dcf5a8124692b168"
+      },
+      "scope": "Only finite20case tail; no completed-feature audit or release rerun",
+      "decision": "accepted: no blocking finding",
+      "independent_pytest": {
+        "command": "python ../run-pytest-focused.py source ci-tail-independent-pytest.json tests/gateway/test_api_server_media_data_urls.py tests/gateway/test_discord_edit_message_overflow.py tests/gateway/test_v021_notification_policy.py tests/gateway/test_v021_notifier_profile_qualification.py tests/gateway/test_shutdown_cache_cleanup.py tests/tools/test_skill_manager_tool.py tests/test_packaging_metadata.py tests/conformance/test_vector_generator.py",
+        "runner_returncode": 0,
+        "passed": 108,
+        "files": 8,
+        "failed": 0,
+        "skipped": 0,
+        "raw_sha256": "0cf80cf9b57075c5dfc892a2e6eeac0c01e019b7c0a66905b3142b473eb183b5",
+        "results": [
+          {
+            "file": "tests/gateway/test_api_server_media_data_urls.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/gateway/test_api_server_media_data_urls.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-dr5s27fu/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": ".....                                                                    [100%]\n5 passed in 3.25s\n"
+          },
+          {
+            "file": "tests/gateway/test_discord_edit_message_overflow.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/gateway/test_discord_edit_message_overflow.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-755p2eco/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": "........                                                                 [100%]\n8 passed in 3.50s\n"
+          },
+          {
+            "file": "tests/gateway/test_v021_notification_policy.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/gateway/test_v021_notification_policy.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-oec_nw67/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": "............                                                             [100%]\n12 passed in 26.78s\n"
+          },
+          {
+            "file": "tests/gateway/test_v021_notifier_profile_qualification.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/gateway/test_v021_notifier_profile_qualification.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-mlbyds2t/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": ".                                                                        [100%]\n1 passed in 5.96s\n"
+          },
+          {
+            "file": "tests/gateway/test_shutdown_cache_cleanup.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/gateway/test_shutdown_cache_cleanup.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-3ckrj728/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": "...                                                                      [100%]\n3 passed in 5.04s\n"
+          },
+          {
+            "file": "tests/tools/test_skill_manager_tool.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/tools/test_skill_manager_tool.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-fyy_a3hq/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": ".................................................................        [100%]\n65 passed in 13.53s\n"
+          },
+          {
+            "file": "tests/test_packaging_metadata.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/test_packaging_metadata.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-fvfje5oe/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": "..........                                                               [100%]\n10 passed in 2.50s\n"
+          },
+          {
+            "file": "tests/conformance/test_vector_generator.py",
+            "command": [
+              "/home/brian/.hermes/hermes-agent/.venv/bin/python",
+              "-B",
+              "-m",
+              "pytest",
+              "tests/conformance/test_vector_generator.py",
+              "-o",
+              "addopts=",
+              "-q",
+              "--tb=short",
+              "--basetemp",
+              "/home/brian/.hermes/kanban/boards/engineering/workspaces/t_4a31a31b/hermes-pytest-j60evg0c/hermes-pytest-base",
+              "-p",
+              "no:cacheprovider"
+            ],
+            "timeout_seconds": 150,
+            "returncode": 0,
+            "output": "....                                                                     [100%]\n=============================== warnings summary ===============================\ntests/conformance/test_vector_generator.py::test_oracles_importable_and_self_free\n  /home/brian/.hermes/hermes-agent/.venv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13\n    import audioop\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n4 passed, 1 warning in 3.53s\n"
+          }
+        ]
+      },
+      "worker_final_qualification": {
+        "passed": 403,
+        "files": 22,
+        "subtests_passed": 28,
+        "existing_optional_skips": 1,
+        "receipt_selection": [
+          "ci-tail-text-pytest.json",
+          "ci-tail-notify-pytest.json",
+          "ci-tail-core-final.json",
+          "ci-tail-core-corrected.json",
+          "ci-tail-skill-manager-final.json"
+        ]
+      },
+      "ledger_note": "Entire ledger byte-identical at initial29ffab review checkpoint; parent subsequent additive candidate qualification documentation retains entire rows. Prior reviewed head remains29ffab; final documentation commit separately bound by parent."
+    }
+  },
+  "raw_sha256": {
+    "ci-tail-text-pytest.json": "7deb37be89c13887be827743168455b97667e77f540f822ce0c1f1cd632c55d8",
+    "ci-tail-notify-pytest.json": "e6085f921d63bd54f8f616279476cbfdfd71a3a021298df699b0060be616937f",
+    "ci-tail-core-final.json": "fdda9cfab884b5171c61d60676b810c77c24e1e510d2990ce2b00be174f8278d",
+    "ci-tail-core-corrected.json": "2acd9aafbe9e9535fe4a84731eba82cbc2180f363cfba8503542257abbcfda62",
+    "ci-tail-skill-manager-final.json": "c782e8691a19045e1f68c35f1319719e62394c9ece166135d75d7ece5725f10d",
+    "ci-tail-core-before.json": "5eebed225ae15544e5ef1d273c1e85fb1635995c8286e922081cbc01afefe214",
+    "ci-tail-resolver-check.json": "db484faca09daa978b22763cd9efe9b5ae935f1d9a6f0902c1965feb53c5bacc",
+    "ci-tail-lock-integrity.json": "75bc52d5ebad62489df50b6cbd2f7ac4d5bc1d0337aa62c582dbb6b68686e0f8",
+    "ci-tail-vectors-generation.json": "f578f958e191dc0bcd27da227fdad0428ba15d2d2343a3b7b9373ce2bf739655",
+    "ci-tail-text-bindings.json": "8d08e780b943fa7942fc94777b5e2425cac5cba308fd2567a2bee4873fc3bb66",
+    "ci-tail-notify-bindings.json": "1d2095908692921a47006c9735ee9a1439b84774f33cbedc9547cb5adc096c00",
+    "ci-tail-candidate-bindings.json": "6e0f780e5b8bf12bc50ef6c9c7da9c47c26558812f8f1ba37b40671c01aa02d7",
+    "ci-tail-integrity.json": "48a9e2e7f4ca2e677b72d599e180aad3746a4b86090137e684f9ce440d0b2ca7",
+    "ci-bdc5d6d-failures.json": "f537ee2306ecc0eedd27f745f6a61a4a438ccea0f1199621365bce107a6ede86",
+    "ci-tail-independent-pytest.json": "0cf80cf9b57075c5dfc892a2e6eeac0c01e019b7c0a66905b3142b473eb183b5",
+    "ci-tail-independent-bindings.json": "15195f89e5b0c6348eacf2b3c80632d964021a1567a9d91d24fe0ca6ec63e2f0"
+  },
+  "hosted_logs_sha256": {
+    "ci-bdc5d6d-slice1.txt": "41185afdbb682007a3bb3ff87a68b80e69e8c4826c2b81e197b90f3f8ba811e3",
+    "ci-bdc5d6d-slice2.txt": "e9f6c6846071504c73117e11d43f6b14de449667319c0eb9f0a528c30ccd82d8",
+    "ci-bdc5d6d-slice3.txt": "06971e9a8a2f9e5d50a6e868301baf970aa490f6c2dc031a609a1b0708e4b7b1",
+    "ci-bdc5d6d-slice5.txt": "3f7c2a4ef760a8d58b269077d6c4b1f517a6820a0134597822f86cef7dcd4e93",
+    "ci-bdc5d6d-slice6.txt": "00acd34a4233c07fa147f3e92de1d260d8914bbf6a5189abead765d40944fc21",
+    "ci-bdc5d6d-slice7.txt": "12415f1c5dac980d70befed37b5cda6605c9a3e5d16c50f801533f67f8dabf86"
+  },
+  "review": {
+    "accepted": true,
+    "reviewed_head": "29ffab0af5ae088c0040ffaaa95b68c551b72012",
+    "reviewed_tree": "e407f1261ac2748e5a6fa44158a7d02a850d00b3",
+    "independent_passed": 108,
+    "independent_files": 8,
+    "report_sha256": "1976678eba75c9e9287fb8c32b7ba8f232ba12e61879eb9542b07161bb87fa0d"
+  }
+}

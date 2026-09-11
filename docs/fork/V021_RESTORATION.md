@@ -1,3 +1,18 @@
+# Current checkpoint: finite CI tail qualification
+
+Hosted CI **34553356412 failed** at `bdc5d6de35` with 20 new cases across six
+shards; the previous 26 failures were fixed. This supersedes prior candidate CI
+status. The bounded corrections and actual per-file pytest qualification are in
+[tail evidence](V021_APPROVED_CI_TAIL.md), [raw tests](V021_APPROVED_CI_TAIL_TESTS.json)
+and [targeted review](V021_APPROVED_CI_TAIL_REVIEW.md). No new feature work or
+full CI success is claimed. Ang owns staging integration/push and fresh exact
+candidate hosted CI; workers do not push. Main/live remain excluded.
+
+The 78-feature ledger, all pending manual checks, original five retained checks
+and rollback boundaries remain unchanged. No additional UAT gate.
+
+---
+
 # Current checkpoint: finite pytest/CI compatibility correction
 
 Hosted **34547488980 completed FAILURE** for `75a30e9809`, with26 indexed
