@@ -65,6 +65,34 @@ approval alone is not implementation evidence.
 | OSV publication policy — `FC-30-E03`, `FC-30-E04` | Inspect/evaluate workflow inputs for upstream and fork fixtures → scanning/artifacts stay enabled everywhere, code-scanning publication is upstream-only. | Fork publication is suppressed without suppressing scan; no hosted success inferred from local checks. | pending / — |
 | Tirith complete finding verdict — `FC-33-E01` | Feed exact-package warning, mixed warnings beyond display cap, malformed findings and blocking verdicts → only justified warnings suppress; full finding set determines verdict before display cap. | BLOCK and evidence never relax; near-match package names, unknown/malformed details and nonsuppressible findings retain warning. | pending / — |
 
-Historical CI: exact `3c8f7d0` passed hosted run 34523897060, including 52 added
-tests. This remains a historical checkpoint, not evidence for later candidates.
-Future integration and full CI belong to Ang's exact-SHA staging verification.
+## Retained checks carried forward from the earlier checkpoint
+
+These preserve the five earlier human checks; they are not newly restored features.
+Use the same candidate/operator/evidence fields and disposable-activation gate above.
+
+| Retained feature | Action → expected result | Safety negative | Status / evidence |
+| --- | --- | --- | --- |
+| Delayed model picker | Select a model for a named profile after a delay → only that profile's settings change. | Other profile settings remain unchanged. | pending / — |
+| Secondary cron coverage | Run an allowlisted secondary-profile cron fixture → its own heartbeat and adapter identity appear. | Excluded profiles remain inactive. | pending / — |
+| Secondary-only notification transport | Use a platform connected only for the intended secondary profile → its permitted task notification delivers through that profile. | No default-profile fallback or notification-policy bypass. | pending / — |
+| Shared restart preflight | Inspect active work before the restart-barrier check above → all active work appears, and restart waits for caller delivery before intended-profile drain/reconnect. | Do not execute a real restart without separate disposable activation authorization. | pending / — |
+| Linked-worktree setup safety | Exercise setup in a disposable linked-worktree fixture → canonical launcher and shell configuration remain unchanged. | Do not run bootstrap or repair against the live installation. | pending / — |
+
+## Candidate and rollback boundaries
+
+Implementation/actual-pytest checkpoint: `38c54fbb1b733e6c98e93f9e03f3332f8f5e974f`.
+This checklist-only follow-up does not change its source/test bytes. The exact
+integrated commit/tree and fresh full CI are bound in Ang's task handoff and the
+commit-specific link to this file; record that final identity when testing.
+
+Rollback is not authorized here. Use the ledger's owning commits, keeping each
+feature and its corrective commits/tests together. In particular: registry and
+release-observer compatibility travel together; restart delivery/audit/drain
+fixes travel together; credential/transport/ownership changes require coordinated
+rollback; compression publication and tail-preservation corrections stay together.
+Keep manifest and lockfile together for packaging. Do not withdraw only a safety
+correction or restore known failed fixtures. Preserve historical evidence; any
+actual activation or rollback needs an explicit environment and verified target.
+
+Historical CI at earlier candidates remains historical. Only the final exact-SHA
+CI receipt qualifies this cumulative staging candidate; human checks stay pending.
