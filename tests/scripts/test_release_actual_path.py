@@ -265,22 +265,30 @@ def test_final_launch_real_runner_collect_drain(actual_gateway, monkeypatch):
     from gateway.drain_control import clear_drain_request
     clear_drain_request()
     wait(collect)
-    # A recent marker from the previous gateway generation is also refused.
+    # Hold only the disposable marker writer across fault injection: a real
+    # ticker must not heal the corrupted bytes before health reads them.
+    import fcntl
     success_marker = secondary / 'cron/ticker_last_success'
-    genuine_marker = success_marker.read_text()
     started = health._query_socket(home, 'status')['release_observation']['started']
-    success_marker.write_text(str(started - 1))
-    # Isolate generation ownership from age: a slow real lifecycle can already
-    # be older than the normal90s freshness window. This negative must reject
-    # a marker that is recent under its own finite window but predates startup.
-    generation_window = max(90, int(time.time() - started) + 30)
-    with pytest.raises(c.Refusal, match='predates'):
-        collect(max_age=generation_window)
-    success_marker.write_text(genuine_marker)  # restore actual producer bytes
-    # Genuine ticker created this file; stale secondary must block health.
-    (secondary / 'cron/ticker_last_success').write_text(str(time.time() - 1000))
-    with pytest.raises(c.Refusal, match='stale'):
-        collect()
+    with (secondary / 'cron/.fixture-marker-write.lock').open('a') as marker_lock:
+        fcntl.flock(marker_lock, fcntl.LOCK_EX)
+        genuine_marker = success_marker.read_text()
+        try:
+            success_marker.write_text(str(started - 1))
+            # Keep this generation-negative marker recent in its own finite
+            # window; all other health calls retain the normal90s age bound.
+            generation_window = max(90, int(time.time() - started) + 30)
+            with pytest.raises(c.Refusal, match='predates'):
+                collect(max_age=generation_window)
+            success_marker.write_text(str(time.time() - 1000))
+            with pytest.raises(c.Refusal, match='stale'):
+                collect()
+        finally:
+            success_marker.write_text(genuine_marker)
+            fcntl.flock(marker_lock, fcntl.LOCK_UN)
+    # Prove the original producer resumes after both deliberate corruptions.
+    wait(lambda: float(success_marker.read_text()) > float(genuine_marker))
+    wait(collect)
     (secondary / 'disconnect').touch()
     wait(lambda: not health._query_socket(home, 'status')['release_observation']['profiles']['secondary']['platforms']['discord'])
     with pytest.raises(c.Refusal, match='transport'):

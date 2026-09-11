@@ -15,6 +15,22 @@ def install():
     import tools.tirith_security
     import tools.mcp_tool
 
+    # Synchronize only deliberate marker faults with the real profile producer.
+    # Normal ticker calls still execute the original producer unchanged.
+    import fcntl
+    import cron.jobs as cron_jobs
+    original_record = cron_jobs.record_ticker_heartbeat
+    def record_ticker_heartbeat(success=False):
+        cron_dir = cron_jobs._current_cron_store().cron_dir
+        cron_dir.mkdir(parents=True, exist_ok=True)
+        with (cron_dir / '.fixture-marker-write.lock').open('a') as marker_lock:
+            fcntl.flock(marker_lock, fcntl.LOCK_SH)
+            try:
+                original_record(success=success)
+            finally:
+                fcntl.flock(marker_lock, fcntl.LOCK_UN)
+    cron_jobs.record_ticker_heartbeat = record_ticker_heartbeat
+
     # External downloads/discovery/warmup are not the subject of this test.
     tools.tirith_security.ensure_installed = lambda **kw: None
     tools.mcp_tool.discover_mcp_tools = lambda: None
