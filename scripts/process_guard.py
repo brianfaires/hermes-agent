@@ -19,6 +19,7 @@ _VALUE_OPTIONS = {
     'xargs': {'-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n', '-P', '-s', '--max-args', '--max-procs', '--max-chars', '--replace'},
     'nohup': set(), 'setsid': set(), 'command': set(), 'exec': set(),
     'then': set(), 'do': set(), 'else': set(), '!': set(),
+    'if': set(), 'elif': set(), 'while': set(), 'until': set(),
 }
 _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=')
 
@@ -76,6 +77,10 @@ def _killer_commands(tokens, depth=0):
         index += 1
         while index < len(tokens):
             token = tokens[index]
+            if head == 'env' and token.startswith('--split-string='):
+                for part in _segments(token.partition('=')[2]):
+                    yield from _killer_commands(part + tokens[index + 1:], depth + 1)
+                return
             if token == '--':
                 index += 1
                 break
@@ -88,7 +93,7 @@ def _killer_commands(tokens, depth=0):
             if token in _VALUE_OPTIONS[head] and index < len(tokens):
                 if head == 'env' and token in {'-S', '--split-string'}:
                     for part in _segments(tokens[index]):
-                        yield from _killer_commands(part, depth + 1)
+                        yield from _killer_commands(part + tokens[index + 1:], depth + 1)
                     return
                 index += 1
         if head in {'timeout', 'flock'}:

@@ -33,6 +33,13 @@ class ProcessClassifierTests(unittest.TestCase):
             'echo harmless\npkill --full python',
             ['sh', '-c', 'if true; then pkill -f hermes; fi'],
             ['env', '-S', 'pkill -f hermes'],
+            'if pkill -f hermes; then echo done; fi',
+            ['bash', '-c', 'while pkill -f hermes; do :; done'],
+            ['env', '--split-string=pkill -f hermes'],
+            ['env', '--split-string=pkill', '-f', 'hermes'],
+            ['env', '-S', 'pkill', '--full', 'python'],
+            ['sh', '-c', 'if false; then :; elif pkill --full python; then :; fi'],
+            ['sh', '-c', 'until pkill -f gateway; do :; done'],
         ]
         for command in blocked:
             with self.subTest(command=command):
@@ -47,6 +54,9 @@ class ProcessClassifierTests(unittest.TestCase):
             ['bash', '-lc', "echo 'pkill -f hermes'"],
             'echo pkill -f hermes', ['python', '-c', "print('pkill -f hermes')"],
             ['pkill', 'unrelated-fixture'], ['pkill', 'python'], None,
+            ['env', '--split-string=echo pkill -f hermes'],
+            ['bash', '-c', "while echo 'pkill -f hermes'; do :; done"],
+            'if cat /tmp/hermes/skill; then echo done; fi',
         ]
         for command in allowed:
             with self.subTest(command=command):
