@@ -8349,7 +8349,10 @@ def set_branch_name(
         task = get_task(conn, task_id)
         if task is None:
             raise ValueError(f"task {task_id} not found")
-        branch_name = normalize_branch_name(branch_name, workspace_kind=task.workspace_kind)
+        _, _, branch_name = normalize_workspace_metadata(
+            workspace_kind=task.workspace_kind, workspace_path=task.workspace_path,
+            branch_name=branch_name, require_dir_path=True,
+        )
         conn.execute(
             "UPDATE tasks SET branch_name = ? WHERE id = ?", (branch_name, task_id),
         )
