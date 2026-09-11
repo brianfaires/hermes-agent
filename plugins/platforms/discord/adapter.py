@@ -4370,6 +4370,7 @@ class DiscordAdapter(BasePlatformAdapter):
         handle.generation = self._voice_output_generation(guild_id)
         handle.source = PCMStream(audio_format, gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)))
         handle.playing = False
+        handle.clause_drained = False
         self._voice_streams[guild_id] = handle
         return handle
 
@@ -4379,6 +4380,10 @@ class DiscordAdapter(BasePlatformAdapter):
             handle.aborted = True
             raise RuntimeError("Stale Discord voice stream")
         if not handle.playing:
+            if handle.clause_drained:
+                from plugins.platforms.discord.voice_stream import PCMStream
+                handle.source = PCMStream(handle.audio_format, gain=handle.source.gain)
+                handle.clause_drained = False
             vc = self._voice_clients.get(handle.guild_id)
             if vc is None or not vc.is_connected():
                 raise RuntimeError("Discord voice disconnected")
@@ -4386,6 +4391,8 @@ class DiscordAdapter(BasePlatformAdapter):
             if mixer is not None:
                 mixer.stop_speech()
                 mixer.play_stream(handle.source)
+                if vc.is_paused():
+                    vc.resume()
             else:
                 if vc.is_playing():
                     vc.stop()
@@ -4399,10 +4406,10 @@ class DiscordAdapter(BasePlatformAdapter):
             handle.audible = True
         await handle.source.write(chunk)
 
-    async def finish_streaming_tts(self, handle, *, interrupted=False):
-        if interrupted or handle.aborted:
-            await self.abort_streaming_tts(handle)
-            return
+    async def drain_streaming_tts(self, handle):
+        """End a clause's PCM player, keeping the turn's cancellation handle."""
+        if handle.aborted:
+            raise RuntimeError("Discord stream cancelled")
         await handle.source.finish()
         if handle.playing:
             deadline = time.monotonic() + 10
@@ -4410,6 +4417,28 @@ class DiscordAdapter(BasePlatformAdapter):
                 if handle.aborted or time.monotonic() >= deadline:
                     raise TimeoutError("Discord stream drain interrupted or timed out")
                 await asyncio.sleep(0.02)
+            if handle.aborted:
+                raise RuntimeError("Discord stream cancelled")
+            vc = self._voice_clients.get(handle.guild_id)
+            mixer = self._voice_mixers.get(handle.guild_id)
+            if mixer is not None and not mixer.has_ambient and not mixer.speech_active:
+                if vc is not None:
+                    vc.pause()
+            elif mixer is None and vc is not None:
+                # EOF has been read; wait for discord.py to retire the player
+                # before a subsequent clause can start another one.
+                while vc.is_playing():
+                    if handle.aborted or time.monotonic() >= deadline:
+                        raise TimeoutError("Discord clause player did not stop")
+                    await asyncio.sleep(0.01)
+        handle.playing = False
+        handle.clause_drained = True
+
+    async def finish_streaming_tts(self, handle, *, interrupted=False):
+        if interrupted or handle.aborted:
+            await self.abort_streaming_tts(handle)
+            return
+        await self.drain_streaming_tts(handle)
         if getattr(self, "_voice_streams", {}).get(handle.guild_id) is handle:
             self._voice_streams.pop(handle.guild_id, None)
         self._reset_voice_timeout(handle.guild_id)
@@ -4422,6 +4451,9 @@ class DiscordAdapter(BasePlatformAdapter):
             mixer = self._voice_mixers.get(handle.guild_id)
             if mixer is not None:
                 mixer.stop_speech()
+                vc = self._voice_clients.get(handle.guild_id)
+                if not mixer.has_ambient and vc is not None:
+                    vc.pause()
             elif handle.playing:
                 vc = self._voice_clients.get(handle.guild_id)
                 if vc is not None:
@@ -4429,8 +4461,10 @@ class DiscordAdapter(BasePlatformAdapter):
             self._reset_voice_timeout(handle.guild_id)
 
     def _voice_stream_playing(self, guild_id):
+        # Once PCM starts, reserve the speech lane through subsequent clause gaps.
+        # Before first PCM, retain the existing first-tool acknowledgement path.
         handle = getattr(self, "_voice_streams", {}).get(guild_id)
-        return handle is not None and handle.playing and not handle.aborted
+        return handle is not None and handle.audible and not handle.aborted
 
     async def play_tts(
         self,
@@ -4812,6 +4846,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 self._lead_silence_bytes() + pcm,
                 gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
             )
+            vc = self._voice_clients.get(guild_id)
+            if vc is not None and vc.is_paused():
+                vc.resume()
             self._reset_voice_timeout(guild_id)
             return True
         except Exception as e:
@@ -5328,6 +5365,8 @@ class DiscordAdapter(BasePlatformAdapter):
                         return False
                     speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
                     mixer.play_speech(self._lead_silence_bytes() + pcm, gain=speech_gain)
+                    if vc.is_paused():
+                        vc.resume()
                     self.voice_timing().mark("playback_started")
                     # Block until the speech child drains so callers serialise
                     # replies (mirrors legacy semantics) but the ambient keeps

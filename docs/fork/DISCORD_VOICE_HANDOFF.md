@@ -2,7 +2,7 @@
 
 Development resumed under Brian's approved overnight brief. The earlier parked/MVP-only status is superseded. All six scoped source milestones are implemented on isolated `dev/discord-voice`; no deployment, publication or live acceptance occurred.
 
-Source candidate: `4557bc60348250d464530d6cc63bdd19c59e48e8`. [Milestone ledger](DISCORD_VOICE_MILESTONES.md) records exact feature commits, safety corrections, proposed annotated RC tags, evidence, limitations and rollback boundaries. [Independent review](DISCORD_VOICE_REVIEW.md) is source-scoped. [Human UAT](DISCORD_VOICE_UAT.md) remains entirely unchecked.
+Corrected source candidate: this single correction commit after `bd75c81ffe2edfc72180dfadf07ec77f57eaa8f4`; exact SHA in `../PROGRESS-FIX-RESULT.md`. The earlier candidate is superseded for the confirmed milestone 2/5 idle/progress interaction. [Milestone ledger](DISCORD_VOICE_MILESTONES.md) records exact feature commits, safety corrections, proposed annotated RC tags, evidence, limitations and rollback boundaries. [Independent review](DISCORD_VOICE_REVIEW.md) is source-scoped. [Human UAT](DISCORD_VOICE_UAT.md) remains entirely unchecked.
 
 ## Delivered source
 
@@ -15,9 +15,17 @@ Source candidate: `4557bc60348250d464530d6cc63bdd19c59e48e8`. [Milestone ledger]
 
 Current source anchors: `plugins/platforms/discord/{adapter,voice_output,voice_stream,voice_timing,voice_mixer}.py`, `gateway/{run,slash_commands,streaming_tts_consumer}.py`, and `tools/tts_streaming.py`. No new model tool or front runtime was added.
 
+## Streaming idle/progress correction
+
+The opening clause now drains to EOF before a long tool wait. Sparse truthful timer progress uses the same consumer and turn handle as model clauses, with no competing whole-file playback. No-ambient mixers pause during those waits; configured ambient remains intentional. Delayed progress rechecks tool/turn/connectivity state before PCM writes. Final/partial/cancel suppression is retained, and subsequent mixer file/ack speech resumes normally. Regressions exercise real gateway callbacks, consumer, adapter, PCM reader and mixer with controlled provider/transport boundaries.
+
+All six proposed `progressfix-rc2` source tags in the ledger target this one cumulative correction commit. Original feature SHAs remain provenance. Parent resolves/verifies the exact candidate from the separate task result; no tags or pushes were performed.
+
 ## Verification and limits
 
-At final frozen source `4557bc60348250d464530d6cc63bdd19c59e48e8`: the 24-file relevant subset passed all 313 tests, with no failures/skips. Real local NaCl/Opus packet integration passed 34 tests at preceding source `1aa651d22815516e52870547b862d15a059817bd` without a Discord connection. The final reconnect-only change also passed its focused 35-test subset. Exact review/test provenance is in the ledger rather than implied to cover untested SHAs. Added-line review, Python AST parsing and diff whitespace checks passed; Ruff was unavailable.
+Corrected candidate: **326 passed, 0 failed, no skips**, the relevant 24-file subset (`../progress-qualified-broad.log`). The native reviewer accepted the exact frozen runtime/test delta and independently passed all 19 streaming regressions; parent focused stream/progress run passed 49. Six Python ASTs, unchanged reviewed patch checksum, whitespace and document checks passed. Human acoustic UAT remains entirely unchecked.
+
+Historical qualification at prior frozen source `4557bc60348250d464530d6cc63bdd19c59e48e8`: the 24-file relevant subset passed all 313 tests, with no failures/skips. Real local NaCl/Opus packet integration passed 34 tests at preceding source `1aa651d22815516e52870547b862d15a059817bd` without a Discord connection. The final reconnect-only change also passed its focused 35-test subset. Exact review/test provenance is in the ledger rather than implied to cover untested SHAs. Added-line review, Python AST parsing and diff whitespace checks passed; Ruff was unavailable.
 
 No live Discord/provider tests, acoustic measurements or selected-provider/voice changes were made. Endpoint tuning, streaming STT comparisons, echo cancellation and model/voice A-B remain measurement-dependent. A front runtime remains conditional and unneeded without measurements. Proposed latency targets are unproven.
 
@@ -30,6 +38,8 @@ No live Discord/provider tests, acoustic measurements or selected-provider/voice
 - Current CI push triggers support main/staging, not voice refs. No policy changes or staging movement were used to obtain CI. Exact integration-SHA hosted CI is a later gate.
 - No canonical checkout/config/credential/runtime/global installation changes. Isolated task test-venv uses source-first paths, read-only existing dependencies, and repository-pinned NumPy installed locally.
 
-Source work is complete. Next steps are parent verification/publication, separately authorized integration/CI/activation, and the unchecked human UAT. Runtime activation must use the existing independently authorized release procedure and then-current proven rollback; old source bases are not runtime rollback orders. Do not promote main or reset shared staging based on this handoff.
+The bounded correction is source-complete and verified. Next steps are parent verification/publication, separately authorized integration/CI/activation, and the unchecked human UAT. Runtime activation must use the existing independently authorized release procedure and then-current proven rollback; old source bases are not runtime rollback orders. Do not promote main or reset shared staging based on this handoff.
 
 Task-local durable evidence lives beside the checkout: `../OVERNIGHT-CHECKPOINT.md`, `../OVERNIGHT-EVIDENCE.md`, `../OVERNIGHT-RESULT.md`, and `overnight-*.log`. These are recovery aids; this repository's ledger, review, UAT and exact commits are the retained handoff. Parent updates external plan/Obsidian statuses. Historical milestone 1/2 CI and reviews remain provenance in the ledger; old task artifacts do not authorize activation.
+
+Correction evidence: `../PROGRESS-FIX-EVIDENCE.md`; final native review: `../PROGRESS-FIX-REVIEW.md`; exact commit/tag mapping and final summary: `../PROGRESS-FIX-RESULT.md`. These task-local artifacts supplement the retained source ledger/review/UAT; no unrelated audit was reopened.

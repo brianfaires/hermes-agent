@@ -240,6 +240,11 @@ class VoiceMixer(discord.AudioSource):
                 self._ambient.gain = self._duck_gain
 
     @property
+    def has_ambient(self) -> bool:
+        with self._lock:
+            return self._ambient is not None
+
+    @property
     def speech_active(self) -> bool:
         with self._lock:
             return self._speech_active

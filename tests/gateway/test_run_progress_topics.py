@@ -1063,6 +1063,7 @@ async def _run_with_agent(
     message_type=MessageType.TEXT,
     initial_voice_mode=None,
     return_runner=False,
+    run_generation=None,
 ):
     if config_data:
         import yaml
@@ -1112,6 +1113,8 @@ async def _run_with_agent(
         elif initial_voice_mode == "off":
             adapter._auto_tts_disabled_chats.add(chat_id)
 
+    if run_generation is not None:
+        runner._session_run_generation[session_key] = run_generation
     result = await runner._run_agent(
         message="hello",
         context_prompt="",
@@ -1119,6 +1122,7 @@ async def _run_with_agent(
         source=source,
         session_id=session_id,
         session_key=session_key,
+        run_generation=run_generation,
         message_type=message_type,
     )
     if return_runner:

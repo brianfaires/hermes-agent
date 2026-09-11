@@ -7370,6 +7370,7 @@ class DiscordVoiceProgressSpeaker:
         loop: asyncio.AbstractEventLoop,
         guild_id: int,
         silence_seconds: Optional[float] = None,
+        streaming_consumer=None,
     ) -> None:
         self._runner = runner
         self._event = event
@@ -7380,6 +7381,7 @@ class DiscordVoiceProgressSpeaker:
             if silence_seconds is None
             else max(0.0, float(silence_seconds))
         )
+        self._streaming_consumer = streaming_consumer
         self._closed = False
         self._generation = 0
         self._active_tools: "OrderedDict[str, str]" = OrderedDict()
@@ -7416,7 +7418,8 @@ class DiscordVoiceProgressSpeaker:
             streaming = getattr(adapter, "_voice_stream_playing", None)
             return (bool(is_in_voice_channel(self._guild_id))
                     and (not callable(current) or current(self._guild_id))
-                    and (not callable(streaming) or not streaming(self._guild_id)))
+                    and ((self._streaming_consumer is not None and not self._streaming_consumer.done)
+                         or not callable(streaming) or not streaming(self._guild_id)))
         except Exception:
             logger.debug("Discord voice progress connection check failed", exc_info=True)
             return False
@@ -7451,7 +7454,21 @@ class DiscordVoiceProgressSpeaker:
             )
         ):
             return False
-        await self._runner._send_voice_reply(self._event, text)
+        if (self._streaming_consumer is not None
+                and not (self._streaming_consumer.done
+                         and not self._streaming_consumer.suppress_whole_file)):
+            generation = self._generation
+            accepted = self._streaming_consumer.enqueue_progress(
+                text,
+                is_current=lambda: (not self._closed and generation == self._generation
+                                    and self._voice_still_connected()
+                                    and self._voice_progress_allowed(text)),
+                silence_seconds=self._silence_seconds,
+            )
+            if not accepted:
+                return False
+        else:
+            await self._runner._send_voice_reply(self._event, text)
         self._last_spoken_at = time.monotonic()
         key = self._speech_key(text)
         if key:
@@ -7552,8 +7569,13 @@ class DiscordVoiceProgressSpeaker:
             self._timer_task.cancel()
 
     async def _timer(self, generation: int) -> None:
+        if (self._streaming_consumer is not None and self._streaming_consumer.done
+                and self._streaming_consumer.suppress_whole_file):
+            return
         anchor = self._last_spoken_at if self._last_spoken_at is not None else self._silence_anchor
-        delay = max(0.0, (anchor + self._silence_seconds) - time.monotonic())
+        if self._streaming_consumer is not None:
+            anchor = max(anchor, self._streaming_consumer.activity_at)
+        delay = max(0.01, (anchor + self._silence_seconds) - time.monotonic())
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -31482,6 +31504,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _voice_event,
                             loop=asyncio.get_running_loop(),
                             guild_id=_guild_id,
+                            streaming_consumer=streaming_tts_consumer_holder[0],
                         )
             except Exception:
                 logger.debug("Could not set up Discord voice progress speaker", exc_info=True)

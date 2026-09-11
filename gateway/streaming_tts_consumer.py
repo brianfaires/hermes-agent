@@ -42,6 +42,7 @@ import asyncio
 import logging
 import queue
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from gateway.platforms.base import AudioFormat, StreamingTTSHandle
@@ -105,6 +106,9 @@ class StreamingTTSConsumer:
 
         # Pre-allocate the strip-markdown helper lazily to avoid import cycles.
         self._strip_markdown = None
+        self._busy = False
+        self._progress_pending = False
+        self._last_activity_at = time.monotonic()
 
     # ------------------------------------------------------------------
     # Public properties
@@ -170,6 +174,29 @@ class StreamingTTSConsumer:
             logger.debug("streaming TTS queue full, dropping clause")
         except Exception:
             logger.debug("streaming TTS on_delta error", exc_info=True)
+
+    @property
+    def activity_at(self) -> float:
+        """Silence starts after synthesis and the adapter's clause drain."""
+        return time.monotonic() if self._busy else self._last_activity_at
+
+    def enqueue_progress(self, text: str, *, is_current, silence_seconds: float) -> bool:
+        """Queue one idle-only progress clause on the existing serial consumer.
+
+        Called on the gateway loop. Revalidate execution state when consumed,
+        so a tool completion/turn cancellation cannot leave stale narration.
+        """
+        if (not self.started or self.done or self._finished or self._aborted
+                or self._handle.aborted or self._busy or self._progress_pending
+                or not self._queue.empty()
+                or time.monotonic() - self.activity_at < silence_seconds):
+            return False
+        try:
+            self._queue.put_nowait((text, is_current, silence_seconds))
+        except queue.Full:
+            return False
+        self._progress_pending = True
+        return True
 
     def finish(self) -> None:
         """Signal end-of-text and flush the chunker tail.
@@ -263,6 +290,13 @@ class StreamingTTSConsumer:
                     break
                 if item is _DONE:
                     break
+                is_current = None
+                if isinstance(item, tuple):
+                    self._progress_pending = False
+                    item, is_current, silence_seconds = item
+                    if (self._finished or not is_current()
+                            or time.monotonic() - self.activity_at < silence_seconds):
+                        continue
                 if not isinstance(item, str):
                     continue
                 if self._aborted or self._handle.aborted:
@@ -270,7 +304,14 @@ class StreamingTTSConsumer:
                     break
 
                 try:
-                    await self._synthesise_and_write(item)
+                    self._busy = True
+                    await self._synthesise_and_write(item, is_current=is_current)
+                    # Discord ends its player at each clause while retaining
+                    # the turn handle. Other streaming sinks need no idle hook.
+                    drain = getattr(type(self._adapter), "drain_streaming_tts", None)
+                    if drain is not None:
+                        await drain(self._adapter, self._handle)
+                    self._last_activity_at = time.monotonic()
                 except Exception as exc:
                     logger.warning("streaming TTS clause failed: %s", exc)
                     if self._handle and self._handle.audible:
@@ -281,6 +322,8 @@ class StreamingTTSConsumer:
                     self._completed = False
                     await self._safe_abort(str(exc))
                     return
+                finally:
+                    self._busy = False
 
             if not self._aborted and self._handle is not None and not self._handle.aborted:
                 _finish_failed = False
@@ -324,7 +367,7 @@ class StreamingTTSConsumer:
             except Exception:
                 pass
 
-    async def _synthesise_and_write(self, clause: str) -> None:
+    async def _synthesise_and_write(self, clause: str, *, is_current=None) -> None:
         """Synthesise one clause via the streamer and write PCM chunks."""
         if self._handle is None or self._handle.aborted:
             return
@@ -337,7 +380,8 @@ class StreamingTTSConsumer:
             return
 
         async for chunk in self._iter_stream_chunks(cleaned):
-            if self._aborted or self._handle.aborted:
+            if (self._aborted or self._handle.aborted
+                    or (is_current is not None and not is_current())):
                 return
             if not chunk:
                 continue
