@@ -693,9 +693,12 @@ class VoiceReceiver:
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
-    def __init__(self, voice_client, allowed_user_ids: set = None, *, timing=None):
+    def __init__(self, voice_client, allowed_user_ids: set = None, *, timing=None, on_speech_onset=None):
         self._vc = voice_client
         self._timing = timing
+        self._on_speech_onset = on_speech_onset
+        self._voiced_bytes = {}
+        self._onset_sent = set()
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
 
@@ -932,6 +935,7 @@ class VoiceReceiver:
             with self._lock:
                 self._buffers[ssrc].extend(pcm)
                 self._last_packet_time[ssrc] = time.monotonic()
+            self._confirm_speech_onset(ssrc, pcm)
         except Exception as e:
             with self._lock:
                 self._decoders.pop(ssrc, None)
@@ -945,6 +949,29 @@ class VoiceReceiver:
     # ------------------------------------------------------------------
     # Silence detection
     # ------------------------------------------------------------------
+
+    def _confirm_speech_onset(self, ssrc, pcm):
+        """Confirm 100ms of non-silent decoded PCM from an explicitly mapped user.
+
+        This does not change capture or inference policy. Authorization is
+        rechecked on the owning adapter's loop before any playback is stopped.
+        """
+        samples = len(pcm) // 2
+        if not samples:
+            return
+        energy = sum(value * value for (value,) in struct.iter_unpack("<h", pcm)) / samples
+        with self._lock:
+            if energy < 200 * 200:
+                self._voiced_bytes.pop(ssrc, None)
+                return
+            self._voiced_bytes[ssrc] = self._voiced_bytes.get(ssrc, 0) + len(pcm)
+            user_id = self._ssrc_to_user.get(ssrc)
+            if (not user_id or ssrc in self._onset_sent
+                    or self._voiced_bytes[ssrc] < self.SAMPLE_RATE * self.CHANNELS * 2 // 10):
+                return
+            self._onset_sent.add(ssrc)
+        if self._on_speech_onset is not None:
+            self._on_speech_onset(user_id)
 
     def _infer_user_for_ssrc(self, ssrc: int) -> int:
         """Try to infer user_id for an unmapped SSRC.
@@ -1001,10 +1028,14 @@ class VoiceReceiver:
                             self._timing.mark("endpoint_ready", now)
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    self._voiced_bytes.pop(ssrc, None)
+                    self._onset_sent.discard(ssrc)
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user — discard
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    self._voiced_bytes.pop(ssrc, None)
+                    self._onset_sent.discard(ssrc)
 
         return completed
 
@@ -4646,6 +4677,9 @@ class DiscordAdapter(BasePlatformAdapter):
         a turn, so the user hears "let me look into that" before the bot goes
         quiet to work.  No-op unless the mixer is installed and acks enabled.
         """
+        generation = self._voice_output_generation(guild_id)
+        if not self.voice_output_current(guild_id):
+            return False
         if not self._voice_fx_cfg.get("ack_enabled"):
             return False
         mixer = self._voice_mixers.get(guild_id)
@@ -4677,7 +4711,8 @@ class DiscordAdapter(BasePlatformAdapter):
             except ImportError:
                 from .voice_mixer import decode_to_pcm
             pcm = await asyncio.to_thread(decode_to_pcm, actual)
-            if not pcm:
+            if (not pcm or generation != self._voice_output_generation(guild_id)
+                    or not self.voice_output_current(guild_id)):
                 return False
             mixer.play_speech(
                 self._lead_silence_bytes() + pcm,
@@ -4978,10 +5013,15 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start voice receiver (Phase 2: listen to users)
             try:
+                loop = asyncio.get_running_loop()
+                generation = self._voice_session_generations.get(guild_id, 0)
                 receiver = VoiceReceiver(
                     vc,
                     allowed_user_ids=self._auto_voice_user_ids() or self._allowed_user_ids,
                     timing=self.voice_timing(),
+                    on_speech_onset=lambda uid: loop.call_soon_threadsafe(
+                        self._schedule_voice_onset, guild_id, uid, generation
+                    ),
                 )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
@@ -5005,6 +5045,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
+        await self.stop_voice_playback(guild_id)
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
             if not hasattr(self, "_voice_session_generations"):
                 self._voice_session_generations = {}
@@ -5062,6 +5103,54 @@ class DiscordAdapter(BasePlatformAdapter):
                     auto_voice_channels.discard(str(session_channel_id))
             self._voice_sources.pop(guild_id, None)
 
+    def _voice_output_generation(self, guild_id):
+        return getattr(self, "_voice_output_generations", {}).get(guild_id, 0)
+
+    def voice_output_current(self, guild_id):
+        from plugins.platforms.discord.voice_output import output_scope
+        scope = output_scope.get()
+        return scope is None or scope == (self, guild_id, self._voice_output_generation(guild_id))
+
+    async def handle_message(self, event):
+        # Bind generation before BasePlatformAdapter creates background tasks.
+        from plugins.platforms.discord.voice_output import output_scope
+        guild_id = next((gid for gid, chat in self._voice_text_channels.items()
+                         if str(chat) == str(event.source.chat_id)), None)
+        if guild_id is None:
+            return await super().handle_message(event)
+        event._discord_voice_output_scope = (self, guild_id, self._voice_output_generation(guild_id))
+        token = output_scope.set(event._discord_voice_output_scope)
+        try:
+            return await super().handle_message(event)
+        finally:
+            output_scope.reset(token)
+
+    async def _process_message_background(self, event, session_key):
+        from plugins.platforms.discord.voice_output import output_scope
+        scope = getattr(event, "_discord_voice_output_scope", None)
+        if scope is None:
+            guild_id = next((gid for gid, chat in self._voice_text_channels.items()
+                             if str(chat) == str(event.source.chat_id)), None)
+            if guild_id is not None:
+                scope = (self, guild_id, self._voice_output_generation(guild_id))
+        token = output_scope.set(scope)
+        try:
+            return await super()._process_message_background(event, session_key)
+        finally:
+            output_scope.reset(token)
+
+    def _schedule_voice_onset(self, guild_id, user_id, session_generation):
+        if self._voice_session_generations.get(guild_id, 0) != session_generation:
+            return
+        guild = self._client.get_guild(guild_id) if self._client is not None else None
+        if not self._is_voice_speaker_allowed(user_id, guild=guild):
+            return
+        self.voice_timing().mark("speech_onset")
+        # Stop runs on the event loop, independently of the serial STT worker.
+        task = asyncio.create_task(self.stop_voice_playback(guild_id))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def voice_timing(self):
         """Return this adapter's bounded, timestamp-only diagnostic ring."""
         if not hasattr(self, "_voice_timing"):
@@ -5071,6 +5160,9 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def stop_voice_playback(self, guild_id: int) -> bool:
         """Stop active TTS in one guild while keeping the voice connection alive."""
+        if not hasattr(self, "_voice_output_generations"):
+            self._voice_output_generations = {}
+        self._voice_output_generations[guild_id] = self._voice_output_generation(guild_id) + 1
         mixer = getattr(self, "_voice_mixers", {}).get(guild_id)
         if mixer is not None:
             mixer.stop_speech()
@@ -5105,6 +5197,10 @@ class DiscordAdapter(BasePlatformAdapter):
         if not vc or not vc.is_connected():
             return False
 
+        generation = self._voice_output_generation(guild_id)
+        if not self.voice_output_current(guild_id):
+            return False
+
         # Playback is activity. Do not let the inactivity timer disconnect the
         # bot while duration probing, decoding, or speaking; re-arm it when this
         # attempt finishes, even if decoding/playback raises.
@@ -5121,6 +5217,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     from .voice_mixer import decode_to_pcm
                 pcm = await asyncio.to_thread(decode_to_pcm, audio_path)
                 if pcm:
+                    if generation != self._voice_output_generation(guild_id) or not self.voice_output_current(guild_id):
+                        return False
                     speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
                     mixer.play_speech(self._lead_silence_bytes() + pcm, gain=speech_gain)
                     self.voice_timing().mark("playback_started")
@@ -5138,56 +5236,50 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.warning("Mixer decode failed for %s; falling back to legacy playback", audio_path)
 
             # ── Legacy one-shot path (no mixer) ─────────────────────────
-            # Pause voice receiver while playing (echo prevention)
-            receiver = self._voice_receivers.get(guild_id)
-            if receiver:
-                receiver.pause()
-
-            try:
-                # Wait for current playback to finish (with timeout)
-                wait_start = time.monotonic()
-                while vc.is_playing():
-                    if time.monotonic() - wait_start > playback_timeout:
-                        logger.warning("Timed out waiting for previous playback to finish")
-                        vc.stop()
-                        break
-                    await asyncio.sleep(0.1)
-
-                done = asyncio.Event()
-                loop = asyncio.get_running_loop()
-
-                def _after(error):
-                    if error:
-                        logger.error("Voice playback error: %s", error)
-                    loop.call_soon_threadsafe(done.set)
-
-                # Prepend a short lead of silence so the voice socket's warm-up
-                # doesn't clip the first word (mirrors the mixer path above).
-                ffmpeg_opts: Dict[str, Any] = {}
-                _fx_cfg = getattr(self, "_voice_fx_cfg", None) or {}
-                try:
-                    lead_ms = int(_fx_cfg.get("lead_silence_ms", 0) or 0)
-                except (TypeError, ValueError):
-                    lead_ms = 0
-                if lead_ms > 0:
-                    ffmpeg_opts["options"] = f"-af adelay={lead_ms}:all=1"
-                source = discord.FFmpegPCMAudio(
-                    audio_path,
-                    executable=resolve_ffmpeg_executable(),
-                    **ffmpeg_opts,
-                )
-                source = discord.PCMVolumeTransformer(source, volume=1.0)
-                vc.play(source, after=_after)
-                self.voice_timing().mark("playback_started")
-                try:
-                    await asyncio.wait_for(done.wait(), timeout=playback_timeout)
-                except asyncio.TimeoutError:
-                    logger.warning("Voice playback timed out after %.1fs", playback_timeout)
+            # Receive stays live; bot SSRC is already excluded by the receiver.
+            # Wait for current playback to finish (with timeout)
+            wait_start = time.monotonic()
+            while vc.is_playing():
+                if time.monotonic() - wait_start > playback_timeout:
+                    logger.warning("Timed out waiting for previous playback to finish")
                     vc.stop()
-                return True
-            finally:
-                if receiver:
-                    receiver.resume()
+                    break
+                await asyncio.sleep(0.1)
+
+            if generation != self._voice_output_generation(guild_id) or not self.voice_output_current(guild_id):
+                return False
+            done = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def _after(error):
+                if error:
+                    logger.error("Voice playback error: %s", error)
+                loop.call_soon_threadsafe(done.set)
+
+            # Prepend a short lead of silence so the voice socket's warm-up
+            # doesn't clip the first word (mirrors the mixer path above).
+            ffmpeg_opts: Dict[str, Any] = {}
+            _fx_cfg = getattr(self, "_voice_fx_cfg", None) or {}
+            try:
+                lead_ms = int(_fx_cfg.get("lead_silence_ms", 0) or 0)
+            except (TypeError, ValueError):
+                lead_ms = 0
+            if lead_ms > 0:
+                ffmpeg_opts["options"] = f"-af adelay={lead_ms}:all=1"
+            source = discord.FFmpegPCMAudio(
+                audio_path,
+                executable=resolve_ffmpeg_executable(),
+                **ffmpeg_opts,
+            )
+            source = discord.PCMVolumeTransformer(source, volume=1.0)
+            vc.play(source, after=_after)
+            self.voice_timing().mark("playback_started")
+            try:
+                await asyncio.wait_for(done.wait(), timeout=playback_timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Voice playback timed out after %.1fs", playback_timeout)
+                vc.stop()
+            return True
         finally:
             self._reset_voice_timeout(guild_id)
 
