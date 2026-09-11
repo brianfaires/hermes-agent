@@ -6691,12 +6691,23 @@ class DiscordAdapter(BasePlatformAdapter):
             return snap[name] or default
         return _scoped_gate_env(name, default)
 
-    def _gate_raw(self, extra_key: str, env_key: str):
-        """Resolve one gate value: env/snapshot first (legacy precedence), then extra."""
+    def _gate_raw(self, extra_key: str, env_key: str, *, prefer_extra: bool = False):
+        """Resolve a gate; channel policy prefers explicit config before connect.
+
+        Connected nonempty profile snapshots stay authoritative. For channel
+        policy only, explicit extra (including empty lists/strings) wins over
+        the pre-connect environment. Other gates keep legacy env precedence.
+        """
+        extra = getattr(getattr(self, "config", None), "extra", None)
+        if prefer_extra:
+            snapshot = getattr(self, "_gate_env_snapshot", None)
+            if snapshot is not None and snapshot.get(env_key):
+                return snapshot[env_key]
+            if isinstance(extra, dict) and extra_key in extra:
+                return extra[extra_key]
         val = self._gate_env(env_key)
         if val:
             return val
-        extra = getattr(getattr(self, "config", None), "extra", None)
         if isinstance(extra, dict):
             return extra.get(extra_key)
         return None
@@ -6711,11 +6722,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _get_allowed_channels(self) -> set:
         """This adapter's DISCORD_ALLOWED_CHANNELS gate (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS"))
+        return self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS", prefer_extra=True))
 
     def _get_ignored_channels(self) -> set:
         """This adapter's DISCORD_IGNORED_CHANNELS gate (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS"))
+        return self._gate_csv_set(self._gate_raw("ignored_channels", "DISCORD_IGNORED_CHANNELS", prefer_extra=True))
 
     async def _discord_outbound_channel_allowed(self, channel: Any) -> Tuple[bool, str]:
         """Apply this adapter's profile policy to the resolved outbound target."""
