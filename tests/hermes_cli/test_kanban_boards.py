@@ -245,6 +245,7 @@ class TestWorkerSpawnEnv:
 
     def test_default_spawn_sets_env_vars(self, fresh_home, monkeypatch):
         captured = {}
+        (fresh_home / "profiles" / "teknium").mkdir(parents=True)
 
         class FakeProc:
             pid = 12345
