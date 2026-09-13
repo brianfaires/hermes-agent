@@ -147,22 +147,27 @@ class PrivateCredentialsTests(unittest.TestCase):
         self.assertEqual(dict(os.environ), before)
 
     def test_bot_chat_selects_receiver_credentials_and_rejects_missing_profile(self):
-        from hermes_cli import profiles
+        target = self.root / 'profiles' / 'b'
+        target.mkdir(parents=True)
+        (target / '.env').write_text((self.b / '.env').read_text())
+        home_token = set_hermes_home_override(self.root)
+        self.addCleanup(reset_hermes_home_override, home_token)
         secrets.set_secret_scope(secrets.refresh_profile_secret_scope(self.a))
         captured = []
         def send(*args, **kwargs):
             captured.append(kwargs['env'])
             return SimpleNamespace(returncode=0, stdout='', stderr='')
-        with patch.object(profiles, 'get_profile_dir', return_value=self.b), patch.object(profiles, 'profile_exists', return_value=True), patch.object(scheduler.subprocess, 'run', side_effect=send):
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.root)}), patch.object(scheduler.subprocess, 'run', side_effect=send):
             error = scheduler._deliver_to_bot_chat({'id': 'fixture'}, 'hello', 'b')
         self.assertIsNone(error)
         self.assertEqual(captured[0]['CUSTOM_SECRET'], 'b')
         self.assertEqual(captured[0]['OPENAI_API_KEY'], 'b-key')
-        self.assertEqual(Path(captured[0]['HERMES_HOME']), self.b)
+        self.assertEqual(Path(captured[0]['HERMES_HOME']), target)
         self.assertEqual(secrets.get_secret('CUSTOM_SECRET'), 'a')
-        with patch.object(profiles, 'profile_exists', return_value=False), patch.object(scheduler.subprocess, 'run') as send:
-            self.assertIn('no longer exists', scheduler._deliver_to_bot_chat({'id': 'fixture'}, 'hello', 'missing'))
+        with patch.dict(os.environ, {'HERMES_HOME': str(self.root)}), patch.object(scheduler.subprocess, 'run') as send:
+            self.assertIn('does not exist', scheduler._deliver_to_bot_chat({'id': 'fixture'}, 'hello', 'missing'))
             send.assert_not_called()
+
 
 
 if __name__ == '__main__':

@@ -134,7 +134,7 @@ def test_deliver_runs_canonical_bot_chat_lane():
     assert err is None
     argv = calls["argv"]
     assert argv[0] == "/usr/bin/hermes"
-    assert "-p" not in argv  # own profile: subprocess inherits HERMES_HOME
+    assert argv[1:3] == ["-p", "default"]  # explicit owner defeats sticky selection
     assert "chat" in argv
     assert "Bot Chat" in argv
     assert "--create-if-missing" in argv
@@ -183,7 +183,7 @@ def test_deliver_named_profile_uses_p_flag_and_receiver_scope(tmp_path, monkeypa
     with mock.patch.object(sched.subprocess, 'run') as spawn, \
          mock.patch.object(sched.shutil, 'which', return_value='/usr/bin/hermes'):
         error = _deliver_to_bot_chat({'id': 'j1', 'name': 'n'}, 'out', 'missing')
-    assert 'target profile no longer exists' in error
+    assert 'does not exist' in error
     spawn.assert_not_called()
 
 

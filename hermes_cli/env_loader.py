@@ -501,13 +501,27 @@ def load_hermes_dotenv(
     """
     # Late imports during a scoped turn must not reload another profile into
     # the process environment. Runtime scope owners refresh their private maps.
-    from agent.secret_scope import current_secret_scope, is_multiplex_active
-    from hermes_constants import get_hermes_home
+    from agent.secret_scope import (
+        build_profile_secret_scope, current_secret_scope,
+        is_multiplex_active, set_secret_scope,
+    )
+    from hermes_constants import get_hermes_home, get_hermes_home_override
 
     if current_secret_scope() is not None or is_multiplex_active():
         home_path = Path(hermes_home) if hermes_home is not None else get_hermes_home()
-        if load_external_secrets:
+        routed_home = get_hermes_home_override()
+        if routed_home is not None:
+            if home_path.resolve() != Path(routed_home).resolve():
+                raise ValueError("Dotenv home does not match the routed profile")
+            home_path = Path(routed_home)
+        from hermes_cli import _early_recovery
+
+        if load_external_secrets and not _early_recovery._should_skip_external_secret_sources():
             hydrate_profile_secret_sources(home_path)
+        if routed_home is not None and current_secret_scope() is not None:
+            # Replace only the routed mapping; the enclosing owner restores
+            # its token. Cron's explicit refresh still owns external rotation.
+            set_secret_scope(build_profile_secret_scope(home_path))
         return [home_path / ".env"] if (home_path / ".env").is_file() else []
 
     loaded: list[Path] = []

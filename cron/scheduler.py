@@ -2656,16 +2656,15 @@ def _get_bot_chat_delivery_timeout() -> int:
 def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]:
     """Deliver job output into a profile's canonical Bot Chat as an inbound turn.
 
-    Runs ``hermes [-p <profile>] chat --in ~ -c "Bot Chat" --create-if-missing
+    Runs ``hermes -p <profile> chat --in ~ -c "Bot Chat" --create-if-missing
     -Q --query-file <tmp>`` — the exact lane Bot Mode agent-to-agent messages
     use, so the adopt-before-mint canonical-session rules apply and the target
     bot receives the output as a real user-role message it can act on.
     Alternation-safe by construction: this is an inbound turn on the chat
     command lane, not a transcript splice.
 
-    ``profile`` is ``""`` for the job's own profile (subprocess inherits this
-    scheduler's HERMES_HOME) or a validated local profile name.  Returns None
-    on success or an error string for ``last_delivery_error``.
+    ``profile`` is ``""`` for the firing job's own profile or a local profile
+    name. Returns None on success or an error string for ``last_delivery_error``.
     """
     import shutil as _shutil
     import tempfile
@@ -2688,38 +2687,69 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
             return "bot-chat delivery failed: hermes CLI not resolvable"
 
     from agent.secret_scope import (
-        _is_global_env, refresh_profile_secret_scope, reset_secret_scope,
-        scoped_subprocess_environment, set_secret_scope,
+        _is_global_env, is_multiplex_active, refresh_profile_secret_scope,
+        reset_secret_scope, scoped_subprocess_environment, set_secret_scope,
     )
-    from tools.environments.local import build_subprocess_env
+    from gateway.session_context import _VAR_MAP
+    from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+    from hermes_constants import (
+        get_process_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    from tools.environments.local import build_subprocess_env, hermes_subprocess_env
 
-    if profile:
-        from hermes_cli.profiles import get_profile_dir, profile_exists
+    try:
+        source_home = _get_hermes_home()
+        # The existing resolver preserves custom roots and lexical aliases
+        # from the deployment's launch environment.
+        root = Path(resolve_profile_env("default"))
+        if source_home.resolve() == root.resolve():
+            source_profile = "default"
+        elif source_home.parent.resolve() == (root / "profiles").resolve():
+            source_profile = normalize_profile_name(source_home.name)
+        else:
+            raise ValueError("Bot Chat source is not a profile in this deployment")
+        if Path(resolve_profile_env(source_profile)).resolve() != source_home.resolve():
+            raise ValueError("Bot Chat source profile does not match its home")
+        target_profile = normalize_profile_name(profile or source_profile)
+        target_home = Path(resolve_profile_env(target_profile))
+        if not target_home.is_dir():
+            raise FileNotFoundError(f"Profile '{target_profile}' does not exist")
 
-        if not profile_exists(profile):
-            return "bot-chat delivery failed: target profile no longer exists"
-        # A named receiver must never inherit the sending profile's secrets,
-        # even when this scheduler is running in single-profile mode.
-        target_home = get_profile_dir(profile)
-        token = set_secret_scope(refresh_profile_secret_scope(
-            target_home, inherit_process_secrets=False,
-        ))
-        try:
-            env = scoped_subprocess_environment(
-                {name: value for name, value in os.environ.items() if _is_global_env(name)}
-            )
-        finally:
-            reset_secret_scope(token)
-        argv += ["-p", profile]
-        # Keep the resolved destination home so custom/mounted profile roots
-        # survive the child's -p resolution. Never carry the sender's home.
-        env["HERMES_HOME"] = str(target_home)
-        env.pop("HERMES_PROFILE", None)
-    else:
-        env = build_subprocess_env(
-            scoped_subprocess_environment(os.environ), scrub_secrets=False,
-            extra={"HERMES_HOME": str(_get_hermes_home())},
+        # Only a standalone same-owner child may inherit process-only LLM
+        # credentials. Multiplex/cross-owner children load their own .env.
+        inherit_credentials = (
+            not is_multiplex_active()
+            and target_home.resolve() == source_home.resolve()
+            and target_home.resolve() == get_process_hermes_home().resolve()
         )
+        home_token = set_hermes_home_override(str(target_home))
+        try:
+            env = hermes_subprocess_env(inherit_credentials=inherit_credentials)
+            if not inherit_credentials:
+                # Preserve staging's receiver-only external secret refresh.
+                # Unknown sender keys are private too, not just known tokens.
+                env = {name: value for name, value in env.items() if _is_global_env(name)}
+            scope_token = set_secret_scope(refresh_profile_secret_scope(
+                target_home, inherit_process_secrets=inherit_credentials,
+            ))
+            try:
+                env = build_subprocess_env(
+                    scoped_subprocess_environment(env), scrub_secrets=False,
+                )
+            finally:
+                reset_secret_scope(scope_token)
+        finally:
+            reset_hermes_home_override(home_token)
+    except (ValueError, OSError) as exc:
+        return f"bot-chat delivery failed: {exc}"
+
+    # Explicit Default prevents sticky interactive selection. Retain the
+    # target HERMES_HOME so CLI bootstrap resolves the same deployment root.
+    argv += ["-p", target_profile]
+    for key in (*_VAR_MAP, "HERMES_PROFILE", "HERMES_PROFILE_NAME"):
+        env.pop(key, None)
 
     # The prefix tells the receiving bot this is scheduled output, not the
     # human typing — mirrors the Bot Mode sender-attribution convention.
