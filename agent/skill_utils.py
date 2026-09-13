@@ -519,19 +519,38 @@ def _normalize_string_set(values) -> Set[str]:
 
 # ── External skills directories ──────────────────────────────────────────
 
-# (config_path_str, mtime_ns) -> resolved external dirs list.  Keyed by
+# (config_path_str, mtime_ns) -> unexpanded external dirs list.  Keyed by
 # mtime_ns so a config.yaml edit mid-run is picked up automatically;
 # otherwise every call would re-read + re-YAML-parse the 15KB config,
 # which becomes the dominant cost of ``hermes`` startup when ~120 skills
 # each trigger a category lookup during banner construction (10+ seconds
 # of pure waste).
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[str]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
     """Test hook — drop the in-process cache."""
     _EXTERNAL_DIRS_CACHE.clear()
     _raw_config_cache_clear()
+
+
+def _expand_external_dir(entry: str, hermes_home: Path, path_module=os.path) -> str:
+    """Expand path tokens once, with only the dollar-form owner token scoped."""
+    def expand_var(match):
+        token = match.group(0)
+        if token in ("$HERMES_HOME", "${HERMES_HOME}"):
+            return str(hermes_home)
+        return path_module.expandvars(token)
+
+    # Consume native tokens as units, including Windows quotes and escaped
+    # dollars/percents, then delegate ordinary expansion to the stdlib.
+    pattern = (
+        r"'[^']*'?|%(%|[^%]*%?)|\$(\$|[-\w]+|\{[^}]*\}?)"
+        if path_module.sep == "\\"
+        else r"\$(\w+|\{[^}]*\}?)"
+    )
+    expanded = re.sub(pattern, expand_var, entry, flags=re.ASCII)
+    return path_module.expanduser(expanded)
 
 
 def get_external_skills_dirs() -> List[Path]:
@@ -541,8 +560,9 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
 
-    Cached in-process, keyed on ``config.yaml`` mtime — the function is
-    called once per skill during banner / tool-registry scans, and YAML
+    Config entries are cached in-process, keyed on ``config.yaml`` mtime;
+    paths are expanded for the current owner/environment on every call.
+    The function is called once per skill during banner / tool-registry scans, and YAML
     parsing a non-trivial config dominates ``hermes`` cold-start time
     when the cache is absent.
     """
@@ -558,30 +578,20 @@ def get_external_skills_dirs() -> List[Path]:
     except OSError:
         cache_key = None  # type: ignore[assignment]
 
-    if cache_key is not None:
-        cached = _EXTERNAL_DIRS_CACHE.get(cache_key)
-        if cached is not None:
-            # Return a copy so callers can't mutate the cached list.
-            return list(cached)
-
-    parsed = _load_raw_config()
-    if not parsed:
-        return []
-
-    skills_cfg = parsed.get("skills")
-    if not isinstance(skills_cfg, dict):
-        return []
-
-    raw_dirs = skills_cfg.get("external_dirs")
-    if not raw_dirs:
-        result: List[Path] = []
+    raw_dirs = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
+    if raw_dirs is None:
+        parsed = _load_raw_config()
+        skills_cfg = parsed.get("skills")
+        if not isinstance(skills_cfg, dict):
+            return []
+        entries = skills_cfg.get("external_dirs") or []
+        if isinstance(entries, str):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return []
+        raw_dirs = [str(entry).strip() for entry in entries]
         if cache_key is not None:
-            _EXTERNAL_DIRS_CACHE[cache_key] = list(result)
-        return result
-    if isinstance(raw_dirs, str):
-        raw_dirs = [raw_dirs]
-    if not isinstance(raw_dirs, list):
-        return []
+            _EXTERNAL_DIRS_CACHE[cache_key] = raw_dirs
 
     from hermes_constants import get_hermes_home
 
@@ -594,8 +604,9 @@ def get_external_skills_dirs() -> List[Path]:
         entry = str(entry).strip()
         if not entry:
             continue
-        # Expand ~ and environment variables
-        expanded = os.path.expanduser(os.path.expandvars(entry))
+        # Match expandvars' tokens in one pass. Replacement text is literal:
+        # a dollar in the served home must not trigger another expansion.
+        expanded = _expand_external_dir(entry, hermes_home)
         p = Path(expanded)
         # Resolve relative paths against HERMES_HOME, not cwd
         if not p.is_absolute():
@@ -612,8 +623,6 @@ def get_external_skills_dirs() -> List[Path]:
         else:
             logger.debug("External skills dir does not exist, skipping: %s", p)
 
-    if cache_key is not None:
-        _EXTERNAL_DIRS_CACHE[cache_key] = list(result)
     return result
 
 
