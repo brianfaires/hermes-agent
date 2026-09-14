@@ -60,6 +60,7 @@ from agent.interrupt_compat import request_hard_interrupt
 from agent.delegation_context import (
     enter_non_dispatcher_owned_context,
     exit_non_dispatcher_owned_context,
+    non_dispatcher_owned_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -2653,6 +2654,7 @@ def _get_bot_chat_delivery_timeout() -> int:
         return 600
 
 
+@non_dispatcher_owned_context()
 def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]:
     """Deliver job output into a profile's canonical Bot Chat as an inbound turn.
 
@@ -2750,6 +2752,11 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
     argv += ["-p", target_profile]
     for key in (*_VAR_MAP, "HERMES_PROFILE", "HERMES_PROFILE_NAME"):
         env.pop(key, None)
+
+    # Delivery runs after run_job returns. Enforce child lineage after receiver
+    # profile/secret overlays too: cross-profile filtering can remove markers.
+    from agent.delegation_context import delegated_child_subprocess_env
+    env = delegated_child_subprocess_env(env)
 
     # The prefix tells the receiving bot this is scheduled output, not the
     # human typing — mirrors the Bot Mode sender-attribution convention.
@@ -5611,6 +5618,9 @@ class _BoundedCronSessionDB:
         return _bounded
 
 
+# Cover pre-agent scripts, script-only jobs, and finalization as well as the
+# inner agent turn. A worker's task identity must not escape any cron phase.
+@non_dispatcher_owned_context()
 def run_job(
     job: dict,
     *,

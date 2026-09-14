@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error, no_cache_check_fn
 from hermes_cli.config import cfg_get, load_config
 
 logger = logging.getLogger(__name__)
@@ -100,6 +100,7 @@ def _reject_delegated_child_mutation(tool_name: str) -> Optional[str]:
     )
 
 
+@no_cache_check_fn
 def _check_kanban_mode() -> bool:
     """Task-lifecycle tools are available when:
 
@@ -119,6 +120,7 @@ def _check_kanban_mode() -> bool:
     return _profile_has_kanban_toolset()
 
 
+@no_cache_check_fn
 def _check_kanban_orchestrator_mode() -> bool:
     """Board-routing tools (kanban_list, kanban_unblock) are intentionally
     hidden from task workers.

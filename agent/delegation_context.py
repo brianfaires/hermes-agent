@@ -66,8 +66,22 @@ def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
 
 
 def is_delegated_child_context() -> bool:
-    """Return True while code is running for a delegate_task child."""
-    return bool(_DELEGATED_CHILD_CONTEXT.get())
+    """Identify child execution that must not inherit a Kanban worker's rights.
+
+    Worker-fired cron runs share the parent's environment just like delegated
+    agents. Suppressing implicit task defaults is insufficient: an explicit
+    task ID must hit the same tool and DB mutation guards. Standalone cron
+    orchestration (no inherited worker task) retains its configured access.
+    The subprocess marker preserves this boundary after ContextVars are lost.
+    """
+    import os
+
+    return bool(
+        _DELEGATED_CHILD_CONTEXT.get()
+        or os.environ.get(DELEGATED_CHILD_ENV_MARKER)
+        or (_NON_DISPATCHER_OWNED_CONTEXT.get()
+            and os.environ.get("HERMES_KANBAN_TASK"))
+    )
 
 
 @contextmanager
@@ -101,7 +115,7 @@ def is_dispatcher_owned_worker_context() -> bool:
     before trusting those vars.  False for delegate_task children and for cron
     jobs fired in-process from a worker.
     """
-    if _DELEGATED_CHILD_CONTEXT.get():
+    if is_delegated_child_context():
         return False
     return not _NON_DISPATCHER_OWNED_CONTEXT.get()
 
@@ -123,11 +137,7 @@ def exit_non_dispatcher_owned_context(token: Token[bool]) -> None:
 
 def is_delegated_child_process_context() -> bool:
     """Return True in this process or a subprocess spawned by a child."""
-    import os
-
-    return bool(_DELEGATED_CHILD_CONTEXT.get()) or bool(
-        os.environ.get(DELEGATED_CHILD_ENV_MARKER)
-    )
+    return is_delegated_child_context()
 
 
 def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
