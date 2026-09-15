@@ -3515,14 +3515,18 @@ def read_raw_config() -> Dict[str, Any]:
         return data
 
 
-def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
+def read_user_config_raw(
+    config_path: Optional[Path] = None, *, strict_mapping: bool = False
+) -> Dict[str, Any]:
     """Read a user ``config.yaml`` EXACTLY as written on disk.
 
     No DEFAULT_CONFIG merge, no managed-scope overlay, no ``${ENV_VAR}``
     expansion, no migration, no root-model normalization, no caching.
 
-    ONLY legal for write-back round-trips and raw-file diagnostics —
-    behavioral reads must use load_config()/load_config_readonly().
+    ONLY legal for write-back round-trips and raw-file diagnostics,
+    presence-sensitive env bridges, and narrowly local literal deny-only
+    policy reads described below. Other behavioral reads must use
+    load_config()/load_config_readonly().
 
     Legal call sites, exhaustively:
 
@@ -3540,7 +3544,13 @@ def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
         ``managed_scope.apply_managed_overlay`` + ``_expand_env_vars``
         inline, which they do.
 
-    Semantics (deliberately mirrors the bare ``open()+yaml.safe_load()``
+      * LOCAL LITERAL DENY-ONLY POLICIES: additions to existing deletion
+        guards that can only deny deletion. Use ``strict_mapping=True``
+        and an explicit owner-home path; errors must block deletion.
+        No managed overlay, environment expansion, writes, migrations,
+        or caching are permitted.
+
+    Default semantics (deliberately mirrors the bare ``open()+yaml.safe_load()``
     pattern this replaces, so migrated sites keep their exact failure
     behavior):
 
@@ -3550,6 +3560,9 @@ def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
         or warn semantics rely on the exception)
       * non-dict YAML root → ``{}``
 
+    With ``strict_mapping=True``, every non-dict root except ``None``
+    raises ``ValueError``, including falsey roots. ``None`` returns ``{}``.
+
     ``config_path`` defaults to :func:`get_config_path` (profile-aware).
     Pass an explicit path when the caller resolves its own home (gateway
     ``_hermes_home``, tui profile override, multi-profile probes).
@@ -3558,9 +3571,13 @@ def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
         config_path = get_config_path()
     try:
         with open(config_path, encoding="utf-8") as f:
-            data = fast_safe_load(f) or {}
+            data = fast_safe_load(f)
     except FileNotFoundError:
         return {}
+    if data is None:
+        return {}
+    if strict_mapping and not isinstance(data, dict):
+        raise ValueError("invalid user configuration mapping")
     return data if isinstance(data, dict) else {}
 
 

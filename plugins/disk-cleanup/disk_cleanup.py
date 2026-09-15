@@ -31,6 +31,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+from hermes_cli.config import read_user_config_raw
+
 try:
     from hermes_constants import get_hermes_home
 except Exception:  # pragma: no cover — plugin may load before constants resolves
@@ -59,13 +61,7 @@ def _exempt_roots() -> tuple[Path, ...]:
     filesystem creation. The normal config loader masks malformed YAML.
     """
     config_path = get_hermes_home() / "config.yaml"
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ()  # A profile with no config has no configured exemptions.
-    data = yaml.safe_load(text)
-    if data is None:
-        data = {}
+    data = read_user_config_raw(config_path, strict_mapping=True)
     for key in ("plugins", "entries", "disk-cleanup", "settings"):
         if not isinstance(data, dict):
             raise ValueError("invalid disk-cleanup configuration mapping")
