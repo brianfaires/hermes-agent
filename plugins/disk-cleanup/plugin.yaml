@@ -10,3 +10,10 @@ config_schema:
     type: array
     default: []
     description: "Absolute literal paths excluded from cleanup, including canonical descendants and recursive ancestors. Invalid policy blocks deletion."
+  exempt_path_contains:
+    type: array
+    items:
+      type: string
+      minLength: 1
+    default: []
+    description: "Case-sensitive literal substrings matched against full normalized absolute lexical and resolved paths. Recursive removal also scans descendant file and directory paths without following symlink subtrees. Invalid types, empty/nonstring/NUL entries, or scan/stat errors block cleanup."

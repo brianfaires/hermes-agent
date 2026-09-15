@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 _WILDCARD_SYNTAX_CHARS = frozenset("*?[")
 
 
-def _exempt_roots() -> tuple[Path, ...]:
+def _exempt_policy() -> tuple[tuple[Path, ...], tuple[str, ...]]:
     """Read the active profile's policy without fail-open config defaults.
 
     Deliberately uncached: each destructive boundary must see current YAML,
@@ -77,14 +78,50 @@ def _exempt_roots() -> tuple[Path, ...]:
                 or _has_wildcard_syntax(value) or not Path(value).is_absolute()):
             raise ValueError("exempt_paths must contain absolute literal paths")
         roots.extend((Path(os.path.abspath(value)), Path(value).resolve()))
-    return tuple(roots)
+    fragments = data.get("exempt_path_contains", [])
+    if not isinstance(fragments, list):
+        raise ValueError("exempt_path_contains must be a list")
+    for value in fragments:
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ValueError("exempt_path_contains must contain nonempty literal strings without NUL")
+    return tuple(roots), tuple(fragments)
 
 
-def _matches_exemption(path: Path, roots: tuple[Path, ...], *, recursive=False) -> bool:
+def _matches_exemption(
+    path: Path, roots: tuple[Path, ...], fragments: tuple[str, ...], *, recursive=False
+) -> bool:
     for candidate in (Path(os.path.abspath(path)), path.resolve()):
         for root in roots:
             if candidate.is_relative_to(root) or (recursive and root.is_relative_to(candidate)):
                 return True
+        if any(fragment in str(candidate) for fragment in fragments):
+            return True
+    if not recursive or not fragments:
+        return False
+
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    # Direct symlinks were canonicalized above; never walk their targets.
+    if not stat.S_ISDIR(mode):
+        return False
+
+    def scan_error(error: OSError) -> None:
+        raise error
+
+    for directory, dirs, files in os.walk(path, followlinks=False, onerror=scan_error):
+        subdirs = []
+        for name in dirs + files:
+            child = Path(directory) / name
+            # Explicit stat propagates errors that os.walk's classification
+            # can suppress. Rebuild dirs from it without following symlinks.
+            child_mode = child.lstat().st_mode
+            if _matches_exemption(child, (), fragments):
+                return True
+            if stat.S_ISDIR(child_mode):
+                subdirs.append(name)
+        dirs[:] = subdirs
     return False
 
 
@@ -96,7 +133,7 @@ def is_exempt(path: Path, *, recursive: bool = False) -> bool:
     an already executing unlink/rmtree or protect against hostile path swaps.
     """
     try:
-        return _matches_exemption(path, _exempt_roots(), recursive=recursive)
+        return _matches_exemption(path, *_exempt_policy(), recursive=recursive)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError):
         logger.warning("disk-cleanup blocked: invalid or unreadable exemption policy/path")
         return True
@@ -112,16 +149,21 @@ def protection_status(path: Optional[Path] = None) -> Dict[str, Any]:
     result = {
         "policy_version": 1, "pid": os.getpid(),
         "home": str(get_hermes_home()), "module_file": __file__,
-        "policy_valid": False, "exempt_roots": [],
+        "policy_valid": False, "exempt_roots": [], "exempt_path_contains": [],
     }
     try:
-        roots = _exempt_roots()
+        roots, fragments = _exempt_policy()
         result["exempt_roots"] = sorted({str(root) for root in roots})
+        result["exempt_path_contains"] = list(fragments)
         result["policy_valid"] = True
-        result["root_checks"] = {str(root): _matches_exemption(root, roots) for root in roots}
+        result["root_checks"] = {
+            str(root): _matches_exemption(root, roots, fragments) for root in roots
+        }
         if path is not None:
-            result["exempt"] = _matches_exemption(path, roots)
-            result["recursive_exempt"] = _matches_exemption(path, roots, recursive=True)
+            result["exempt"] = _matches_exemption(path, roots, fragments)
+            result["recursive_exempt"] = _matches_exemption(
+                path, roots, fragments, recursive=True
+            )
     except (OSError, ValueError, RuntimeError, yaml.YAMLError):
         result["policy_valid"] = False
         result["error"] = "invalid or unreadable exemption policy/path; cleanup blocked"

@@ -91,8 +91,8 @@ trees are ignored or rejected.
 
 ## Configured path exemptions
 
-Set `plugins.entries.disk-cleanup.settings.exempt_paths` in the owning
-profile's `config.yaml` to a list of absolute literal paths:
+Set `plugins.entries.disk-cleanup.settings` in the owning profile's
+`config.yaml` with exact roots, literal path fragments, or both:
 
 ```yaml
 plugins:
@@ -101,6 +101,8 @@ plugins:
       settings:
         exempt_paths:
           - /absolute/profile/tests
+        exempt_path_contains:
+          - worktrees
 ```
 
 No glob, tilde or environment expansion is supported. The exact root and its
@@ -109,6 +111,25 @@ previews, quick cleanup, wildcard retention, deep cleanup, and empty-directory
 pruning. Recursive deletion of an ancestor containing an exemption is also
 blocked, even when the exempt root does not exist yet. Sibling names such as
 `tests-old` are not matches. Existing hard-coded protections still apply.
+
+`exempt_path_contains` adds case-sensitive literal substring matching against
+both the full normalized absolute lexical path and the resolved path. It does
+not interpret regex or glob syntax, expand variables or tilde, or require Git
+metadata. For example, `worktrees` matches `.worktrees/plain`, non-Git
+`worktrees` directories, `worktrees-cache`, and filenames containing that text.
+Direct symlink candidates also match through their resolved targets.
+
+Before recursive removal, a candidate that does not already match an exact
+root or fragment is scanned with `os.walk(followlinks=False)`. Any matching
+descendant file or directory path protects the ancestor. Symlink entries are
+checked but symlink subtrees are never traversed. Filesystem scan/stat errors
+block cleanup; a missing scan root may return no match. No scan is performed
+when fragments are empty or the candidate already matches.
+
+The fragment setting must be a list of nonempty strings without NUL characters.
+An invalid list type or any empty, nonstring, or NUL-containing entry blocks
+cleanup. Both settings are additive; `exempt_paths` retains its exact-root
+containment behavior.
 
 The library reads the active profile's raw configuration on every policy check;
 registered hooks and commands are bound to the profile that loaded them. No
@@ -124,7 +145,8 @@ this new safety setting; configure the canonical local `settings` key.
 A YAML edit does not update already loaded old plugin code. Deploy and drain
 old cleanup-capable sessions/processes before restoring durable files. At
 registration the plugin logs `disk-cleanup registered protection:` with its PID,
-profile home, library file, policy version, validity, roots, and root checks.
+profile home, library file, policy version, validity, roots, root checks, and
+`exempt_path_contains`.
 Correlate the gateway's own startup record with the new PID, exact deployed
 source, and absence of old cleanup-capable processes. A fresh standalone Python
 import is not evidence that the gateway adopted the feature.
@@ -134,6 +156,8 @@ registered profile-bound handler. Unlike status/dry-run it never loads tracking
 state, creates a directory, or invokes cleanup. A successful protected-path
 check has `policy_valid: true`, `exempt: true`, and `recursive_exempt: true`.
 An invalid policy returns `policy_valid: false`, not a protection success claim.
+The diagnostic includes `exempt_path_contains`; path probes use both settings
+and the recursive ancestor scan. Errors also leave state and configuration untouched.
 
 Checks are repeated at destructive boundaries (including after deep confirmation
 and wildcard candidate discovery). They do not revoke a syscall or recursive
@@ -142,6 +166,6 @@ concurrent filesystem renames/symlink swaps. Keep policy and filesystem topology
 stable during cleanup. Safe restoration requires quiescence plus adoption,
 not merely the time a configuration write returned.
 
-This is an exact-path containment mechanism, not a general ownership redesign.
+These exemptions protect exact roots and literal path substrings.
 It does not repair cross-session bucket draining or change which other profile
 assets are disposable. No global cleanup disable is needed.

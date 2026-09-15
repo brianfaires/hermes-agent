@@ -1,4 +1,4 @@
-"""Exact exemption contract; all destructive probes use disposable homes."""
+"""Exact and literal-substring exemptions; probes use disposable homes."""
 import importlib.util
 import json
 from pathlib import Path
@@ -30,6 +30,121 @@ def dg(home):
 def configure(home, paths):
     config = {"plugins": {"entries": {"disk-cleanup": {"settings": {"exempt_paths": paths}}}}}
     (home / "config.yaml").write_text(yaml.safe_dump(config))
+
+
+def configure_contains(home, fragments, roots=()):
+    settings = {"exempt_paths": list(roots), "exempt_path_contains": fragments}
+    (home / "config.yaml").write_text(yaml.safe_dump(
+        {"plugins": {"entries": {"disk-cleanup": {"settings": settings}}}}
+    ))
+
+
+@pytest.mark.parametrize("relative", [
+    "outside/worktrees-cache/test_keep.py", "any/.worktrees/deep/test_keep.py",
+    "plain/worktrees/test_keep.py", "test_hasworktreesinside.py",
+])
+def test_contains_literal_paths_keep_files_and_clean_sibling(home, dg, relative):
+    durable = home / relative
+    durable.parent.mkdir(parents=True, exist_ok=True)
+    durable.write_text("keep")
+    ordinary = home / "test_disposable.py"
+    ordinary.write_text("delete")
+    dg.save_tracked([record(durable), record(ordinary)])
+    configure_contains(home, ["worktrees"])
+    dg.quick()
+    assert durable.read_text() == "keep"
+    assert not ordinary.exists()
+    assert dg.is_exempt(durable)
+
+
+def test_contains_recursive_ancestor_and_confirmation_recheck(home, dg):
+    parent = home / "research"
+    durable = parent / "nested" / "worktrees-cache" / "keep.txt"
+    durable.parent.mkdir(parents=True)
+    durable.write_text("keep")
+    dg.save_tracked([record(parent, "chrome-profile")])
+    def confirm(item):
+        configure_contains(home, ["worktrees"])
+        return True
+    result = dg.deep(confirm)
+    assert durable.read_text() == "keep"
+    assert result["deep_deleted"] == 0
+    assert dg.is_exempt(parent, recursive=True)
+    assert not dg.is_exempt(parent)
+
+
+@pytest.mark.parametrize("bad", ["worktrees", None, [None], [""], ["bad\x00token"], [1]])
+def test_contains_invalid_policy_keeps_sentinel(home, dg, bad):
+    durable = home / "test_keep.py"
+    durable.write_text("keep")
+    dg.save_tracked([record(durable)])
+    configure_contains(home, bad)
+    dg.quick()
+    assert durable.read_text() == "keep"
+    assert dg.protection_status()["policy_valid"] is False
+
+
+def test_contains_canonical_symlink_and_exact_roots_coexist(home, dg):
+    target = home / "has-worktrees-in-name"
+    target.mkdir()
+    alias = home / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    exact = home / "tests"
+    configure_contains(home, ["worktrees"], [str(exact)])
+    assert dg.is_exempt(alias / "file")
+    assert dg.is_exempt(exact / "file")
+    assert not dg.is_exempt(home / "ordinary")
+    assert not dg.is_exempt(home / "WORKTREES")
+
+
+def test_contains_scan_errors_fail_closed(home, dg, monkeypatch):
+    parent = home / "parent"
+    parent.mkdir()
+    configure_contains(home, ["worktrees"])
+    def broken_walk(*args, **kwargs):
+        kwargs["onerror"](PermissionError("unreadable descendant"))
+        return iter(())
+    monkeypatch.setattr(dg.os, "walk", broken_walk)
+    assert dg.is_exempt(parent, recursive=True)
+    assert dg.protection_status(parent)["policy_valid"] is False
+
+
+def test_contains_diagnostic_is_readonly_and_owner_bound(home, tmp_path, monkeypatch):
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    configure_contains(home, ["worktrees"])
+    plugin = load_plugin(monkeypatch)
+    class Context:
+        def register_hook(self, *args):
+            pass
+        def register_command(self, name, handler, description):
+            self.handler = handler
+    ctx = Context()
+    plugin.register(ctx)
+    other = tmp_path / "other"
+    other.mkdir()
+    token = set_hermes_home_override(other)
+    try:
+        result = json.loads(ctx.handler("protection " + str(home / "some-worktrees-name")))
+        assert result["home"] == str(home)
+        assert result["exempt_path_contains"] == ["worktrees"]
+        assert result["exempt"] and result["recursive_exempt"]
+        assert not (home / "disk-cleanup").exists()
+        assert not (other / "disk-cleanup").exists()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_contains_scan_does_not_follow_symlink_subtrees(home, tmp_path, dg):
+    parent = home / "parent"
+    parent.mkdir()
+    external = tmp_path / "external"
+    sentinel = external / "worktrees-cache" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("keep")
+    (parent / "alias").symlink_to(external, target_is_directory=True)
+    configure_contains(home, ["worktrees"])
+    assert not dg.is_exempt(parent, recursive=True)
+    assert sentinel.read_text() == "keep"
 
 
 def record(path, category="test", size=1):
@@ -265,7 +380,7 @@ def test_invalid_policy_preserves_wildcard_record_for_recovery(home, dg):
 
 def test_real_manager_loads_schema_and_profile_bound_diagnostic(home):
     from hermes_cli.plugins import PluginManager
-    configure(home, [str(home / "tests")])
+    configure_contains(home, ["worktrees"], [str(home / "tests")])
     raw = yaml.safe_load((home / "config.yaml").read_text())
     raw["plugins"]["enabled"] = ["disk-cleanup"]
     (home / "config.yaml").write_text(yaml.safe_dump(raw))
@@ -274,9 +389,11 @@ def test_real_manager_loads_schema_and_profile_bound_diagnostic(home):
     loaded = mgr._plugins["disk-cleanup"]
     assert loaded.enabled, loaded.error
     assert loaded.manifest.config_schema["exempt_paths"]["type"] == "array"
+    assert loaded.manifest.config_schema["exempt_path_contains"]["type"] == "array"
     assert mgr.has_hook("on_session_end")
     handler = mgr._plugin_commands["disk-cleanup"]["handler"]
     result = json.loads(handler("protection " + str(home / "tests")))
     assert result["home"] == str(home)
+    assert result["exempt_path_contains"] == ["worktrees"]
     assert result["exempt"] is True
     assert not (home / "disk-cleanup").exists()
