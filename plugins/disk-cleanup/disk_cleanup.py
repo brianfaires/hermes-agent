@@ -23,10 +23,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import yaml
 
 try:
     from hermes_constants import get_hermes_home
@@ -47,9 +50,86 @@ logger = logging.getLogger(__name__)
 
 _WILDCARD_SYNTAX_CHARS = frozenset("*?[")
 
+
+def _exempt_roots() -> tuple[Path, ...]:
+    """Read the active profile's policy without fail-open config defaults.
+
+    Deliberately uncached: each destructive boundary must see current YAML,
+    including parse failures. No config writes, environment expansion, or
+    filesystem creation. The normal config loader masks malformed YAML.
+    """
+    config_path = get_hermes_home() / "config.yaml"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()  # A profile with no config has no configured exemptions.
+    data = yaml.safe_load(text)
+    if data is None:
+        data = {}
+    for key in ("plugins", "entries", "disk-cleanup", "settings"):
+        if not isinstance(data, dict):
+            raise ValueError("invalid disk-cleanup configuration mapping")
+        data = data.get(key, {})
+    if not isinstance(data, dict):
+        raise ValueError("invalid disk-cleanup settings")
+    paths = data.get("exempt_paths", [])
+    if not isinstance(paths, list):
+        raise ValueError("exempt_paths must be a list")
+    roots = []
+    for value in paths:
+        if (not isinstance(value, str) or not value or "\x00" in value
+                or _has_wildcard_syntax(value) or not Path(value).is_absolute()):
+            raise ValueError("exempt_paths must contain absolute literal paths")
+        roots.extend((Path(os.path.abspath(value)), Path(value).resolve()))
+    return tuple(roots)
+
+
+def _matches_exemption(path: Path, roots: tuple[Path, ...], *, recursive=False) -> bool:
+    for candidate in (Path(os.path.abspath(path)), path.resolve()):
+        for root in roots:
+            if candidate.is_relative_to(root) or (recursive and root.is_relative_to(candidate)):
+                return True
+    return False
+
+
+def is_exempt(path: Path, *, recursive: bool = False) -> bool:
+    """Deny on invalid policy/path; also guard ancestors for tree removal.
+
+    This is a final pre-syscall check, not a filesystem transaction. Operators
+    must drain old callbacks before restoration; config changes cannot revoke
+    an already executing unlink/rmtree or protect against hostile path swaps.
+    """
+    try:
+        return _matches_exemption(path, _exempt_roots(), recursive=recursive)
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError):
+        logger.warning("disk-cleanup blocked: invalid or unreadable exemption policy/path")
+        return True
+
+
 def get_state_dir() -> Path:
     """State dir — separate from ``$HERMES_HOME/logs/``."""
     return get_hermes_home() / "disk-cleanup"
+
+
+def protection_status(path: Optional[Path] = None) -> Dict[str, Any]:
+    """Read-only diagnostic; never loads tracking state or runs cleanup."""
+    result = {
+        "policy_version": 1, "pid": os.getpid(),
+        "home": str(get_hermes_home()), "module_file": __file__,
+        "policy_valid": False, "exempt_roots": [],
+    }
+    try:
+        roots = _exempt_roots()
+        result["exempt_roots"] = sorted({str(root) for root in roots})
+        result["policy_valid"] = True
+        result["root_checks"] = {str(root): _matches_exemption(root, roots) for root in roots}
+        if path is not None:
+            result["exempt"] = _matches_exemption(path, roots)
+            result["recursive_exempt"] = _matches_exemption(path, roots, recursive=True)
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError):
+        result["policy_valid"] = False
+        result["error"] = "invalid or unreadable exemption policy/path; cleanup blocked"
+    return result
 
 
 def get_tracked_file() -> Path:
@@ -174,6 +254,7 @@ def _iter_safe_wildcard_files(
             continue
         if (
             not is_safe_path(resolved)
+            or is_exempt(child)
             or _is_worktree_path(child)
             or _is_durable_script_path(resolved)
             or _is_protected_cron_path(resolved)
@@ -203,7 +284,7 @@ def _remove_empty_wildcard_dirs(parent: Path) -> int:
     for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
         try:
             d.resolve().relative_to(parent)
-            if not any(d.iterdir()):
+            if not any(d.iterdir()) and not is_exempt(d, recursive=True):
                 d.rmdir()
                 removed += 1
                 _log(f"DELETED: {d} (empty dir via wildcard)")
@@ -409,6 +490,8 @@ def fmt_size(n: float) -> str:
 
 def track(path_str: str, category: str, silent: bool = False) -> bool:
     """Register a file for tracking. Returns True if newly tracked."""
+    if is_exempt(_wildcard_parent(path_str) or Path(path_str)):
+        return False
     if category not in ALLOWED_CATEGORIES:
         _log(f"WARN: unknown category '{category}', using 'other'")
         category = "other"
@@ -517,7 +600,7 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
             continue
         if _is_at_or_below_valid_wildcard_root(p, wildcard_roots):
             continue
-        if _is_durable_script_path(p) or _would_remove_worktree(p):
+        if is_exempt(p, recursive=True) or _is_durable_script_path(p) or _would_remove_worktree(p):
             continue
         if p.is_dir() and item["category"] in {"test", "temp", "cron-output"}:
             continue
@@ -577,6 +660,8 @@ def quick() -> Dict[str, Any]:
             ):
                 p = Path(file_item["path"])
                 try:
+                    if is_exempt(p):
+                        continue
                     p.unlink()
                     freed += file_item["size"]
                     deleted += 1
@@ -598,6 +683,12 @@ def quick() -> Dict[str, Any]:
 
         p = Path(path_str)
         cat = item["category"]
+
+        # Exemption/config failures suspend a record; they do not invalidate
+        # its category or remove a policy that should resume after repair.
+        if is_exempt(p, recursive=True):
+            new_tracked.append(item)
+            continue
 
         if not p.exists():
             _log(f"STALE: {p} (removed from tracking)")
@@ -669,6 +760,9 @@ def quick() -> Dict[str, Any]:
 
         if should_delete:
             try:
+                if is_exempt(p, recursive=True):
+                    new_tracked.append(item)
+                    continue
                 if p.is_file():
                     p.unlink()
                 elif p.is_dir():
@@ -703,11 +797,14 @@ def quick() -> Dict[str, Any]:
 
     while sweep_stack:
         dirpath, visited = sweep_stack.pop()
+        if is_exempt(dirpath):
+            continue
         if visited:
             try:
                 if (
                     dirpath not in wildcard_sweep_roots
                     and not any(dirpath.iterdir())
+                    and not is_exempt(dirpath, recursive=True)
                 ):
                     dirpath.rmdir()
                     empty_removed += 1
@@ -768,7 +865,7 @@ def deep(
 
     for item in tracked:
         p = Path(item["path"])
-        if not p.exists() or _would_remove_worktree(p):
+        if not p.exists() or is_exempt(p, recursive=True) or _would_remove_worktree(p):
             continue
         age = (now - datetime.fromisoformat(item["timestamp"])).days
         cat = item["category"]
@@ -791,7 +888,7 @@ def deep(
             if confirm(item):
                 try:
                     p = Path(item["path"])
-                    if _would_remove_worktree(p):
+                    if _would_remove_worktree(p) or is_exempt(p, recursive=True):
                         continue
                     if p.is_file():
                         p.unlink()
@@ -881,7 +978,7 @@ def guess_category(path: Path) -> Optional[str]:
 
     Used by the ``post_tool_call`` hook to auto-track ephemeral files.
     """
-    if not is_safe_path(path) or _is_worktree_path(path):
+    if is_exempt(path) or not is_safe_path(path) or _is_worktree_path(path):
         return None
 
     # Skip the state dir itself, logs, memory files, sessions, config.

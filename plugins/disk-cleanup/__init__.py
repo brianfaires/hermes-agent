@@ -20,7 +20,9 @@ needs to remember to run commands.
 
 from __future__ import annotations
 
+import json
 import logging
+from functools import wraps
 import re
 import shlex
 import threading
@@ -197,6 +199,7 @@ _HELP_TEXT = """\
 
 Subcommands:
   status                     Per-category breakdown + top-10 largest
+  protection [path]          Read-only exemption policy / path diagnostic
   dry-run                    Preview what quick/deep would delete
   quick                      Run safe cleanup now (no prompts)
   deep                       Run quick, then list items that need prompts
@@ -226,6 +229,16 @@ def _handle_slash(raw_args: str) -> Optional[str]:
         return _HELP_TEXT
 
     sub = argv[0]
+
+    if sub == "protection":
+        try:
+            parts = shlex.split(raw_args)
+        except ValueError:
+            return "Usage: /disk-cleanup protection [absolute-path]"
+        if len(parts) > 2 or (len(parts) == 2 and not Path(parts[1]).is_absolute()):
+            return "Usage: /disk-cleanup protection [absolute-path]"
+        path = Path(parts[1]) if len(parts) == 2 else None
+        return json.dumps(dg.protection_status(path), sort_keys=True)
 
     if sub == "status":
         return dg.format_status(dg.status())
@@ -307,10 +320,26 @@ def _handle_slash(raw_args: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    ctx.register_hook("post_tool_call", _on_post_tool_call)
-    ctx.register_hook("on_session_end", _on_session_end)
+    # Discovery runs inside the owning manager's profile scope. Bind every
+    # callback, including direct hook invocation, to that same home.
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    home = dg.get_hermes_home()
+
+    def bound(callback):
+        @wraps(callback)
+        def invoke(*args, **kwargs):
+            token = set_hermes_home_override(home)
+            try:
+                return callback(*args, **kwargs)
+            finally:
+                reset_hermes_home_override(token)
+        return invoke
+
+    ctx.register_hook("post_tool_call", bound(_on_post_tool_call))
+    ctx.register_hook("on_session_end", bound(_on_session_end))
     ctx.register_command(
         "disk-cleanup",
-        handler=_handle_slash,
+        handler=bound(_handle_slash),
         description="Track and clean up ephemeral Hermes session files.",
     )
+    logger.info("disk-cleanup registered protection: %s", json.dumps(dg.protection_status(), sort_keys=True))

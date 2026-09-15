@@ -88,3 +88,60 @@ trees are ignored or rejected.
 - Backup/restore is scoped to `tracked.json` — the plugin never touches
   agent logs
 - Atomic writes: `.tmp` → backup → rename
+
+## Configured path exemptions
+
+Set `plugins.entries.disk-cleanup.settings.exempt_paths` in the owning
+profile's `config.yaml` to a list of absolute literal paths:
+
+```yaml
+plugins:
+  entries:
+    disk-cleanup:
+      settings:
+        exempt_paths:
+          - /absolute/profile/tests
+```
+
+No glob, tilde or environment expansion is supported. The exact root and its
+canonical and lexical descendants are excluded from auto/manual tracking,
+previews, quick cleanup, wildcard retention, deep cleanup, and empty-directory
+pruning. Recursive deletion of an ancestor containing an exemption is also
+blocked, even when the exempt root does not exist yet. Sibling names such as
+`tests-old` are not matches. Existing hard-coded protections still apply.
+
+The library reads the active profile's raw configuration on every policy check;
+registered hooks and commands are bound to the profile that loaded them. No
+process-global policy cache or configuration writes are involved. Malformed
+YAML, invalid mapping/list/path types, resolution errors and unreadable config
+block deletion, rather than degrading to default permissions. A missing config
+file or absent setting means no configured exemptions. The legacy `config`
+subtree, managed overlays and environment-expanded paths are not accepted for
+this new safety setting; configure the canonical local `settings` key.
+
+## Adoption and in-flight work
+
+A YAML edit does not update already loaded old plugin code. Deploy and drain
+old cleanup-capable sessions/processes before restoring durable files. At
+registration the plugin logs `disk-cleanup registered protection:` with its PID,
+profile home, library file, policy version, validity, roots, and root checks.
+Correlate the gateway's own startup record with the new PID, exact deployed
+source, and absence of old cleanup-capable processes. A fresh standalone Python
+import is not evidence that the gateway adopted the feature.
+
+`/disk-cleanup protection [absolute-path]` returns a JSON diagnostic from the
+registered profile-bound handler. Unlike status/dry-run it never loads tracking
+state, creates a directory, or invokes cleanup. A successful protected-path
+check has `policy_valid: true`, `exempt: true`, and `recursive_exempt: true`.
+An invalid policy returns `policy_valid: false`, not a protection success claim.
+
+Checks are repeated at destructive boundaries (including after deep confirmation
+and wildcard candidate discovery). They do not revoke a syscall or recursive
+delete already in flight, nor are they a kernel-enforced defense against hostile
+concurrent filesystem renames/symlink swaps. Keep policy and filesystem topology
+stable during cleanup. Safe restoration requires quiescence plus adoption,
+not merely the time a configuration write returned.
+
+This is an exact-path containment mechanism, not a general ownership redesign.
+It does not repair cross-session bucket draining or change which other profile
+assets are disposable. No global cleanup disable is needed.
