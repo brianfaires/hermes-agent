@@ -864,9 +864,35 @@ def _mask_python_data_read_paths(body: str) -> str:
     )
     if not path_import:
         return body
-    # Refuse scopes and rebinding/escaping of the names used for recognition.
+    # A helper may coexist with module-level reads, but may not access the
+    # recognized bindings or escape as an object that exposes its globals.
+    helpers = [node for node in nodes if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    helper_names = {node.name for node in helpers}
+    if len(helper_names) != len(helpers) or helper_names & {"Path", "json"}:
+        return body
+    for helper in helpers:
+        if helper not in tree.body or helper.decorator_list:
+            return body
+        for item in ast.walk(helper):
+            if (isinstance(item, ast.Name) and item.id in {"Path", "json"}
+                    or isinstance(item, ast.arg) and item.arg in {"Path", "json"}
+                    or isinstance(item, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal))):
+                return body
     for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.Match)):
+        if helpers:
+            if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+                return body
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in helper_names:
+                return body
+            if isinstance(node, ast.arg) and node.arg in helper_names:
+                return body
+            if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) in helper_names:
+                return body
+            if isinstance(node, ast.Name) and node.id in helper_names:
+                parent = parents.get(node)
+                if not (isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Call) and parent.func is node):
+                    return body
+        if isinstance(node, (ast.ClassDef, ast.Lambda, ast.Match)):
             return body
         if isinstance(node, ast.ExceptHandler) and node.name in {"Path", "json"}:
             return body
@@ -896,9 +922,10 @@ def _mask_python_data_read_paths(body: str) -> str:
             else:
                 call = parents.get(parent)
                 if not (
-                    isinstance(parent, ast.Attribute) and parent.attr in {"loads", "dumps"}
+                    isinstance(parent, ast.Attribute) and parent.attr in {"load", "loads", "dumps"}
                     and isinstance(parent.ctx, ast.Load)
                     and isinstance(call, ast.Call) and call.func is parent
+                    and (parent.attr != "load" or (len(call.args) == 1 and not call.keywords))
                 ):
                     return body
     lines = body.encode("utf-8").splitlines(keepends=True)
