@@ -40,6 +40,7 @@ operations and stay allowed.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -819,6 +820,161 @@ def _references_at(
                 yield resolved
 
 
+def _mask_python_data_read_paths(body: str) -> str:
+    """Exempt bounded literal data reads; uncertain bodies keep original scanning."""
+    try:
+        tree = ast.parse(body)
+    except (SyntaxError, ValueError, RecursionError):
+        return body
+    nodes = list(ast.walk(tree))
+    parents = {child: node for node in nodes for child in ast.iter_child_nodes(node)}
+    # Inspect the entire body before exempting any read. Name/attribute/import
+    # references and literal lookup keys cover ordinary execution aliases too.
+    execution_names = {
+        "exec", "eval", "compile", "builtins", "__builtins__", "__import__",
+        "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+        "getattr", "globals", "locals", "vars", "subprocess", "runpy", "asyncio",
+        "create_subprocess_shell", "create_subprocess_exec", "subprocess_shell", "subprocess_exec",
+        "system", "popen", "Popen", "run", "call", "check_call",
+        "check_output", "getoutput", "getstatusoutput", "run_module", "run_path",
+    }
+    for node in nodes:
+        names = []
+        if isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, ast.alias):
+            names = node.name.split(".")
+        elif isinstance(node, ast.ImportFrom):
+            names = (node.module or "").split(".")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names = [node.value]
+        if any(name in execution_names or name.startswith(("spawn", "posix_spawn"))
+               for name in names):
+            return body
+    path_import = any(
+        isinstance(node, ast.ImportFrom) and node.module == "pathlib"
+        and node.level == 0 and any(a.name == "Path" and a.asname is None for a in node.names)
+        for node in tree.body
+    )
+    json_import = any(
+        isinstance(node, ast.Import) and any(a.name == "json" and a.asname is None for a in node.names)
+        for node in tree.body
+    )
+    if not path_import:
+        return body
+    # Refuse scopes and rebinding/escaping of the names used for recognition.
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.Match)):
+            return body
+        if isinstance(node, ast.ExceptHandler) and node.name in {"Path", "json"}:
+            return body
+        if isinstance(node, ast.alias):
+            bound = node.asname or node.name.split(".")[0]
+            owner = parents[node]
+            if node.name == "*":
+                return body
+            if bound == "Path" and not (
+                owner in tree.body and isinstance(owner, ast.ImportFrom)
+                and owner.module == "pathlib" and owner.level == 0
+                and node.name == "Path" and node.asname is None
+            ):
+                return body
+            if bound == "json" and not (
+                owner in tree.body and isinstance(owner, ast.Import)
+                and node.name == "json" and node.asname is None
+            ):
+                return body
+        if isinstance(node, ast.Name) and node.id in {"Path", "json"}:
+            parent = parents.get(node)
+            if not isinstance(node.ctx, ast.Load):
+                return body
+            if node.id == "Path":
+                if not isinstance(parent, ast.Call) or parent.func is not node:
+                    return body
+            else:
+                call = parents.get(parent)
+                if not (
+                    isinstance(parent, ast.Attribute) and parent.attr in {"loads", "dumps"}
+                    and isinstance(parent.ctx, ast.Load)
+                    and isinstance(call, ast.Call) and call.func is parent
+                ):
+                    return body
+    lines = body.encode("utf-8").splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    ranges = []
+    for read in nodes:
+        if not (
+            isinstance(read, ast.Call) and isinstance(read.func, ast.Attribute)
+            and read.func.attr == "read_text" and not read.args
+            and all(k.arg in {"encoding", "errors"} and isinstance(k.value, ast.Constant)
+                    and isinstance(k.value.value, str) for k in read.keywords)
+        ):
+            continue
+        path = read.func.value
+        if not (
+            isinstance(path, ast.Call) and isinstance(path.func, ast.Name)
+            and path.func.id == "Path" and len(path.args) == 1 and not path.keywords
+            and isinstance(path.args[0], ast.Constant) and isinstance(path.args[0].value, str)
+        ):
+            continue
+        consumer = parents.get(read)
+        discarded = isinstance(consumer, ast.Expr)
+        decoded = (
+            json_import and isinstance(consumer, ast.Call)
+            and isinstance(consumer.func, ast.Attribute) and consumer.func.attr == "loads"
+            and isinstance(consumer.func.value, ast.Name) and consumer.func.value.id == "json"
+            and consumer.args == [read] and not consumer.keywords
+        )
+        if discarded or decoded:
+            literal = path.args[0]
+            ranges.append((offsets[literal.lineno - 1] + literal.col_offset,
+                           offsets[literal.end_lineno - 1] + literal.end_col_offset))
+    encoded = body.encode("utf-8")
+    for start, end in sorted(ranges, reverse=True):
+        encoded = encoded[:start] + b"'_guard_data_'" + encoded[end:]
+    return encoded.decode("utf-8")
+
+
+def _mask_python_heredoc_data_paths(command: str) -> str:
+    """Recognize quoted Python stdin with an explicit boolean-flag allowlist."""
+    from tools.shell_heredoc import _find_heredoc_close, _scan_heredoc_command_unit
+
+    if "<<" not in command:
+        return command
+    ranges = []
+    start = 0
+    while start < len(command):
+        end, specs, unknown, compound = _scan_heredoc_command_unit(command, start)
+        if unknown:
+            return command
+        cursor = end + 1
+        for delimiter, strip_tabs, quoted in specs:
+            close = _find_heredoc_close(command, cursor, delimiter, strip_tabs)
+            if end >= len(command) or close is None:
+                return command
+            # Exclude wrappers, other redirections, expansions, combined flags,
+            # arguments after stdin '-', and multiple heredocs.
+            if len(specs) == 1 and quoted and not strip_tabs and not compound and re.fullmatch(
+                r"[ \t]*(?:/[A-Za-z0-9_./-]+/)?python(?:3(?:\.\d+)*)?"
+                r"(?:[ \t]+-(?:B|I|u|E|s|S))*[ \t]+-[ \t]*"
+                r"<<[ \t]*(['\"])[A-Za-z_][A-Za-z0-9_]*\1[ \t]*",
+                command[start:end],
+            ):
+                body = "".join(command[cursor:close].splitlines(keepends=True)[:-1])
+                masked = _mask_python_data_read_paths(body)
+                if masked != body:
+                    ranges.append((cursor, cursor + len(body), masked))
+            cursor = close
+        start = cursor
+    for start, end, masked in reversed(ranges):
+        command = command[:start] + masked + command[end:]
+    return command
+
+
 def _iter_referenced_shell_scripts(
     command: str,
     *,
@@ -832,6 +988,7 @@ def _iter_referenced_shell_scripts(
     have found. A local script named ``./timeout`` is a script, not the
     coreutils wrapper, and reading only the peeled index would skip it.
     """
+    command = _mask_python_heredoc_data_paths(command)
     for segment in _iter_command_segments(command):
         index = _command_token_index(segment)
         if index is None:
