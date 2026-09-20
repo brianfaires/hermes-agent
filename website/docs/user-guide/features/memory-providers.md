@@ -468,7 +468,11 @@ The setup wizard installs dependencies automatically and only installs what's ne
 | `retain_source` | — | Optional `metadata.source` attached to retained memories |
 | `retain_user_prefix` | `User` | Label used before user turns in auto-retained transcripts |
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
+| `retain_cron_prompts` | `true` | Retain scheduler-authored cron prompts with an explicit provenance label |
+| `retain_cron_results` | `true` | Retain labeled cron run outcomes |
 | `recall_tags` | — | Tags to filter on recall |
+
+Cron providers retain the scheduler prompt as execution context by default, while cron-specific extraction context instructs the downstream model not to learn it as user-authored facts, preferences, requirements, or instructions. Set either cron control independently; when both are `false`, no retain is issued for that cron turn. This behavior requires proven `platform="cron"` provenance and is never inferred from keywords. Hermes cannot retroactively distinguish harness or skill text delivered through an ordinary human platform. Extraction instructions reduce misclassification risk but cannot guarantee model compliance.
 
 See [plugin README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
 

@@ -101,6 +101,12 @@ Config file: `~/.hermes/hindsight/config.json`
 | `retain_indicator` | `true` | Show a `👁️ Hindsight — saving to memory…` status line when a turn is saved. Turn off for customer-facing agents. |
 | `retain_user_prefix` | `User` | Label used before user turns in auto-retained transcripts |
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
+| `retain_cron_prompts` | `true` | Retain scheduler-authored cron prompts as `Cron automation prompt` context |
+| `retain_cron_results` | `true` | Retain cron outcomes labeled `Cron run result` |
+
+For providers initialized with `platform="cron"`, retained messages keep Hindsight's structural `user`/`assistant` roles but use the labels above. Every retained cron payload also gets extraction context instructing Hindsight to treat the prompt as scheduler-authored context, never as user-authored facts, preferences, requirements, or instructions, and to extract only substantive outcomes evidenced by the run result. The configured `retain_context` is preserved before this cron-specific context. Disabling both cron controls skips the retain entirely.
+
+These controls rely only on proven `platform="cron"` provenance; message keywords do not activate them. Hermes cannot retroactively distinguish harness or skill text that arrives through an ordinary human platform, so those turns continue to use the configured user/assistant prefixes and generic retain context. The extraction context guides the downstream model; it reduces misclassification risk but cannot guarantee model compliance.
 
 ### Integration
 
@@ -144,6 +150,8 @@ Available in `hybrid` and `tools` memory modes:
 | `HINDSIGHT_BANK_ID` | Override bank name |
 | `HINDSIGHT_BUDGET` | Override recall budget |
 | `HINDSIGHT_MODE` | Override mode (`cloud`, `local_embedded`, `local_external`) |
+| `HINDSIGHT_RETAIN_CRON_PROMPTS` | Boolean fallback for `retain_cron_prompts` (`true` by default) |
+| `HINDSIGHT_RETAIN_CRON_RESULTS` | Boolean fallback for `retain_cron_results` (`true` by default) |
 
 ## Client Version
 

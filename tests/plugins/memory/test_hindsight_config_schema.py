@@ -1,6 +1,7 @@
 """Tests for Hindsight's declared config surface."""
 
 from plugins.memory.config_schema import (
+    KIND_BOOL,
     KIND_SECRET,
     KIND_SELECT,
     get_provider_config_schema,
@@ -18,6 +19,8 @@ def test_hindsight_is_declared():
         "api_url",
         "bank_id",
         "recall_budget",
+        "retain_cron_prompts",
+        "retain_cron_results",
     }
 
 
@@ -49,3 +52,18 @@ def test_api_key_is_a_secret_bound_to_env():
     assert api_key.kind == KIND_SECRET
     assert api_key.is_secret is True
     assert api_key.env_key == "HINDSIGHT_API_KEY"
+
+
+def test_cron_retain_controls_are_boolean_and_default_enabled():
+    provider = get_provider_config_schema("hindsight")
+    assert provider is not None
+
+    fields = {field.key: field for field in provider.fields}
+    for key, env_key in (
+        ("retain_cron_prompts", "HINDSIGHT_RETAIN_CRON_PROMPTS"),
+        ("retain_cron_results", "HINDSIGHT_RETAIN_CRON_RESULTS"),
+    ):
+        field = fields[key]
+        assert field.kind == KIND_BOOL
+        assert field.default == "true"
+        assert field.env_fallbacks == (env_key,)

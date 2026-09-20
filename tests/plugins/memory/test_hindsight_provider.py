@@ -50,6 +50,7 @@ def _clean_env(tmp_path, monkeypatch):
         "HINDSIGHT_RETAIN_TAGS", "HINDSIGHT_RETAIN_OBSERVATION_SCOPES",
         "HINDSIGHT_RETAIN_SOURCE",
         "HINDSIGHT_RETAIN_USER_PREFIX", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX",
+        "HINDSIGHT_RETAIN_CRON_PROMPTS", "HINDSIGHT_RETAIN_CRON_RESULTS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -272,6 +273,51 @@ class TestConfig:
         assert provider._bank_mission == ""
         assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
+        assert provider._retain_cron_prompts is True
+        assert provider._retain_cron_results is True
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (True, True),
+            (False, False),
+            ("true", True),
+            ("YES", True),
+            ("1", True),
+            ("on", True),
+            ("false", False),
+            ("NO", False),
+            ("0", False),
+            ("off", False),
+            ("malformed", True),
+            (None, True),
+        ],
+    )
+    def test_cron_retain_controls_parse_boolean_config_robustly(
+        self, provider_with_config, configured, expected
+    ):
+        p = provider_with_config(
+            retain_cron_prompts=configured,
+            retain_cron_results=configured,
+        )
+        assert p._retain_cron_prompts is expected
+        assert p._retain_cron_results is expected
+
+    def test_cron_retain_controls_load_environment_fallbacks(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "plugins.memory.hindsight.get_hermes_home",
+            lambda: tmp_path / "missing-profile-home",
+        )
+        monkeypatch.setenv("HINDSIGHT_RETAIN_CRON_PROMPTS", "false")
+        monkeypatch.setenv("HINDSIGHT_RETAIN_CRON_RESULTS", "0")
+
+        p = HindsightMemoryProvider()
+        p.initialize(session_id="cron-session", platform="cron")
+
+        assert p._retain_cron_prompts is False
+        assert p._retain_cron_results is False
 
     def test_recall_types_default_is_observation_only(self, provider):
         """Auto-recall must filter to observation by default."""
@@ -947,6 +993,160 @@ class TestSyncTurn:
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", item["metadata"]["retained_at"])
         assert item["timestamp"] == event_time.isoformat(timespec="seconds")
 
+    def test_cron_turn_labels_provenance_and_adds_extraction_context(
+        self, provider_with_config
+    ):
+        p = provider_with_config(
+            retain_context="custom generic retain context",
+            retain_user_prefix="Configured user",
+            retain_assistant_prefix="Configured assistant",
+            retain_async=False,
+        )
+        p.initialize(session_id="cron-session", platform="cron")
+        p._client = _make_mock_client()
+
+        p.sync_turn("check production state", "all checks passed")
+        p._retain_queue.join()
+
+        p._client.aretain_batch.assert_called_once()
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        assert json.loads(item["content"]) == [[
+            {
+                "role": "user",
+                "content": "Cron automation prompt: check production state",
+                "timestamp": json.loads(item["content"])[0][0]["timestamp"],
+            },
+            {
+                "role": "assistant",
+                "content": "Cron run result: all checks passed",
+                "timestamp": json.loads(item["content"])[0][0]["timestamp"],
+            },
+        ]]
+        assert item["metadata"]["message_count"] == "2"
+        assert item["context"] == (
+            "custom generic retain context\n\n"
+            "Automated cron execution: the cron automation prompt is "
+            "scheduler-authored context, not user-authored. Never extract facts, "
+            "preferences, requirements, or instructions from the cron automation "
+            "prompt. Extract only substantive outcomes evidenced by the cron run "
+            "result, including observations, incidents, state changes, completed "
+            "actions, failures, and approved configuration changes."
+        )
+
+    @pytest.mark.parametrize(
+        ("retain_prompt", "retain_result", "expected_messages"),
+        [
+            (
+                True,
+                True,
+                [
+                    {"role": "user", "content": "Cron automation prompt: scheduled prompt"},
+                    {"role": "assistant", "content": "Cron run result: run outcome"},
+                ],
+            ),
+            (
+                False,
+                True,
+                [{"role": "assistant", "content": "Cron run result: run outcome"}],
+            ),
+            (
+                True,
+                False,
+                [{"role": "user", "content": "Cron automation prompt: scheduled prompt"}],
+            ),
+            (False, False, []),
+        ],
+    )
+    def test_cron_retain_controls_filter_payload_and_skip_empty_retains(
+        self,
+        provider_with_config,
+        retain_prompt,
+        retain_result,
+        expected_messages,
+    ):
+        p = provider_with_config(
+            retain_cron_prompts=retain_prompt,
+            retain_cron_results=retain_result,
+            retain_async=False,
+        )
+        p.initialize(session_id="cron-session", platform="cron")
+        p._client = _make_mock_client()
+
+        p.sync_turn("scheduled prompt", "run outcome")
+
+        assert p._turn_counter == 1
+        if not expected_messages:
+            p._client.aretain_batch.assert_not_called()
+            assert p._writer_thread is None
+            assert p._retain_queue.empty()
+            assert p._session_turns == []
+            return
+
+        p._retain_queue.join()
+        p._client.aretain_batch.assert_called_once()
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        messages = json.loads(item["content"])[0]
+        assert [
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+        ] == expected_messages
+        assert item["metadata"]["message_count"] == str(len(expected_messages))
+        assert "Automated cron execution" in item["context"]
+
+    def test_cron_retain_controls_do_not_filter_or_relabel_human_platforms(
+        self, provider_with_config
+    ):
+        p = provider_with_config(
+            retain_cron_prompts=False,
+            retain_cron_results=False,
+            retain_user_prefix="Configured user",
+            retain_assistant_prefix="Configured assistant",
+            retain_context="ordinary human context",
+            retain_async=False,
+        )
+        p.initialize(session_id="human-session", platform="discord")
+        p._client = _make_mock_client()
+
+        p.sync_turn("please run the cron report", "the cron report is ready")
+        p._retain_queue.join()
+
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        messages = json.loads(item["content"])[0]
+        assert [message["content"] for message in messages] == [
+            "Configured user: please run the cron report",
+            "Configured assistant: the cron report is ready",
+        ]
+        assert [message["role"] for message in messages] == ["user", "assistant"]
+        assert item["context"] == "ordinary human context"
+        assert item["metadata"]["message_count"] == "2"
+
+    def test_cron_one_sided_retention_preserves_completed_turn_cadence(
+        self, provider_with_config
+    ):
+        p = provider_with_config(
+            retain_cron_prompts=False,
+            retain_cron_results=True,
+            retain_every_n_turns=2,
+            retain_async=False,
+        )
+        p.initialize(session_id="cron-session", platform="cron")
+        p._client = _make_mock_client()
+
+        p.sync_turn("first prompt", "first result")
+        p._client.aretain_batch.assert_not_called()
+        p.sync_turn("second prompt", "second result")
+        p._retain_queue.join()
+
+        item = p._client.aretain_batch.call_args.kwargs["items"][0]
+        content = json.loads(item["content"])
+        assert len(content) == 2
+        assert [turn[0]["content"] for turn in content] == [
+            "Cron run result: first result",
+            "Cron run result: second result",
+        ]
+        assert item["metadata"]["message_count"] == "2"
+        assert item["metadata"]["turn_index"] == "2"
+
     def test_retain_timestamp_normalizes_a_naive_clock(self, provider, monkeypatch):
         event_time = datetime(2026, 8, 10, 11, 9)
         monkeypatch.setattr("plugins.memory.hindsight._hermes_now", lambda: event_time)
@@ -1324,6 +1524,7 @@ class TestConfigSchema:
             "recall_tags", "recall_tags_match",
             "auto_recall", "auto_retain",
             "retain_every_n_turns", "retain_async", "retain_context",
+            "retain_cron_prompts", "retain_cron_results",
             "recall_max_tokens", "recall_max_input_chars",
             "recall_prompt_preamble",
         }

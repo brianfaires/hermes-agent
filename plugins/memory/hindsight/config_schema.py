@@ -1,6 +1,7 @@
 """Hindsight's declared config surface — rendered by the generic desktop panel."""
 
 from plugins.memory.config_schema import (
+    KIND_BOOL,
     KIND_SECRET,
     KIND_SELECT,
     KIND_TEXT,
@@ -70,6 +71,24 @@ CONFIG_SCHEMA = ProviderConfigSchema(
                 ProviderFieldOption("mid", "mid"),
                 ProviderFieldOption("high", "high"),
             ),
+            inline=True,
+        ),
+        ProviderField(
+            key="retain_cron_prompts",
+            label="Retain cron prompts",
+            kind=KIND_BOOL,
+            default="true",
+            description="Retain scheduler-authored cron prompts as labeled context.",
+            env_fallbacks=("HINDSIGHT_RETAIN_CRON_PROMPTS",),
+            inline=True,
+        ),
+        ProviderField(
+            key="retain_cron_results",
+            label="Retain cron results",
+            kind=KIND_BOOL,
+            default="true",
+            description="Retain labeled outcomes from cron executions.",
+            env_fallbacks=("HINDSIGHT_RETAIN_CRON_RESULTS",),
             inline=True,
         ),
     ),
