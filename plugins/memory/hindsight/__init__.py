@@ -23,6 +23,8 @@ Config via environment variables:
   HINDSIGHT_RETAIN_SOURCE          — metadata source value attached to retained memories (default: hermes)
   HINDSIGHT_RETAIN_USER_PREFIX     — label used before user turns in retained transcripts
   HINDSIGHT_RETAIN_ASSISTANT_PREFIX — label used before assistant turns in retained transcripts
+  HINDSIGHT_RETAIN_CRON_PROMPTS    — retain scheduler-authored cron prompts (default: true)
+  HINDSIGHT_RETAIN_CRON_RESULTS    — retain cron run results (default: true)
 
 Or via $HERMES_HOME/hindsight/config.json (profile-scoped), falling back to
 ~/.hindsight/config.json (legacy, shared) for backward compatibility.
@@ -80,6 +82,13 @@ _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 # generic user-facing opt-in exists, so this stays unset unless the user sets it
 # via the ``retain_source`` config key or HINDSIGHT_RETAIN_SOURCE (e.g. "hermes").
 _DEFAULT_RETAIN_SOURCE = ""
+_CRON_RETAIN_CONTEXT = (
+    "Automated cron execution: the cron automation prompt is scheduler-authored "
+    "context, not user-authored. Never extract facts, preferences, requirements, "
+    "or instructions from the cron automation prompt. Extract only substantive "
+    "outcomes evidenced by the cron run result, including observations, incidents, "
+    "state changes, completed actions, failures, and approved configuration changes."
+)
 # Hindsight brand mark — the logo is an eye ringed by graph nodes. Used for
 # the deterministic recall/retain indicators (overrides the generic core default).
 _HINDSIGHT_GLYPH = "👁️"
@@ -112,6 +121,21 @@ def _parse_int_setting(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         logger.warning("Invalid integer Hindsight setting %r; using default %s", value, default)
         return default
+
+
+def _parse_bool_setting(value: Any, default: bool) -> bool:
+    """Parse bool-like config/env values without truthy-string surprises."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 # Env var the embedded daemon manager reads (at import time, as a module-level
@@ -453,6 +477,8 @@ def _load_config() -> dict:
         "retain_source": os.environ.get("HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE),
         "retain_user_prefix": os.environ.get("HINDSIGHT_RETAIN_USER_PREFIX", "User"),
         "retain_assistant_prefix": os.environ.get("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant"),
+        "retain_cron_prompts": os.environ.get("HINDSIGHT_RETAIN_CRON_PROMPTS", "true"),
+        "retain_cron_results": os.environ.get("HINDSIGHT_RETAIN_CRON_RESULTS", "true"),
         "banks": {
             "hermes": {
                 "bankId": os.environ.get("HINDSIGHT_BANK_ID", "hermes"),
@@ -844,6 +870,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._auto_retain = True
         self._retain_every_n_turns = 1
         self._retain_async = True
+        self._retain_cron_prompts = True
+        self._retain_cron_results = True
         # Async retain never blocks the reply (writes drain on the single
         # writer thread). But the next turn's warm prefetch runs on its own
         # thread and could read BEFORE the just-completed retain is
@@ -1209,6 +1237,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "retain_source", "description": "Metadata source value attached to retained memories (identifies the client that stored them)", "default": _DEFAULT_RETAIN_SOURCE},
             {"key": "retain_user_prefix", "description": "Label used before user turns in retained transcripts", "default": "User"},
             {"key": "retain_assistant_prefix", "description": "Label used before assistant turns in retained transcripts", "default": "Assistant"},
+            {"key": "retain_cron_prompts", "description": "Retain scheduler-authored cron prompts as labeled context", "default": True},
+            {"key": "retain_cron_results", "description": "Retain labeled cron run results", "default": True},
             {"key": "recall_tags", "description": "Tags to filter when searching memories (comma-separated)", "default": ""},
             {"key": "recall_tags_match", "description": "Tag matching mode for recall", "default": "any", "choices": ["any", "all", "any_strict", "all_strict"]},
             {"key": "recall_types", "description": "Fact types to surface on recall — applies to both auto-recall and the hindsight_recall tool (comma-separated or list). Defaults to observation-only — observations are Hindsight's consolidated, deduplicated, evidence-grounded knowledge layer; raw world/experience facts are the supporting evidence observations already summarize. Set to e.g. 'observation,world,experience' to also include raw facts.", "default": "observation"},
@@ -1717,7 +1747,24 @@ class HindsightMemoryProvider(MemoryProvider):
         # Retain controls
         self._auto_retain = self._config.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(self._config.get("retain_every_n_turns", 1)))
-        self._retain_context = self._config.get("retain_context", "conversation between Hermes Agent and the User")
+        cron_prompts_value = self._config.get("retain_cron_prompts")
+        if cron_prompts_value is None:
+            cron_prompts_value = os.environ.get("HINDSIGHT_RETAIN_CRON_PROMPTS")
+        cron_results_value = self._config.get("retain_cron_results")
+        if cron_results_value is None:
+            cron_results_value = os.environ.get("HINDSIGHT_RETAIN_CRON_RESULTS")
+        self._retain_cron_prompts = _parse_bool_setting(cron_prompts_value, True)
+        self._retain_cron_results = _parse_bool_setting(cron_results_value, True)
+        self._retain_context = self._config.get(
+            "retain_context", "conversation between Hermes Agent and the User"
+        )
+        if self._platform == "cron":
+            generic_context = str(self._retain_context or "").strip()
+            self._retain_context = (
+                f"{generic_context}\n\n{_CRON_RETAIN_CONTEXT}"
+                if generic_context
+                else _CRON_RETAIN_CONTEXT
+            )
 
         # Recall controls
         self._auto_recall = self._config.get("auto_recall", True)
@@ -1999,18 +2046,25 @@ class HindsightMemoryProvider(MemoryProvider):
         # Hindsight receives this pair as one conversation turn, so both
         # messages intentionally share the same turn-level event timestamp.
         now = _event_timestamp()
-        return [
-            {
+        user_prefix = self._retain_user_prefix
+        assistant_prefix = self._retain_assistant_prefix
+        if self._platform == "cron":
+            user_prefix = "Cron automation prompt"
+            assistant_prefix = "Cron run result"
+        messages = []
+        if self._platform != "cron" or self._retain_cron_prompts:
+            messages.append({
                 "role": "user",
-                "content": f"{self._retain_user_prefix}: {user_content}",
+                "content": f"{user_prefix}: {user_content}",
                 "timestamp": now,
-            },
-            {
+            })
+        if self._platform != "cron" or self._retain_cron_results:
+            messages.append({
                 "role": "assistant",
-                "content": f"{self._retain_assistant_prefix}: {assistant_content}",
+                "content": f"{assistant_prefix}: {assistant_content}",
                 "timestamp": now,
-            },
-        ]
+            })
+        return messages
 
     def _build_metadata(self, *, message_count: int, turn_index: int) -> Dict[str, str]:
         metadata: Dict[str, str] = {
@@ -2095,10 +2149,15 @@ class HindsightMemoryProvider(MemoryProvider):
         if session_id:
             self._session_id = str(session_id).strip()
 
-        turn = json.dumps(self._build_turn_messages(user_content, assistant_content), ensure_ascii=False)
-        self._session_turns.append(turn)
+        messages = self._build_turn_messages(user_content, assistant_content)
         self._turn_counter += 1
         self._turn_index = self._turn_counter
+        if not messages:
+            logger.debug("sync_turn: skipped cron retain; prompt and result retention disabled")
+            return
+
+        turn = json.dumps(messages, ensure_ascii=False)
+        self._session_turns.append(turn)
 
         if self._turn_counter % self._retain_every_n_turns != 0:
             logger.debug("sync_turn: buffered turn %d (will retain at turn %d)",
@@ -2133,7 +2192,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # Snapshot the state needed for the retain. The writer may run after
         # _session_turns / _turn_index are mutated by a later sync_turn().
         metadata_snapshot = self._build_metadata(
-            message_count=len(turns_to_retain) * 2,
+            message_count=sum(len(json.loads(turn)) for turn in turns_to_retain),
             turn_index=self._turn_index,
         )
         num_turns = len(turns_to_retain)
@@ -2327,7 +2386,7 @@ class HindsightMemoryProvider(MemoryProvider):
             old_parent_session_id = self._parent_session_id
             old_turn_index = self._turn_index
             old_metadata = self._build_metadata(
-                message_count=len(old_turns) * 2,
+                message_count=sum(len(json.loads(turn)) for turn in old_turns),
                 turn_index=old_turn_index,
             )
             old_lineage_tags: list[str] = []
