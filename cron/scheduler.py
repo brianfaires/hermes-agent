@@ -8,6 +8,7 @@ Uses a file-based lock (~/.hermes/cron/.tick.lock) so only one tick
 runs at a time if multiple processes overlap.
 """
 
+from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
 import asyncio
 import atexit
 import concurrent.futures
@@ -5621,6 +5622,7 @@ class _BoundedCronSessionDB:
 # Cover pre-agent scripts, script-only jobs, and finalization as well as the
 # inner agent turn. A worker's task identity must not escape any cron phase.
 @non_dispatcher_owned_context()
+@scoped_inference
 def run_job(
     job: dict,
     *,
@@ -6291,6 +6293,7 @@ def _run_job_scoped(
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            validate_subscription_only(subscription_only_active(), job.get("provider"), job.get("model"), job.get("base_url"))
             runtime = resolve_runtime_provider(**runtime_kwargs)
             primary_provider_for_drift = (
                 str(runtime.get("provider") or "").strip().lower()

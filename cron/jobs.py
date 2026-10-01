@@ -2328,6 +2328,8 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     prompt_path: Optional[str] = None,
+    *,
+    subscription_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2421,6 +2423,24 @@ def create_job(
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
 
+    from agent.inference_policy import inherit_subscription_policy
+    subscription_only, provider, model = inherit_subscription_policy(subscription_only, provider, model, base_url)
+    # CLI subprocesses lose Python context, but retain the dispatcher's
+    # existing task/board identity. Read without initializing or changing DBs.
+    worker_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if worker_id:
+        import sqlite3
+        from hermes_cli import kanban_db
+        uri = kanban_db.kanban_db_path().resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            worker = kanban_db.get_task(conn, worker_id)
+        if worker is None:
+            raise ValueError("Cannot recover inference policy for Kanban worker")
+        if worker.subscription_only:
+            subscription_only, provider, model = inherit_subscription_policy(
+                True, provider or worker.provider_override,
+                model or worker.model_override, base_url)
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_model = _normalize_job_optional_text(model)
     normalized_provider = _normalize_job_optional_text(provider)
@@ -2528,6 +2548,7 @@ def create_job(
         "prompt_path": normalized_prompt_path,
         "skills": normalized_skills,
         "skill": normalized_skills[0] if normalized_skills else None,
+        "subscription_only": subscription_only,
         "model": normalized_model,
         "provider": normalized_provider,
         # Provider/model resolution captured at creation for unpinned jobs
@@ -2727,6 +2748,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
+            from agent.inference_policy import inherit_subscription_policy
+            restricted, provider, model = inherit_subscription_policy(
+                updated.get("subscription_only", False), updated.get("provider"),
+                updated.get("model"), updated.get("base_url"))
+            updated.update(subscription_only=restricted, provider=provider, model=model)
 
             if (
                 is_terminal_job(job)

@@ -509,6 +509,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
         "provider_override": task.provider_override,
+        "subscription_only": task.subscription_only,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -555,6 +556,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
                     "provider_override": t.provider_override,
+                    "subscription_only": t.subscription_only,
                 }
 
             def _run_dict(r):
@@ -1460,6 +1462,7 @@ def _handle_create(args: dict, **kw) -> str:
                 skills=skills,
                 model_override=model_override,
                 provider_override=provider_override,
+                subscription_only=args.get("subscription_only", False),
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None
@@ -2289,6 +2292,7 @@ KANBAN_CREATE_SCHEMA = {
                     "true. Defaults to the goal-engine default (20)."
                 ),
             },
+            "subscription_only": {"type": "boolean", "description": "Require explicit Codex subscription inference; inherited by child tasks."},
             "model": {
                 "type": "string",
                 "description": (

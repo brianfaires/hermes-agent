@@ -268,6 +268,8 @@ def _openai_http_client_kwargs(
     return {"http_client": client}
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+    from agent.inference_policy import subscription_only_active, validate_subscription_only
+    validate_subscription_only(subscription_only_active(), "openai-codex", "client", base_url or "missing")
     if _aux_probe_active():
         # Availability probe: credentials/base_url resolved — that is the
         # answer. Skip the openai import + httpx/SSL construction entirely.
@@ -6547,6 +6549,8 @@ def resolve_provider_client(
     Returns:
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
+    from agent.inference_policy import subscription_only_active, validate_subscription_only
+    validate_subscription_only(subscription_only_active(), provider, model, explicit_base_url)
     _validate_proxy_env_urls()
     # Preserve the original provider name before alias normalization so a
     # user-declared ``custom_providers`` entry whose name coincidentally
@@ -7485,6 +7489,8 @@ def _resolve_strict_vision_backend(
     provider: str,
     model: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
+    from agent.inference_policy import reject_auxiliary_inference
+    reject_auxiliary_inference()
     provider = _normalize_vision_provider(provider)
     if provider == "copilot":
         return resolve_provider_client("copilot", model, is_vision=True)
@@ -8346,6 +8352,8 @@ def _resolve_task_provider_model(
     auth, transport, and request-shaping behavior still apply. api_mode is one
     of "chat_completions", "codex_responses", or None (auto-detect).
     """
+    from agent.inference_policy import reject_auxiliary_inference
+    reject_auxiliary_inference()
     cfg_provider = None
     cfg_model = None
     cfg_base_url = None
@@ -9749,6 +9757,8 @@ def call_llm(
     latency_info: Optional[Dict[str, int]] = None,
 ) -> Any:
     """Run an auxiliary LLM request, applying the configured task limit."""
+    from agent.inference_policy import reject_auxiliary_inference
+    reject_auxiliary_inference()
     queue_started_at = time.monotonic()
     semaphore = _acquire_sync_aux_semaphore(task)
     if semaphore is not None:
@@ -10703,6 +10713,8 @@ async def async_call_llm(
     route_info: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Run an asynchronous auxiliary LLM request under the configured limit."""
+    from agent.inference_policy import reject_auxiliary_inference
+    reject_auxiliary_inference()
     semaphore = _acquire_async_aux_semaphore(task)
     if semaphore is not None:
         await semaphore.acquire()

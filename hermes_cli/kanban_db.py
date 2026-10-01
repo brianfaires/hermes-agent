@@ -1119,6 +1119,7 @@ class Task:
     # configured provider. NULL = worker profile's provider resolves the
     # model (pre-existing behaviour). Solves the "model from provider A,
     # profile configured for provider B" mismatch class.
+    subscription_only: bool = field(default=False, kw_only=True)
     provider_override: Optional[str] = None
     # Per-task reasoning effort for the worker (one of
     # ``hermes_constants.VALID_REASONING_EFFORTS``, or ``"none"`` for thinking
@@ -1223,6 +1224,7 @@ class Task:
                 row["current_step_key"] if "current_step_key" in keys else None
             ),
             skills=skills_value,
+            subscription_only=bool(row["subscription_only"]) if "subscription_only" in keys else False,
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             provider_override=(
                 row["provider_override"]
@@ -2656,6 +2658,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
+    if "subscription_only" not in cols:
+        _add_column_if_missing(conn, "tasks", "subscription_only", "subscription_only INTEGER NOT NULL DEFAULT 0")
+
     if "provider_override" not in cols:
         # Provider the model_override belongs to. NULL = worker profile's
         # provider resolves the model (the behaviour existing rows had).
@@ -3205,6 +3210,7 @@ def create_task(
     max_retries: Optional[int] = None,
     model_override: Optional[str] = None,
     provider_override: Optional[str] = None,
+    subscription_only: bool = False,
     reasoning_effort: Optional[str] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
@@ -3253,6 +3259,19 @@ def create_task(
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
     """
+    from agent.inference_policy import inherit_subscription_policy
+    # A CLI subprocess has no Python ContextVars. Its existing worker identity
+    # supplies the persisted parent policy; explicit dependency parents do too.
+    parents = tuple(parents)
+    policy_parents = (*parents, os.environ.get("HERMES_KANBAN_TASK", ""))
+    for parent_id in policy_parents:
+        parent = get_task(conn, parent_id) if parent_id else None
+        if parent and parent.subscription_only:
+            subscription_only = True
+            provider_override = provider_override or parent.provider_override
+            model_override = model_override or parent.model_override
+    subscription_only, provider_override, model_override = inherit_subscription_policy(
+        subscription_only, provider_override, model_override)
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -3529,9 +3548,9 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
-                        reasoning_effort,
+                        reasoning_effort, subscription_only,
                         goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3553,7 +3572,7 @@ def create_task(
                         int(max_retries) if max_retries is not None else None,
                         model_override,
                         provider_override,
-                        reasoning_effort,
+                        reasoning_effort, int(subscription_only),
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
@@ -3802,10 +3821,12 @@ def set_model_override(
         provider = None
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status, subscription_only FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not row:
             return False
+        from agent.inference_policy import validate_subscription_only
+        validate_subscription_only(bool(row["subscription_only"]), provider, model)
         if row["status"] == "archived":
             raise RuntimeError(f"cannot set model override on archived task {task_id}")
         conn.execute(
@@ -7527,7 +7548,8 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, "
+            "subscription_only, provider_override, model_override "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -7538,6 +7560,15 @@ def decompose_triage_task(
         if has_active_control_hold(conn, task_id):
             return None
         tenant = root_row["tenant"]
+        from agent.inference_policy import inherit_subscription_policy
+        inherited_policy = inherit_subscription_policy(
+            bool(root_row["subscription_only"]), root_row["provider_override"],
+            root_row["model_override"])
+        worker_id = os.environ.get("HERMES_KANBAN_TASK", "")
+        worker = get_task(conn, worker_id) if worker_id else None
+        if worker and worker.subscription_only and not inherited_policy[0]:
+            inherited_policy = inherit_subscription_policy(
+                True, worker.provider_override, worker.model_override)
         # Children inherit the root's workspace kind by default. Worktree
         # inheritance is normalized to a repo-root anchor so each child gets its
         # own linked checkout; scratch children stay per-task; implicit dir
@@ -7623,8 +7654,9 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, branch_name, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
+                " workspace_path, branch_name, tenant, created_at, created_by, "
+                " subscription_only, provider_override, model_override) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -7636,6 +7668,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    *inherited_policy,
                 ),
             )
             _append_event(
@@ -11294,6 +11327,10 @@ def _default_spawn(
         for sk in task.skills:
             if sk:
                 cmd.extend(["--skills", sk])
+    if task.subscription_only:
+        from agent.inference_policy import validate_subscription_only
+        validate_subscription_only(True, task.provider_override, task.model_override)
+        cmd.append("--subscription-only")
     if task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too when the override names one, so the worker

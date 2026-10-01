@@ -3180,6 +3180,9 @@ def _text_to_speech_single(
     The public :func:`text_to_speech_tool` wrapper owns long-form splitting,
     delivery packing, and post-encoding size enforcement.
     """
+    from agent.inference_policy import subscription_only_active
+    if subscription_only_active():
+        return tool_error("subscription_only prohibits auxiliary speech inference", success=False)
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
@@ -3553,6 +3556,9 @@ def text_to_speech_tool(
     Returns:
         str: JSON result with success, file_path, file_paths, and MEDIA tag.
     """
+    from agent.inference_policy import subscription_only_active
+    if subscription_only_active():
+        return tool_error("subscription_only prohibits auxiliary speech inference", success=False)
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
@@ -4079,6 +4085,10 @@ def stream_tts_to_speaker(
         * *tts_done_event* is **set** in the ``finally`` block so callers
           waiting on it (continuous voice mode) know playback is finished.
     """
+    from agent.inference_policy import reject_auxiliary_inference, subscription_only_active
+    if subscription_only_active():
+        tts_done_event.set()
+        reject_auxiliary_inference()
     tts_done_event.clear()
     sync_pipeline: Optional[_SyncSentencePipeline] = None
 

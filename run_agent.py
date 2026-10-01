@@ -31,6 +31,7 @@ except ModuleNotFoundError:
     # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
     pass
 
+from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
 import asyncio
 import base64
 import copy
@@ -442,6 +443,7 @@ class AIAgent:
         self._base_url_lower = value.lower() if value else ""
         self._base_url_hostname = base_url_hostname(value)
 
+    @scoped_inference
     def __init__(
         self,
         base_url: str = None,
@@ -524,6 +526,8 @@ class AIAgent:
         pass_session_id: bool = False,
         requested_provider: str = None,
         capabilities: Dict[str, bool] | None = None,
+        *,
+        subscription_only: bool = False,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         if tool_delay is not None:
@@ -533,6 +537,11 @@ class AIAgent:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        validate_subscription_only(self.subscription_only, provider, model, base_url)
+        if self.subscription_only:
+            fallback_model = None
+            skip_background_review = True
+            skip_memory = True
         from agent.agent_init import init_agent
         init_agent(
             self,
@@ -1931,6 +1940,10 @@ class AIAgent:
         # model and replays the whole conversation at premium rates, silently
         # inflating token cost (#85859). An explicit ``/refine`` (``focus`` set)
         # is a deliberate user request and still runs.
+        if getattr(self, "subscription_only", False):
+            if focus is not None:
+                raise RuntimeError("subscription_only prohibits background review inference")
+            return
         if focus is None and getattr(self, "_delegate_depth", 0) > 0:
             return
         # Explicit off-switch for automatic post-turn forks
@@ -5231,6 +5244,8 @@ class AIAgent:
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         """Forwarder — see ``agent.agent_runtime_helpers.create_openai_client``."""
+        validate_subscription_only(getattr(self, "subscription_only", False),
+                                   self.provider, self.model, client_kwargs.get("base_url") or "missing")
         from agent.agent_runtime_helpers import create_openai_client
         return create_openai_client(self, client_kwargs, reason=reason, shared=shared)
 
@@ -5891,6 +5906,8 @@ class AIAgent:
 
         api_key = creds.get("api_key")
         base_url = creds.get("base_url")
+        validate_subscription_only(getattr(self, "subscription_only", False),
+                                   self.provider, self.model, base_url)
         if not isinstance(api_key, str) or not api_key.strip():
             return False
         if not isinstance(base_url, str) or not base_url.strip():
@@ -6479,6 +6496,8 @@ class AIAgent:
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+        validate_subscription_only(getattr(self, "subscription_only", False),
+                                   self.provider, self.model, runtime_base)
         self._credential_pool_entry_id = getattr(entry, "id", None)
         from hermes_cli.route_identity import normalize_route_base_url
 
@@ -8689,6 +8708,7 @@ class AIAgent:
                 logger.debug("Conversation root lineage walk failed", exc_info=True)
         return start
 
+    @scoped_inference
     def run_conversation(
         self,
         user_message: Any,

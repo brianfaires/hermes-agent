@@ -2931,6 +2931,8 @@ def switch_model(
     from hermes_cli.providers import determine_api_mode
     from agent.native_compaction import resolve_native_compaction_capabilities
 
+    from agent.inference_policy import validate_subscription_only
+    validate_subscription_only(getattr(agent, "subscription_only", False), new_provider, new_model, base_url)
     old_model = agent.model
     old_provider = agent.provider
 

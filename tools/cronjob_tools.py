@@ -770,6 +770,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "skills": skills,
         "prompt_preview": preview_src[:100] + "..." if len(preview_src) > 100 else preview_src,
         "prompt_path": prompt_path or None,
+        "subscription_only": job.get("subscription_only", False),
         "model": job.get("model"),
         "provider": job.get("provider"),
         "base_url": job.get("base_url"),
@@ -1497,6 +1498,8 @@ def cronjob(
     reasoning_effort: Optional[str] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
+    *,
+    subscription_only: Optional[bool] = None,
 ) -> str:
     """Unified cron job management tool."""
     del task_id  # unused but kept for handler signature compatibility
@@ -1611,6 +1614,7 @@ def cronjob(
                     skills=canonical_skills,
                     model=_normalize_optional_job_value(model),
                     provider=_normalize_optional_job_value(provider),
+                    subscription_only=subscription_only if subscription_only is not None else False,
                     base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                     script=_normalize_optional_job_value(script),
                     context_from=context_from,
@@ -1849,6 +1853,8 @@ def cronjob(
                 canonical_skills = _canonical_skills(skill, skills)
                 updates["skills"] = canonical_skills
                 updates["skill"] = canonical_skills[0] if canonical_skills else None
+            if subscription_only is not None:
+                updates["subscription_only"] = subscription_only
             if model is not None:
                 updates["model"] = _normalize_optional_job_value(model)
             if provider is not None:
@@ -2005,6 +2011,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
     "parameters": {
         "type": "object",
         "properties": {
+            "subscription_only": {"type": "boolean", "description": "Restrict inference to an explicitly pinned Codex subscription route."},
             "action": {
                 "type": "string",
                 "description": "One of: create, list, update, pause, resume, remove, run. When action=create, 'schedule' is REQUIRED and you must provide 'prompt', 'prompt_path', or at least one skill. If both prompt and prompt_path are provided, the effective prompt is prompt + newline + file contents."
@@ -2137,6 +2144,7 @@ def _cronjob_handler(args, **kw):
         # `hermes cron create/edit --model`, or hand-edited jobs). The agent
         # must not be able to point unattended spend at a different model.
         # Programmatic callers of cronjob() itself retain the parameters.
+        subscription_only=args.get("subscription_only"),
         reason=args.get("reason"),
         script=args.get("script"),
         context_from=args.get("context_from"),

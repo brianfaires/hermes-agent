@@ -47,7 +47,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
@@ -613,6 +613,7 @@ class CreateTaskBody(BaseModel):
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
     model_override: Optional[str] = None
+    subscription_only: StrictBool = False
     provider_override: Optional[str] = None
     # Per-task thinking depth (none|minimal|…|ultra). None = inherit the
     # assigned profile's own agent.reasoning_effort.
@@ -647,6 +648,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_max_turns=payload.goal_max_turns,
             model_override=payload.model_override,
             provider_override=payload.provider_override,
+            subscription_only=payload.subscription_only,
             reasoning_effort=payload.reasoning_effort,
             project_id=payload.project_id,
             board=board,

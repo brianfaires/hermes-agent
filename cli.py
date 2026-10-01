@@ -23,6 +23,7 @@ except ModuleNotFoundError:
     # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
     pass
 
+from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
 import logging
 import copy
 import os
@@ -5193,6 +5194,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     # on this attribute and is enqueued after the fresh queue exists.
     _seeded_first_message: Optional["_SeededQueryMessage"] = None
 
+    @scoped_inference
     def __init__(
         self,
         model: str = None,
@@ -5209,6 +5211,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        *,
+        subscription_only: bool = False,
     ):
         """
         Initialize the Hermes CLI.
@@ -5226,6 +5230,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
         """
+        validate_subscription_only(self.subscription_only, provider, model, base_url)
         # Initialize Rich console
         self.console = Console()
         self.config = CLI_CONFIG
@@ -21641,6 +21646,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     )
 
 
+@scoped_inference
 def main(
     query: str = None,
     q: str = None,
@@ -21668,6 +21674,8 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    *,
+    subscription_only: bool = False,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -21853,6 +21861,7 @@ def main(
             toolsets=toolsets_list,
             provider=provider,
             reasoning=reasoning,
+            subscription_only=subscription_only,
             api_key=api_key,
             base_url=base_url,
             max_turns=max_turns,

@@ -1896,6 +1896,8 @@ def resolve_runtime_provider(
     persisted default. Other callers can leave it None to preserve existing
     behavior (api_mode derived from config).
     """
+    from agent.inference_policy import subscription_only_active, validate_subscription_only
+    validate_subscription_only(subscription_only_active(), requested, target_model, explicit_base_url)
     requested_provider = resolve_requested_provider(requested)
 
     # Honour ``providers.<name>.enabled: false`` for BOTH user-defined

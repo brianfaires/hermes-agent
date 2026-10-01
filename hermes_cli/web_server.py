@@ -13201,6 +13201,7 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             skills=skills,
             model=_cron_optional_text(body.model),
             provider=_cron_optional_text(body.provider),
+            subscription_only=body.subscription_only,
             base_url=_cron_optional_text(body.base_url, strip_trailing_slash=True),
             script=script,
             context_from=context_from,

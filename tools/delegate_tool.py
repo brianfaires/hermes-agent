@@ -2069,6 +2069,7 @@ def _build_child_agent(
     with delegated_child_context():
         try:
             child = AIAgent(
+                subscription_only=getattr(parent_agent, "subscription_only", False),
                 base_url=effective_base_url,
                 api_key=effective_api_key,
                 model=effective_model,
@@ -4714,6 +4715,12 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
     configured_api_mode = str(cfg.get("api_mode") or "").strip().lower() or None
+    if getattr(parent_agent, "subscription_only", False):
+        from agent.inference_policy import validate_subscription_only
+        configured_model = configured_model or parent_agent.model
+        validate_subscription_only(
+            True, configured_provider or parent_agent.provider,
+            configured_model or parent_agent.model, configured_base_url)
 
     # delegation.request_overrides: explicit per-child request settings from
     # config. Honored on EVERY resolution branch (direct base_url, named

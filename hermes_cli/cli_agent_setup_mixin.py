@@ -13,6 +13,7 @@ loaded) so this module never imports ``cli`` at import time -> no import cycle.
 """
 
 from __future__ import annotations
+from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
 
 import sys
 
@@ -52,6 +53,7 @@ def _single_query_clarify_callback(question: str, choices=None, multi_select=Fal
 class CLIAgentSetupMixin:
     """Agent construction + session-resume display methods for ``HermesCLI``."""
 
+    @scoped_inference
     def _ensure_runtime_credentials(self) -> bool:
         """
         Ensure runtime credentials are resolved before agent use.
@@ -70,6 +72,7 @@ class CLIAgentSetupMixin:
         try:
             runtime = resolve_runtime_provider(
                 requested=self.requested_provider,
+                target_model=self.model,
                 explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
             )
@@ -80,7 +83,7 @@ class CLIAgentSetupMixin:
         if runtime is None and _primary_exc is not None:
             from hermes_cli.auth import AuthError
             if isinstance(_primary_exc, AuthError):
-                _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+                _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) and not subscription_only_active() else []
                 for _fb in _fb_chain:
                     _fb_provider = (_fb.get("provider") or "").strip().lower()
                     _fb_model = (_fb.get("model") or "").strip()
@@ -251,6 +254,7 @@ class CLIAgentSetupMixin:
         try:
             runtime = resolve_runtime_provider(
                 requested=self.requested_provider,
+                target_model=self.model,
                 explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
             )
@@ -383,6 +387,7 @@ class CLIAgentSetupMixin:
         route["request_overrides"] = overrides
         return route
 
+    @scoped_inference
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
         """
         Initialize the agent on first use.
@@ -579,6 +584,7 @@ class CLIAgentSetupMixin:
                 ),
                 reasoning_callback=self._current_reasoning_callback(),
 
+                subscription_only=getattr(self, "subscription_only", False),
                 fallback_model=self._fallback_model,
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,

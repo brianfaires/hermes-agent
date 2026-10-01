@@ -86,6 +86,9 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
     The returned list always contains fresh dict copies.
     """
 
+    from agent.inference_policy import subscription_only_active
+    if subscription_only_active():
+        return []
     config = config or {}
     chain: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()

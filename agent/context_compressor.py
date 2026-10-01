@@ -16,6 +16,7 @@ Improvements over v2:
   - Richer tool call/result detail in summarizer input
 """
 
+from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
 import contextlib
 import contextvars
 import copy
@@ -3419,6 +3420,7 @@ class ContextCompressor(ContextEngine):
         if effective_window > 0 and floored >= effective_window:
             return max(1, min(trigger_cap, effective_window - 1))
         return floored
+    @scoped_inference
     def __init__(
         self,
         model: str,
@@ -7725,6 +7727,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             merged.append(msg)
         return merged
 
+    @scoped_inference
     def compress(
         self,
         messages: List[Dict[str, Any]],
@@ -7769,6 +7772,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             memory_context: Optional provider-supplied context to preserve in
                 the summary prompt. Whitespace-only values are ignored.
         """
+        from agent.inference_policy import reject_auxiliary_inference
+        reject_auxiliary_inference()
         # Reset per-call summary failure state — callers inspect these fields
         # after compress() returns to decide whether to surface a warning.
         self._last_summary_dropped_count = 0

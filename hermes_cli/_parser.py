@@ -198,6 +198,8 @@ def build_top_level_parser():
             "under model.provider — use `hermes setup` or edit the file to change it."
         ),
     )
+    _inherited_flag(parser, "--subscription-only", action="store_true", default=False,
+                    help="Restrict this execution to an explicit Codex subscription route")
     _inherited_flag(
         parser,
         "--reasoning",
@@ -408,6 +410,7 @@ def build_top_level_parser():
         default=argparse.SUPPRESS,
         help="Comma-separated toolsets to enable",
     )
+    _inherited_flag(chat_parser, "--subscription-only", action="store_true", default=argparse.SUPPRESS)
     _inherited_flag(
         chat_parser,
         "--reasoning",

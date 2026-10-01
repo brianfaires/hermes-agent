@@ -79,6 +79,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "max_retries": t.max_retries,
         "model_override": t.model_override,
         "provider_override": t.provider_override,
+        "subscription_only": t.subscription_only,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
@@ -415,6 +416,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "configured model. Combine with --provider "
                                "when the model belongs to a different "
                                "backend than the profile's default.")
+    p_create.add_argument("--subscription-only", action="store_true")
     p_create.add_argument("--provider", default=None, dest="provider_override",
                           help="Provider the --model belongs to (passed as "
                                "--provider <name> to the worker). Requires "
@@ -1706,6 +1708,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_retries=max_retries,
             model_override=getattr(args, "model_override", None),
             provider_override=getattr(args, "provider_override", None),
+            subscription_only=getattr(args, "subscription_only", False),
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
