@@ -35,6 +35,7 @@ def _cfg(**overrides):
 
 def _parent(**attrs):
     parent = MagicMock()
+    parent.subscription_only = False  # Explicitly model an unrestricted parent.
     parent._delegate_depth = 0
     # MagicMock attributes are MagicMocks (non-dict) by default; set real
     # values for the ones the resolution path inspects.

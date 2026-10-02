@@ -37,6 +37,7 @@ from hermes_state import SessionDB
 def _make_mock_parent(depth=0):
     """Create a mock parent agent with the fields delegate_task expects."""
     parent = MagicMock()
+    parent.subscription_only = False  # Explicitly model an unrestricted parent.
     parent.base_url = "https://openrouter.ai/api/v1"
     parent.api_key="***"
     parent.provider = "openrouter"

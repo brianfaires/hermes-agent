@@ -21,6 +21,7 @@ from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
 class _Host(CLIAgentSetupMixin):
     def __init__(self):
         self.requested_provider = "auto"
+        self.model = ""  # HermesCLI initializes this even without an explicit model.
         self._explicit_api_key = None
         self._explicit_base_url = None
 

@@ -40,6 +40,7 @@ def _make_agent(provider="openai-codex", model="gpt-5.5",
                 api_mode="codex_responses"):
     """Create a minimal AIAgent-like object with just the fields we need."""
     agent = MagicMock()
+    agent.subscription_only = False  # These tests exercise unrestricted routing.
     agent.provider = provider
     agent.model = model
     agent.base_url = base_url

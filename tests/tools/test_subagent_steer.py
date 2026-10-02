@@ -166,6 +166,7 @@ class TestMissedSteerRetention:
         from tools.delegate_tool import delegate_task
 
         parent = MagicMock()
+        parent.subscription_only = False  # Exercise unrestricted delegation.
         parent._delegate_depth = 0
         parent.model = "test-model"
         parent.interactive_mode = False
@@ -203,6 +204,7 @@ class TestMissedSteerRetention:
         from tools.delegate_tool import delegate_task
 
         parent = MagicMock()
+        parent.subscription_only = False  # Exercise unrestricted delegation.
         parent._delegate_depth = 0
         parent.model = "test-model"
         parent.interactive_mode = False

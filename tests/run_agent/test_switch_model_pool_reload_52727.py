@@ -35,6 +35,7 @@ def _make_agent(current_provider, current_model, current_pool):
     ``_ensure_lmstudio_runtime_loaded()`` work without real implementations.
     """
     agent = MagicMock(name=f"Agent[{current_provider}]")
+    agent.subscription_only = False  # These tests exercise unrestricted routing.
     agent.provider = current_provider
     agent.model = current_model
     agent.base_url = f"https://{current_provider}.example/v1"

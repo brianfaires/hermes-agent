@@ -16,6 +16,7 @@ class TestSwitchModelReasoningOverride:
     def _make_fake_agent(self, model="gpt-5", provider="openai"):
         """Create a minimal fake agent for switch_model testing."""
         agent = MagicMock()
+        agent.subscription_only = False  # These tests exercise unrestricted routing.
         agent.model = model
         agent.provider = provider
         agent.base_url = "https://api.openai.com/v1"
