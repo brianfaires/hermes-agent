@@ -288,6 +288,34 @@ parent, missing input, unmet capability) before unblocking, or raise
 `BLOCK_RECURRENCE_LIMIT` if the loop is expected.
 :::
 
+### Explicit continuation after a PR
+
+A recent PR URL in a task comment normally suppresses duplicate implementation
+workers. If an operator has authorized further work on that same task, record
+the approval explicitly on the existing unclaimed `ready`/`todo` task:
+
+```bash
+hermes kanban unblock t_abc --resume-after-pr --reason "Operator approved release continuation in message 123"
+```
+
+An identified, configured Kanban orchestrator can use `kanban_unblock` with
+`resume_after_pr: true` and the same required `reason`. Workers, delegated
+children and in-process cron agents cannot authorize their own continuation.
+The caller must already have operator authority; a reason is an audit citation,
+not a mechanism for granting permissions. The trusted local CLI/board and
+configured orchestrator are the existing access boundary, not an OS sandbox.
+
+This mode records a `pr_resume_authorized` event bound transactionally to the
+latest PR comment. It does **not** change task status, release a hold, clear an
+authentication/quota error or acquire a claim. Release an applicable hold via
+the normal authorized workflow first. Dependencies, live ownership, atomic
+claiming, concurrency, cooldown and all release checks remain in force.
+Ordinary unblock, automatic promotion/reclaim/retry and comments saying
+“resume” do not authorize this override. A later PR comment requires a new
+approval; matching comment IDs distinguish causal approval even in the same
+second. Approval survives mechanical retries of the same approved PR state,
+but does not override the separate recent-success guard.
+
 ## How workers interact with the board
 
 **Workers do not shell out to `hermes kanban`.** When the dispatcher spawns a worker it sets `HERMES_KANBAN_TASK=t_abcd` in the child's env, and that env var flips on a dedicated **kanban toolset** in the model's schema. The same toolset is also available to orchestrator profiles that enable `kanban` in their toolsets config. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.

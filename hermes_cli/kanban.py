@@ -695,6 +695,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons.",
     )
     p_unblock.add_argument("task_ids", nargs="+")
+    p_unblock.add_argument(
+        "--resume-after-pr", action="store_true",
+        help="Record explicit authorized continuation for an unclaimed ready/todo task's current PR signal; requires --reason. Does not release holds or change task state.",
+    )
 
     p_request_review = sub.add_parser(
         "request-review",
@@ -2528,9 +2532,23 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     if reason is not None:
         reason = reason.strip() or None
     author = _profile_author() if reason else None
+    resume_after_pr = bool(getattr(args, "resume_after_pr", False))
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            if resume_after_pr:
+                if not kb.authorize_pr_resume(
+                    conn, tid, actor=_profile_author(), source="host_cli", reason=reason,
+                ):
+                    failed.append(tid)
+                    print(
+                        f"cannot authorize post-PR resume {tid}: require approval reason, "
+                        "current PR, and unclaimed ready/todo task without an active hold",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"Authorized post-PR continuation {tid}: {reason}")
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
             if not kb.unblock_task(conn, tid):

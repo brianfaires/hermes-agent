@@ -1636,7 +1636,27 @@ def _handle_unblock(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            ok = kb.unblock_task(conn, str(tid))
+            resume_after_pr = args.get("resume_after_pr", False)
+            if not isinstance(resume_after_pr, bool):
+                return tool_error("resume_after_pr must be a boolean")
+            if resume_after_pr:
+                # Recheck configured orchestration rights at the mutation
+                # boundary; stale schemas and caller-provided actor fields
+                # cannot grant authority. DB also rejects cron/worker contexts.
+                actor = os.environ.get("HERMES_PROFILE")
+                if not _check_kanban_orchestrator_mode() or not actor:
+                    return tool_error("post-PR resume requires an identified orchestrator")
+                ok = kb.authorize_pr_resume(
+                    conn, str(tid), actor=actor, source="orchestrator_tool",
+                    reason=args.get("reason"),
+                )
+                if not ok:
+                    return tool_error(
+                        "post-PR resume refused: require approval reason, current PR, "
+                        "and unclaimed ready/todo task without an active hold"
+                    )
+            else:
+                ok = kb.unblock_task(conn, str(tid))
             if not ok:
                 return tool_error(f"could not unblock {tid} (not blocked or unknown)")
             task = kb.get_task(conn, str(tid))
@@ -2326,6 +2346,10 @@ KANBAN_UNBLOCK_SCHEMA = {
         "or todo while any parent remains open. Orchestrator-only — only "
         "profiles with the kanban toolset can unblock routed work; "
         "dispatcher-spawned task workers never see this tool."
+        " With resume_after_pr=true, instead record explicit authorized "
+        "continuation for a ready/todo task's latest PR signal, requiring an "
+        "approval reason. This overrides ONLY the PR duplicate-work heuristic; "
+        "it does not unblock holds or change status, claims or other checks."
     ),
     "parameters": {
         "type": "object",
@@ -2335,6 +2359,14 @@ KANBAN_UNBLOCK_SCHEMA = {
                 "description": "Blocked task id to move to ready or parent-gated todo.",
             },
             "board": _board_schema_prop(),
+            "resume_after_pr": {
+                "type": "boolean",
+                "description": "Explicit authorized post-PR continuation only; never automatic retry consent.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Required with resume_after_pr: cite the applicable operator approval and continuation scope.",
+            },
         },
         "required": ["task_id"],
     },

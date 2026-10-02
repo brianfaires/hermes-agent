@@ -7059,6 +7059,47 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "todo" if undone_parents else "ready"
 
 
+def authorize_pr_resume(
+    conn: sqlite3.Connection, task_id: str, *, actor: str, source: str, reason: str,
+) -> bool:
+    """Record explicit operator consent for the current PR duplicate-work signal.
+
+    Trusted host CLI/orchestrator ingress supplies provenance, never comments or
+    automatic transitions. This is NOT an unblock: holds, dependency status,
+    failure counters/errors and live claims are untouched. Legacy events are
+    deliberately not authority. The board/host remains the existing trust
+    boundary; this is not a sandbox against arbitrary direct SQLite writers.
+    """
+    from agent.delegation_context import (
+        is_delegated_child_context, is_dispatcher_owned_worker_context,
+    )
+
+    if (os.environ.get("HERMES_KANBAN_TASK") or is_delegated_child_context()
+            or not is_dispatcher_owned_worker_context()):
+        return False
+    if (source not in ("host_cli", "orchestrator_tool")
+            or not isinstance(actor, str) or not actor.strip()
+            or not isinstance(reason, str) or not reason.strip()):
+        return False
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, claim_lock, worker_pid, current_run_id "
+            "FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if (not row or row["status"] not in {"ready", "todo"}
+                or row["claim_lock"] or row["worker_pid"] or row["current_run_id"]
+                or has_active_control_hold(conn, task_id)):
+            return False
+        pr = _latest_guarded_pr_comment(conn, task_id)
+        if pr is None:
+            return False
+        _append_event(conn, task_id, "pr_resume_authorized", {
+            "actor": actor.strip(), "source": source, "reason": reason.strip(),
+            "pr_comment_id": pr["id"],
+        })
+        return True
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled``/held-``triage`` to a resumable phase.
 
@@ -9861,6 +9902,19 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 _clear_spawn_failures = _clear_failure_counter
 
 
+def _latest_guarded_pr_comment(conn: sqlite3.Connection, task_id: str):
+    """Latest PR signal by insertion order, not ambiguous second timestamps."""
+    cutoff = int(time.time()) - _RESPAWN_GUARD_PR_WINDOW
+    for row in conn.execute(
+        "SELECT id, body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY id DESC",
+        (task_id, cutoff),
+    ):
+        if row["body"] and _RESPAWN_GUARD_PR_URL_RE.search(row["body"]):
+            return row
+    return None
+
+
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
 ) -> Optional[str]:
@@ -9913,6 +9967,9 @@ def check_respawn_guard(
         A GitHub PR URL appears in a recent task comment (within
         ``_RESPAWN_GUARD_PR_WINDOW`` seconds).  A prior worker already
         opened a PR; re-spawning risks a duplicate PR on the same task.
+        Only explicit operator consent bound transactionally to the latest
+        PR comment bypasses this heuristic. Ordinary requeues/comments are
+        not consent, and a subsequent PR comment invalidates old approval.
 
     Stale / dead claim locks are NOT a guard reason — they are handled
     by ``release_stale_claims`` and ``detect_crashed_workers`` which
@@ -10001,12 +10058,22 @@ def check_respawn_guard(
             return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
-    for c in conn.execute(
-        "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",
-        (task_id, pr_cutoff),
-    ).fetchall():
-        if c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
+    pr = _latest_guarded_pr_comment(conn, task_id)
+    if pr is not None:
+        approval = conn.execute(
+            "SELECT payload, created_at FROM task_events "
+            "WHERE task_id = ? AND kind = 'pr_resume_authorized' "
+            "ORDER BY id DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        payload = _event_payload_dict(approval)
+        if not (
+            approval and approval["created_at"] >= pr["created_at"]
+            and type(payload.get("pr_comment_id")) is int
+            and payload["pr_comment_id"] == pr["id"]
+            and payload.get("source") in ("host_cli", "orchestrator_tool")
+            and isinstance(payload.get("actor"), str) and payload["actor"].strip()
+            and isinstance(payload.get("reason"), str) and payload["reason"].strip()
+        ):
             return "active_pr"
 
     return None
