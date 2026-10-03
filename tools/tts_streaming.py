@@ -99,29 +99,67 @@ class SentenceChunker:
     def __init__(self, min_len: int = 20):
         self.min_len = min_len
         self.buf = ""
+        self._at_line_start = True
+
+    def _emit(self, text: str) -> str:
+        from tools.tts_text_normalize import strip_attachment_references
+
+        cleaned = strip_attachment_references(text, at_line_start=self._at_line_start)
+        self._at_line_start = text.endswith("\n")
+        return cleaned
 
     def feed(self, delta: str) -> List[str]:
         """Absorb *delta*; return every complete sentence now ready to speak."""
+        from tools.tts_text_normalize import strip_attachment_references
+
         self.buf = _THINK_BLOCK_RE.sub("", self.buf + delta)
         if "<think" in self.buf and "</think>" not in self.buf:
             return []  # open think tag — the closing tag may arrive next delta
+        # Classify complete attachment lines before sentence punctuation can
+        # split a spaced filename. Never discard an unfinished directive: its
+        # remaining path may arrive in later deltas.
+        line_start = self.buf.rfind("\n") + 1
+        complete, tail = self.buf[:line_start], self.buf[line_start:]
+        complete = strip_attachment_references(complete, at_line_start=self._at_line_start)
+        attachment_tail = (line_start > 0 or self._at_line_start) and re.match(
+            r"^[ \t]*(?:[-*][ \t]+)?[`\"'*_]{0,3}"
+            r"(?:MEDIA:|\[\[(?:as_document|audio_as_voice)\]\])",
+            tail, re.IGNORECASE,
+        )
+        if not attachment_tail:
+            tail = strip_attachment_references(tail, at_line_start=line_start > 0 or self._at_line_start)
+        self.buf = complete + tail
+        line_start = len(complete)
         out: List[str] = []
         start = 0  # skip boundaries that would leave the head too short
         while m := SENTENCE_BOUNDARY_RE.search(self.buf, start):
+            if m.end() > line_start and (
+                attachment_tail or tail.rfind("[") > tail.rfind(")")
+            ):
+                break  # unfinished directive/link must retain its raw context
             head = self.buf[: m.end()]
             if len(head.strip()) < self.min_len:
                 start = m.end()
                 continue
-            out.append(head)
+            out.append(self._emit(head))
             self.buf = self.buf[m.end():]
+            line_start = max(0, line_start - m.end())
             start = 0
         return out
 
-    def flush(self) -> List[str]:
+    def flush(self, *, final: bool = True) -> List[str]:
         """Drain the tail (end-of-text or long-idle flush)."""
-        tail = _THINK_BLOCK_RE.sub("", self.buf).strip()
+        if not final:
+            tail = self.buf.rsplit("\n", 1)[-1]
+            if ("\n" in self.buf or self._at_line_start) and re.match(
+                r"^[ \t]*(?:[-*][ \t]+)?[`\"'*_]{0,3}"
+                r"(?:MEDIA:|\[\[(?:as_document|audio_as_voice)\]\])",
+                tail, re.IGNORECASE,
+            ) or tail.rfind("[") > tail.rfind(")"):
+                return []  # A later delta still belongs to this raw reference.
+        tail = self._emit(_THINK_BLOCK_RE.sub("", self.buf))
         self.buf = ""
-        return [tail] if tail else []
+        return [tail] if tail.strip() else []
 
 
 # ---------------------------------------------------------------------------

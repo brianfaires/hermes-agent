@@ -3568,7 +3568,7 @@ def text_to_speech_tool(
         from tools.tts_text_normalize import prepare_spoken_text
         text = prepare_spoken_text(text, max_chars=None)
     except Exception:
-        text = text.strip()
+        text = _strip_markdown_for_tts(text)
     if not text:
         return tool_error("Text is empty after TTS cleanup", success=False)
 
@@ -3955,6 +3955,11 @@ def _strip_markdown_for_tts(text: str) -> str:
         return prepare_spoken_text(text, max_chars=None)
     except Exception:
         pass
+    try:
+        from tools.tts_text_normalize import strip_attachment_references
+        text = strip_attachment_references(text)
+    except Exception:
+        return ""  # No raw attachment metadata if speech cleanup is unavailable.
     text = _THINK_BLOCK.sub(' ', text)
     text = _MD_CODE_BLOCK.sub(' ', text)
     text = _MD_LINK.sub(r'\1', text)
@@ -4352,7 +4357,7 @@ def stream_tts_to_speaker(
             """Display sentence and route to the appropriate audio path."""
             if stop_event.is_set():
                 return
-            cleaned = _strip_markdown_for_tts(sentence).strip()
+            cleaned = _strip_markdown_for_tts(sentence)
             if not cleaned:
                 return
             # Skip duplicate/near-duplicate sentences (LLM repetition)
@@ -4436,7 +4441,7 @@ def stream_tts_to_speaker(
             except queue.Empty:
                 # Idle producer: flush a long buffer instead of sitting on it
                 if len(chunker.buf) > long_flush_len:
-                    for sentence in chunker.flush():
+                    for sentence in chunker.flush(final=False):
                         _speak_sentence(sentence)
                 continue
 

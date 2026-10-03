@@ -121,3 +121,37 @@ def test_split_text_respects_cap_and_preserves_content():
         assert word in joined
 
 
+def test_attachment_metadata_is_not_synthesized(stream_client, monkeypatch):
+    streamer = _FakeStreamer([b"\x00\x00"])
+    _patch_provider(monkeypatch, streamer)
+    raw = "Here is the requested report.\nMEDIA:/tmp/quarterly. report.pdf\n\nAll done."
+    with stream_client.websocket_connect(_url()) as conn:
+        assert conn.receive_json()["type"] == "start"
+        for char in raw:
+            conn.send_text(json.dumps({"text": char}))
+        conn.send_text(json.dumps({"done": True}))
+        while True:
+            message = conn.receive()
+            if message.get("text") is not None:
+                assert json.loads(message["text"]) == {"type": "end"}
+                break
+    assert " ".join(streamer.requests) == "Here is the requested report. All done."
+
+
+def test_idle_flush_retains_attachment_path_context(stream_client, monkeypatch):
+    streamer = _FakeStreamer([b"\x00\x00"])
+    _patch_provider(monkeypatch, streamer)
+    with stream_client.websocket_connect(_url()) as conn:
+        assert conn.receive_json()["type"] == "start"
+        conn.send_text(json.dumps({"text": "MEDIA:/tmp/quarterly. "}))
+        # Longer than the real forced-idle boundary; no live provider/audio.
+        time.sleep(2.5)
+        conn.send_text(json.dumps({"text": "report.pdf\n\nAll done.", "done": True}))
+        while True:
+            message = conn.receive()
+            if message.get("text") is not None:
+                assert json.loads(message["text"]) == {"type": "end"}
+                break
+    assert streamer.requests == ["All done."]
+
+

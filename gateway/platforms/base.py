@@ -4776,6 +4776,11 @@ class BasePlatformAdapter(ABC):
             return prepare_spoken_text(text, max_chars=None)
         except Exception:
             # Keep auto-TTS best-effort if the normalizer ever fails.
+            try:
+                from tools.tts_text_normalize import strip_attachment_references
+                text = strip_attachment_references(text)
+            except Exception:
+                return ""  # Display/delivery remain intact; don't speak raw metadata.
             text = re.sub(r'<think[\s>].*?</think>', ' ', text, flags=re.DOTALL)
             return re.sub(r'[*_`#\[\]()]', '', text).strip()
 
