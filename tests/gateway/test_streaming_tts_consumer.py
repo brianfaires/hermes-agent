@@ -264,6 +264,30 @@ class TestAdapterContractDefaults:
 class TestConsumerLifecycle:
     """Begin/write/finish lifecycle exactly once on success."""
 
+    def test_attachment_deltas_never_reach_streaming_provider(self):
+        async def run(loop):
+            class RecordingStreamer(FakeStreamer):
+                def __init__(self):
+                    super().__init__()
+                    self.scripts = []
+
+                def stream(self, text):
+                    self.scripts.append(text)
+                    yield from super().stream(text)
+
+            adapter = FakeVoiceAdapter()
+            streamer = RecordingStreamer()
+            consumer = _make_consumer(adapter, "chat1", loop, streamer)
+            consumer.start()
+            raw = "Here is the requested report.\nMEDIA:/tmp/quarterly. report.pdf\n\nAll done."
+            for char in raw:
+                consumer.on_delta(char)
+            consumer.finish()
+            assert await consumer.wait_complete(timeout=5.0)
+            assert " ".join(streamer.scripts) == "Here is the requested report. All done."
+
+        _run_test(run)
+
     def test_successful_stream_produces_ordered_chunks(self):
         async def run(loop):
             adapter = FakeVoiceAdapter()

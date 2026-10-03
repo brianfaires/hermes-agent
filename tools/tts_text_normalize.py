@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import html
 import re
+from urllib.parse import unquote
 
 # Sentinel appended to former heading lines so smooth_whitespace_for_tts can
 # fold a heading into the sentence that follows it ("Weather, it will be sunny")
@@ -33,6 +34,51 @@ _MD_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", flags=re.MULTILINE)
 _MD_HR_RE = re.compile(r"^\s*[-*_]{3,}\s*$", flags=re.MULTILINE)
 _MD_TABLE_PIPE_RE = re.compile(r"\s*\|\s*")
 _URL_RE = re.compile(r"https?://\S+")
+
+# Delivery directives occupy a line; never erase ordinary filename discussion.
+_ATTACHMENT_LINE_RE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]+)?[`\"'*_]{0,3}"
+    r"(?:MEDIA:[ \t]*|\[\[(?:as_document|audio_as_voice)\]\][ \t]*)"
+    r"(?:[`\"'](?:~/|/|[A-Za-z]:[/\\])[^\n`\"']+[`\"']|"
+    r"(?:~/|/|[A-Za-z]:[/\\])[^\n`\"']+?\.[\w]+|"
+    r"(?:~/|/|[A-Za-z]:[/\\])[^\s`\"']+)"
+    r"[*_]{0,3}[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_DELIVERY_MARKER_RE = re.compile(r"\[\[(?:as_document|audio_as_voice)\]\]")
+_ATTACHMENT_LINK_RE = re.compile(r"!?\[([^\]]+)\]\(((?:[^()]|\([^)]*\))*)\)")
+
+
+class _AttachmentCleanedText(str):
+    """Speech copy whose attachment syntax was classified in original context.
+
+    Kept across in-process repeated normalization (not chat/delivery data), so
+    a streamed inline example cannot become a directive after clause splitting.
+    """
+
+
+def strip_attachment_references(text: str, *, at_line_start: bool = True) -> str:
+    """Remove explicit attachment metadata only from the speech copy."""
+    if isinstance(text, _AttachmentCleanedText):
+        return text
+
+    def strip_line(match: re.Match) -> str:
+        return "" if at_line_start or match.start() > 0 else match.group(0)
+
+    text = _ATTACHMENT_LINE_RE.sub(strip_line, text)
+    text = _DELIVERY_MARKER_RE.sub("", text)
+    # A delivery marker can share a line with the MEDIA directive.
+    text = _ATTACHMENT_LINE_RE.sub(strip_line, text)
+
+    def strip_filename_label(match: re.Match) -> str:
+        target = unquote(match.group(2).strip().strip("<>"))
+        if not re.match(r"^(?:~/|/|[A-Za-z]:[/\\]|file:///)", target):
+            return match.group(0)
+        label = match.group(1).strip().strip("`")
+        filename = re.split(r"[/\\]", target)[-1]
+        return "" if label in (filename, target) else match.group(0)
+
+    return _AttachmentCleanedText(_ATTACHMENT_LINK_RE.sub(strip_filename_label, text))
 
 # Broad emoji / pictograph cleanup.  Voice providers vary a lot here; most read
 # emojis as awkward labels, so keep the speech script calm and literal.
@@ -59,7 +105,10 @@ def strip_markdown_for_tts(text: str) -> str:
     if not text:
         return ""
 
+    attachments_cleaned = isinstance(text, _AttachmentCleanedText)
     text = html.unescape(str(text))
+    if not attachments_cleaned:
+        text = strip_attachment_references(text)
     text = _MD_CODE_BLOCK_RE.sub(" ", text)
     text = _MD_IMAGE_RE.sub(lambda m: f" {m.group(1)} " if m.group(1) else " ", text)
     text = _MD_LINK_RE.sub(r"\1", text)
@@ -268,11 +317,14 @@ def prepare_spoken_text(text: str, max_chars: int | None = 4000) -> str:
     the result to a single line so newline-sensitive providers (Kokoro) speak
     the whole script.
     """
+    attachments_cleaned = isinstance(text, _AttachmentCleanedText)
     spoken = strip_nonspoken_blocks(text)
+    if attachments_cleaned:
+        spoken = _AttachmentCleanedText(spoken)
     spoken = strip_markdown_for_tts(spoken)
     spoken = normalize_symbols_for_tts(spoken)
     spoken = smooth_whitespace_for_tts(spoken)
     spoken = flatten_newlines_for_payload(spoken)
     if max_chars is not None and max_chars > 0 and len(spoken) > max_chars:
         spoken = spoken[:max_chars].rstrip()
-    return spoken
+    return _AttachmentCleanedText(spoken)
