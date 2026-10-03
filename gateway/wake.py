@@ -59,6 +59,7 @@ async def deliver_wake(
     text: str,
     session_id: str = "",
     source: Any = None,
+    require_decision_receipt: bool = False,
 ) -> None:
     """Deliver a wake turn to the session behind ``adapter``.
 
@@ -83,7 +84,30 @@ async def deliver_wake(
             source=source,
             internal=True,
         )
-        await adapter.handle_message(synth_event)
+        if require_decision_receipt:
+            synth_event._native_decision_receipt = asyncio.get_running_loop().create_future()
+            destination = getattr(adapter, "_native_decision_destination", None)
+            if callable(destination):
+                synth_event._native_decision_destination = destination(source)
+
+            async def handle_decision():
+                await adapter.handle_message(synth_event)
+                return await synth_event._native_decision_receipt
+
+            try:
+                handled = await asyncio.wait_for(
+                    handle_decision(),
+                    timeout=WAKE_TURN_TIMEOUT_SECONDS,
+                )
+            except BaseException:
+                task = getattr(synth_event, "_native_decision_task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                raise
+            if not handled:
+                raise RuntimeError("native decision receiver unavailable, busy, or failed")
+        else:
+            await adapter.handle_message(synth_event)
         return
 
     if not session_id:

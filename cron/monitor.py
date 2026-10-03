@@ -60,6 +60,7 @@ class MonitorOutcome:
     first_run: bool = False
     context_block: Optional[str] = None
     error: Optional[str] = None
+    source_output: Optional[str] = None
 
 
 def hash_monitor_output(output: str) -> str:
@@ -158,7 +159,31 @@ def check_monitor(job: dict) -> MonitorOutcome:
     if not ok:
         return MonitorOutcome(ok=False, error=output)
 
+    # A shared monitor/pre-check script is one observation, not two. Idle
+    # gates must not replace the last admitted hash: otherwise a busy/held
+    # interval re-arms an already delivered transition on the next poll.
+    shared_gate = bool(job.get("monitor_script")) and (
+        job.get("monitor_script") == job.get("script")
+    )
+    if shared_gate:
+        from cron.scheduler import _parse_wake_gate
+
+        if not _parse_wake_gate(output):
+            return MonitorOutcome(ok=True, changed=False, source_output=output)
+
     new_hash = hash_monitor_output(output)
+    if shared_gate:
+        import json
+        from hermes_cli.kanban_continuation import PROCEDURE
+
+        try:
+            observation = json.loads(output)
+        except (TypeError, ValueError):
+            observation = None
+        if isinstance(observation, dict) and observation.get("procedure") == PROCEDURE:
+            # The native reason cursor, acknowledged only after verified effect,
+            # owns this gate. Inference/delivery success cannot consume admission.
+            return MonitorOutcome(ok=True, changed=True, source_output=output)
     raw_state = job.get("monitor_state")
     state = raw_state if isinstance(raw_state, dict) else {}
     last_hash = state.get("last_output_hash")
@@ -173,7 +198,11 @@ def check_monitor(job: dict) -> MonitorOutcome:
     if len(shown_output) > MAX_OUTPUT_CHARS:
         shown_output = shown_output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
 
-    if first_run:
+    if shared_gate:
+        # Fresh coordinator runs need only the admitted compact event, not a
+        # repeated baseline explanation or a diff containing old card context.
+        context_block = None
+    elif first_run:
         context_block = (
             "## Monitor Baseline (first run)\n\n"
             "This is the first observation of the monitored source — there is "
@@ -191,7 +220,8 @@ def check_monitor(job: dict) -> MonitorOutcome:
 
     _persist_monitor_state(job_id, new_hash, output)
     return MonitorOutcome(
-        ok=True, changed=True, first_run=first_run, context_block=context_block
+        ok=True, changed=True, first_run=first_run, context_block=context_block,
+        source_output=output if shared_gate else None,
     )
 
 

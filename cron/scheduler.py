@@ -4852,6 +4852,22 @@ def _build_job_prompt(
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
+    # Restricted shared monitor gates carry only a compact admitted event.
+    # Keep the normal wrapper for all other cron jobs and retain delivery,
+    # warning/error and silence guidance in this equivalent compact form.
+    if (job.get("script") and job.get("monitor_script") == job.get("script")
+            and job.get("subscription_only") is True
+            and job.get("provider") == "openai-codex"
+            and job.get("model") == "gpt-6.1-sol"
+            and job.get("attach_to_session") is False
+            and not job.get("base_url") and not job.get("skills")
+            and not job.get("prompt_path") and not job.get("continuity")
+            and not job.get("context_from") and len(user_prompt) <= 200):
+        cron_hint = (
+            "[Scheduled cron job, not the user. Final response is auto-delivered; "
+            "do not send_message or deliver it yourself. Warnings: ⚠️; errors/blockers: ❌. "
+            "Nothing new: exactly [SILENT], never mixed with content.]\n\n"
+        )
     prompt = cron_hint + prompt
     if skills is None:
         legacy = job.get("skill")
@@ -5814,6 +5830,7 @@ def _run_job_scoped(
     from cron.monitor import check_monitor, job_has_monitor
 
     _monitor_context: Optional[str] = None
+    _monitor_script_output: Optional[str] = None
     if job_has_monitor(job):
         _mon = check_monitor(job)
         _mon_now = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5856,6 +5873,7 @@ def _run_job_scoped(
         # through the existing per-run context seam and fall through to a
         # normal agent run.
         _monitor_context = _mon.context_block
+        _monitor_script_output = _mon.source_output
         if _monitor_context:
             extra_prompt = (
                 f"{_monitor_context}\n\n{extra_prompt}" if extra_prompt else _monitor_context
@@ -5883,9 +5901,12 @@ def _run_job_scoped(
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script_with_claim_heartbeat(
-            job, script_path, cancel_event=cancel_event,
-        )
+        if _monitor_script_output is not None:
+            prerun_script = (True, _monitor_script_output)
+        else:
+            prerun_script = _run_job_script_with_claim_heartbeat(
+                job, script_path, cancel_event=cancel_event,
+            )
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(

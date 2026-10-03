@@ -5750,7 +5750,7 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
                     if not buffered or ("<think" in chunker.buf and "</think>" not in chunker.buf):
                         continue
                     if buffered.endswith((".", "!", "?", "…", ":")) or idle_polls >= idle_polls_before_force_flush:
-                        yield from chunker.flush(final=False)
+                        yield from chunker.flush()
                     continue
                 idle_polls = 0
                 if delta is None:

@@ -232,6 +232,43 @@ class GatewayKanbanWatchersMixin:
             home = getattr(self, "_launch_profile_home", None)
         return policy_subscription(sub, profile_home=home)
 
+    def _kanban_continuation_reason(self, sub: dict, board: str, conn=None):
+        """Admit only explicit wake-only, existing-context continuation routes.
+
+        Fresh coordinators use the cron gate. Legacy subscriptions are
+        unchanged, and status/mode never substitutes for a scoped grant.
+        """
+        from hermes_cli.kanban_continuation import admission_reason
+        from hermes_cli import kanban_db as kb
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        if conn is None:
+            with kb.connect_closing(board=board) as current:
+                return self._kanban_continuation_reason(sub, board, current)
+        sub = next((row for row in kb.list_notify_subs(conn, sub["task_id"])
+                    if row.get("platform") == sub.get("platform")
+                    and row.get("chat_id") == sub.get("chat_id")
+                    and (row.get("thread_id") or "") == (sub.get("thread_id") or "")), {})
+        metadata = sub.get("delivery_metadata") or {}
+        if (metadata.get("continuation_context") != "existing"
+                or sub.get("delivery_mode") != "wake"):
+            return None
+        owner = sub.get("notifier_profile")
+        adapters = getattr(self, "_profile_adapters", {}).get(owner, {})
+        home = next((getattr(adapter, "runtime_profile_home", None)
+                     for adapter in adapters.values()
+                     if getattr(adapter, "runtime_profile_home", None) is not None), None)
+        if home is None and owner == self._active_profile_name():
+            home = getattr(self, "_launch_profile_home", None)
+        if home is None and owner != self._active_profile_name():
+            return None
+        token = set_hermes_home_override(str(home)) if home is not None else None
+        try:
+            return admission_reason(conn, sub, profile=owner, profile_home=home)
+        finally:
+            if token is not None:
+                reset_hermes_home_override(token)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 
@@ -496,14 +533,32 @@ class GatewayKanbanWatchersMixin:
                                             sub.get("task_id"), platform or "<missing>",
                                         )
                                         continue
-                                    old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
-                                        conn,
-                                        task_id=sub["task_id"],
-                                        platform=sub["platform"],
-                                        chat_id=sub["chat_id"],
-                                        thread_id=sub.get("thread_id") or "",
-                                        kinds=TERMINAL_KINDS,
+                                    continuation = (sub.get("delivery_metadata") or {}).get("procedure") == "autonomous-work-continuation"
+                                    decision_pending = False
+                                    if continuation:
+                                        reason = self._kanban_continuation_reason(sub, slug, conn)
+                                        if reason is None:
+                                            continue
+                                        decision_pending = reason == "decision_required"
+                                        from hermes_cli.kanban_continuation import EVENT_KINDS
+                                        event_kinds = EVENT_KINDS
+                                    else:
+                                        event_kinds = TERMINAL_KINDS
+                                    event_args = dict(
+                                        task_id=sub["task_id"], platform=sub["platform"],
+                                        chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "",
+                                        kinds=event_kinds,
                                     )
+                                    if decision_pending:
+                                        # The native subscription is the sole pending ledger.
+                                        # Never consume before the exact handler receipt:
+                                        # cancellation or process death cannot reliably rewind.
+                                        old_cursor = sub["last_event_id"]
+                                        cursor, events = _kb.unseen_events_for_sub(conn, **event_args)
+                                    else:
+                                        old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
+                                            conn, **event_args,
+                                        )
                                     if not events:
                                         continue
                                     task = _kb.get_task(conn, sub["task_id"])
@@ -518,6 +573,7 @@ class GatewayKanbanWatchersMixin:
                                         "events": events,
                                         "task": task,
                                         "board": slug,
+                                        "continuation": continuation,
                                     })
                                 except Exception as sub_exc:
                                     # Isolate per-subscription failures so one
@@ -543,6 +599,17 @@ class GatewayKanbanWatchersMixin:
                             d.get("old_cursor", 0), d.get("board"),
                         )
                         continue
+                    continuation_reason = None
+                    if d.get("continuation"):
+                        continuation_reason = await asyncio.to_thread(
+                            self._kanban_continuation_reason, original_sub, d.get("board"),
+                        )
+                        if continuation_reason is None:
+                            await _to_thread_process_service(
+                                self._kanban_rewind, original_sub, d["cursor"],
+                                d.get("old_cursor", 0), d.get("board"),
+                            )
+                            continue
                     sub["_cursor_sub"] = original_sub
                     task = d["task"]
                     board_slug = d.get("board")
@@ -568,6 +635,12 @@ class GatewayKanbanWatchersMixin:
                     # exists to fix). The helper returns None only when the profile
                     # (or default) genuinely has no adapter for the platform.
                     adapter = self._authorization_adapter(plat, sub_profile or None)
+                    if continuation_reason and adapter is not None:
+                        from gateway.wake import adapter_supports_push
+                        if not adapter_supports_push(adapter):
+                            # Context-local inference restrictions cannot cross
+                            # HTTP self-posts. Fresh cron is the supported route.
+                            adapter = None
                     if adapter is None:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
@@ -878,6 +951,8 @@ class GatewayKanbanWatchersMixin:
                             if wake_agent
                             else set()
                         )
+                        if continuation_reason:
+                            _wake_kinds = {continuation_reason}
                         from gateway.wake import adapter_supports_push as _adapter_push_ok
 
                         _is_push_adapter = _adapter_push_ok(adapter)
@@ -939,6 +1014,15 @@ class GatewayKanbanWatchersMixin:
                             _synth += "\n\n" + t(
                                 "gateway.kanban.wake.guidance"
                             )
+
+                        if continuation_reason:
+                            _synth = (
+                                f"Kanban {sub['task_id']}: {continuation_reason}; "
+                                f"event {d['cursor']}. Procedure: autonomous-work-continuation. "
+                                "Re-read this card and its gates before acting."
+                            )
+                            if continuation_reason == "decision_required":
+                                _synth += " Decision surfacing only; no execution approval or effect acknowledgement."
 
                         if not _is_push_adapter and _wake_kinds and _session_key:
                             # Wake self-post IS the delivery on this path —
@@ -1033,12 +1117,16 @@ class GatewayKanbanWatchersMixin:
                             # push-capable adapters (the non-push /
                             # self-post branch is handled BEFORE the
                             # cursor advance above).
-                            await deliver_wake(
-                                adapter,
-                                text=_synth,
-                                session_id=_session_key,
-                                source=_source,
-                            )
+                            from agent.inference_policy import inference_scope
+
+                            with inference_scope(bool(continuation_reason)):
+                                await deliver_wake(
+                                    adapter,
+                                    text=_synth,
+                                    session_id=_session_key,
+                                    source=_source,
+                                    require_decision_receipt=continuation_reason == "decision_required",
+                                )
                             logger.info(
                                 "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
                                 sub["task_id"], platform_str, sub["chat_id"], sub_profile or "default", _wake_kinds,
@@ -1065,7 +1153,7 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], fails,
                                     MAX_SEND_FAILURES, _wk_err, exc_info=True,
                                 )
-                                if fails >= MAX_SEND_FAILURES:
+                                if fails >= MAX_SEND_FAILURES and continuation_reason != "decision_required":
                                     logger.warning(
                                         "kanban notifier: dropping subscription "
                                         "%s on %s after %d consecutive wake failures",

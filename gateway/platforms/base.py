@@ -3994,6 +3994,21 @@ class BasePlatformAdapter(ABC):
                 return resolved
         return None
     
+    def _native_decision_destination(self, source: Any) -> tuple:
+        """Freeze a decision's requested lane; recheck after topic recovery."""
+        return (
+            build_session_key(
+                source,
+                group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+                profile=self._session_key_profile(source),
+            ),
+            source.platform, source.chat_id, source.chat_type, source.user_id,
+            source.thread_id, source.scope_id, source.guild_id, source.profile,
+            getattr(source, "profile_route_rejected", False),
+            getattr(self, "_owner_profile", None), self.runtime_profile_home,
+        )
+
     def _history_media_paths_for_session(self, session_key: str) -> Optional[set]:
         """Return media paths already delivered in prior turns of this session.
 
@@ -4776,11 +4791,6 @@ class BasePlatformAdapter(ABC):
             return prepare_spoken_text(text, max_chars=None)
         except Exception:
             # Keep auto-TTS best-effort if the normalizer ever fails.
-            try:
-                from tools.tts_text_normalize import strip_attachment_references
-                text = strip_attachment_references(text)
-            except Exception:
-                return ""  # Display/delivery remain intact; don't speak raw metadata.
             text = re.sub(r'<think[\s>].*?</think>', ' ', text, flags=re.DOTALL)
             return re.sub(r'[*_`#\[\]()]', '', text).strip()
 
@@ -6240,6 +6250,9 @@ class BasePlatformAdapter(ABC):
         enabling interruption support.
         """
         if not self._message_handler:
+            receipt = getattr(event, "_native_decision_receipt", None)
+            if receipt is not None and not receipt.done():
+                receipt.set_result(False)
             return
 
         if event.allow_gateway_control:
@@ -6271,6 +6284,41 @@ class BasePlatformAdapter(ABC):
                 expected_session_key,
                 session_key,
             )
+            receipt = getattr(event, "_native_decision_receipt", None)
+            if receipt is not None and not receipt.done():
+                receipt.set_result(False)
+            return
+
+        # Durable decision wakes must not enter the ordinary memory queue.
+        # Recovery and final-key validation precede this atomic admission.
+        receipt = getattr(event, "_native_decision_receipt", None)
+        if receipt is not None:
+            destination = getattr(event, "_native_decision_destination", None)
+            if (receipt.done() or event.source.profile_route_rejected
+                    or (destination is not None
+                        and destination != self._native_decision_destination(event.source))):
+                if not receipt.done():
+                    receipt.set_result(False)
+                return
+            self._heal_stale_session_lock(session_key)
+            if session_key in self._active_sessions:
+                receipt.set_result(False)
+                return
+            if not self._start_session_processing(event, session_key):
+                receipt.set_result(False)
+                return
+            task = self._session_tasks[session_key]
+            event._native_decision_task = task
+
+            def complete_decision(owner):
+                if not receipt.done():
+                    receipt.set_result(
+                        not owner.cancelled()
+                        and owner.exception() is None
+                        and bool(getattr(event, "_native_decision_handler_succeeded", False))
+                    )
+
+            task.add_done_callback(complete_decision)
             return
 
         # Private commands use the authorized runner even when cold or busy,
@@ -6555,6 +6603,8 @@ class BasePlatformAdapter(ABC):
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
             is_ephemeral_response = isinstance(response, EphemeralReply)
+            if getattr(event, "_native_decision_receipt", None) is not None:
+                event._native_decision_handler_succeeded = True
 
             # Slash-command handlers may return an EphemeralReply sentinel to
             # request that their reply message auto-delete after a TTL (used
@@ -7120,6 +7170,8 @@ class BasePlatformAdapter(ABC):
             await self._run_processing_hook("on_processing_complete", event, outcome)
             raise
         except BaseException as e:
+            if getattr(event, "_native_decision_receipt", None) is not None:
+                event._native_decision_handler_succeeded = False
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
