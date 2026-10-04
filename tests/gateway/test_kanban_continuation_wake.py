@@ -235,6 +235,45 @@ def test_native_escalation_retained_until_exact_decision_handler(board, monkeypa
     assert not any(key.startswith("reason_ack_event:") for key in origin["delivery_metadata"])
 
 
+@pytest.mark.parametrize("grant_change", [None, "missing_decision", "wrong_event"])
+def test_capability_escalation_existing_recipient_requires_exact_explicit_grant(board, monkeypatch, grant_change):
+    tid = make_task(board)
+    assert kb.block_task(board, tid, reason="real stalled capability", kind="capability")
+    held = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0]
+    recipient = kb.list_notify_subs(board, tid)[0]
+    metadata = recipient["delivery_metadata"]
+    metadata.update(decision_required=True, capability_decision_event=held)
+    kb.add_notify_sub(board, task_id=tid, platform="telegram", chat_id="chat-1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    job, escalation = native_escalation(board, tid)
+    if grant_change:
+        recipient = next(sub for sub in kb.list_notify_subs(board, tid) if sub["platform"] == "telegram")
+        metadata = recipient["delivery_metadata"]
+        if grant_change == "missing_decision":
+            del metadata["decision_required"]
+        else:
+            metadata["capability_decision_event"] = held + 1
+        kb.add_notify_sub(board, task_id=tid, platform="telegram", chat_id="chat-1",
+                          notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    before = kb.list_notify_subs(board)
+    adapter = RecordingAdapter()
+    tick(monkeypatch, adapter)
+    tick(monkeypatch, adapter)
+    if grant_change:
+        assert adapter.handled == []
+        assert kb.list_notify_subs(board) == before
+    else:
+        assert len(adapter.handled) == 1
+        event = adapter.handled[0]
+        assert f"escalation {escalation}" in event.text
+        assert "no execution approval" in event.text
+        assert event.source.profile == "default" and event.source.chat_id == "chat-1"
+    assert kb.get_task(board, tid).status == "blocked"
+    assert kb.has_active_control_hold(board, tid)
+    origin = next(sub for sub in kb.list_notify_subs(board, tid) if sub["chat_id"] == job)
+    assert not any(key.startswith("reason_ack_event:") for key in origin["delivery_metadata"])
+
+
 @pytest.mark.parametrize("gate", ["origin_home", "origin_episode", "origin_grant", "origin_job", "recipient_grant", "recipient_policy", "running"])
 def test_native_escalation_rechecks_origin_and_recipient_without_consuming(board, monkeypatch, gate):
     import json

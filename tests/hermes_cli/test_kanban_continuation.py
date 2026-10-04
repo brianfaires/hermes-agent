@@ -125,6 +125,64 @@ def test_semantic_escalation_is_durable_without_replay(board, monkeypatch, state
                                 "AND kind = 'continuation_escalation_required'", (task,)).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("gate_change", [None, "expiry", "job_pause"])
+def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, monkeypatch, gate_change):
+    from cron.jobs import create_job, pause_job, use_cron_store
+    from hermes_cli import kanban_continuation as continuation
+    from hermes_constants import get_hermes_home
+
+    with use_cron_store(get_hermes_home()):
+        job = create_job(prompt="Read admitted card; decision only.", schedule="every 5m",
+                         script="gate.py", monitor_script="gate.py", deliver="local",
+                         provider="openai-codex", model="gpt-6.1-sol", subscription_only=True,
+                         attach_to_session=False)
+        task = new_task(board)
+        subscribe(board, task)
+        metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+        kb.remove_notify_sub(board, task_id=task, platform="continuation", chat_id="job1")
+        assert kb.block_task(board, task, reason="real stalled capability", kind="capability")
+        held = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+        metadata.update(decision_required=True, continuation_context="fresh", capability_decision_event=held)
+        kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id=job["id"],
+                          notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+        admitted = continuation.collect_wakeup(board, job_id=job["id"], profile="default")
+        item = continuation.observe_pending_obligations(
+            board, job_id=job["id"], profile="default", deadline_seconds=120)[0]
+        before = kb.list_notify_subs(board)
+        clock = [item["deadline_at"] + 1]
+
+        def advancing_time():
+            clock[0] += 0.01
+            return clock[0]
+
+        monkeypatch.setattr(continuation.time, "time", advancing_time)
+
+        def owner_gate(observation):
+            if gate_change == "expiry":
+                clock[0] = metadata["authority_expires_at"]
+            elif gate_change == "job_pause":
+                pause_job(job["id"])
+            return True
+
+        args = dict(job_id=job["id"], profile="default", card=task, reason=admitted["reason"],
+                    deadline_seconds=120, coordinator_state="unavailable", owner_gate=owner_gate)
+        signal = continuation.signal_pending_escalation(board, **args)
+        if gate_change:
+            assert signal is None
+        else:
+            assert signal is not None
+            assert signal["episode_event"] == item["episode_event"]
+            assert signal["deadline_at"] == item["deadline_at"]
+            assert signal["overdue"] and signal["action"] == "owner_decision_required"
+        with kb.connect_closing() as reopened:
+            assert continuation.signal_pending_escalation(reopened, **args) is None
+            assert kb.list_notify_subs(reopened) == before
+            assert reopened.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? "
+                                    "AND kind = 'continuation_escalation_required'", (task,)).fetchone()[0] == (0 if gate_change else 1)
+            assert kb.get_task(reopened, task).status == "blocked"
+            assert kb.has_active_control_hold(reopened, task)
+
+
 @pytest.mark.parametrize("gate", ["healthy", "before_deadline", "owner", "hold", "job", "inference"])
 def test_semantic_escalation_gates_are_quiet(board, monkeypatch, gate):
     from cron import jobs

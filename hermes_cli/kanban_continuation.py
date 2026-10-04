@@ -171,7 +171,7 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
             and json.loads(latest["payload"] or "{}").get("kind") == task.block_kind
             and (task.block_kind == "needs_input"
                  or (task.block_kind == "capability"
-                     and sub.get("platform") == "continuation"
+                     and grant.get("decision_required") is True
                      and type(grant.get("capability_decision_event")) is int
                      and grant["capability_decision_event"] == latest["id"]))
             and sub.get("delivery_mode") == "wake"
@@ -461,6 +461,8 @@ def signal_pending_escalation(conn, *, job_id: str, profile: str,
     if coordinator_state not in ("unavailable", "dead", "stale"):
         return None
     with kb.write_txn(conn):
+        # Freeze age/deadline observation only; admission still checks live time.
+        now = time.time() if now is None else now
         items = observe_pending_obligations(
             conn, job_id=job_id, profile=profile, deadline_seconds=deadline_seconds, now=now)
         item = next((item for item in items if item["card"] == card and item["reason"] == reason), None)
