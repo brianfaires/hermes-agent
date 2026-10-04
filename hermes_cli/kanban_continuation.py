@@ -166,9 +166,12 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
             and latest and latest["kind"] == "blocked"
             and task.block_kind == "needs_input"
             and json.loads(latest["payload"] or "{}").get("kind") == "needs_input"
-            and sub.get("platform") != "continuation"
             and sub.get("delivery_mode") == "wake"
-            and grant.get("continuation_context") == "existing"):
+            and ((sub.get("platform") != "continuation"
+                  and grant.get("continuation_context") == "existing")
+                 or (sub.get("platform") == "continuation"
+                     and grant.get("continuation_context") == "fresh"
+                     and grant.get("decision_required") is True))):
         return "decision_required"
     if kb.has_active_control_hold(conn, task.id):
         return None
@@ -226,6 +229,14 @@ def collect_wakeup(conn, *, job_id: str, profile: str,
                 conn, task_id=sub["task_id"], platform="continuation", chat_id=job_id,
                 kinds=EVENT_KINDS,
             )
+            if reason == "decision_required":
+                # Owner binding may postdate the real hold. Observe its native
+                # identity without rewinding the installation/delivery cursor.
+                held = conn.execute(
+                    "SELECT id FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                    "ORDER BY id DESC LIMIT 1", (sub["task_id"],),
+                ).fetchone()
+                cursor, events = (held["id"], [held]) if held else (cursor, [])
             boundary = _verified_closure(conn, sub, reason) or 0
             if events and cursor > boundary:
                 metadata = dict(sub.get("delivery_metadata") or {})
@@ -292,7 +303,7 @@ def observe_pending_obligations(conn, *, job_id: str, profile: str,
         if task is None or task.status == "running" or task.claim_lock:
             continue
         metadata = sub.get("delivery_metadata") or {}
-        for reason in ("authentication_blocker", "retry_exhausted", "goal_closeout"):
+        for reason in ("authentication_blocker", "retry_exhausted", "goal_closeout", "decision_required"):
             event = metadata.get(f"reason_observed_event:{reason}")
             if type(event) is not int or event < 1:
                 continue
@@ -330,7 +341,7 @@ def acknowledge_wakeup(conn, *, job_id: str, profile: str, card: str, event: int
     the subscription baseline intact so another reason remains admissible.
     """
     if (not profile_matches_home(profile) or type(event) is not int or event < 1
-            or reason not in ("authentication_blocker", "retry_exhausted", "goal_closeout")
+            or reason not in ("authentication_blocker", "retry_exhausted", "goal_closeout", "decision_required")
             or type(effect_event) is not int or effect_event < event
             or (effect_event == event and reason != "goal_closeout")):
         return False
@@ -345,7 +356,8 @@ def acknowledge_wakeup(conn, *, job_id: str, profile: str, card: str, event: int
             "AND kind IN (" + ",".join("?" for _ in EVENT_KINDS) + ")",
             (event, card, *EVENT_KINDS),
         ).fetchone()
-        if row is None or exists is None or event < row["last_event_id"]:
+        if (row is None or exists is None
+                or (event < row["last_event_id"] and reason != "decision_required")):
             return False
         effect = conn.execute(
             "SELECT kind FROM task_events WHERE id = ? AND task_id = ?",
@@ -459,6 +471,47 @@ def signal_pending_escalation(conn, *, job_id: str, profile: str,
                 return None
         kb._append_event(conn, card, "continuation_escalation_required", identity)
     return {**item, "action": "owner_decision_required"}
+
+
+def pending_escalation(conn, *, card: str, event: int) -> dict | None:
+    """Reread a native signal under its origin's exact profile/job gates.
+
+    Delivery uses the existing recipient subscription/handler cursor, not the
+    producer's return value. A handler receipt is NOT obligation closure.
+    """
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from cron.jobs import use_cron_store
+
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND id = ? "
+        "AND kind = 'continuation_escalation_required'", (card, event),
+    ).fetchone()
+    payload = json.loads(row["payload"] or "{}") if row else None
+    if (not isinstance(payload, dict)
+            or set(payload) != {"reason", "profile", "profile_home", "job_id", "episode_event"}
+            or not isinstance(payload["profile"], str)
+            or not isinstance(payload["job_id"], str)
+            or not profile_exists(payload["profile"])
+            or not profile_matches_home(payload["profile"], payload["profile_home"])
+            or type(payload["episode_event"]) is not int
+            or not 0 < payload["episode_event"] < event):
+        return None
+    home = get_profile_dir(payload["profile"])
+    token = set_hermes_home_override(str(home))
+    try:
+        with use_cron_store(home):
+            if not _job_permits_inference(job_id=payload["job_id"], profile=payload["profile"]):
+                return None
+            items = observe_pending_obligations(
+                conn, job_id=payload["job_id"], profile=payload["profile"], deadline_seconds=1)
+            if any(item["card"] == card and item["reason"] == payload["reason"]
+                   and item["episode_event"] == payload["episode_event"]
+                   and item["admission_actionable"] for item in items):
+                return payload
+    finally:
+        reset_hermes_home_override(token)
+    return None
 
 
 def emit_gate(*, job_id: str, profile: str) -> None:

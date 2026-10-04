@@ -269,6 +269,13 @@ class GatewayKanbanWatchersMixin:
             if token is not None:
                 reset_hermes_home_override(token)
 
+    def _kanban_pending_escalation(self, card: str, event: int, board: str):
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_continuation import pending_escalation
+
+        with kb.connect_closing(board=board) as conn:
+            return pending_escalation(conn, card=card, event=event)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 
@@ -534,14 +541,13 @@ class GatewayKanbanWatchersMixin:
                                         )
                                         continue
                                     continuation = (sub.get("delivery_metadata") or {}).get("procedure") == "autonomous-work-continuation"
-                                    decision_pending = False
+                                    escalation_event = None
                                     if continuation:
                                         reason = self._kanban_continuation_reason(sub, slug, conn)
                                         if reason is None:
                                             continue
-                                        decision_pending = reason == "decision_required"
-                                        from hermes_cli.kanban_continuation import EVENT_KINDS
-                                        event_kinds = EVENT_KINDS
+                                        from hermes_cli.kanban_continuation import EVENT_KINDS, pending_escalation
+                                        event_kinds = (*EVENT_KINDS, "continuation_escalation_required")
                                     else:
                                         event_kinds = TERMINAL_KINDS
                                     event_args = dict(
@@ -549,12 +555,23 @@ class GatewayKanbanWatchersMixin:
                                         chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or "",
                                         kinds=event_kinds,
                                     )
-                                    if decision_pending:
+                                    if continuation:
                                         # The native subscription is the sole pending ledger.
                                         # Never consume before the exact handler receipt:
                                         # cancellation or process death cannot reliably rewind.
                                         old_cursor = sub["last_event_id"]
                                         cursor, events = _kb.unseen_events_for_sub(conn, **event_args)
+                                        for index, ev in enumerate(events):
+                                            if (ev.kind == "continuation_escalation_required"
+                                                    and not pending_escalation(conn, card=sub["task_id"], event=ev.id)):
+                                                # A temporarily gated signal is a cursor
+                                                # barrier, not a discardable event. An
+                                                # earlier handler cannot receipt it.
+                                                events = events[:index]
+                                                cursor = events[-1].id if events else old_cursor
+                                                break
+                                        escalation_event = next((ev.id for ev in reversed(events)
+                                                                 if ev.kind == "continuation_escalation_required"), None)
                                     else:
                                         old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
                                             conn, **event_args,
@@ -574,6 +591,7 @@ class GatewayKanbanWatchersMixin:
                                         "task": task,
                                         "board": slug,
                                         "continuation": continuation,
+                                        "escalation_event": escalation_event,
                                     })
                                 except Exception as sub_exc:
                                     # Isolate per-subscription failures so one
@@ -601,6 +619,11 @@ class GatewayKanbanWatchersMixin:
                         continue
                     continuation_reason = None
                     if d.get("continuation"):
+                        # Policy redirects deliberately strip wake authority.
+                        # A passive destination cannot receipt the origin's
+                        # decision; retain its native cursor for permitted delivery.
+                        if sub.get("delivery_mode") != "wake":
+                            continue
                         continuation_reason = await asyncio.to_thread(
                             self._kanban_continuation_reason, original_sub, d.get("board"),
                         )
@@ -610,6 +633,14 @@ class GatewayKanbanWatchersMixin:
                                 d.get("old_cursor", 0), d.get("board"),
                             )
                             continue
+                        if d.get("escalation_event"):
+                            escalation = await asyncio.to_thread(
+                                self._kanban_pending_escalation, original_sub["task_id"],
+                                d["escalation_event"], d.get("board"),
+                            )
+                            if escalation is None:
+                                continue
+                            continuation_reason = "decision_required"
                     sub["_cursor_sub"] = original_sub
                     task = d["task"]
                     board_slug = d.get("board")
@@ -1023,6 +1054,8 @@ class GatewayKanbanWatchersMixin:
                             )
                             if continuation_reason == "decision_required":
                                 _synth += " Decision surfacing only; no execution approval or effect acknowledgement."
+                            if d.get("escalation_event"):
+                                _synth += f" Missed progress escalation {d['escalation_event']}."
 
                         if not _is_push_adapter and _wake_kinds and _session_key:
                             # Wake self-post IS the delivery on this path —

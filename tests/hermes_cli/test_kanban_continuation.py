@@ -195,6 +195,38 @@ def test_semantic_read_retains_pending_hold_without_authorizing_action(board):
             board, job_id="job1", profile="default", deadline_seconds=0)
 
 
+def test_explicit_decision_owner_admission_preserves_hold_until_control_effect(board):
+    from hermes_cli import kanban_continuation as continuation
+    task = new_task(board)
+    subscribe(board, task)
+    metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+    metadata.update(decision_required=True, continuation_context="fresh")
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert kb.block_task(board, task, reason="real owner input", kind="needs_input")
+    payload = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert payload["reason"] == "decision_required"
+    assert kb.get_task(board, task).status == "blocked"
+    assert kb.has_active_control_hold(board, task)
+    kb.add_comment(board, task, author="default", body="an answer is not a control effect")
+    comment = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    assert not continuation.acknowledge_wakeup(
+        board, job_id="job1", profile="default", card=task, event=payload["event"],
+        reason=payload["reason"], effect_event=comment)
+    with kb.connect_closing() as reopened:
+        items = continuation.observe_pending_obligations(
+            reopened, job_id="job1", profile="default", deadline_seconds=900)
+        assert len(items) == 1 and items[0]["reason"] == "decision_required"
+        assert items[0]["admission_actionable"]
+    assert kb.unblock_task(board, task)
+    effect = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    assert continuation.acknowledge_wakeup(
+        board, job_id="job1", profile="default", card=task, event=payload["event"],
+        reason=payload["reason"], effect_event=effect)
+    assert continuation.observe_pending_obligations(
+        board, job_id="job1", profile="default", deadline_seconds=900) == []
+
+
 def test_blocked_poll_has_no_wake_or_cursor_change(board):
     task = new_task(board)
     kb.block_task(board, task, reason="needs input", kind="needs_input")
