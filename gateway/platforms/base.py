@@ -6304,6 +6304,7 @@ class BasePlatformAdapter(ABC):
             if session_key in self._active_sessions:
                 receipt.set_result(False)
                 return
+            event._native_decision_handler_succeeded = False
             if not self._start_session_processing(event, session_key):
                 receipt.set_result(False)
                 return
@@ -6315,7 +6316,7 @@ class BasePlatformAdapter(ABC):
                     receipt.set_result(
                         not owner.cancelled()
                         and owner.exception() is None
-                        and bool(getattr(event, "_native_decision_handler_succeeded", False))
+                        and getattr(event, "_native_decision_handler_succeeded", False) is True
                     )
 
             task.add_done_callback(complete_decision)
@@ -6603,8 +6604,6 @@ class BasePlatformAdapter(ABC):
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
             is_ephemeral_response = isinstance(response, EphemeralReply)
-            if getattr(event, "_native_decision_receipt", None) is not None:
-                event._native_decision_handler_succeeded = True
 
             # Slash-command handlers may return an EphemeralReply sentinel to
             # request that their reply message auto-delete after a TTL (used

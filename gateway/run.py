@@ -3149,7 +3149,7 @@ _CONVERSATION_SCOPED_STATE: tuple = (
 _UNSET = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(*, provider=None, model=None, base_url=None) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     Provider is read from ``config.yaml`` ``model.provider`` (the single
@@ -3168,10 +3168,26 @@ def _resolve_runtime_agent_kwargs() -> dict:
         _get_model_config,
     )
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+    from agent.inference_policy import subscription_only_active
 
     try:
-        runtime = resolve_runtime_provider()
+        if subscription_only_active():
+            # Restricted turns must name their route before credential I/O.
+            # Read raw configuration, not auto-detection or a paid fallback.
+            if provider is None and model is None:
+                cfg = _load_gateway_config().get("model", {})
+                if isinstance(cfg, dict):
+                    provider = cfg.get("provider")
+                    base_url = cfg.get("base_url")
+                model = _resolve_gateway_model()
+            runtime = resolve_runtime_provider(
+                requested=provider, target_model=model, explicit_base_url=base_url,
+            )
+        else:
+            runtime = resolve_runtime_provider()
     except AuthError as auth_exc:
+        if subscription_only_active():
+            raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
         # token). Both fall through to the fallback chain, but the log message
@@ -5860,6 +5876,7 @@ class TurnRunner:
                 "final_response": f"⚠️ Provider authentication failed: {exc}",
                 "messages": [],
                 "api_calls": 0,
+                "failed": True,
                 "tools": [],
             }
 
@@ -8702,6 +8719,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         override = (
             _override_state.conversation.model_override if _override_state else None
         )
+        from agent.inference_policy import subscription_only_active
+        if subscription_only_active():
+            # Resolve the effective route before any credential fast-path.
+            # A native wake inherits policy, never permission to auto-detect.
+            cfg = user_config if user_config is not None else _load_gateway_config()
+            model_cfg = cfg.get("model", {})
+            provider = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
+            base_url = model_cfg.get("base_url") if isinstance(model_cfg, dict) else None
+            if source is not None and getattr(self, "config", None):
+                ch = _get_channel_override(
+                    self.config, source.platform, str(source.chat_id or ""),
+                    thread_id=getattr(source, "thread_id", None),
+                    parent_id=getattr(source, "parent_chat_id", None),
+                )
+                if ch:
+                    model = ch.model or model
+                    if ch.provider:
+                        provider, base_url = ch.provider, None
+            if override:
+                model = override.get("model", model)
+                override_provider = override.get("requested_provider") or override.get("provider")
+                if override_provider:
+                    provider, base_url = override_provider, None
+                if override.get("base_url") is not None:
+                    base_url = override["base_url"]
+            return model, _resolve_runtime_agent_kwargs(
+                provider=provider, model=model, base_url=base_url,
+            )
         if override:
             override_model = override.get("model", model)
             override_runtime = {
@@ -22390,6 +22435,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
+            if getattr(event, "_native_decision_receipt", None) is not None:
+                # A denial/early return can produce text without a model turn.
+                # Only a successful decision turn may receipt the wake; this
+                # is NOT acknowledgement of the Kanban obligation's effect.
+                event._native_decision_handler_succeeded = (
+                    _api_calls > 0
+                    and agent_result.get("completed") is True
+                    and not agent_result.get("partial")
+                    and not agent_result.get("failed")
+                    and not agent_result.get("error")
+                    and not agent_result.get("interrupted")
+                )
             _resp_len = len(response)
             logger.info(
                 "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",

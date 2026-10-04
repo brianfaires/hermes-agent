@@ -37,13 +37,13 @@ import sys
 import threading
 import types
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
 import gateway.run as gateway_run
-from gateway.config import GatewayConfig, Platform
-from gateway.platforms.base import MessageEvent
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.session import SessionEntry, SessionSource
 
 
@@ -153,6 +153,67 @@ def _source():
 def _live_count(db, session_id):
     row = db.get_session(session_id)
     return (row.get("message_count", 0) if row else 0)
+
+
+class _NativeDecisionAdapter(BasePlatformAdapter):
+    async def connect(self, *, is_reconnect=False):
+        pass
+
+    async def disconnect(self):
+        pass
+
+    async def send(self, chat_id, content, **kwargs):
+        return SendResult(success=True, message_id="fixture-reply")
+
+    async def get_chat_info(self, chat_id):
+        return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["provider_denied", "success", "failed", "incomplete", "partial", "unmarked"])
+async def test_native_decision_receipt_requires_successful_turn(monkeypatch, tmp_path, outcome):
+    from types import SimpleNamespace
+    from gateway.run import TurnRunner
+    from gateway.turn_context import TurnContext
+    from gateway.wake import deliver_wake
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "sessions.db")
+    db.create_session(session_id=SESSION_ID, source="telegram", model="test-model")
+    runner = _bootstrap(monkeypatch, tmp_path, db)
+    turn_runner = SimpleNamespace(
+        _get_system_prompt_for_channel=lambda *args, **kwargs: None,
+        _resolve_session_agent_runtime=Mock(side_effect=RuntimeError("subscription route denied")),
+    )
+    denied = TurnRunner(turn_runner, TurnContext(
+        source=_source(), resolve_display_setting=lambda *args: False,
+    )).run_sync()
+    assert denied["api_calls"] == 0 and denied["messages"] == []
+    result = denied if outcome == "provider_denied" else {
+        "final_response": "fixture decision result", "api_calls": 1,
+        "messages": [], "failed": outcome == "failed",
+        "completed": outcome not in ("incomplete", "unmarked"),
+        "partial": outcome == "partial",
+    }
+    if outcome == "unmarked":
+        result.pop("completed")
+    runner._run_agent = AsyncMock(return_value=result)
+    adapter = _NativeDecisionAdapter(PlatformConfig(enabled=True, typing_indicator=False), Platform.TELEGRAM)
+
+    async def handler(event):
+        return await runner._handle_message_with_agent(event, event.source, SESSION_KEY, 1)
+
+    adapter._message_handler = handler
+    try:
+        if outcome == "success":
+            await deliver_wake(adapter, text="Kanban scoped decision", source=_source(), require_decision_receipt=True)
+        else:
+            with pytest.raises(RuntimeError, match="native decision receiver"):
+                await deliver_wake(adapter, text="Kanban scoped decision", source=_source(), require_decision_receipt=True)
+        runner._run_agent.assert_awaited_once()
+    finally:
+        await adapter.cancel_background_tasks()
+        db.close()
 
 
 @pytest.mark.asyncio
