@@ -36,7 +36,7 @@ def _goal_admission_only(conn, card, event, reason, profile, job_id, *, before=N
                and json.loads(row["payload"] or "{}") == identity for row in rows)
 
 
-def _verified_closure(conn, sub, reason, *, current=False):
+def _verified_closure(conn, sub, reason, *, current=False, legacy_blocked_decision=False):
     """Scalar pointers alone never prove closure; require the native receipt."""
     metadata = sub.get("delivery_metadata") or {}
     event = metadata.get(f"reason_ack_event:{reason}")
@@ -62,8 +62,12 @@ def _verified_closure(conn, sub, reason, *, current=False):
         + ",".join("?" for _ in EVENT_KINDS) + ")", (sub["task_id"], event, *EVENT_KINDS),
     ).fetchone()
     if (observed is None or native is None
+            or (reason == "decision_required" and native["kind"] == "blocked"
+                and not legacy_blocked_decision)
             or native["kind"] not in ("blocked", "completed", "review_requested", "unblocked", "changes_requested")):
         return None
+    if legacy_blocked_decision and not (reason == "decision_required" and native["kind"] == "blocked"):
+        return None  # Migration permits replacement of this old receipt only.
     if not _goal_admission_only(conn, sub["task_id"], effect, reason,
                                 sub["notifier_profile"], sub["chat_id"], before=receipt):
         return None
@@ -156,16 +160,20 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
             or not kb._parents_satisfied(conn, task.id)):
         return None
     latest = conn.execute(
-        "SELECT kind, payload FROM task_events WHERE task_id = ? "
+        "SELECT id, kind, payload FROM task_events WHERE task_id = ? "
         "AND kind IN ('gave_up', 'blocked', 'unblocked', 'created', 'promoted_manual') "
         "ORDER BY id DESC LIMIT 1", (task.id,),
     ).fetchone()
-    # A needs_input hold is surfaced, not released. Cron admission and native
-    # claims still require the real operator control action, never a comment.
+    # Surface a needs_input hold or an explicitly event-bound capability
+    # decision. Neither grants execution or releases the real operator hold.
     if (task.status == "blocked" and not task.claim_lock
             and latest and latest["kind"] == "blocked"
-            and task.block_kind == "needs_input"
-            and json.loads(latest["payload"] or "{}").get("kind") == "needs_input"
+            and json.loads(latest["payload"] or "{}").get("kind") == task.block_kind
+            and (task.block_kind == "needs_input"
+                 or (task.block_kind == "capability"
+                     and sub.get("platform") == "continuation"
+                     and type(grant.get("capability_decision_event")) is int
+                     and grant["capability_decision_event"] == latest["id"]))
             and sub.get("delivery_mode") == "wake"
             and ((sub.get("platform") != "continuation"
                   and grant.get("continuation_context") == "existing")
@@ -368,6 +376,8 @@ def acknowledge_wakeup(conn, *, job_id: str, profile: str, card: str, event: int
                     "unblocked": "ready", "changes_requested": "ready"}
         if effect is None or task is None or statuses.get(effect["kind"]) != task.status:
             return False
+        if reason == "decision_required" and effect["kind"] == "blocked":
+            return False  # A new unresolved hold is not decision follow-through.
         # Returning to the same status does not revive a superseded receipt.
         # Commentary/liveness alone neither verifies nor invalidates an effect.
         if not _goal_admission_only(conn, card, effect_event, reason, profile, job_id):
@@ -396,8 +406,10 @@ def acknowledge_wakeup(conn, *, job_id: str, profile: str, card: str, event: int
         if previous and event <= previous:
             sub = {"task_id": card, "notifier_profile": profile, "chat_id": job_id,
                    "delivery_metadata": metadata}
-            return (previous == event and metadata.get(effect_key) == effect_event
-                    and _verified_closure(conn, sub, reason, current=True) == effect_event)
+            if not (previous == event and _verified_closure(
+                    conn, sub, reason, legacy_blocked_decision=True)):
+                return (previous == event and metadata.get(effect_key) == effect_event
+                        and _verified_closure(conn, sub, reason, current=True) == effect_event)
         metadata[ack_key] = event
         metadata[effect_key] = effect_event
         kb._append_event(conn, card, "continuation_reason_closed", {

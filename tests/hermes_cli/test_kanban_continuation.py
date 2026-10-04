@@ -227,6 +227,107 @@ def test_explicit_decision_owner_admission_preserves_hold_until_control_effect(b
         board, job_id="job1", profile="default", deadline_seconds=900) == []
 
 
+def test_exact_capability_decision_grant_surfaces_hold_without_releasing_it(board):
+    from hermes_cli import kanban_continuation as continuation
+    task = new_task(board)
+    assert kb.block_task(board, task, reason="real owner capability boundary", kind="capability")
+    held = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    subscribe(board, task)
+    metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+    metadata.update(decision_required=True, continuation_context="fresh")
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert continuation.collect_wakeup(board, job_id="job1", profile="default") == {"wakeAgent": False}
+    metadata["capability_decision_event"] = held
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    payload = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert payload["reason"] == "decision_required" and payload["event"] == held
+    assert kb.get_task(board, task).status == "blocked"
+    assert kb.has_active_control_hold(board, task)
+    before = kb.list_notify_subs(board)
+    with kb.connect_closing() as reopened:
+        assert continuation.collect_wakeup(reopened, job_id="job1", profile="default") == payload
+        assert kb.list_notify_subs(reopened) == before
+    assert kb.unblock_task(board, task)
+    assert kb.block_task(board, task, reason="later incident hold", kind="capability")
+    assert continuation.collect_wakeup(board, job_id="job1", profile="default") == {"wakeAgent": False}
+
+
+def test_new_block_cannot_close_unresolved_decision(board):
+    from hermes_cli import kanban_continuation as continuation
+    task = new_task(board)
+    subscribe(board, task)
+    metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+    metadata.update(decision_required=True, continuation_context="fresh")
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert kb.block_task(board, task, reason="real owner decision", kind="needs_input")
+    payload = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert kb.unblock_task(board, task)
+    assert kb.block_task(board, task, reason="still unresolved capability", kind="capability")
+    effect = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    before = kb.list_notify_subs(board)
+    assert not continuation.acknowledge_wakeup(
+        board, job_id="job1", profile="default", card=task, event=payload["event"],
+        reason=payload["reason"], effect_event=effect)
+    assert kb.list_notify_subs(board) == before
+    items = continuation.observe_pending_obligations(
+        board, job_id="job1", profile="default", deadline_seconds=900)
+    assert len(items) == 1 and items[0]["last_verified_progress_at"] is None
+
+
+@pytest.mark.parametrize("observe_again", [False, True])
+def test_legacy_blocked_decision_receipt_cannot_hide_pending_episode(board, observe_again):
+    from hermes_cli import kanban_continuation as continuation
+    from hermes_constants import get_hermes_home
+    task = new_task(board)
+    subscribe(board, task)
+    metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+    metadata.update(decision_required=True, continuation_context="fresh")
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert kb.block_task(board, task, reason="owner decision", kind="needs_input")
+    payload = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert kb.unblock_task(board, task)
+    assert kb.block_task(board, task, reason="still stalled", kind="capability")
+    effect = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    # Persist an actual old-version native closure, then read with new semantics.
+    with kb.write_txn(board):
+        kb._append_event(board, task, "continuation_reason_closed", {
+            "reason": payload["reason"], "event": payload["event"], "effect_event": effect,
+            "profile": "default", "job_id": "job1", "profile_home": str(get_hermes_home()),
+        })
+    receipt = board.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+    metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
+    metadata.update({"reason_ack_event:decision_required": payload["event"],
+                     "reason_effect_event:decision_required": effect,
+                     "reason_closed_event:decision_required": receipt,
+                     "capability_decision_event": effect})
+    kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    with kb.connect_closing() as reopened:
+        items = continuation.observe_pending_obligations(
+            reopened, job_id="job1", profile="default", deadline_seconds=900)
+        assert len(items) == 1, "another block did not resolve the owner decision"
+        episode, admitted_at = items[0]["episode_event"], items[0]["admitted_at"]
+        current = payload
+        if observe_again:
+            current = continuation.collect_wakeup(reopened, job_id="job1", profile="default")
+            assert current["event"] == effect
+        retained = continuation.observe_pending_obligations(
+            reopened, job_id="job1", profile="default", deadline_seconds=900)
+        assert retained[0]["episode_event"] == episode == payload["event"]
+        assert retained[0]["admitted_at"] == admitted_at
+        assert kb.unblock_task(reopened, task)
+        resolved = reopened.execute("SELECT MAX(id) FROM task_events WHERE task_id = ?", (task,)).fetchone()[0]
+        assert continuation.acknowledge_wakeup(
+            reopened, job_id="job1", profile="default", card=task, event=current["event"],
+            reason=current["reason"], effect_event=resolved)
+        assert continuation.observe_pending_obligations(
+            reopened, job_id="job1", profile="default", deadline_seconds=900) == []
+
+
 def test_blocked_poll_has_no_wake_or_cursor_change(board):
     task = new_task(board)
     kb.block_task(board, task, reason="needs input", kind="needs_input")
