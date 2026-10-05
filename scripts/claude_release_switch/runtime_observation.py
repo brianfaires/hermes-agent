@@ -108,13 +108,13 @@ def cron_running_count(scheduler):
     return len(jobs)
 
 
-async def observe(runner, homes, primary, started):
+async def observe(runner, homes, primary, started, status_provider=None):
     from cron import scheduler
     from tools.async_delegation import active_count
     from tools.process_registry import process_registry
     from gateway.control_socket import build_status_payload
 
-    status = build_status_payload()
+    status = build_status_payload() if status_provider is None else status_provider()
     groups = {primary: runner.adapters, **runner._profile_adapters}
     check(set(groups) <= set(homes), 'unknown adapter profile')
     required = runner._release_required_platforms
@@ -228,9 +228,19 @@ def install(gateway, attest):
         check(len(owners) == 1, 'ambiguous gateway owner')
         runner, homes, primary = owners[0]
         loop = asyncio.get_running_loop()
+        handlers = dict(kwargs.pop('verb_handlers', None) or {})
+        native_status = handlers.get('status')
+        if 'status' in handlers:
+            # Current gateways supply their own live activity sampler. Compose
+            # only with this runner's native callback; unrelated owners refuse.
+            check(getattr(native_status, '__self__', None) is runner
+                  and getattr(native_status, '__func__', None)
+                  is getattr(gateway.GatewayRunner, '_live_control_status', None),
+                  'status callback already owned')
 
         def status():
-            future = asyncio.run_coroutine_threadsafe(observe(runner, homes, primary, started), loop)
+            future = asyncio.run_coroutine_threadsafe(
+                observe(runner, homes, primary, started, native_status), loop)
             try:
                 value = future.result(timeout=2)
                 attest()
@@ -239,8 +249,6 @@ def install(gateway, attest):
                 if not future.done():
                     future.cancel()
 
-        handlers = dict(kwargs.pop('verb_handlers', None) or {})
-        check('status' not in handlers, 'status callback already owned')
         handlers['status'] = status
         original_server_init(self, *args, verb_handlers=handlers, **kwargs)
 

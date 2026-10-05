@@ -768,6 +768,51 @@ def test_install_captures_consumed_profile_config(tmp_path, monkeypatch):
         observation.required_platforms(consumed)
 
 
+
+@pytest.mark.parametrize('native_status', [False, True])
+def test_install_composes_runner_owned_status(tmp_path, monkeypatch, native_status):
+    """Constructor compatibility only; actual health is qualified by real launch tests."""
+    import asyncio
+    from types import SimpleNamespace
+    from gateway import config as config_module, control_socket
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+
+    class Runtime:
+        def __init__(self):
+            self.config = config_module.GatewayConfig(multiplex_profiles=False)
+        def _create_adapter(self, *args):
+            return None
+        async def _start_one_profile_adapters(self, *args):
+            pass
+        _run_secondary_profile_reconnect = _start_one_profile_adapters
+        def _live_control_status(self):
+            raise AssertionError('constructor regression must not fabricate health')
+
+    gateway = SimpleNamespace(GatewayRunner=Runtime)
+    monkeypatch.setattr(config_module, 'load_gateway_config', config_module.load_gateway_config)
+    monkeypatch.setattr(control_socket.GatewayControlServer, '__init__', control_socket.GatewayControlServer.__init__)
+    observation.install(gateway, lambda: None)
+    runner = Runtime()
+
+    async def exercise():
+        pause = lambda: {'pausing': True}
+        handlers = {'pause-for-update': pause}
+        if native_status:
+            handlers['status'] = runner._live_control_status
+        # Real server construction, before bind: this is where startup failed.
+        server = control_socket.GatewayControlServer(tmp_path, verb_handlers=handlers)
+        assert server._handlers['pause-for-update'] is pause
+        assert callable(server._handlers['status'])
+        assert handlers.get('status') == (runner._live_control_status if native_status else None)
+        foreign = Runtime.__new__(Runtime)
+        for callback in (foreign._live_control_status, lambda: {}):
+            with pytest.raises(RuntimeError, match='status callback already owned'):
+                control_socket.GatewayControlServer(tmp_path, verb_handlers={'status': callback})
+
+    asyncio.run(exercise())
+
+
 def test_actual_api_startup_maintenance_preserves_idle_and_busy(observation_runtime, monkeypatch, tmp_path):
     import asyncio
     import secrets
