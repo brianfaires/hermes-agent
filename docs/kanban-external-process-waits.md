@@ -1,5 +1,8 @@
 # Existing Kanban waits for supervised terminal CLI output
 
+The external-process variant requires Linux user-systemd/procfs and fails
+closed before file inspection on unsupported platforms; native waits are unchanged.
+
 `kanban_block(kind="dependency", wait=...)` accepts the existing native
 `{board, task_id, run_id}` result reference unchanged. The alternative is:
 

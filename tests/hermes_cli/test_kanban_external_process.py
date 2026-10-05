@@ -61,6 +61,17 @@ def write_result(output):
     output.chmod(0o600)
 
 
+def test_unsupported_platform_rejects_before_private_file_io(process_wait, monkeypatch):
+    import sys
+    conn, card, run, wait, props, output = process_wait
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsupported platform must not inspect private release paths")
+    with monkeypatch.context() as scope:
+        scope.setattr(sys, "platform", "win32")
+        scope.setattr(ep, "_release_dir", forbidden)
+        assert ep.inspect_receipt(wait, require_live=True) == (False, None)
+
+
 @pytest.mark.parametrize("terminal", ["success", "failure"])
 def test_terminal_released_cgroup_keeps_exact_invocation_receipt(process_wait, terminal):
     conn, card, run, wait, props, output = process_wait

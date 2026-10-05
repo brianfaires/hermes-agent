@@ -9,6 +9,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 from hermes_cli import profiles
 
 MAX_RESULT_BYTES = 1024 * 1024
+_UID = getattr(os, "getuid", lambda: None)()
 _FIELDS = {"kind", "unit", "invocation_id", "release_id", "phase", "candidate_sha",
            "known_good_sha", "result_basename"}
 
@@ -52,7 +54,7 @@ def _release_dir(owner, ref):
             fd = child
             info = os.fstat(fd)
             if index >= len(home.parts) - 1:
-                if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                if info.st_uid != _UID or info.st_mode & 0o022:
                     raise ValueError("executor directory is not owner-controlled")
             if index > len(home.parts) - 1 and info.st_mode & 0o077:
                 raise ValueError("release state directories must be private")
@@ -81,14 +83,14 @@ def _show(ref, owner):
 def _proc_identity(pid):
     """Read exact Linux process identity, checking for death/reuse during read."""
     root = Path("/proc") / str(int(pid))
-    first = (root / "stat").read_text()
+    first = (root / "stat").read_text(encoding="utf-8")
     fields = first[first.rfind(")") + 2:].split()
-    groups = (root / "cgroup").read_text().splitlines()
+    groups = (root / "cgroup").read_text(encoding="utf-8").splitlines()
     cgroups = [line.split(":", 2)[2] for line in groups
                if line.startswith("0::") or line.split(":", 2)[1] == "name=systemd"]
     if (len(cgroups) != 1 or fields[0] in {"Z", "X", "x"}
-            or root.stat().st_uid != os.getuid()
-            or (root / "stat").read_text().rpartition(") ")[2].split()[19] != fields[19]):
+            or root.stat().st_uid != _UID
+            or (root / "stat").read_text(encoding="utf-8").rpartition(") ")[2].split()[19] != fields[19]):
         raise ValueError("unavailable or changing process identity")
     return dict(pid=int(pid), start_ticks=int(fields[19]), pgrp=int(fields[2]), cgroup=cgroups[0])
 
@@ -118,6 +120,8 @@ def _live_identity(props, control_pid=None):
 
 def inspect_receipt(wait, *, require_live=False, identity=None, control_pid=None):
     """Return (binding valid, terminal/liveness receipt or None), fail closed."""
+    if sys.platform != "linux" or _UID is None:
+        return False, None
     ref, owner = wait["result_ref"], wait["executor"]
     try:
         validate_ref(ref)
@@ -179,7 +183,7 @@ def inspect_receipt(wait, *, require_live=False, identity=None, control_pid=None
                 fd = os.open(ref["result_basename"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                 with os.fdopen(fd, "rb") as stream:
                     before = os.fstat(stream.fileno())
-                    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                    if (not stat.S_ISREG(before.st_mode) or before.st_uid != _UID
                             or before.st_mode & 0o077 or before.st_nlink != 1
                             or not 0 < before.st_size <= MAX_RESULT_BYTES
                             or before.st_mtime_ns < started_wall):
