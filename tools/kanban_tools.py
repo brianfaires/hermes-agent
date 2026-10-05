@@ -1968,7 +1968,7 @@ KANBAN_BLOCK_SCHEMA = {
             },
             "wait": {
                 "type": "object",
-                "description": "Expected external waiting, with kind=dependency. Closes this worker run as scheduled without failure. Requires an already existing independent native executor run. Receipts only resume ordinary fenced dispatch; they grant no authority or goal completion. Deadline retains the reason as an owned blocker. Available only on a runtime shipping this schema.",
+                "description": "Expected external waiting, with kind=dependency. Closes this worker run as scheduled without failure. Requires an existing independent native executor run or a live external_process transient user service bound to an exact InvocationID and executor HERMES_HOME. External results are private CLI output files, never release approval. Receipts only resume ordinary fenced dispatch; they grant no authority or goal completion. Deadline retains the reason as an owned blocker. Available only on a runtime shipping this schema.",
                 "properties": {
                     "next_owner": {"type": "string"},
                     "expected_effect": {"type": "string"},
@@ -1976,10 +1976,30 @@ KANBAN_BLOCK_SCHEMA = {
                     "resume_condition": {"type": "string", "enum": ["accepted", "launched", "result"]},
                     "recheck_at": {"type": "integer", "description": "Unix timestamp for independent dispatcher recheck/blocker evidence."},
                     "result_ref": {
-                        "type": "object",
-                        "properties": {"board": {"type": "string"}, "task_id": {"type": "string"}, "run_id": {"type": "integer"}},
-                        "required": ["board", "task_id", "run_id"],
-                        "additionalProperties": False,
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {"board": {"type": "string"}, "task_id": {"type": "string"}, "run_id": {"type": "integer"}},
+                                "required": ["board", "task_id", "run_id"],
+                                "additionalProperties": False,
+                            },
+                            {
+                                "type": "object",
+                                "description": "Existing independent transient SERVICE only; actual PID/start/cgroup identity and exact executor profile home. Same initiating owner only. resume_condition must be result; no live-process owner transfer. Private state/release-switches/release_id/result_basename under executor home. Retain terminal unit for reconciliation; no collect. No launch authority.",
+                                "properties": {
+                                    "kind": {"type": "string", "enum": ["external_process"]},
+                                    "unit": {"type": "string"},
+                                    "invocation_id": {"type": "string"},
+                                    "release_id": {"type": "string"},
+                                    "phase": {"type": "string"},
+                                    "candidate_sha": {"type": "string"},
+                                    "known_good_sha": {"type": "string"},
+                                    "result_basename": {"type": "string"},
+                                },
+                                "required": ["kind", "unit", "invocation_id", "release_id", "phase", "candidate_sha", "known_good_sha", "result_basename"],
+                                "additionalProperties": False,
+                            },
+                        ],
                     },
                 },
                 "required": ["next_owner", "expected_effect", "executor", "resume_condition", "recheck_at", "result_ref"],

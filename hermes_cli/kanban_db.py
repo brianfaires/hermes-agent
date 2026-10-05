@@ -8441,13 +8441,17 @@ def set_branch_name(
 
 
 # ---------------------------------------------------------------------------
-def _external_wait_receipt(wait: dict) -> tuple[bool, Optional[int]]:
-    """Read one explicit native run, never scan artifacts or infer authority.
+def _external_wait_receipt(wait: dict, *, identity=None) -> tuple[bool, Optional[int | dict]]:
+    """Read one explicit native run or bound service, never infer authority.
 
     The bool verifies the executor binding; the event id proves the requested
-    lifecycle effect. A delivery acknowledgement is never such an effect.
+    lifecycle effect; external services return a bounded receipt instead.
+    A delivery acknowledgement is never such an effect.
     """
     ref = wait["result_ref"]
+    if ref.get("kind") == "external_process":
+        from hermes_cli.kanban_external_process import inspect_receipt
+        return inspect_receipt(wait, identity=identity)
     path = board_db_path(ref["board"])
     if not path.is_file():
         return False, None
@@ -8494,12 +8498,18 @@ def _validate_external_wait(wait: dict) -> None:
     if not profile_exists(wait["next_owner"]):
         raise ValueError("external wait destination profile is unavailable")
     ref = wait["result_ref"]
-    if (not isinstance(ref, dict) or set(ref) != {"board", "task_id", "run_id"}
+    if isinstance(ref, dict) and ref.get("kind") == "external_process":
+        from hermes_cli.kanban_external_process import validate_ref
+        validate_ref(ref)
+        if wait["resume_condition"] != "result":
+            raise ValueError("external_process resume_condition must be result")
+    elif (not isinstance(ref, dict) or set(ref) != {"board", "task_id", "run_id"}
             or not isinstance(ref["board"], str) or not ref["board"]
             or not isinstance(ref["task_id"], str) or not ref["task_id"]
             or type(ref["run_id"]) is not int or ref["run_id"] < 1):
         raise ValueError("result_ref requires an explicit board/task_id/run_id")
-    _normalize_board_slug(ref["board"])
+    else:
+        _normalize_board_slug(ref["board"])
     if wait["resume_condition"] not in ("accepted", "launched", "result"):
         raise ValueError("resume_condition must be accepted, launched, or result")
     if type(wait["recheck_at"]) is not int or wait["recheck_at"] <= 0:
@@ -8529,13 +8539,16 @@ def reconcile_external_waits(conn: sqlite3.Connection, *, now: Optional[int] = N
     ).fetchall()
     for row in rows:
         try:
-            wait = json.loads(row["metadata"] or "{}").get("external_wait")
+            saved_metadata = json.loads(row["metadata"] or "{}")
+            wait = saved_metadata.get("external_wait")
             if wait is None:
                 continue
             _validate_external_wait(wait)
+            if (wait["result_ref"].get("kind") == "external_process"
+                    and saved_metadata.get("external_process_receipt")):
+                continue
         except (ValueError, TypeError, AttributeError):
             continue  # Corrupt/legacy evidence cannot enable execution.
-        bound, receipt = _external_wait_receipt(wait)
         with write_txn(conn):
             task = get_task(conn, row["id"])
             latest = latest_run(conn, row["id"])
@@ -8552,12 +8565,33 @@ def reconcile_external_waits(conn: sqlite3.Connection, *, now: Optional[int] = N
                     or event["kind"] not in ("scheduled", "external_wait_due")
                     or has_active_control_hold(conn, task.id)):
                 continue
+            if (wait["result_ref"].get("kind") == "external_process"
+                    and wait["executor"] != latest.profile):
+                continue  # Reject foreign-profile file inspection, not just transfer.
+            bound, receipt = _external_wait_receipt(
+                wait, identity=(latest.metadata or {}).get("external_process_identity"))
+            if isinstance(receipt, dict):
+                metadata = dict(latest.metadata or {})
+                # A failed terminal observation is consumed once, even when
+                # an earlier deadline already produced a due notification.
+                if metadata.get("external_process_receipt"):
+                    continue
+                metadata["external_process_receipt"] = receipt
+                conn.execute("UPDATE task_runs SET metadata=? WHERE id=?",
+                             (json.dumps(metadata), latest.id))
+                if receipt["verdict"] == "process_failed":
+                    _append_event(conn, task.id, "external_wait_due",
+                                  {**wait, "blocker": row["summary"], "executor_verified": bound,
+                                   "external_process_receipt": receipt}, run_id=latest.id)
+                    continue  # Current owner retains recovery; no success or transfer.
             if bound and receipt is not None:
                 status = _landing_status_after_parents(conn, task.id)
                 conn.execute("UPDATE tasks SET status=?, assignee=? WHERE id=?",
                              (status, wait["next_owner"], task.id))
                 _append_event(conn, task.id, "external_wait_resumed",
-                              {"wait_run_id": latest.id, "receipt_event": receipt,
+                              {"wait_run_id": latest.id,
+                               **({"external_process_receipt": receipt} if isinstance(receipt, dict)
+                                  else {"receipt_event": receipt}),
                                **wait}, run_id=latest.id)
                 resumed.append(task.id)
             elif now >= wait["recheck_at"] and not conn.execute(
@@ -8586,19 +8620,35 @@ def schedule_task(
     external ``wait`` instead uses dispatcher reconciliation without resetting
     failure budgets. Its structured result reference grants no execution rights.
     """
+    external_identity = None
     if wait is not None:
         _validate_external_wait(wait)
         ref = wait["result_ref"]
         source_path = _connection_main_db_path(conn)
+        external_process = ref.get("kind") == "external_process"
+        if external_process:
+            initiating_task = get_task(conn, task_id)
+            initiating_run = get_run(conn, expected_run_id) if expected_run_id is not None else None
+            if (not initiating_task or not initiating_run
+                    or initiating_task.current_run_id != expected_run_id
+                    or initiating_task.assignee != initiating_run.profile
+                    or wait["executor"] != initiating_run.profile):
+                return False
+            from hermes_cli.kanban_external_process import inspect_receipt
+            executor_bound, external_identity = inspect_receipt(
+                wait, require_live=True, control_pid=initiating_task.worker_pid)
+        else:
+            executor_bound = _external_wait_receipt(wait)[0]
         if (expected_run_id is None or not reason or not reason.strip() or source_path is None
-                or (ref["task_id"] == task_id
+                or (not external_process and ref["task_id"] == task_id
                     and board_db_path(ref["board"]).resolve() == source_path.resolve())
-                or not _external_wait_receipt(wait)[0]):
+                or not executor_bound):
             return False
     with write_txn(conn):
         if wait is not None:
             task = get_task(conn, task_id)
             if (not task or task.status != "running" or task.current_run_id != expected_run_id
+                    or (external_process and task.assignee != wait["executor"])
                     or has_active_control_hold(conn, task_id)):
                 return False
             # A repeated result must not restart a relay that already consumed
@@ -8630,6 +8680,8 @@ def schedule_task(
             current_run = get_run(conn, expected_run_id)
             metadata = dict(current_run.metadata or {})
             metadata["external_wait"] = wait
+            if external_identity is not None:
+                metadata["external_process_identity"] = external_identity
         run_id = _end_run(
             conn, task_id,
             outcome="scheduled", status="scheduled",
