@@ -250,7 +250,9 @@ def test_capability_escalation_existing_recipient_requires_exact_explicit_grant(
         recipient = next(sub for sub in kb.list_notify_subs(board, tid) if sub["platform"] == "telegram")
         metadata = recipient["delivery_metadata"]
         if grant_change == "missing_decision":
-            del metadata["decision_required"]
+            # Same-owner updates merge metadata; revoke explicitly rather
+            # than relying on omission to discard a retained grant.
+            metadata["decision_required"] = False
         else:
             metadata["capability_decision_event"] = held + 1
         kb.add_notify_sub(board, task_id=tid, platform="telegram", chat_id="chat-1",
@@ -365,3 +367,107 @@ def test_policy_redirect_retains_native_decision_until_origin_handler(board, mon
     assert f"escalation {escalation}" in adapter.handled[-1].text
     tick(monkeypatch, adapter)
     assert len(adapter.handled) == 2
+
+
+def overdue_separate_wait(conn, *, bind=True, next_owner="default"):
+    """Separate fixture stimulus; the controller's own card is never a wake."""
+    controller = kb.create_task(conn, title="Acceptance controller", assignee="ang")
+    tid = make_task(conn)
+    current = kb.claim_task(conn, tid)
+    with kb.connect_closing(kb.board_db_path("operations")) as external:
+        target = kb.create_task(external, title="Independent native work", assignee="ops")
+        run = kb.claim_task(external, target)
+    wait = dict(next_owner=next_owner, executor="ops", expected_effect="Obtain exact Ops action or retain owned blocker",
+                result_ref=dict(board="operations", task_id=target, run_id=run.current_run_id),
+                resume_condition="result", recheck_at=int(time.time()) - 1)
+    if bind:
+        sub = kb.list_notify_subs(conn, tid)[0]
+        metadata = dict(sub["delivery_metadata"], decision_required=True,
+                        external_wait_run_id=current.current_run_id)
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1",
+                          notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert kb.schedule_task(conn, tid, reason="ops owns missing verified action", expected_run_id=current.current_run_id, wait=wait)
+    assert kb.reconcile_external_waits(conn) == []
+    due = next(e for e in kb.list_events(conn, tid) if e.kind == "external_wait_due")
+    return controller, tid, due
+
+
+def test_external_due_reaches_matching_decision_handler_and_stays_owned(board, monkeypatch):
+    controller, tid, due = overdue_separate_wait(board)
+    from hermes_cli.kanban_continuation import admission_reason
+    assert admission_reason(board, kb.list_notify_subs(board, tid)[0], profile="default") == "decision_required"
+    before_controller = kb.list_events(board, controller)
+    adapter = RecordingAdapter()
+    tick(monkeypatch, adapter)  # Real collector, routing, deliver_wake and native receipt.
+    assert len(adapter.handled) == 1
+    event = adapter.handled[0]
+    assert event.source.profile == "default" and event.source.chat_id == "chat-1"
+    assert "decision_required" in event.text and "no execution approval" in event.text
+    assert str(due.id) in event.text
+    assert adapter.sent == []
+    assert kb.list_notify_subs(board, tid)[0]["last_event_id"] == due.id
+    with kb.connect_closing() as reopened:
+        # Native delivery receipt persists, but it never closes the obligation.
+        assert kb.get_task(reopened, tid).status == "scheduled"
+        retained = next(e for e in kb.list_events(reopened, tid) if e.kind == "external_wait_due")
+        assert retained.payload["blocker"] == "ops owns missing verified action"
+        assert retained.payload["next_owner"] == "default"
+        for _ in range(2):
+            assert kb.reconcile_external_waits(reopened) == []
+            tick(monkeypatch, adapter)
+        assert len([e for e in kb.list_events(reopened, tid) if e.kind == "external_wait_due"]) == 1
+    assert len(adapter.handled) == 1 and adapter.sent == []
+    assert kb.list_events(board, controller) == before_controller
+
+
+@pytest.mark.parametrize("gate", ["unbound", "wrong_destination", "expired", "ordinary_notice", "hold", "fresh_cron"])
+def test_external_due_does_not_broaden_owner_grants(board, monkeypatch, gate):
+    _, tid, _ = overdue_separate_wait(board, bind=gate != "unbound",
+                                      next_owner="ang" if gate == "wrong_destination" else "default")
+    if gate == "hold":
+        with kb.write_txn(board):
+            kb._append_event(board, tid, "blocked", {"kind": "needs_input", "recurrences": 1})
+    if gate in ("expired", "ordinary_notice", "fresh_cron"):
+        sub = kb.list_notify_subs(board, tid)[0]
+        metadata = dict(sub["delivery_metadata"])
+        if gate == "expired":
+            metadata["authority_expires_at"] = int(time.time()) - 1
+        elif gate == "ordinary_notice":
+            metadata["decision_required"] = False
+        else:
+            metadata["continuation_context"] = "fresh"
+        kb.add_notify_sub(board, task_id=tid, platform="telegram", chat_id="chat-1",
+                          notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    before = kb.list_notify_subs(board, tid)
+    adapter = RecordingAdapter()
+    for _ in range(2):
+        tick(monkeypatch, adapter)
+    assert adapter.handled == []
+    assert kb.get_task(board, tid).status == "scheduled"
+    # Ordinary notification may consume unrelated native events, but never
+    # proves decision delivery or closes the scheduled wait.
+    if gate != "ordinary_notice":
+        assert kb.list_notify_subs(board, tid) == before
+
+
+def test_external_due_denied_handler_has_no_success_receipt(board, monkeypatch):
+    _, tid, due = overdue_separate_wait(board)
+    class Denied(RecordingAdapter):
+        async def handle_message(self, event):
+            self.handled.append(event)
+            event._native_decision_receipt.set_result(False)
+    denied = Denied()
+    before = kb.list_notify_subs(board, tid)
+    tick(monkeypatch, denied)
+    assert len(denied.handled) == 1
+    assert kb.list_notify_subs(board, tid) == before
+    with kb.connect_closing() as reopened:
+        assert kb.get_task(reopened, tid).status == "scheduled"
+        assert kb.list_notify_subs(reopened, tid) == before
+    accepted = RecordingAdapter()
+    tick(monkeypatch, accepted)
+    assert len(accepted.handled) == 1
+    assert kb.list_notify_subs(board, tid)[0]["last_event_id"] == due.id
+    tick(monkeypatch, accepted)
+    tick(monkeypatch, accepted)
+    assert len(accepted.handled) == 1

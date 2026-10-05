@@ -8088,6 +8088,12 @@ class AIAgent:
         auto-compress abort.  Auto-compress callers use the default
         ``force=False``.
         """
+        if getattr(self, "subscription_only", False):
+            if not os.environ.get("HERMES_KANBAN_TASK"):
+                raise RuntimeError("subscription_only prohibits auxiliary inference")
+            from hermes_cli.kanban_worker_context import park_for_context
+            park_for_context(self, messages, system_message)
+
         # Per-attempt signal consumed by turn-start preflight. A stalled
         # compression must not be mistaken for a structural no-op and followed
         # by the oversized provider request it was meant to prevent.
@@ -9083,19 +9089,25 @@ class AIAgent:
                         with durable_turn_lease_activity_lock:
                             durable_turn_lease_turn_active = True
                         durable_turn_lease_thread.start()
-                    result = run_conversation(
-                        self,
-                        user_message,
-                        system_message,
-                        conversation_history,
-                        effective_task_id,
-                        stream_callback,
-                        persist_user_message,
-                        persist_user_timestamp=persist_user_timestamp,
-                        persist_user_display_kind=persist_user_display_kind,
-                        persist_user_display_metadata=persist_user_display_metadata,
-                        moa_config=moa_config,
-                    )
+                    from hermes_cli.kanban_worker_context import ContextContinuation
+                    try:
+                        result = run_conversation(
+                            self,
+                            user_message,
+                            system_message,
+                            conversation_history,
+                            effective_task_id,
+                            stream_callback,
+                            persist_user_message,
+                            persist_user_timestamp=persist_user_timestamp,
+                            persist_user_display_kind=persist_user_display_kind,
+                            persist_user_display_metadata=persist_user_display_metadata,
+                            moa_config=moa_config,
+                        )
+                    except ContextContinuation as continuation:
+                        # Handle committed parking before generic failure and
+                        # retain the ordinary relay/session lease cleanup.
+                        result = continuation.result
                 finally:
                     # The lease remains held through relay/task finalization, but
                     # those post-loop steps must not receive a late refresh

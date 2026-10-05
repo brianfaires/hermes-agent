@@ -22228,7 +22228,8 @@ def main(
                         # out (→ sticky block). Gated on the env vars the
                         # dispatcher sets in `_default_spawn`; a no-op for every
                         # normal worker and every non-kanban `-q` run.
-                        if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+                        if (os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1"
+                                and not (isinstance(result, dict) and result.get("context_parked"))):
                             try:
                                 _run_kanban_goal_loop_q(cli, response)
                             except Exception as _goal_exc:

@@ -530,12 +530,26 @@ def _handle_show(args: dict, **kw) -> str:
             "task_id is required (or set HERMES_KANBAN_TASK in the env)"
         )
     board = args.get("board")
+    full, bool_error = _parse_bool_arg(args, "full")
+    if bool_error:
+        return tool_error(bool_error)
+    if args.get("reference") is not None and not isinstance(args["reference"], dict):
+        return tool_error("reference must be an object")
     try:
         kb, conn = _connect(board=board)
         try:
             task = kb.get_task(conn, tid)
             if task is None:
                 return tool_error(f"task {tid} not found")
+            if args.get("reference") is not None:
+                from hermes_cli.kanban_worker_context import inspect_reference
+                return json.dumps(inspect_reference(conn, tid, args["reference"]))
+            if (task.subscription_only and not full
+                    and os.environ.get("HERMES_KANBAN_TASK") == tid
+                    and _is_dispatcher_owned_worker()):
+                # One total-bounded representation, not raw history plus the
+                # same history again in worker_context.
+                return kb.build_worker_context(conn, tid)
             comments = kb.list_comments(conn, tid)
             events = kb.list_events(conn, tid)
             runs = kb.list_runs(conn, tid)
@@ -873,6 +887,19 @@ def _handle_block(args: dict, **kw) -> str:
                 f"completion judge will evaluate it."
             )
         try:
+            wait = args.get("wait")
+            if wait is not None:
+                if kind != "dependency":
+                    return tool_error("external wait requires kind='dependency'")
+                # Persist only bounded, redacted facts; the native receipt is
+                # separately verified by schedule_task, never trusted prose.
+                wait = dict(wait)
+                wait["expected_effect"] = redact_sensitive_text(str(wait.get("expected_effect", "")), force=True)
+                ok = kb.schedule_task(conn, tid, reason=reason, wait=wait,
+                                      expected_run_id=_worker_run_id(tid))
+                if not ok:
+                    return tool_error("external wait requires the current worker run and a distinct verified executor run")
+                return _ok(task_id=tid, status="scheduled", run_id=_worker_run_id(tid))
             ok = kb.block_task(
                 conn, tid,
                 reason=reason,
@@ -1730,7 +1757,9 @@ KANBAN_SHOW_SCHEMA = {
         "and recent events. Use this to (re)orient yourself before "
         "starting work, especially on retries. The response includes a "
         "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning."
+        "verbatim in your reasoning. Subscription workers get a bounded "
+        "view by default. Use full=true for full inspection or reference "
+        "to retrieve a specific current restriction or saved receipt."
     ),
     "parameters": {
         "type": "object",
@@ -1740,6 +1769,20 @@ KANBAN_SHOW_SCHEMA = {
                 "description": _DESC_TASK_ID_DEFAULT,
             },
             "board": _board_schema_prop(),
+            "full": {"type": "boolean", "description": "Explicit full task history inspection."},
+            "reference": {
+                "type": "object",
+                "description": "Retrieve exact evidence on this task without duplicated history.",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["task", "comment", "comments", "run", "event", "attachment", "parents", "children", "authority"]},
+                    "id": {"type": ["integer", "string"]},
+                    "field": {"type": "string"},
+                    "message_id": {"type": "integer", "description": "Read one native session message receipt; requires its saved owner profile/home."},
+                    "after_id": {"type": "integer", "description": "Lower exclusive bound of a required comment-reference range."},
+                    "through_id": {"type": "integer", "description": "Upper inclusive bound; follow next_reference until every comment ID is enumerated, then read each exact comment."},
+                },
+                "required": ["kind"],
+            },
         },
         "required": [],
     },
@@ -1922,6 +1965,25 @@ KANBAN_BLOCK_SCHEMA = {
                     "resumes automatically; the others surface to a human. "
                     "Omit only if none apply."
                 ),
+            },
+            "wait": {
+                "type": "object",
+                "description": "Expected external waiting, with kind=dependency. Closes this worker run as scheduled without failure. Requires an already existing independent native executor run. Receipts only resume ordinary fenced dispatch; they grant no authority or goal completion. Deadline retains the reason as an owned blocker. Available only on a runtime shipping this schema.",
+                "properties": {
+                    "next_owner": {"type": "string"},
+                    "expected_effect": {"type": "string"},
+                    "executor": {"type": "string"},
+                    "resume_condition": {"type": "string", "enum": ["accepted", "launched", "result"]},
+                    "recheck_at": {"type": "integer", "description": "Unix timestamp for independent dispatcher recheck/blocker evidence."},
+                    "result_ref": {
+                        "type": "object",
+                        "properties": {"board": {"type": "string"}, "task_id": {"type": "string"}, "run_id": {"type": "integer"}},
+                        "required": ["board", "task_id", "run_id"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["next_owner", "expected_effect", "executor", "resume_condition", "recheck_at", "result_ref"],
+                "additionalProperties": False,
             },
             "board": _board_schema_prop(),
         },

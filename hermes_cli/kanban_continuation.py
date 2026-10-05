@@ -18,7 +18,7 @@ from hermes_cli.profiles import profile_exists, profile_matches_home
 
 EVENT_KINDS = ("created", "promoted", "unblocked", "status", "completed",
                "crashed", "stale", "timed_out", "reclaimed", "changes_requested",
-               "review_requested", "gave_up", "blocked", "spawn_failed")
+               "review_requested", "gave_up", "blocked", "spawn_failed", "external_wait_due")
 PROCEDURE = "autonomous-work-continuation"
 
 
@@ -159,6 +159,40 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
             or task.model_override != "gpt-6.1-sol"
             or not kb._parents_satisfied(conn, task.id)):
         return None
+    if task.status == "scheduled":
+        # An overdue native wait may surface its exact owned blocker to an
+        # explicitly authorized existing-context decision handler. Ordinary
+        # notifications and fresh cron grants do not acquire this authority.
+        if (task.claim_lock or task.current_run_id is not None
+                or kb.has_active_control_hold(conn, task.id)
+                or sub.get("platform") == "continuation"
+                or sub.get("delivery_mode") != "wake"
+                or grant.get("continuation_context") != "existing"
+                or grant.get("decision_required") is not True
+                or type(grant.get("external_wait_run_id")) is not int):
+            return None
+        run = kb.latest_run(conn, task.id)
+        if (not run or run.id != grant["external_wait_run_id"]
+                or run.profile != task.assignee or run.outcome != "scheduled"):
+            return None
+        wait = (run.metadata or {}).get("external_wait")
+        try:
+            kb._validate_external_wait(wait)
+        except (ValueError, TypeError, AttributeError):
+            return None
+        due = conn.execute(
+            "SELECT kind, run_id, payload FROM task_events WHERE task_id=? "
+            "AND kind NOT IN ('commented', 'heartbeat', 'attachment_added') ORDER BY id DESC LIMIT 1",
+            (task.id,),
+        ).fetchone()
+        if (wait["next_owner"] != profile or not due
+                or due["kind"] != "external_wait_due" or due["run_id"] != run.id):
+            return None
+        payload = kb._event_payload_dict(due)
+        if (any(payload.get(key) != value for key, value in wait.items())
+                or payload.get("blocker") != run.summary):
+            return None
+        return "decision_required"  # Handler receipt only; wait/goal stays open.
     latest = conn.execute(
         "SELECT id, kind, payload FROM task_events WHERE task_id = ? "
         "AND kind IN ('gave_up', 'blocked', 'unblocked', 'created', 'promoted_manual') "

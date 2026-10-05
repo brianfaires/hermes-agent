@@ -133,7 +133,8 @@ def test_human_single_query_main_finalizes_after_query(monkeypatch):
     ]
 
 
-def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatch):
+@pytest.mark.parametrize("parked", [False, True])
+def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatch, parked):
     calls = []
 
     import cli as cli_mod
@@ -142,8 +143,9 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
         calls.append(("run", user_message, conversation_history))
         return {
             "final_response": "",
-            "error": "provider failed",
-            "failed": True,
+            "error": "" if parked else "provider failed",
+            "failed": not parked,
+            "context_parked": parked,
         }
 
     class FakeCLI:
@@ -186,6 +188,11 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
 
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
+    if parked:
+        monkeypatch.setenv("HERMES_KANBAN_GOAL_MODE", "1")
+        def unexpected_goal_loop(*args):
+            pytest.fail("parked context must not enter auxiliary goal loop")
+        monkeypatch.setattr(cli_mod, "_run_kanban_goal_loop_q", unexpected_goal_loop)
     monkeypatch.setattr(cli_mod, "HermesCLI", FakeCLI)
     monkeypatch.setattr(cli_mod.atexit, "register", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -197,7 +204,7 @@ def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatc
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.main(query="hello", quiet=True, toolsets="terminal")
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == (0 if parked else 1)
     assert ("claim", "cli", True) in calls
     assert ("run", "hello", []) in calls
     assert calls[-1] == ("finalize", "quiet-session")

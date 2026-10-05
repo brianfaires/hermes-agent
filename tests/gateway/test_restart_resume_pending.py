@@ -288,6 +288,20 @@ class TestSuspendRecentlyActiveSkipsResumePending:
 
 
 class TestResumePendingSystemNote:
+    @pytest.mark.parametrize("interactive", [True, False])
+    @pytest.mark.parametrize("message", ["", "Finish the already approved closeout"])
+    def test_restart_preserves_approval_and_requires_receipt_reconciliation(self, interactive, message):
+        note = build_resume_recovery_note("restart_timeout", message, interactive=interactive)
+        assert "next unfinished step covered by existing approval" in note
+        assert "completion receipts" in note
+        assert "expired or was revoked" in note
+        assert "Do not replay old side effects" in note
+        assert "skip any unfinished work" not in note
+        assert "ask what they would like to do next" not in note
+        if message:
+            assert "NEW message" in note
+            assert note.endswith(message)
+
     def _pending_entry(self, reason="restart_timeout") -> SessionEntry:
         now = datetime.now()
         return SessionEntry(

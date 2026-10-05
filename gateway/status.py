@@ -1335,6 +1335,27 @@ def runtime_status_pid_is_live(record: Optional[dict[str, Any]]) -> bool:
     return True
 
 
+def activity_is_fresh_zero(record: Optional[dict[str, Any]], *,
+                          expected_pid: int, max_age_s: float = 5.0) -> bool:
+    """Release evidence only, not stop authority: unknown activity fails closed.
+
+    The caller must already have verified the current gateway identity and
+    drain acknowledgement. General ``updated_at``/``answered_at`` fields do
+    not establish the freshness of an activity count.
+    """
+    if (not isinstance(record, dict) or record.get("activity_state") != "fresh"
+            or type(expected_pid) is not int or expected_pid < 1
+            or record.get("activity_writer_pid") != expected_pid
+            or record.get("gateway_state") != "draining"
+            or type(record.get("active_agents")) is not int
+            or record["active_agents"] != 0):
+        return False
+    sampled_at = record.get("activity_sampled_at")
+    if type(sampled_at) not in (int, float) or max_age_s <= 0:
+        return False
+    return 0 <= time.time() - sampled_at <= max_age_s
+
+
 def parse_active_agents(raw: Any) -> int:
     """Coerce a persisted ``active_agents`` value to a clamped non-negative int.
 

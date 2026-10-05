@@ -857,3 +857,36 @@ def test_goal_identity_and_unfinished_children_do_not_close_goal(board, goal_id)
         assert result["reason"] == "goal_closeout"
     else:
         assert result == {"wakeAgent": False}
+
+
+def test_separate_smoke_stimulus_decision_effect_ack_and_two_quiet_repeats(board):
+    """Native decision/receipt boundary only: no installed provider success claim."""
+    from hermes_cli import kanban_continuation as continuation
+    controller = new_task(board)
+    stimulus = new_task(board)
+    assert stimulus != controller
+    subscribe(board, stimulus)
+    metadata = kb.list_notify_subs(board, stimulus)[0]["delivery_metadata"]
+    metadata.update(decision_required=True, continuation_context="fresh")
+    kb.add_notify_sub(board, task_id=stimulus, platform="continuation", chat_id="job1",
+                      notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
+    assert kb.block_task(board, stimulus, reason="Separate scoped owner decision", kind="needs_input")
+    decision = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert decision["card"] == stimulus and decision["reason"] == "decision_required"
+    # An explicit native owner action is required; delivery alone is not it.
+    kb.add_comment(board, stimulus, author="default", body="Transport receipt only")
+    receipt = kb.list_events(board, stimulus)[-1].id
+    ack = dict(job_id="job1", profile="default", card=stimulus,
+               event=decision["event"], reason=decision["reason"])
+    assert not continuation.acknowledge_wakeup(board, **ack, effect_event=receipt)
+    assert kb.unblock_task(board, stimulus)
+    effect = kb.list_events(board, stimulus)[-1].id
+    assert continuation.acknowledge_wakeup(board, **ack, effect_event=effect)
+    # Real fresh connection; the close/reopen wait test separately destroys
+    # the original connection to verify full persistence of that lifecycle.
+    with kb.connect_closing() as reopened:
+        before = kb.list_events(reopened, stimulus)
+        for _ in range(2):
+            assert continuation.collect_wakeup(reopened, job_id="job1", profile="default") == {"wakeAgent": False}
+        assert kb.list_events(reopened, stimulus) == before
+        assert kb.get_task(reopened, controller).status == "ready"

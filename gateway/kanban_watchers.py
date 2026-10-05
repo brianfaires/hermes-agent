@@ -436,9 +436,11 @@ class GatewayKanbanWatchersMixin:
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
                         tick_context.update(operation="collect_subscriptions", board=slug, task_id=None)
-                        db_path = board_meta.get("db_path")
                         try:
-                            resolved_db_path = str(Path(db_path).expanduser().resolve()) if db_path else str(_kb.kanban_db_path(slug).resolve())
+                            # Match count_notify_subs/connect, including the
+                            # worker DB pin. Metadata paths can name different
+                            # boards that actually open the same pinned DB.
+                            resolved_db_path = str(_kb.kanban_db_path(slug).resolve())
                         except Exception:
                             resolved_db_path = f"slug:{slug}"
                         if resolved_db_path in seen_db_paths:

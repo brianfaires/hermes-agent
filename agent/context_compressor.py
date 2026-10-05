@@ -7297,7 +7297,8 @@ This compaction should PRIORITISE preserving all information related to the focu
         ``archive_and_compact`` on the session DB to soft-archive old rows
         and insert the compacted set atomically.
         """
-        if not self._micro_compact_enabled:
+        from agent.inference_policy import subscription_only_active
+        if subscription_only_active() or not self._micro_compact_enabled:
             return messages
 
         # Cadence gate. A pass rewrites already-sent history, so it costs one

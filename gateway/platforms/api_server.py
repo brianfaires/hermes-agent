@@ -1610,13 +1610,15 @@ class APIServerAdapter(BasePlatformAdapter):
         self._browser_control_artifacts: Dict[str, ArtifactStore] = {}
         self._browser_control_artifact_limiter: Optional[ArtifactRateLimiter] = None
 
-    def active_agent_work_count(self) -> int:
+    def active_agent_work_count(self, *, strict: bool = False) -> int:
         """Return all live agent work owned by this API adapter.
 
         ``/v1/runs`` registers an asyncio task before it constructs and stores
         its agent, so ``_active_run_agents`` has a real queued-before-agent gap.
         Reuse the task-based accounting used by the concurrent-run limit: it
         covers that gap and excludes completed tasks retained until cleanup.
+        ``strict`` propagates sampling failure for live release evidence;
+        existing display/drain callers retain the best-effort zero fallback.
         """
         try:
             return (
@@ -1625,6 +1627,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 + sum(not task.done() for task in self._active_run_tasks.values())
             )
         except Exception:
+            if strict:
+                raise
             return 0
 
     def interrupt_active_runs(self, reason: str) -> int:

@@ -8441,20 +8441,174 @@ def set_branch_name(
 
 
 # ---------------------------------------------------------------------------
+def _external_wait_receipt(wait: dict) -> tuple[bool, Optional[int]]:
+    """Read one explicit native run, never scan artifacts or infer authority.
+
+    The bool verifies the executor binding; the event id proves the requested
+    lifecycle effect. A delivery acknowledgement is never such an effect.
+    """
+    ref = wait["result_ref"]
+    path = board_db_path(ref["board"])
+    if not path.is_file():
+        return False, None
+    try:
+        other = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        other.row_factory = sqlite3.Row
+        try:
+            run = other.execute(
+                "SELECT * FROM task_runs WHERE id=? AND task_id=? AND profile=?",
+                (ref["run_id"], ref["task_id"], wait["executor"]),
+            ).fetchone()
+            if run is None:
+                return False, None
+            condition = wait["resume_condition"]
+            kind = {"accepted": "claimed", "launched": "spawned", "result": "completed"}[condition]
+            # A dead/failed attempt cannot masquerade as current acceptance.
+            if condition != "result":
+                task = other.execute("SELECT current_run_id FROM tasks WHERE id=?", (ref["task_id"],)).fetchone()
+                if run["ended_at"] is not None or not task or task[0] != ref["run_id"]:
+                    return True, None
+            elif run["outcome"] != "completed" or not run["summary"]:
+                return True, None
+            event = other.execute(
+                "SELECT id FROM task_events WHERE task_id=? AND run_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                (ref["task_id"], ref["run_id"], kind),
+            ).fetchone()
+            return True, int(event[0]) if event else None
+        finally:
+            other.close()
+    except sqlite3.Error:
+        return False, None
+
+
+def _validate_external_wait(wait: dict) -> None:
+    fields = {"next_owner", "expected_effect", "result_ref", "resume_condition", "recheck_at", "executor"}
+    if not isinstance(wait, dict) or set(wait) != fields:
+        raise ValueError("wait requires next_owner, expected_effect, result_ref, resume_condition, recheck_at, executor")
+    for key in ("next_owner", "expected_effect", "executor"):
+        if not isinstance(wait[key], str) or not wait[key].strip() or len(wait[key]) > 2000:
+            raise ValueError(f"invalid wait {key}")
+    from hermes_cli.profiles import profile_exists, validate_profile_name
+    validate_profile_name(wait["next_owner"])
+    validate_profile_name(wait["executor"])
+    if not profile_exists(wait["next_owner"]):
+        raise ValueError("external wait destination profile is unavailable")
+    ref = wait["result_ref"]
+    if (not isinstance(ref, dict) or set(ref) != {"board", "task_id", "run_id"}
+            or not isinstance(ref["board"], str) or not ref["board"]
+            or not isinstance(ref["task_id"], str) or not ref["task_id"]
+            or type(ref["run_id"]) is not int or ref["run_id"] < 1):
+        raise ValueError("result_ref requires an explicit board/task_id/run_id")
+    _normalize_board_slug(ref["board"])
+    if wait["resume_condition"] not in ("accepted", "launched", "result"):
+        raise ValueError("resume_condition must be accepted, launched, or result")
+    if type(wait["recheck_at"]) is not int or wait["recheck_at"] <= 0:
+        raise ValueError("recheck_at must be a positive Unix timestamp")
+
+
+def reconcile_external_waits(conn: sqlite3.Connection, *, now: Optional[int] = None,
+                             failure_limit: Optional[int] = None) -> list[str]:
+    """Resume verified waits through ordinary dispatch; keep overdue blockers.
+
+    Run/event identity is durable across process restarts. No grants, counters,
+    subscriptions, or holds are changed. Read-only foreign-board evidence does
+    not authorize any downstream effect; the resumed owner must obtain that.
+    """
+    from agent.estop import is_engaged
+
+    if is_engaged():
+        return []
+    failure_limit = DEFAULT_FAILURE_LIMIT if failure_limit is None else failure_limit
+    now = int(time.time()) if now is None else now
+    resumed = []
+    rows = conn.execute(
+        "SELECT t.id, r.id AS run_id, r.metadata, r.summary FROM tasks t "
+        "JOIN task_runs r ON r.task_id=t.id WHERE t.status='scheduled' "
+        "AND t.current_run_id IS NULL AND r.id=(SELECT MAX(id) FROM task_runs WHERE task_id=t.id) "
+        "AND r.outcome='scheduled'"
+    ).fetchall()
+    for row in rows:
+        try:
+            wait = json.loads(row["metadata"] or "{}").get("external_wait")
+            if wait is None:
+                continue
+            _validate_external_wait(wait)
+        except (ValueError, TypeError, AttributeError):
+            continue  # Corrupt/legacy evidence cannot enable execution.
+        bound, receipt = _external_wait_receipt(wait)
+        with write_txn(conn):
+            task = get_task(conn, row["id"])
+            latest = latest_run(conn, row["id"])
+            event = conn.execute(
+                "SELECT kind, run_id FROM task_events WHERE task_id=? "
+                "AND kind NOT IN ('commented', 'attachment_added', 'heartbeat') ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if (not task or task.status != "scheduled" or task.current_run_id is not None
+                    or not latest or latest.id != row["run_id"]
+                    or task.assignee != latest.profile
+                    or task.consecutive_failures >= (task.max_retries if task.max_retries is not None else failure_limit)
+                    or not event or event["run_id"] != latest.id
+                    or event["kind"] not in ("scheduled", "external_wait_due")
+                    or has_active_control_hold(conn, task.id)):
+                continue
+            if bound and receipt is not None:
+                status = _landing_status_after_parents(conn, task.id)
+                conn.execute("UPDATE tasks SET status=?, assignee=? WHERE id=?",
+                             (status, wait["next_owner"], task.id))
+                _append_event(conn, task.id, "external_wait_resumed",
+                              {"wait_run_id": latest.id, "receipt_event": receipt,
+                               **wait}, run_id=latest.id)
+                resumed.append(task.id)
+            elif now >= wait["recheck_at"] and not conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='external_wait_due'",
+                (task.id, latest.id),
+            ).fetchone():
+                _append_event(conn, task.id, "external_wait_due",
+                              {**wait, "blocker": row["summary"], "executor_verified": bound},
+                              run_id=latest.id)
+    return resumed
+
+
 def schedule_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    wait: Optional[dict] = None,
 ) -> bool:
     """Park a task in ``scheduled`` so it is waiting on time, not human input.
 
     ``scheduled`` tasks are intentionally not dispatchable; an external cron,
     human action, or automation can later call ``unblock_task`` to re-gate them
-    to ``ready`` (or ``todo`` if parents are still incomplete).
+    to ``ready`` (or ``todo`` if parents are still incomplete). An optional
+    external ``wait`` instead uses dispatcher reconciliation without resetting
+    failure budgets. Its structured result reference grants no execution rights.
     """
+    if wait is not None:
+        _validate_external_wait(wait)
+        ref = wait["result_ref"]
+        source_path = _connection_main_db_path(conn)
+        if (expected_run_id is None or not reason or not reason.strip() or source_path is None
+                or (ref["task_id"] == task_id
+                    and board_db_path(ref["board"]).resolve() == source_path.resolve())
+                or not _external_wait_receipt(wait)[0]):
+            return False
     with write_txn(conn):
+        if wait is not None:
+            task = get_task(conn, task_id)
+            if (not task or task.status != "running" or task.current_run_id != expected_run_id
+                    or has_active_control_hold(conn, task_id)):
+                return False
+            # A repeated result must not restart a relay that already consumed
+            # it, even after that relay obtains a new worker run.
+            for event in conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind='external_wait_resumed'", (task_id,),
+            ):
+                previous = _event_payload_dict(event)
+                if all(previous.get(key) == wait[key] for key in ("result_ref", "resume_condition", "next_owner")):
+                    return False
         params: list[Any] = [task_id]
         sql = """
             UPDATE tasks
@@ -8471,10 +8625,16 @@ def schedule_task(
         cur = conn.execute(sql, params)
         if cur.rowcount != 1:
             return False
+        metadata = None
+        if wait is not None:
+            current_run = get_run(conn, expected_run_id)
+            metadata = dict(current_run.metadata or {})
+            metadata["external_wait"] = wait
         run_id = _end_run(
             conn, task_id,
             outcome="scheduled", status="scheduled",
             summary=reason,
+            metadata=metadata,
         )
         if run_id is None and reason:
             run_id = _synthesize_ended_run(
@@ -8482,6 +8642,15 @@ def schedule_task(
                 outcome="scheduled",
                 summary=reason,
             )
+        if wait is not None:
+            # Existing bootstrap requires current comments to be read. Give
+            # the next owner an exact run reference without expanding context
+            # or modifying the compact-bootstrap machinery.
+            add_comment(conn, task_id, task.assignee or "worker",
+                        "External wait evidence, not approval. Before effects, inspect "
+                        f"kanban_show reference={{kind:run,id:{run_id}}}; verify current "
+                        "authority and downstream receipts. Required next action: "
+                        + wait["expected_effect"])
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
         return True
 
@@ -10511,6 +10680,10 @@ def _dispatch_once_locked(
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
+    if not dry_run:
+        from hermes_cli.kanban_worker_context import resume_context_tasks
+        resume_context_tasks(conn)
+        reconcile_external_waits(conn, failure_limit=failure_limit)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 
     # Count tasks already running so max_spawn enforces concurrency rather
@@ -11417,14 +11590,8 @@ def _default_spawn(
     cmd.extend([
         "chat",
         "-q", prompt,
+        "-Q",
     ])
-    if task.goal_mode:
-        # Goal-mode workers must take the fully-quiet single-query path:
-        # the kanban goal-loop hook (_run_kanban_goal_loop_q) only runs in
-        # cli.py's quiet branch. Without -Q the worker gets exactly one
-        # turn, prints text, exits rc=0, and the dispatcher records a
-        # protocol violation (incident 2026-06-09 t_d9cbe312).
-        cmd.append("-Q")
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and
@@ -11568,6 +11735,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
+
+    if task.subscription_only:
+        from hermes_cli.kanban_worker_context import worker_context
+        return worker_context(conn, task_id)
 
     # Single clock reading shared by every relative-age stamp below, so all
     # ages in one rendering are consistent ("3h ago" / "3h ago", not drifting
@@ -11979,6 +12150,22 @@ def add_notify_sub(
     now = int(time.time())
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
+        existing = conn.execute(
+            "SELECT notifier_profile, delivery_metadata FROM kanban_notify_subs "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
+            (task_id, platform, chat_id, thread_id or ""),
+        ).fetchone()
+        if existing is not None:
+            owner = existing["notifier_profile"] or None
+            if owner and owner != notifier_profile:
+                raise ValueError(
+                    f"subscription owner collision: existing owner {owner!r}, "
+                    f"expected {notifier_profile!r}; no fields changed"
+                )
+            if metadata_json:
+                merged = _decode_notify_delivery_metadata(existing["delivery_metadata"])
+                merged.update(_decode_notify_delivery_metadata(metadata_json))
+                metadata_json = _encode_notify_delivery_metadata(merged)
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs

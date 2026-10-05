@@ -55,11 +55,15 @@ def test_notify_sub_delivery_mode_persists_and_last_write_wins(kanban_home):
         assert subs[0]["delivery_mode"] == "notify"
         assert subs[0]["notifier_profile"] == "owner-a"
 
-        # Explicit re-subscribe changes the mode (last-write-wins) and must NOT
-        # overwrite the existing owner (owner self-heals only when unset).
+        # A foreign owner is rejected before any field changes.
+        with pytest.raises(ValueError, match="subscription owner collision"):
+            kb.add_notify_sub(
+                conn, task_id=tid, platform="telegram", chat_id="chat1",
+                notifier_profile="owner-b", delivery_mode="wake",
+            )
         kb.add_notify_sub(
             conn, task_id=tid, platform="telegram", chat_id="chat1",
-            notifier_profile="owner-b", delivery_mode="wake",
+            notifier_profile="owner-a", delivery_mode="wake",
         )
         subs = kb.list_notify_subs(conn, tid)
         assert len(subs) == 1
@@ -67,17 +71,45 @@ def test_notify_sub_delivery_mode_persists_and_last_write_wins(kanban_home):
         assert subs[0]["notifier_profile"] == "owner-a"
 
         # A None re-subscribe leaves the existing mode untouched.
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1",
+                          notifier_profile="owner-a")
         subs = kb.list_notify_subs(conn, tid)
         assert subs[0]["delivery_mode"] == "wake"
 
         # An unknown mode is ignored (treated like None: no clobber).
         kb.add_notify_sub(
             conn, task_id=tid, platform="telegram", chat_id="chat1",
-            delivery_mode="bogus",
+            delivery_mode="bogus", notifier_profile="owner-a",
         )
         subs = kb.list_notify_subs(conn, tid)
         assert subs[0]["delivery_mode"] == "wake"
+    finally:
+        conn.close()
+
+
+def test_subscription_collision_is_atomic_and_same_owner_preserves_state(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="historical Ang subscription", assignee="ang")
+        key = dict(task_id=tid, platform="telegram", chat_id="chat1", thread_id="")
+        kb.add_notify_sub(conn, **key, notifier_profile="ang", user_id="original",
+                          chat_type="dm", delivery_mode="wake",
+                          delivery_metadata={"authority_reference": "approved", "reply_to": "old"})
+        before = kb.list_notify_subs(conn, tid)[0]
+        for owner in ("default", None):
+            with pytest.raises(ValueError, match="subscription owner collision"):
+                kb.add_notify_sub(conn, **key, notifier_profile=owner, user_id_alt="different",
+                                  chat_type="channel", delivery_mode="notify",
+                                  delivery_metadata={"reply_to": "replacement"})
+            assert kb.list_notify_subs(conn, tid)[0] == before
+        kb.add_notify_sub(conn, **key, notifier_profile="ang", delivery_mode="notify",
+                          delivery_metadata={"reply_to": "new"})
+        after = kb.list_notify_subs(conn, tid)[0]
+        assert after["last_event_id"] == before["last_event_id"]
+        assert after["created_at"] == before["created_at"]
+        assert after["delivery_metadata"] == {"authority_reference": "approved", "reply_to": "new"}
+        assert after["notifier_profile"] == "ang"
+        assert after["delivery_mode"] == "notify"
     finally:
         conn.close()
 

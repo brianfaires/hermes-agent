@@ -1537,13 +1537,9 @@ def build_resume_recovery_note(
     startup auto-resume turn synthesized by
     ``_schedule_resume_pending_sessions`` with no human message attached.
 
-    ``interactive`` selects the empty-message guidance: on interactive
-    platforms a human is present, so "report the restore and ask what next"
-    is right.  On non-interactive event platforms (webhook, API server —
-    adapters with ``interactive_resume = False``) nobody can answer; the
-    resumed turn must instead complete the interrupted work, or the task is
-    silently abandoned behind a "restored" acknowledgement that goes
-    nowhere (#57056).
+    ``interactive`` only controls whether a restore acknowledgement is useful.
+    Every surface reconciles receipts and resumes only already-approved work;
+    a restart neither revokes standing approval nor grants new authority.
     """
     reason_phrase = (
         "a gateway restart"
@@ -1557,36 +1553,30 @@ def build_resume_recovery_note(
             "Address the user's NEW message below FIRST and focus "
             "on what the user is asking now."
         )
-        tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any "
-            "unfinished work from the conversation history."
-        )
     elif interactive:
         resume_guidance = (
-            "Report to the user that the session was restored "
-            "successfully and ask what they would like to do next."
-        )
-        tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any "
-            "unfinished work from the conversation history."
+            "The session was restored; a restart does not require "
+            "another approval question for the same covered work."
         )
     else:
         resume_guidance = (
             "No user is present on this non-interactive platform, "
             "so do NOT emit a 'session restored' acknowledgement "
-            "or ask questions. Review the conversation history and "
-            "CONTINUE the interrupted task to completion."
+            "or ask what to do next. CONTINUE the interrupted task "
+            "only within existing approval."
         )
-        tail_guidance = (
-            "Do NOT re-run tool calls whose results already "
-            "appear in the history — resume from the first step "
-            "that has no recorded result."
-        )
+    tail_guidance = (
+        "Read the current task and completion receipts, reconcile what "
+        "actually completed, and resume the next unfinished step covered by existing approval. "
+        "Do not replay old side effects or tool calls whose results already appear in the history. "
+        "Ask only when the next action falls outside approval, or approval expired or was revoked. "
+        "Preserve ownership, security, manual holds and superseding user instructions."
+    )
     return (
         f"[System note: The previous turn was interrupted by "
         f"{reason_phrase}; the gateway is now back online. "
         f"Any restart/shutdown command in the history has already "
-        f"run — do NOT re-execute or verify it. {resume_guidance} "
+        f"run — do NOT re-execute it. Verify its receipt before dependent effects. {resume_guidance} "
         f"{tail_guidance}]"
         + (f"\n\n{message}" if message else "")
     )
@@ -9284,6 +9274,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             + self._active_cron_job_count()
             + self._active_api_run_count()
         )
+
+    def _live_control_status(self) -> dict:
+        """Sample activity for this request; answering alone is not freshness.
+
+        Do not use the best-effort display counters for release evidence: a
+        sampling error is unknown, never an idle zero. No state is mutated.
+        """
+        from gateway.control_socket import build_status_payload
+        from cron.scheduler import get_running_job_keys
+
+        payload = build_status_payload()
+        payload["activity_state"] = "unknown"
+        payload["active_agents"] = None
+        payload["activity_writer_pid"] = os.getpid()
+        payload["activity_sampled_at"] = None
+        try:
+            count = self._running_agent_count() + len(get_running_job_keys())
+            adapter = self.adapters.get(Platform.API_SERVER)
+            if adapter is not None:
+                api_count = adapter.active_agent_work_count(strict=True)
+                if type(api_count) is not int or api_count < 0:
+                    raise ValueError("invalid API activity sample")
+                count += api_count
+            if type(count) is not int or count < 0:
+                raise ValueError("invalid activity sample")
+            payload.update(active_agents=count, activity_state="fresh",
+                           activity_sampled_at=time.time())
+            if self._draining or self._external_drain_active:
+                payload["gateway_state"] = "draining"
+            elif self._running:
+                payload["gateway_state"] = "running"
+            else:
+                payload["gateway_state"] = "stopped"
+        except Exception:
+            logger.debug("Live control activity sample unavailable", exc_info=True)
+        from gateway.status import activity_is_fresh_zero
+        payload["activity_zero_verified"] = activity_is_fresh_zero(payload, expected_pid=os.getpid())
+        return payload
 
     def _active_cron_job_count(self) -> int:
         """Count of cron jobs currently executing, from the cron scheduler's
@@ -33269,7 +33297,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             }
 
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": _pause_for_update_handler}
+            verb_handlers={"pause-for-update": _pause_for_update_handler,
+                           "status": runner._live_control_status}
         )
         if not await _control_server.start():
             _control_server = None
