@@ -548,8 +548,8 @@ class GatewayKanbanWatchersMixin:
                                         reason = self._kanban_continuation_reason(sub, slug, conn)
                                         if reason is None:
                                             continue
-                                        from hermes_cli.kanban_continuation import EVENT_KINDS, pending_escalation, pending_decision_admission
-                                        event_kinds = (*EVENT_KINDS, "continuation_escalation_required", "continuation_reason_admitted")
+                                        from hermes_cli.kanban_continuation import EVENT_KINDS, pending_escalation
+                                        event_kinds = (*EVENT_KINDS, "continuation_escalation_required")
                                     else:
                                         event_kinds = TERMINAL_KINDS
                                     event_args = dict(
@@ -563,21 +563,6 @@ class GatewayKanbanWatchersMixin:
                                         # cancellation or process death cannot reliably rewind.
                                         old_cursor = sub["last_event_id"]
                                         cursor, events = _kb.unseen_events_for_sub(conn, **event_args)
-                                        task = _kb.get_task(conn, sub["task_id"])
-                                        if task and task.status == "triage":
-                                            # The actual hold may already be consumed. Its
-                                            # scoped native admission is a new deliverable,
-                                            # never a rewind or authority to release it.
-                                            held = (sub.get("delivery_metadata") or {}).get("capability_decision_event")
-                                            events = [ev for ev in events
-                                                      if ev.kind == "continuation_escalation_required"
-                                                      or (ev.kind == "continuation_reason_admitted"
-                                                      and (pending := pending_decision_admission(
-                                                          conn, card=sub["task_id"], event=ev.id))
-                                                      and pending["event"] == held)]
-                                        else:
-                                            events = [ev for ev in events if ev.kind != "continuation_reason_admitted"]
-                                        cursor = events[-1].id if events else old_cursor
                                         for index, ev in enumerate(events):
                                             if (ev.kind == "continuation_escalation_required"
                                                     and not pending_escalation(conn, card=sub["task_id"], event=ev.id)):
@@ -650,23 +635,6 @@ class GatewayKanbanWatchersMixin:
                                 d.get("old_cursor", 0), d.get("board"),
                             )
                             continue
-                        admitted = [ev for ev in d["events"] if ev.kind == "continuation_reason_admitted"]
-                        if admitted:
-                            def _current_admission():
-                                from hermes_cli.kanban_continuation import pending_decision_admission
-                                with _kb.connect_closing(board=d.get("board")) as current:
-                                    payload = pending_decision_admission(
-                                        current, card=original_sub["task_id"], event=admitted[-1].id)
-                                    recipient = next((row for row in _kb.list_notify_subs(current, original_sub["task_id"])
-                                                      if row["platform"] == original_sub["platform"]
-                                                      and row["chat_id"] == original_sub["chat_id"]
-                                                      and row.get("thread_id", "") == original_sub.get("thread_id", "")
-                                                      and row.get("notifier_profile") == original_sub.get("notifier_profile")), None)
-                                    return (payload and recipient
-                                            and self._kanban_continuation_reason(recipient, d.get("board"), current) == "decision_required"
-                                            and payload["event"] == (recipient.get("delivery_metadata") or {}).get("capability_decision_event"))
-                            if not await asyncio.to_thread(_current_admission):
-                                continue
                         if d.get("escalation_event"):
                             escalation = await asyncio.to_thread(
                                 self._kanban_pending_escalation, original_sub["task_id"],
