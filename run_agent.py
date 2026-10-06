@@ -8068,6 +8068,7 @@ class AIAgent:
         """
         return self.api_mode != "codex_responses"
 
+    @scoped_inference
     def _compress_context(
         self,
         messages: list,
@@ -8088,12 +8089,6 @@ class AIAgent:
         auto-compress abort.  Auto-compress callers use the default
         ``force=False``.
         """
-        if getattr(self, "subscription_only", False):
-            if not os.environ.get("HERMES_KANBAN_TASK"):
-                raise RuntimeError("subscription_only prohibits auxiliary inference")
-            from hermes_cli.kanban_worker_context import park_for_context
-            park_for_context(self, messages, system_message)
-
         # Per-attempt signal consumed by turn-start preflight. A stalled
         # compression must not be mistaken for a structural no-op and followed
         # by the oversized provider request it was meant to prevent.

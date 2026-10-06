@@ -1,4 +1,4 @@
-"""Native OpenAI Responses server-side compaction — gpt-5.6 on direct OpenAI routes only.
+"""Native OpenAI Responses server-side compaction on supported OpenAI routes.
 
 OpenAI's Responses API supports server-side compaction: include
 ``context_management=[{"type": "compaction", "compact_threshold": N}]`` in a
@@ -11,7 +11,9 @@ Docs: https://developers.openai.com/api/docs/guides/compaction
 
 Hermes' support is deliberately narrow (live verification, Aug 2026):
 
-* **gpt-5.6 family only.** gpt-5.6 and its variants compact correctly.
+* **gpt-5.6 family and exact gpt-6-astra.** Astra additionally requires
+  the openai-codex provider and official HTTPS ChatGPT Codex endpoint.
+  gpt-5.6 and its variants compact correctly.
   Sending the field to gpt-5.1 / gpt-5.2 reliably fails server-side —
   HTTP 500 on the blocking path and a permanent stall on the streaming
   path (90s watchdog x 3 retries = a dead turn). There is no structured
@@ -63,9 +65,34 @@ DEFAULT_COMPACT_THRESHOLD = 200_000
 _ELIGIBLE_MODEL_MARKER = "gpt-5.6"
 
 
-def is_native_compaction_model(model: Optional[str]) -> bool:
-    """True when the model is in the gpt-5.6 family."""
-    return _ELIGIBLE_MODEL_MARKER in (model or "").lower()
+def _is_exact_codex_compaction_base_url(base_url: Optional[str]) -> bool:
+    """Astra compaction is verified only on the official base, not subroutes."""
+    try:
+        parsed = urlsplit(base_url or "")
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "chatgpt.com"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.path in ("/backend-api/codex", "/backend-api/codex/")
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def is_native_compaction_model(
+    model: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
+) -> bool:
+    """Preserve gpt-5.6 eligibility; Astra additionally requires official Codex OAuth."""
+    model_name = (model or "").lower()
+    return _ELIGIBLE_MODEL_MARKER in model_name or (
+        model_name == "gpt-6-astra"
+        and (provider or "").strip().lower() == "openai-codex"
+        and _is_exact_codex_compaction_base_url(base_url)
+    )
 
 
 def resolve_native_compaction_capabilities(
@@ -82,11 +109,14 @@ def resolve_native_compaction_capabilities(
     """
     normalized_provider = (provider or "").strip().lower()
     direct_default = normalized_provider == "openai" and not base_url
-    eligible = is_native_compaction_model(model) and (
+    eligible = is_native_compaction_model(
+        model, provider=provider, base_url=base_url
+    ) and (
         direct_default
         or is_direct_openai_route(base_url, is_codex_backend=is_codex_backend)
     )
     return {"native_compaction": eligible}
+
 
 
 def is_direct_openai_route(
@@ -201,7 +231,20 @@ def native_compaction_context_management(
         return None
     if is_xai_responses or is_github_responses:
         return None
-    if not is_native_compaction_model(getattr(agent, "model", None)):
+    # AIAgent lifts configured URL queries into SDK default_query, leaving
+    # agent.base_url clean. Those requests are still outside Astra's verified
+    # base route, and must not enable either compaction or opaque replay.
+    if (getattr(agent, "model", "") or "").lower() == "gpt-6-astra":
+        client = getattr(agent, "client", None)
+        # parse_qs drops blank values, but initialization preserves the presence
+        # of a configured query in the rebuild kwargs even when it becomes {}.
+        if ("default_query" in getattr(agent, "_client_kwargs", {})
+                or getattr(client, "default_query", None)):
+            return None
+    if not is_native_compaction_model(
+        getattr(agent, "model", None), provider=getattr(agent, "provider", None),
+        base_url=getattr(agent, "base_url", None),
+    ):
         return None
     trusted_proxy = bool(
         getattr(agent, "capabilities", {}).get("openai_native_compaction", False)

@@ -536,6 +536,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
              "--provider <name>). Cleared together with the model.",
     )
 
+    p_clear_subscription = sub.add_parser(
+        "clear-subscription-only",
+        help="Controller-only: clear one task's legacy subscription-only flag",
+    )
+    p_clear_subscription.add_argument("task_id")
+    p_clear_subscription.add_argument("--reason", required=True, help="Authority/reason for the audit trail")
+
     # --- reclaim / reassign (recovery) ---
     p_reclaim = sub.add_parser(
         "reclaim",
@@ -1098,6 +1105,13 @@ def kanban_command(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if action == "clear-subscription-only":
+        try:
+            kb._assert_subscription_clear_controller()
+        except PermissionError as exc:
+            print(f"kanban: {exc}", file=sys.stderr)
+            return 1
+
     # Board-management commands operate on board metadata and the persisted
     # current-board pointer itself. They must ignore the shared `--board`
     # task-routing override; otherwise `/kanban --board beta boards show`
@@ -1162,6 +1176,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "show":     _cmd_show,
             "assign":   _cmd_assign,
             "set-model": _cmd_set_model,
+            "clear-subscription-only": _cmd_clear_subscription_only,
             "reclaim":  _cmd_reclaim,
             "reassign": _cmd_reassign,
             "diagnostics": _cmd_diagnostics,
@@ -1996,6 +2011,22 @@ def _cmd_assign(args: argparse.Namespace) -> int:
         print(f"no such task: {args.task_id}", file=sys.stderr)
         return 1
     print(f"Assigned {args.task_id} to {profile or '(unassigned)'}")
+    return 0
+
+
+def _cmd_clear_subscription_only(args: argparse.Namespace) -> int:
+    try:
+        with kb.connect_closing() as conn:
+            ok = kb.clear_subscription_only(
+                conn, args.task_id, actor=_profile_author(), reason=args.reason,
+            )
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        print(f"kanban: {exc}", file=sys.stderr)
+        return 1
+    if not ok:
+        print(f"no such task: {args.task_id}", file=sys.stderr)
+        return 1
+    print(f"subscription_only=false on {args.task_id} (clear request audited)")
     return 0
 
 

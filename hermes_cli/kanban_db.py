@@ -3793,6 +3793,48 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     return True
 
 
+def _assert_subscription_clear_controller() -> None:
+    # Same controller boundary as authorize_pr_resume, including direct imports.
+    from agent.delegation_context import (
+        is_delegated_child_context, is_dispatcher_owned_worker_context,
+    )
+
+    if (os.environ.get("HERMES_KANBAN_TASK") or is_delegated_child_context()
+            or not is_dispatcher_owned_worker_context()):
+        raise PermissionError("clear-subscription-only is controller-only; workers cannot clear it")
+
+
+def clear_subscription_only(
+    conn: sqlite3.Connection, task_id: str, *, actor: str, reason: str,
+) -> bool:
+    """Clear only one task's legacy policy flag, with an atomic audit event.
+
+    Controller use after separate authority; this grants no dispatch or hold
+    release rights and does not alter an already-running worker's policy.
+    Returns False for an unknown ID. Repeated clears succeed and audit changed=False.
+    """
+    _assert_subscription_clear_controller()
+    if not isinstance(actor, str) or not actor.strip():
+        raise ValueError("actor is required")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason is required")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT subscription_only FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        previous = bool(row["subscription_only"])
+        conn.execute("UPDATE tasks SET subscription_only = 0 WHERE id = ?", (task_id,))
+        _append_event(conn, task_id, "subscription_only_cleared", {
+            "actor": actor.strip(), "reason": reason.strip(),
+            "previous": previous, "subscription_only": False, "changed": previous,
+        })
+    if previous:
+        notify_task_updated(conn, task_id, ("subscription_only",))
+    return True
+
+
 def set_model_override(
     conn: sqlite3.Connection,
     task_id: str,

@@ -507,6 +507,20 @@ hermes kanban set-model t_abcd none    # clear the override
 
 The dispatcher spawns the worker with the pinned model (`--provider <name>` is passed when set; `--provider` requires a model). The dashboard's per-task model dropdown drives the same `model_override` field. With no override, the worker uses its profile's configured model.
 
+To retire a legacy task's subscription-only restriction, an authorized Default/Ops
+controller can clear that flag on one explicit task:
+
+```bash
+hermes kanban --board default clear-subscription-only t_abcd --reason "Operator authorized retiring this task's restriction"
+```
+
+Obtain authority separately before running this command. Workers (including the
+task's own worker), delegated children, and worker-fired cron contexts are rejected.
+Only `subscription_only` changes; status, holds, models, dependencies, and existing
+history remain intact. Each request appends a transactional `subscription_only_cleared`
+event with the actor, reason, prior value, and `changed` boolean. Repeating the command
+succeeds with `changed: false`. It does not change an already-running worker's policy.
+
 ### Cost strategy: frontier orchestrator, inexpensive workers
 
 Kanban's per-profile configs make the planner/worker cost split natural. Decomposing a project into well-scoped cards takes frontier-level judgment; executing a card that already carries a clear goal, context, and handoff evidence usually doesn't — and the workers are where the vast majority of tokens are spent, so the worker model is where the cost lives. Run your orchestrator/dispatcher profile on a frontier model and point worker profiles at inexpensive models. Each profile has its own `config.yaml` under `~/.hermes/profiles/<name>/`, and the dispatcher injects the profile-scoped `HERMES_HOME` when it spawns `hermes -p <assignee>`, so each worker reads its own profile's model settings:

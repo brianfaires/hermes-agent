@@ -62,29 +62,17 @@ def agent(worker):
 
 def compress(agent, messages=None):
     with pytest.raises(wc.ContextContinuation) as raised:
-        agent._compress_context(messages or [
+        wc.park_for_context(agent, messages or [
             {"role": "assistant", "content": "Phase completed. candidate1 retained."},
             {"role": "tool", "tool_call_id": "effect1", "content": "receipt.txt: succeeded"},
-        ], "Never publish.", approx_tokens=209077)
+        ], "Never publish.")
     return raised.value.result
 
 
-def test_preflight_parks_before_auxiliary_and_releases_turn_lease(worker, agent, monkeypatch):
+def test_explicit_park_preserves_context_evidence(worker, agent):
     path, task = worker
-    agent.compression_enabled = True
-    agent.context_compressor.threshold_tokens = 1000
-    agent.context_compressor.should_compress = lambda *args: True
-    auxiliary = MagicMock(side_effect=AssertionError("auxiliary forbidden"))
-    monkeypatch.setattr("agent.auxiliary_client.get_text_auxiliary_client", auxiliary)
-    with patch("agent.conversation_compression.compress_context", auxiliary):
-        result = agent.run_conversation("Continue", conversation_history=[
-            {"role": "user", "content": "Approved tests only."},
-            {"role": "assistant", "content": "receipt.txt completed " + "x" * 30000},
-        ])
+    result = compress(agent)
     assert result["context_parked"] and not result["failed"]
-    auxiliary.assert_not_called()
-    agent.client.chat.completions.create.assert_not_called()
-    assert not getattr(agent, "_active_session_turn_lease_holder", None)
     with kb.connect_closing(path) as conn:
         parked = kb.get_task(conn, task.id)
         assert parked.status == "scheduled" and parked.current_run_id is None
@@ -93,33 +81,26 @@ def test_preflight_parks_before_auxiliary_and_releases_turn_lease(worker, agent,
         assert len(events) == 1
         assert "receipt.txt completed" not in json.dumps(events[0].payload)
         stored = wc.inspect_reference(conn, task.id, {"kind": "event", "id": events[0].id,
-            "message_id": events[0].payload["last_message_id"] - 1})
-        assert "receipt.txt completed" in stored["message"]["content"]
+            "message_id": events[0].payload["last_message_id"]})
+        assert "receipt.txt: succeeded" in stored["message"]["content"]
         run = kb.list_runs(conn, task.id)[-1]
         assert run.metadata["candidate_refs"] == ["candidate1"]
         assert run.metadata["artifacts"] == ["receipt.txt"]
     assert compress(agent)["failed"]  # same run cannot park twice
 
 
-def test_output_cap_catch_unwinds_without_retry(worker, agent, monkeypatch):
-    agent.compression_enabled = True
-    agent.context_compressor.should_compress = lambda *args: False
-    agent.context_compressor.context_length = 200000
-    agent.max_tokens = 65536
-    error = Exception("max_tokens: 65536 > context_window: 200000 - input_tokens: 199000 = available_tokens: 1000")
-    error.status_code = 400
-    error.code = 400
-    agent.client.chat.completions.create.side_effect = error
-    with patch.object(agent.context_compressor, "update_model"):
-        result = agent.run_conversation("Continue")
-    assert result["context_parked"] and not result["failed"]
-    assert agent.client.chat.completions.create.call_count == 1
-
-
-def test_non_worker_keeps_normal_policy_error(worker, agent, monkeypatch):
-    monkeypatch.delenv("HERMES_KANBAN_TASK")
-    with pytest.raises(RuntimeError, match="subscription_only prohibits auxiliary"):
-        agent._compress_context([], "system")
+@pytest.mark.parametrize("worker_context", [False, True])
+def test_subscription_compression_forwards_without_parking(worker, agent, monkeypatch, worker_context):
+    if not worker_context:
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+    messages = [{"role": "user", "content": "Summarize"}]
+    compress_context = MagicMock(return_value=(messages, "system"))
+    park = MagicMock(side_effect=AssertionError("must not park for compression"))
+    monkeypatch.setattr("agent.conversation_compression.compress_context", compress_context)
+    monkeypatch.setattr(wc, "park_for_context", park)
+    assert agent._compress_context(messages, "system", force=True) == (messages, "system")
+    compress_context.assert_called_once()
+    park.assert_not_called()
 
 
 def test_failed_commit_does_not_leave_partial_evidence(worker, agent, monkeypatch):
@@ -380,13 +361,15 @@ def test_review_all_initial_comment_refs_fit_total_budget(worker):
         assert ids <= _all_comment_references(conn, task.id, json.loads(context))
 
 
-def test_review_subscription_finalizer_never_enters_micro_summarizer(worker, agent, monkeypatch):
+def test_subscription_finalizer_allows_micro_summarizer(worker, agent, monkeypatch):
     from agent.turn_finalizer import finalize_turn
     compressor = agent.context_compressor
     compressor._micro_compact_enabled = True
     compressor.protect_first_n = 1
     compressor.protect_last_n = 2
-    summarize = MagicMock(return_value="should not summarize")
+    compressor.tail_token_budget = 100
+    compressor._micro_compact_every_n_turns = 1
+    summarize = MagicMock(return_value="Earlier exchange summarized.")
     monkeypatch.setattr(compressor, "_micro_summarize_one", summarize)
     messages = [{"role": "system", "content": "private system"}]
     for index in range(6):
@@ -396,9 +379,8 @@ def test_review_subscription_finalizer_never_enters_micro_summarizer(worker, age
         interrupted=False, failed=False, messages=messages, conversation_history=None,
         effective_task_id="review-test", turn_id="review-turn", user_message="question",
         original_user_message="question", _should_review_memory=False, _turn_exit_reason="unknown")
-    summarize.assert_not_called()
+    summarize.assert_called_once()
     assert result["final_response"] == "complete"
-    assert any(m.get("content") == "question 0" for m in messages)
 
 
 def test_review_non_json_source_and_session_write_failure_do_not_park(worker, agent, monkeypatch):

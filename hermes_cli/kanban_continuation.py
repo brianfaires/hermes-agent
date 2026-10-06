@@ -155,7 +155,7 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
         return None
     if (not re.fullmatch(r"t_[0-9a-f]{8}", task.id)
             or not task.assignee or not profile_exists(task.assignee)
-            or not task.subscription_only or task.provider_override != "openai-codex"
+            or task.provider_override != "openai-codex"
             or task.model_override != "gpt-6.1-sol"
             or not kb._parents_satisfied(conn, task.id)):
         return None
@@ -467,7 +467,6 @@ def _job_permits_inference(*, job_id: str, profile: str) -> bool:
 
     job = get_job(job_id) if profile_matches_home(profile) else None
     if (job is None or not is_job_runnable(job)
-            or job.get("subscription_only") is not True
             or job.get("provider") != "openai-codex"
             or job.get("model") != "gpt-6.1-sol"
             or job.get("base_url")

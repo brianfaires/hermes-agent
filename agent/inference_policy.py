@@ -63,8 +63,10 @@ def scoped_inference(fn):
     return wrapped
 
 
-def reject_auxiliary_inference():
-    if subscription_only_active():
+def reject_auxiliary_inference(task=None):
+    # Compression maintains the running conversation. The exception belongs to
+    # this call's task, never to an ambient scope that nested work can inherit.
+    if subscription_only_active() and task != "compression":
         raise RuntimeError("subscription_only prohibits auxiliary inference")
 
 

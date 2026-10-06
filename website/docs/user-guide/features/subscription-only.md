@@ -35,12 +35,20 @@ Cron creation through a Kanban worker's CLI subprocess also recovers the
 restriction and route from the existing persisted task identity. Unavailable
 worker state and invalid restricted route overrides fail closed.
 
-This deliberately narrow mode disables auxiliary inference (including all
-speech synthesis and streaming speech), external memory
-inference, and background reviews. Hermes summarization raises a policy error
-instead of trying auxiliary providers or silently dropping context. Native
-Codex compaction stays on the subscription route. These limitations can cause
-jobs requiring those features to fail; failures must be handled by the caller.
+Context compression is always allowed to use the configured
+`auxiliary.compression` provider and model, including paid inference. This
+exception applies to both full summarization and micro-compaction, even when
+an existing job or task stores `subscription_only: true`. The configured
+compression route is also exempt from `auxiliary.free_only`; unrelated paid
+fallbacks remain subject to that setting. Compression does not clear the
+execution's subscription restriction or cause a Kanban task to park merely
+because that restriction is set. Native Codex compaction stays on the
+subscription route.
+
+Other auxiliary inference remains disabled, including vision, title generation,
+all speech synthesis and streaming speech, external memory inference, and
+background reviews. The compression exception does not authorize nested or
+concurrent noncompression calls or another provider for the main conversation.
 
 The restriction uses execution context and agent state, not a mutable process
 flag. It governs Hermes-managed inference; it is not an operating-system

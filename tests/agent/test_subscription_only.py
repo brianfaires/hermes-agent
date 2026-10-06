@@ -57,7 +57,7 @@ def test_auxiliary_and_vision_never_construct_client(monkeypatch):
     monkeypatch.setattr(aux, "_create_openai_client", construct)
     with inference_scope(True):
         with pytest.raises(RuntimeError, match="subscription_only"):
-            aux.call_llm(task="compression", messages=[])
+            aux.call_llm(task="title_generation", messages=[])
         with pytest.raises(RuntimeError, match="subscription_only"):
             aux._resolve_strict_vision_backend("openrouter")
         with pytest.raises(ValueError, match="subscription_only"):
@@ -188,17 +188,25 @@ def test_cli_parser_and_preinit_failure(monkeypatch, restricted):
     assert resolve.call_count == (1 if restricted else 2)
 
 
-def test_compression_thread_fails_without_auxiliary_client(monkeypatch):
+def test_compression_thread_preserves_policy_for_noncompression_calls(monkeypatch):
     from agent.context_compressor import ContextCompressor
     from agent import auxiliary_client
-    compressor = object.__new__(ContextCompressor)
+    compressor = ContextCompressor(model=MODEL, quiet_mode=True)
     compressor.subscription_only = True
-    create = Mock(side_effect=AssertionError("unapproved construction"))
-    monkeypatch.setattr(auxiliary_client, "_create_openai_client", create)
-    with ThreadPoolExecutor(1) as executor:
+    seen = []
+
+    def begin(**kwargs):
+        seen.append(subscription_only_active())
         with pytest.raises(RuntimeError, match="subscription_only"):
-            executor.submit(compressor.compress, [{"role": "user", "content": "hello"}]).result()
-    create.assert_not_called()
+            auxiliary_client.call_llm(task="title_generation", messages=[])
+        return {}
+
+    monkeypatch.setattr(compressor, "_begin_compression_telemetry", begin)
+    with ThreadPoolExecutor(1) as executor:
+        messages = [{"role": "user", "content": "hello"}]
+        assert executor.submit(compressor.compress, messages).result() == messages
+    assert seen == [True]
+    assert not subscription_only_active()
 
 
 @pytest.mark.parametrize("status,message", [(401, "authentication failed"), (429, "quota exceeded"),

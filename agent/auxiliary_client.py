@@ -267,9 +267,10 @@ def _openai_http_client_kwargs(
         return {}
     return {"http_client": client}
 
-def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+def _create_openai_client(*, api_key: str, base_url: str, task: Optional[str] = None, **kwargs: Any) -> Any:
     from agent.inference_policy import subscription_only_active, validate_subscription_only
-    validate_subscription_only(subscription_only_active(), "openai-codex", "client", base_url or "missing")
+    validate_subscription_only(subscription_only_active() and task != "compression",
+                               "openai-codex", "client", base_url or "missing")
     if _aux_probe_active():
         # Availability probe: credentials/base_url resolved — that is the
         # answer. Skip the openai import + httpx/SSL construction entirely.
@@ -3084,10 +3085,21 @@ def _warn_paid_lane_once(model: str) -> None:
     )
 
 
-def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+def _try_openrouter(explicit_api_key: str = None, model: str = None, *, task: Optional[str] = None, main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Optional[OpenAI], Optional[str]]:
     free_only, cfg_model = _aux_openrouter_settings()
     or_model = model or cfg_model
-    if free_only and not _is_free_model(or_model):
+    compression_config = _get_auxiliary_task_config("compression") if task == "compression" else {}
+    compression_provider = _normalize_aux_provider(compression_config.get("provider"))
+    compression_model = str(compression_config.get("model") or "").strip()
+    if task == "compression" and compression_provider in {"", "auto"}:
+        runtime = _normalize_main_runtime(main_runtime)
+        compression_provider = runtime.get("provider") or _read_main_provider()
+        compression_model = runtime.get("model") or _read_main_model()
+    configured_compression = (
+        task == "compression" and compression_provider == "openrouter"
+        and compression_model == or_model
+    )
+    if free_only and not configured_compression and not _is_free_model(or_model):
         logger.warning(
             "Auxiliary client: auxiliary.free_only is enabled but the "
             "OpenRouter fallback model %r is not a :free SKU — skipping the "
@@ -3106,7 +3118,7 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
         if or_key:
             base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
             logger.debug("Auxiliary client: OpenRouter via pool")
-            return _create_openai_client(api_key=or_key, base_url=base_url,
+            return _create_openai_client(task=task, api_key=or_key, base_url=base_url,
                            default_headers=build_or_headers()), or_model
         # Pool exists but is exhausted (no usable runtime key) — fall through to
         # the OPENROUTER_API_KEY env-var path rather than failing outright.
@@ -3117,7 +3129,7 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
         _mark_provider_unhealthy("openrouter", ttl=60)
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
-    return _create_openai_client(api_key=or_key, base_url=OPENROUTER_BASE_URL,
+    return _create_openai_client(task=task, api_key=or_key, base_url=OPENROUTER_BASE_URL,
                    default_headers=build_or_headers()), or_model
 
 
@@ -3141,7 +3153,7 @@ def _describe_openrouter_unavailable(model: str = None) -> str:
     return "no usable OpenRouter credentials found"
 
 
-def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
+def _try_nous(vision: bool = False, *, task: Optional[str] = None) -> Tuple[Optional[OpenAI], Optional[str]]:
     # Check cross-session rate limit guard before attempting Nous —
     # if another session already recorded a 429, skip Nous entirely
     # to avoid piling more requests onto the tapped RPH bucket.
@@ -3222,6 +3234,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
         base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
     return (
         _create_openai_client(
+            task=task,
             api_key=api_key,
             base_url=base_url,
         ),
@@ -3931,7 +3944,7 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     return _fallback_client, model
 
 
-def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
+def _build_xai_oauth_aux_client(model: str, *, task: Optional[str] = None) -> Tuple[Optional[Any], Optional[str]]:
     """Build a CodexAuxiliaryClient for an xAI Grok OAuth-authenticated session.
 
     xAI's ``/v1/responses`` endpoint speaks the OpenAI Responses API, so we
@@ -3956,6 +3969,7 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
     from tools.xai_http import hermes_xai_default_headers
 
     real_client = _create_openai_client(
+        task=task,
         api_key=api_key,
         base_url=base_url,
         default_headers=hermes_xai_default_headers(),
@@ -3963,7 +3977,7 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
     return CodexAuxiliaryClient(real_client, model), model
 
 
-def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
+def _build_codex_client(model: str, *, task: Optional[str] = None) -> Tuple[Optional[Any], Optional[str]]:
     """Build a CodexAuxiliaryClient for an explicitly-requested model.
 
     There is no auto-selection of the Codex model: the ChatGPT-account
@@ -3997,6 +4011,7 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
         base_url = _CODEX_AUX_BASE_URL
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
     real_client = _create_openai_client(
+        task=task,
         api_key=codex_token,
         base_url=base_url,
         default_headers=_codex_cloudflare_headers(codex_token, base_url=base_url),
@@ -4010,6 +4025,7 @@ def _try_azure_foundry(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     api_mode: Optional[str] = None,
+    task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Resolve an Azure Foundry auxiliary client via the runtime resolver.
 
@@ -4096,7 +4112,7 @@ def _try_azure_foundry(
     if _dq:
         extra["default_query"] = _dq
 
-    client = _create_openai_client(api_key=api_key, base_url=_clean_base, **extra)
+    client = _create_openai_client(task=task, api_key=api_key, base_url=_clean_base, **extra)
 
     if runtime_api_mode == "codex_responses":
         # GPT-5.x / o-series / codex models on Azure Foundry are
@@ -5000,6 +5016,7 @@ def _retry_same_provider_sync(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            task=task,
             main_runtime=main_runtime,
         )
         effective_provider = _effective_provider_for_client(
@@ -5058,6 +5075,7 @@ async def _retry_same_provider_async(
     effective_timeout: float,
     effective_extra_body: dict,
     reasoning_config: Optional[dict],
+    main_runtime: Optional[Dict[str, Any]] = None,
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> Any:
     if task == "vision":
@@ -5076,6 +5094,8 @@ async def _retry_same_provider_async(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            task=task,
+            main_runtime=main_runtime,
         )
         effective_provider = _effective_provider_for_client(
             retry_client, resolved_provider,
@@ -5494,6 +5514,7 @@ def _call_fallback_candidate_sync(
                 destination.model,
                 base_url=destination.base_url or None,
                 api_mode=destination.api_mode,
+                task=task,
             )
             if retry_client is not None:
                 retry_destination = _FallbackDestination(
@@ -5627,6 +5648,7 @@ async def _call_fallback_candidate_async(
                 async_mode=True,
                 base_url=destination.base_url or None,
                 api_mode=destination.api_mode,
+                task=task,
             )
             if retry_client is not None:
                 retry_destination = _FallbackDestination(
@@ -6323,6 +6345,8 @@ def _resolve_auto_route(
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
                 api_mode=runtime_api_mode or None,
+                task=task,
+                main_runtime=main_runtime,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
@@ -6550,7 +6574,8 @@ def resolve_provider_client(
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
     from agent.inference_policy import subscription_only_active, validate_subscription_only
-    validate_subscription_only(subscription_only_active(), provider, model, explicit_base_url)
+    validate_subscription_only(subscription_only_active() and task != "compression",
+                               provider, model, explicit_base_url)
     _validate_proxy_env_urls()
     # Preserve the original provider name before alias normalization so a
     # user-declared ``custom_providers`` entry whose name coincidentally
@@ -6712,6 +6737,8 @@ def resolve_provider_client(
     # ── OpenRouter ───────────────────────────────────────────
     if provider == "openrouter":
         client, default = _try_openrouter(
+            task=task,
+            main_runtime=main_runtime,
             explicit_api_key=explicit_api_key,
             model=model,
         )
@@ -6734,7 +6761,7 @@ def resolve_provider_client(
             or model in _PROVIDER_VISION_MODELS.values()
             or (model or "").strip().lower() == "mimo-v2-omni"
         )
-        client, default = _try_nous(vision=_is_vision)
+        client, default = _try_nous(vision=_is_vision, task=task)
         if client is None:
             logger.warning("resolve_provider_client: nous requested "
                            "but Nous Portal not configured (run: hermes auth)")
@@ -6773,13 +6800,14 @@ def resolve_provider_client(
                 return None, None
             final_model = _normalize_resolved_model(model, provider)
             raw_client = _create_openai_client(
+                task=task,
                 api_key=codex_token,
                 base_url=_CODEX_AUX_BASE_URL,
                 default_headers=_codex_cloudflare_headers(codex_token),
             )
             return (raw_client, final_model)
         # Standard path: wrap in CodexAuxiliaryClient adapter
-        client, default = _build_codex_client(model)
+        client, default = _build_codex_client(model, task=task)
         if client is None:
             logger.warning("resolve_provider_client: openai-codex requested "
                            "but no Codex OAuth token found (run: hermes model)")
@@ -6797,7 +6825,7 @@ def resolve_provider_client(
     # OpenRouter / Nous bills for side tasks they thought were running on
     # their xAI subscription.
     if provider == "xai-oauth":
-        client, default = _build_xai_oauth_aux_client(model)
+        client, default = _build_xai_oauth_aux_client(model, task=task)
         if client is None:
             logger.warning(
                 "resolve_provider_client: xai-oauth requested but no xAI "
@@ -6879,7 +6907,7 @@ def resolve_provider_client(
             _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
             if _merged_custom:
                 extra["default_headers"] = _merged_custom
-            client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
+            client = _create_openai_client(task=task, api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, wrap_base or custom_base, custom_key)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
@@ -6994,7 +7022,7 @@ def resolve_provider_client(
                         _fb_headers = _apply_user_default_headers(_fb_extra.get("default_headers"))
                         if _fb_headers:
                             _fb_extra["default_headers"] = _fb_headers
-                        client = _create_openai_client(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
+                        client = _create_openai_client(task=task, api_key=custom_key, base_url=_fb_clean, **_fb_extra)
                         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                                 else (client, final_model))
                     sync_anthropic = AnthropicAuxiliaryClient(
@@ -7003,7 +7031,7 @@ def resolve_provider_client(
                     if async_mode:
                         return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
                     return sync_anthropic, final_model
-                client = _create_openai_client(api_key=custom_key, base_url=_clean_base2, **_extra2)
+                client = _create_openai_client(task=task, api_key=custom_key, base_url=_clean_base2, **_extra2)
                 # codex_responses or inherited auto-detect (via _wrap_if_needed).
                 # _wrap_if_needed reads the closed-over `api_mode` (the task-level
                 # override). Named-provider entry api_mode=codex_responses also
@@ -7041,6 +7069,7 @@ def resolve_provider_client(
     # session search) inherit the user's full Azure config.
     if provider == "azure-foundry":
         client, default_model = _try_azure_foundry(
+            task=task,
             model=model,
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
@@ -7181,7 +7210,7 @@ def resolve_provider_client(
         _merged_main = _apply_user_default_headers(headers)
         if _merged_main:
             headers = _merged_main
-        client = _create_openai_client(api_key=api_key, base_url=base_url,
+        client = _create_openai_client(task=task, api_key=api_key, base_url=base_url,
                         **({"default_headers": headers} if headers else {}))
 
         # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
@@ -7421,6 +7450,7 @@ def get_text_auxiliary_client(
         explicit_api_key=api_key,
         api_mode=api_mode,
         main_runtime=main_runtime,
+        task=task,
     )
 
 
@@ -7440,6 +7470,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
         explicit_api_key=api_key,
         api_mode=api_mode,
         main_runtime=main_runtime,
+        task=task,
     )
 
 
@@ -7909,13 +7940,13 @@ def _client_cache_key(
         _runtime_cache_discriminator(field, runtime.get(field, ""))
         for field in _MAIN_RUNTIME_FIELDS
     ) if provider == "auto" else ()
-    # `auto` can now resolve through task-specific or main fallback policy,
-    # so the task participates in the cache key. Non-auto providers keep the
-    # old cache shape because the explicit provider/model tuple is sufficient.
+    # Compression can use a configured paid route under free_only. Its client
+    # must never seed another task's cache and bypass that task's cost gate.
+    # Auto routes additionally depend on task-specific fallback policy.
     task_key = (
         (task or "", _task_prefers_fast_model(task))
         if provider == "auto"
-        else ""
+        else ("compression" if task == "compression" else "")
     )
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
     # The model MUST participate in the key. Two concurrent auxiliary calls to
@@ -7954,6 +7985,7 @@ def _refresh_nous_auxiliary_client(
     api_mode: Optional[str] = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
+    task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Refresh Nous runtime creds, rebuild the client, and replace the cache entry."""
     runtime = _resolve_nous_runtime_api(force_refresh=True)
@@ -7961,7 +7993,7 @@ def _refresh_nous_auxiliary_client(
         return None, model
 
     fresh_key, fresh_base_url = runtime
-    sync_client = _create_openai_client(api_key=fresh_key, base_url=fresh_base_url)
+    sync_client = _create_openai_client(task=task, api_key=fresh_key, base_url=fresh_base_url)
     final_model = model
 
     current_loop = None
@@ -7984,6 +8016,7 @@ def _refresh_nous_auxiliary_client(
         main_runtime=main_runtime,
         is_vision=is_vision,
         model=final_model,
+        task=task,
     )
     _store_cached_client(cache_key, client, final_model, bound_loop=current_loop)
     return client, final_model
@@ -8353,7 +8386,7 @@ def _resolve_task_provider_model(
     of "chat_completions", "codex_responses", or None (auto-detect).
     """
     from agent.inference_policy import reject_auxiliary_inference
-    reject_auxiliary_inference()
+    reject_auxiliary_inference(task)
     cfg_provider = None
     cfg_model = None
     cfg_base_url = None
@@ -9758,7 +9791,7 @@ def call_llm(
 ) -> Any:
     """Run an auxiliary LLM request, applying the configured task limit."""
     from agent.inference_policy import reject_auxiliary_inference
-    reject_auxiliary_inference()
+    reject_auxiliary_inference(task)
     queue_started_at = time.monotonic()
     semaphore = _acquire_sync_aux_semaphore(task)
     if semaphore is not None:
@@ -10327,6 +10360,7 @@ def _call_llm_impl(
                 api_mode=resolved_api_mode,
                 main_runtime=main_runtime,
                 is_vision=(task == "vision"),
+                task=task,
             )
             if refreshed_client is not None:
                 logger.info(
@@ -10363,6 +10397,7 @@ def _call_llm_impl(
                 api_mode=resolved_api_mode,
                 main_runtime=main_runtime,
                 is_vision=(task == "vision"),
+                task=task,
             )
             if refreshed_client is not None:
                 logger.info("Auxiliary %s: refreshed Nous runtime credentials after 401, retrying",
@@ -10714,7 +10749,7 @@ async def async_call_llm(
 ) -> Any:
     """Run an asynchronous auxiliary LLM request under the configured limit."""
     from agent.inference_policy import reject_auxiliary_inference
-    reject_auxiliary_inference()
+    reject_auxiliary_inference(task)
     semaphore = _acquire_async_aux_semaphore(task)
     if semaphore is not None:
         await semaphore.acquire()
@@ -11073,6 +11108,8 @@ async def _async_call_llm_impl(
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
                 is_vision=(task == "vision"),
+                task=task,
+                main_runtime=main_runtime,
             )
             if refreshed_client is not None:
                 logger.info(
@@ -11108,6 +11145,8 @@ async def _async_call_llm_impl(
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
                 is_vision=(task == "vision"),
+                task=task,
+                main_runtime=main_runtime,
             )
             if refreshed_client is not None:
                 logger.info("Auxiliary %s (async): refreshed Nous runtime credentials after 401, retrying",
@@ -11144,6 +11183,7 @@ async def _async_call_llm_impl(
                     resolved_base_url=resolved_base_url,
                     resolved_api_key=resolved_api_key,
                     resolved_api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
                     final_model=final_model,
                     messages=messages,
                     temperature=temperature,
@@ -11187,6 +11227,7 @@ async def _async_call_llm_impl(
                         resolved_base_url=resolved_base_url,
                         resolved_api_key=resolved_api_key,
                         resolved_api_mode=resolved_api_mode,
+                        main_runtime=main_runtime,
                         final_model=final_model,
                         messages=messages,
                         temperature=temperature,

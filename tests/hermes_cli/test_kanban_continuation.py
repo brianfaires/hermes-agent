@@ -125,8 +125,9 @@ def test_semantic_escalation_is_durable_without_replay(board, monkeypatch, state
                                 "AND kind = 'continuation_escalation_required'", (task,)).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("subscription_only", [False, True])
 @pytest.mark.parametrize("gate_change", [None, "expiry", "job_pause"])
-def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, monkeypatch, gate_change):
+def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, monkeypatch, gate_change, subscription_only):
     from cron.jobs import create_job, pause_job, use_cron_store
     from hermes_cli import kanban_continuation as continuation
     from hermes_constants import get_hermes_home
@@ -134,9 +135,9 @@ def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, mon
     with use_cron_store(get_hermes_home()):
         job = create_job(prompt="Read admitted card; decision only.", schedule="every 5m",
                          script="gate.py", monitor_script="gate.py", deliver="local",
-                         provider="openai-codex", model="gpt-6.1-sol", subscription_only=True,
+                         provider="openai-codex", model="gpt-6.1-sol", subscription_only=subscription_only,
                          attach_to_session=False)
-        task = new_task(board)
+        task = new_task(board, subscription_only=subscription_only)
         subscribe(board, task)
         metadata = kb.list_notify_subs(board, task)[0]["delivery_metadata"]
         kb.remove_notify_sub(board, task_id=task, platform="continuation", chat_id="job1")
@@ -146,6 +147,7 @@ def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, mon
         kb.add_notify_sub(board, task_id=task, platform="continuation", chat_id=job["id"],
                           notifier_profile="default", delivery_mode="wake", delivery_metadata=metadata)
         admitted = continuation.collect_wakeup(board, job_id=job["id"], profile="default")
+        assert admitted["wakeAgent"] is True
         item = continuation.observe_pending_obligations(
             board, job_id=job["id"], profile="default", deadline_seconds=120)[0]
         before = kb.list_notify_subs(board)
@@ -183,14 +185,16 @@ def test_semantic_escalation_with_advancing_clock_rechecks_live_gates(board, mon
             assert kb.has_active_control_hold(reopened, task)
 
 
+@pytest.mark.parametrize("subscription_only", [False, True])
 @pytest.mark.parametrize("gate", ["healthy", "before_deadline", "owner", "hold", "job", "inference"])
-def test_semantic_escalation_gates_are_quiet(board, monkeypatch, gate):
+def test_semantic_escalation_gates_are_quiet(board, monkeypatch, gate, subscription_only):
     from cron import jobs
     from hermes_cli import kanban_continuation as continuation
-    task = pending(board)
+    task = pending(board, subscription_only=subscription_only)
     payload = continuation.collect_wakeup(board, job_id="job1", profile="default")
+    assert payload["wakeAgent"] is True
     started = kb.list_notify_subs(board)[0]["delivery_metadata"]["reason_admitted_at:authentication_blocker"]
-    job = dict(subscription_only=gate != "inference", provider="openai-codex", model="gpt-6.1-sol",
+    job = dict(subscription_only=subscription_only, provider="other" if gate == "inference" else "openai-codex", model="gpt-6.1-sol",
                attach_to_session=False, prompt="bounded", script="private.py", monitor_script="private.py")
     monkeypatch.setattr(jobs, "get_job", lambda job_id: None if gate == "job" else job)
     monkeypatch.setattr(jobs, "is_job_runnable", lambda value: True)
@@ -532,9 +536,9 @@ def subscribe(conn, task):
                           "procedure": "autonomous-work-continuation"})
 
 
-def new_task(conn, **kwargs):
+def new_task(conn, subscription_only=True, **kwargs):
     return kb.create_task(conn, title="Authorized work", assignee="ang",
-                          subscription_only=True, model_override="gpt-6.1-sol",
+                          subscription_only=subscription_only, model_override="gpt-6.1-sol",
                           provider_override="openai-codex", **kwargs)
 
 
@@ -684,8 +688,8 @@ def test_superseded_same_status_effect_rejected(board):
                               event=payload["event"], reason=payload["reason"], effect_event=fresh_effect)
 
 
-def pending(conn):
-    task = new_task(conn)
+def pending(conn, **kwargs):
+    task = new_task(conn, **kwargs)
     kb.block_task(conn, task, reason="temporary wait", kind="transient")
     subscribe(conn, task)
     kb.unblock_task(conn, task)

@@ -16,7 +16,7 @@ Improvements over v2:
   - Richer tool call/result detail in summarizer input
 """
 
-from agent.inference_policy import scoped_inference, subscription_only_active, validate_subscription_only
+from agent.inference_policy import scoped_inference
 import contextlib
 import contextvars
 import copy
@@ -7297,8 +7297,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         ``archive_and_compact`` on the session DB to soft-archive old rows
         and insert the compacted set atomically.
         """
-        from agent.inference_policy import subscription_only_active
-        if subscription_only_active() or not self._micro_compact_enabled:
+        if not self._micro_compact_enabled:
             return messages
 
         # Cadence gate. A pass rewrites already-sent history, so it costs one
@@ -7774,7 +7773,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                 the summary prompt. Whitespace-only values are ignored.
         """
         from agent.inference_policy import reject_auxiliary_inference
-        reject_auxiliary_inference()
+        reject_auxiliary_inference("compression")
         # Reset per-call summary failure state — callers inspect these fields
         # after compress() returns to decide whether to surface a warning.
         self._last_summary_dropped_count = 0

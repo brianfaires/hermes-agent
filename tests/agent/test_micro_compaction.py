@@ -58,16 +58,28 @@ def _summary_markers(messages: list) -> list:
 
 
 class TestMicroCompaction:
-    def test_subscription_scope_never_enters_auxiliary_micro_summary(self):
-        from agent.inference_policy import inference_scope
+    def test_subscription_scope_allows_only_compression_micro_summary(self):
+        from types import SimpleNamespace
+        from agent.inference_policy import inference_scope, subscription_only_active
         cc = _compressor()
         cc._micro_summarize_one = ContextCompressor._micro_summarize_one.__get__(cc)
         messages = _conversation()
-        with patch("agent.auxiliary_client.call_llm") as auxiliary, inference_scope(True):
-            for _ in range(5):
-                assert cc._micro_compact(messages) is messages
-        auxiliary.assert_not_called()
-        assert cc._micro_compact_cursor == 0
+
+        def summarize(**kwargs):
+            assert subscription_only_active()
+            assert kwargs["task"] == "compression"
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="Earlier exchange summarized."),
+                finish_reason="stop",
+            )])
+
+        with patch("agent.auxiliary_client.call_llm", side_effect=summarize) as auxiliary:
+            with inference_scope(True):
+                compacted = cc._micro_compact(messages)
+                assert subscription_only_active()
+        auxiliary.assert_called_once()
+        assert cc._micro_compact_cursor > 0
+        assert _summary_markers(compacted)
 
     def test_absorbs_one_exchange_and_leaves_a_summary_marker(self):
         cc = _compressor()
