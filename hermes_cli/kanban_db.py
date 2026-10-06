@@ -7100,7 +7100,7 @@ def authorize_pr_resume(
         return True
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, allow_nested: bool = False) -> bool:
     """Transition ``blocked``/``scheduled``/held-``triage`` to a resumable phase.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
@@ -7111,7 +7111,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     state) holds for the rest of this function's lifetime.
     """
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=allow_nested):
         current = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
             (task_id,),

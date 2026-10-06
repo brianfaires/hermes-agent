@@ -695,6 +695,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons.",
     )
     p_unblock.add_argument("task_ids", nargs="+")
+    p_unblock.add_argument("--continuation-job", help="Exact admitted origin job for an explicit scoped decision disposition.")
+    p_unblock.add_argument("--continuation-event", type=int, help="Exact native capability decision event; requires --continuation-job and --reason.")
     p_unblock.add_argument(
         "--resume-after-pr", action="store_true",
         help="Record explicit authorized continuation for an unclaimed ready/todo task's current PR signal; requires --reason. Does not release holds or change task state.",
@@ -2533,6 +2535,36 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         reason = reason.strip() or None
     author = _profile_author() if reason else None
     resume_after_pr = bool(getattr(args, "resume_after_pr", False))
+    decision_job = getattr(args, "continuation_job", None)
+    decision_event = getattr(args, "continuation_event", None)
+    if decision_job is not None or decision_event is not None:
+        if not decision_job or type(decision_event) is not int or not reason or len(ids) != 1 or resume_after_pr:
+            print("scoped decision unblock requires one task, exact job/event and --reason", file=sys.stderr)
+            return 1
+        from hermes_cli.kanban_continuation import pending_decision_admission, decision_effect_identity
+        with kb.connect_closing() as conn, kb.write_txn(conn):
+            tid = ids[0]
+            owner = _profile_author()
+            sub = next((s for s in kb.list_notify_subs(conn, tid)
+                        if s["platform"] == "continuation" and s["chat_id"] == decision_job
+                        and s["notifier_profile"] == owner and not s.get("thread_id")), None)
+            admitted = sub and any(
+                (payload := pending_decision_admission(conn, card=tid, event=e.id))
+                and payload["event"] == decision_event and payload["job_id"] == decision_job
+                and payload["profile"] == owner
+                for e in kb.list_events(conn, tid) if e.kind == "continuation_reason_admitted")
+            if not admitted or _worker_run_id_for(tid) is not None:
+                print("cannot unblock: no current exact owner decision authorization", file=sys.stderr)
+                return 1
+            # Existing native control mutation, not a turn/comment/launch receipt.
+            if not kb.unblock_task(conn, tid, allow_nested=True):
+                return 1
+            effect = kb.list_events(conn, tid)[-1].id
+            kb._append_event(conn, tid, "continuation_decision_effect",
+                             decision_effect_identity(sub, decision_event, effect))
+            kb.add_comment(conn, tid, owner, f"UNBLOCK: {reason}")
+        print(f"Unblocked {tid}: {reason}")
+        return 0
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
