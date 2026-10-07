@@ -654,6 +654,112 @@ def _wake_text(adapter):
     return getattr(adapter.handled[0], "text", "") or ""
 
 
+def _assert_retry_notification(
+    tmp_path, monkeypatch, *, status, terminal_kind=None, retry_expected=False,
+    retry_status="ready",
+):
+    """Exercise ordinary pings and coalesced wakes against the same DB claim."""
+    for kind in ("crashed", "timed_out"):
+        for mode in ("wake", "notify", "notify+wake"):
+            with monkeypatch.context() as patch:
+                patch.setenv("HERMES_KANBAN_DB", str(tmp_path / f"{kind}-{mode}.db"))
+                kb.init_db()
+                conn = kb.connect()
+                try:
+                    tid = kb.create_task(
+                        conn, title="retry outcome", assignee="worker",
+                        session_id="agent:main:telegram:dm:chat-1",
+                    )
+                    kb.add_notify_sub(
+                        conn, task_id=tid, platform="telegram", chat_id="chat-1",
+                        delivery_mode=mode,
+                    )
+                    # The breaker can leave ready in BOTH event payloads even
+                    # though the task has since become blocked.
+                    payload = {"retry_status": retry_status} if retry_status else {}
+                    kb._append_event(conn, tid, kind, payload)
+                    if terminal_kind:
+                        kb._append_event(conn, tid, terminal_kind, {
+                            "retry_status": "ready", "summary": "finished work",
+                        })
+                    with kb.write_txn(conn):
+                        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+                finally:
+                    conn.close()
+
+                adapter = RecordingAdapter()
+                asyncio.run(_run_one_notifier_tick(patch, _make_runner(adapter)))
+                texts = [item["text"] for item in adapter.sent]
+                if mode != "notify":
+                    wake = _wake_text(adapter)
+                    texts.append(wake)
+                    if terminal_kind == "completed":
+                        assert "completed" in wake and "finished work" in wake
+                        assert "crashed" not in wake and "timed out" not in wake, wake
+                    elif terminal_kind == "gave_up":
+                        assert "gave up (retries exhausted)" in wake, wake
+                if mode != "wake":
+                    assert adapter.sent, "ordinary notification must still be delivered"
+                    assert kind.replace("_", " ") in adapter.sent[0]["text"]
+                assert texts
+                for text in texts:
+                    assert ("will retry" in text) is retry_expected, text
+                    if terminal_kind == "gave_up":
+                        assert "spawn failures" not in text, text
+
+
+def test_retry_notification_gave_up_overrides_stale_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="blocked", terminal_kind="gave_up")
+
+
+def test_retry_notification_gave_up_batch_overrides_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="gave_up")
+
+
+def test_retry_notification_blocked_batch_overrides_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="blocked")
+
+
+def test_retry_notification_triage_batch_overrides_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="block_loop_detected")
+
+
+def test_retry_notification_current_blocked_overrides_stale_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="blocked")
+
+
+def test_retry_notification_current_triage_overrides_stale_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="triage")
+
+
+def test_retry_notification_current_done_overrides_stale_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="done")
+
+
+def test_retry_notification_current_archived_overrides_stale_ready(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="archived")
+
+
+def test_retry_notification_completed_takes_precedence(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="done", terminal_kind="completed")
+
+
+def test_retry_notification_ready_preserves_retry_wording(tmp_path, monkeypatch):
+    _assert_retry_notification(tmp_path, monkeypatch, status="ready", retry_expected=True)
+
+
+def test_retry_notification_legacy_ready_preserves_retry_wording(tmp_path, monkeypatch):
+    _assert_retry_notification(
+        tmp_path, monkeypatch, status="ready", retry_expected=True, retry_status=None,
+    )
+
+
+def test_retry_notification_review_preserves_retry_wording(tmp_path, monkeypatch):
+    _assert_retry_notification(
+        tmp_path, monkeypatch, status="review", retry_expected=True, retry_status="review",
+    )
+
+
 def _review_handoff_task(
     *,
     delivery_mode="notify+wake",

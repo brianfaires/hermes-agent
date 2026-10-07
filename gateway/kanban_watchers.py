@@ -706,6 +706,18 @@ class GatewayKanbanWatchersMixin:
                     # exists on the board.
                     wake_handoff = ""
                     wake_review_detail = ""
+                    # Crash/timeout payloads can retain retry_status=ready
+                    # even after the failure breaker emits gave_up and blocks
+                    # the task. Current state and terminal outcomes win over
+                    # that historical retry intent in both delivery paths.
+                    outcome_kinds = {ev.kind for ev in d["events"]} & {
+                        "completed", "gave_up", "blocked", "block_loop_detected",
+                        "archived",
+                    }
+                    retry_pending = (
+                        task is not None and task.status in ("ready", "review")
+                        and not outcome_kinds
+                    )
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -748,13 +760,15 @@ class GatewayKanbanWatchersMixin:
                                 err = f"\n{str(ev.payload['error'])[:200]}"
                             msg = (
                                 f"✖ {board_tag}{tag}Kanban {sub['task_id']} gave up "
-                                f"after repeated spawn failures{err}"
+                                f"(retries exhausted){err}"
                             )
                         elif kind == "crashed":
                             msg = (
                                 f"✖ {board_tag}{tag}Kanban {sub['task_id']} worker crashed "
-                                f"(pid gone); dispatcher will retry"
+                                f"(pid gone)"
                             )
+                            if retry_pending:
+                                msg += "; dispatcher will retry"
                         elif kind == "running_progress_warning":
                             elapsed = int((ev.payload or {}).get("elapsed_seconds", 0))
                             msg = (
@@ -769,8 +783,10 @@ class GatewayKanbanWatchersMixin:
                                 limit = int(ev.payload["limit_seconds"])
                             msg = (
                                 f"⏱ {board_tag}{tag}Kanban {sub['task_id']} timed out "
-                                f"(max_runtime={limit}s); will retry"
+                                f"(max_runtime={limit}s)"
                             )
+                            if retry_pending:
+                                msg += "; will retry"
                         elif kind == "status":
                             new_status = ""
                             if ev.payload and ev.payload.get("status"):
@@ -992,6 +1008,8 @@ class GatewayKanbanWatchersMixin:
                             if wake_agent
                             else set()
                         )
+                        if outcome_kinds:
+                            _wake_kinds -= {"crashed", "timed_out"}
                         if continuation_reason:
                             _wake_kinds = {continuation_reason}
                         from gateway.wake import adapter_supports_push as _adapter_push_ok
@@ -1022,8 +1040,10 @@ class GatewayKanbanWatchersMixin:
                             _parts = []
                             if "completed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.completed"))
                             if "gave_up" in _wake_kinds: _parts.append(t("gateway.kanban.wake.gave_up"))
-                            if "crashed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.crashed"))
-                            if "timed_out" in _wake_kinds: _parts.append(t("gateway.kanban.wake.timed_out"))
+                            if "crashed" in _wake_kinds:
+                                _parts.append(t("gateway.kanban.wake.crashed") if retry_pending else "crashed (worker exited)")
+                            if "timed_out" in _wake_kinds:
+                                _parts.append(t("gateway.kanban.wake.timed_out") if retry_pending else "timed out")
                             if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
                             if "review_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.review_requested"))
                             if "changes_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.changes_requested"))
