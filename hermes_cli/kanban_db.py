@@ -79,6 +79,7 @@ import random
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -346,6 +347,7 @@ def _fire_dispatch_tick_hook(
             result.promoted,
             result.reconciled_orphans,
             result.crashed,
+            result.progress_warned,
             result.stale,
             result.timed_out,
             result.auto_blocked,
@@ -4290,6 +4292,28 @@ def add_attachment(
             "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
         ).fetchone():
             raise ValueError(f"unknown task {task_id}")
+        # Only a newly persisted, nonempty regular file can be a progress
+        # receipt. Re-registering an old path, comments, and heartbeat notes
+        # are not evidence. Do not read file contents or walk the workspace.
+        run_id = _current_run_id(conn, task_id)
+        spawn = conn.execute(
+            "SELECT created_at FROM task_events WHERE task_id = ? "
+            "AND run_id = ? AND kind = 'spawned' ORDER BY id ASC LIMIT 1",
+            (task_id, run_id),
+        ).fetchone() if run_id is not None else None
+        progress_evidence = False
+        if spawn and not conn.execute(
+            "SELECT 1 FROM task_attachments WHERE task_id = ? AND stored_path = ?",
+            (task_id, stored_path),
+        ).fetchone():
+            try:
+                info = Path(stored_path).lstat()
+                progress_evidence = (
+                    stat.S_ISREG(info.st_mode) and info.st_size == int(size) > 0
+                    and info.st_mtime >= spawn["created_at"]
+                )
+            except OSError:
+                pass
         cur = conn.execute(
             "INSERT INTO task_attachments "
             "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
@@ -4308,7 +4332,9 @@ def add_attachment(
             conn,
             task_id,
             "attached",
-            {"filename": filename.strip(), "size": int(size), "by": uploaded_by},
+            {"filename": filename.strip(), "size": int(size), "by": uploaded_by,
+             "attachment_id": int(cur.lastrowid), "progress_evidence": progress_evidence},
+            run_id=run_id,
         )
         return int(cur.lastrowid or 0)
 
@@ -8843,6 +8869,8 @@ class DispatchResult:
     "task is genuinely stuck"."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
+    progress_warned: list[str] = field(default_factory=list)
+    """Live workers warned about missing persisted progress; no reclaim."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
@@ -9159,6 +9187,78 @@ def _defer_reclaim_for_live_worker(
         }
         payload.update(termination)
         _append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
+
+
+# Matches the existing semantic-progress warning policy. This is deliberately
+# independent of claim TTL, heartbeat freshness, and max-runtime enforcement:
+# fifteen minutes without a receipt is worth surfacing, never proof of failure.
+RUNNING_PROGRESS_WARNING_SECONDS = 900
+
+
+def observe_running_progress(conn: sqlite3.Connection) -> list[str]:
+    """Emit one warning per launched run / persisted-progress episode.
+
+    The event ledger is also the durable dedup ledger. Running tasks retain
+    their events during GC; BEGIN IMMEDIATE serializes the episode check and
+    insert across dispatcher processes/restarts. Only current-run, post-spawn
+    attachment receipts verified at registration reset the deadline. No file
+    scanning, model inference, claim/status changes, retry, or signaling.
+    """
+    warned: list[str] = []
+    now = int(time.time())
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT t.id, t.current_run_id, t.worker_pid, t.claim_lock "
+            "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+            "AND r.task_id = t.id "
+            "WHERE t.status = 'running' AND r.status = 'running' "
+            "AND r.ended_at IS NULL AND t.assignee IS NOT NULL "
+            "AND t.assignee != '' AND t.assignee = r.profile "
+            "AND t.worker_pid = r.worker_pid AND t.claim_lock = r.claim_lock"
+        ).fetchall()
+        for row in rows:
+            if not (row["claim_lock"] or "").startswith(host_prefix):
+                continue
+            # 'running' alone also means claimed-but-not-spawned. Require
+            # the durable spawn receipt AND a matching, live host-local PID.
+            spawn = conn.execute(
+                "SELECT * FROM task_events WHERE task_id = ? AND run_id = ? "
+                "AND kind = 'spawned' ORDER BY id ASC LIMIT 1",
+                (row["id"], row["current_run_id"]),
+            ).fetchone()
+            if (not spawn or _event_payload_dict(spawn).get("pid") != row["worker_pid"]
+                    or not _pid_alive(row["worker_pid"])):
+                continue
+            progress = conn.execute(
+                "SELECT id, created_at FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND id > ? AND kind = 'attached' "
+                "AND CASE WHEN json_valid(payload) "
+                "THEN json_extract(payload, '$.progress_evidence') ELSE 0 END = 1 "
+                "ORDER BY id DESC LIMIT 1",
+                (row["id"], row["current_run_id"], spawn["id"]),
+            ).fetchone()
+            episode = progress if progress is not None else spawn
+            elapsed = now - episode["created_at"]
+            if elapsed < RUNNING_PROGRESS_WARNING_SECONDS:
+                continue
+            if conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND run_id = ? "
+                "AND kind = 'running_progress_warning' AND id > ? LIMIT 1",
+                (row["id"], row["current_run_id"], episode["id"]),
+            ).fetchone():
+                continue
+            _append_event(
+                conn, row["id"], "running_progress_warning",
+                {"severity": "WARNING", "pid": row["worker_pid"],
+                 "episode_event_id": episode["id"], "spawn_event_id": spawn["id"],
+                 "last_progress_at": progress["created_at"] if progress else None,
+                 "elapsed_seconds": elapsed,
+                 "deadline_seconds": RUNNING_PROGRESS_WARNING_SECONDS},
+                run_id=row["current_run_id"],
+            )
+            warned.append(row["id"])
+    return warned
 
 
 def heartbeat_worker(
@@ -10775,6 +10875,7 @@ def _dispatch_once_locked(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     if not dry_run:
+        result.progress_warned = observe_running_progress(conn)
         from hermes_cli.kanban_worker_context import resume_context_tasks
         resume_context_tasks(conn)
         reconcile_external_waits(conn, failure_limit=failure_limit)

@@ -318,7 +318,7 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "running_progress_warning")
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
@@ -755,6 +755,14 @@ class GatewayKanbanWatchersMixin:
                                 f"✖ {board_tag}{tag}Kanban {sub['task_id']} worker crashed "
                                 f"(pid gone); dispatcher will retry"
                             )
+                        elif kind == "running_progress_warning":
+                            elapsed = int((ev.payload or {}).get("elapsed_seconds", 0))
+                            msg = (
+                                f"⚠ WARNING {board_tag}{tag}Kanban {sub['task_id']} "
+                                f"run {ev.run_id}: no new persisted progress receipt for {elapsed}s. "
+                                "Worker was alive when observed. Age is not proof of failure; "
+                                "this warning does not stop, retry, or release the worker."
+                            )
                         elif kind == "timed_out":
                             limit = 0
                             if ev.payload and ev.payload.get("limit_seconds"):
@@ -977,7 +985,7 @@ class GatewayKanbanWatchersMixin:
                         _WAKE_KINDS = (
                             "completed", "gave_up", "crashed", "timed_out",
                             "blocked", "review_requested", "changes_requested",
-                            "block_loop_detected",
+                            "block_loop_detected", "running_progress_warning",
                         )
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
@@ -1020,6 +1028,12 @@ class GatewayKanbanWatchersMixin:
                             if "review_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.review_requested"))
                             if "changes_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.changes_requested"))
                             if "block_loop_detected" in _wake_kinds: _parts.append(t("gateway.kanban.wake.block_loop_detected"))
+                            if "running_progress_warning" in _wake_kinds:
+                                _parts.append(
+                                    "WARNING: no new persisted progress receipt; worker was alive "
+                                    "when observed. Age is not proof of failure. Inspect current "
+                                    "run evidence; this warning grants no stop/retry/release authority"
+                                )
                             _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
                             _synth = t(
                                 "gateway.kanban.wake.message",
