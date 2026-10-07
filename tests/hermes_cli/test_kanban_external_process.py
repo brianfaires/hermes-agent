@@ -346,3 +346,134 @@ def test_native_control_worker_cannot_be_the_executor(process_wait):
     conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (424242, card))
     conn.commit()
     assert not kb.schedule_task(conn, card, reason="wait", expected_run_id=run, wait=wait)
+
+
+class OwnerAttentionAdapter:
+    def __init__(self, fail=False):
+        self.handled = []
+        self.sent = []
+        self.fail = fail
+
+    async def handle_message(self, event):
+        if self.fail:
+            raise RuntimeError("temporary receiver failure")
+        self.handled.append(event)
+
+    async def send(self, chat_id, text, metadata=None):
+        self.sent.append(text)
+
+
+def owner_attention_tick(monkeypatch, adapter):
+    import asyncio
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._kanban_dispatcher_lock_handle = object()
+    runner._active_profile_name = lambda: "default"
+    async def sleep(delay):
+        if delay != 5:
+            runner._running = False
+
+    with monkeypatch.context() as scope:
+        scope.setattr(asyncio, "sleep", sleep)
+        asyncio.run(runner._kanban_notifier_watcher(interval=1))
+
+
+@pytest.mark.parametrize("output_state", ["valid", "missing", "stale"])
+@pytest.mark.parametrize("deadline_first", [False, True])
+def test_ordinary_external_failure_owner_attention(process_wait, monkeypatch, output_state, deadline_first):
+    conn, card, run, wait, props, output = process_wait
+    db_path = kb._connection_main_db_path(conn)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.add_notify_sub(conn, task_id=card, platform="telegram", chat_id="default-dm",
+                      chat_type="dm", notifier_profile="default", delivery_mode="wake")
+    unrelated = kb.create_task(conn, title="Unrelated subscription", assignee="ang")
+    kb.add_notify_sub(conn, task_id=unrelated, platform="telegram", chat_id="other-dm",
+                      notifier_profile="default", delivery_mode="wake")
+    unrelated_before = kb.list_notify_subs(conn, unrelated)
+    assert kb.schedule_task(conn, card, reason="Inspect external effects", expected_run_id=run, wait=wait)
+    task_before = kb.get_task(conn, card)
+    adapter = OwnerAttentionAdapter()
+    if deadline_first:
+        kb.reconcile_external_waits(conn, now=wait["recheck_at"] + 1)
+        owner_attention_tick(monkeypatch, adapter)
+        assert len(adapter.handled) == 1
+        assert "deadline" in adapter.handled[0].text.lower()
+        assert "process exited unsuccessfully" not in adapter.handled[0].text
+        owner_attention_tick(monkeypatch, adapter)
+        assert len(adapter.handled) == 1
+    conn.close()  # Restart before the terminal receipt is ingested.
+    if output_state != "missing":
+        write_result(output)
+        if output_state == "stale":
+            os.utime(output, (1, 1))
+    finish(props, 9)
+    with kb.connect_closing(db_path) as reopened:
+        assert kb.reconcile_external_waits(reopened) == []
+        due = [e for e in kb.list_events(reopened, card) if e.kind == "external_wait_due"]
+        assert len(due) == 1 + int(deadline_first)
+        before_sub = kb.list_notify_subs(reopened, card)
+        assert not before_sub[0]["delivery_metadata"]
+        assert reopened.execute("SELECT delivery_metadata FROM kanban_notify_subs WHERE task_id=?", (card,)).fetchone()[0] is None
+        owner_attention_tick(monkeypatch, OwnerAttentionAdapter(fail=True))
+        assert kb.list_notify_subs(reopened, card) == before_sub
+        # A hold added after observation must survive notification unchanged.
+        with kb.write_txn(reopened):
+            kb._append_event(reopened, card, "blocked", {"kind": "needs_input", "recurrences": 1})
+        events_before = kb.list_events(reopened, card)
+        owner_attention_tick(monkeypatch, adapter)
+        assert len(adapter.handled) == 1 + int(deadline_first)
+        event = adapter.handled[-1]
+        assert event.source.profile == "default" and event.source.chat_id == "default-dm"
+        assert event.source.chat_type == "dm"
+        assert getattr(event, "_native_decision_receipt", None) is None
+        text = event.text.lower()
+        assert f"run {run}" in text and f"event {due[-1].id}" in text
+        assert "ang" in text and "process exited unsuccessfully" in text
+        assert "verified result artifact present" in text if output_state == "valid" else "no verified result artifact" in text
+        assert "external effects may have succeeded" in text
+        assert "owner must inspect" in text and "no execution approval" in text
+        assert "will retry" not in text and "autonomous-work-continuation" not in text
+        assert str(output) not in event.text and "Deterministic test child" not in event.text
+        for _ in range(2):
+            assert kb.reconcile_external_waits(reopened) == []
+            owner_attention_tick(monkeypatch, adapter)
+        assert len(adapter.handled) == 1 + int(deadline_first)
+        assert adapter.sent == []
+        assert kb.get_task(reopened, card) == task_before
+        assert kb.has_active_control_hold(reopened, card)
+        assert kb.list_events(reopened, card) == events_before
+        assert kb.latest_run(reopened, card).id == run
+        assert kb.list_notify_subs(reopened, unrelated) == unrelated_before
+        assert not kb.list_notify_subs(reopened, card)[0]["delivery_metadata"]
+
+
+@pytest.mark.parametrize("guard", ["success", "wrong_invocation", "stale_output", "manual_hold"])
+def test_ordinary_attention_does_not_replace_receipt_guards(process_wait, monkeypatch, guard):
+    conn, card, run, wait, props, output = process_wait
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb._connection_main_db_path(conn)))
+    kb.add_notify_sub(conn, task_id=card, platform="telegram", chat_id="default-dm",
+                      notifier_profile="default", delivery_mode="wake")
+    assert kb.schedule_task(conn, card, reason="Exact receipt only", expected_run_id=run, wait=wait)
+    write_result(output)
+    finish(props, 9 if guard in ("wrong_invocation", "manual_hold") else 0)
+    if guard == "wrong_invocation":
+        props["InvocationID"] = "d" * 32
+    elif guard == "stale_output":
+        os.utime(output, (1, 1))
+    elif guard == "manual_hold":
+        with kb.write_txn(conn):
+            kb._append_event(conn, card, "blocked", {"kind": "needs_input", "recurrences": 1})
+    assert kb.reconcile_external_waits(conn) == ([card] if guard == "success" else [])
+    adapter = OwnerAttentionAdapter()
+    owner_attention_tick(monkeypatch, adapter)
+    assert not any(e.kind == "external_wait_due" for e in kb.list_events(conn, card))
+    assert not any("owner attention" in e.text.lower() for e in adapter.handled)
+    if guard == "success":
+        assert kb.get_run(conn, run).metadata["external_process_receipt"]["verdict"] == "process_exited"
+    else:
+        assert kb.get_task(conn, card).status == "scheduled"
+        assert kb.get_task(conn, card).assignee == "ang"

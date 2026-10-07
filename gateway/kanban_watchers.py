@@ -49,6 +49,28 @@ def _safe_review_reason(value: Any, limit: int = 160) -> str:
     return reason
 
 
+def _external_wait_attention(ev: Any, task: Any) -> str:
+    """Describe persisted wait evidence without granting execution authority."""
+    payload = ev.payload or {}
+    receipt = payload.get("external_process_receipt")
+    failed = isinstance(receipt, dict) and receipt.get("verdict") == "process_failed"
+    observation = "process exited unsuccessfully" if failed else "external wait deadline reached"
+    result = (
+        "verified result artifact present (not proof of success)"
+        if failed and receipt.get("result_sha256")
+        else "no verified result artifact"
+    )
+    owner = _safe_review_reason(
+        getattr(task, "assignee", None) or payload.get("executor"), 48,
+    ) or "unknown"
+    return (
+        f"Owner attention: run {ev.run_id}, event {ev.id}, owner @{owner}: "
+        f"{observation}; {result}. External effects may have succeeded; "
+        "owner must inspect the evidence and external state. No execution approval; "
+        "do not unblock, resume, retry, or transfer ownership. Preserve holds."
+    )
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -318,7 +340,7 @@ class GatewayKanbanWatchersMixin:
         # but is not a block (see kanban_db.request_review); the task is not
         # archived, so the subscription stays alive and later review
         # cycles keep notifying.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "running_progress_warning")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "running_progress_warning", "external_wait_due")
         # Subscriptions are removed only when the task reaches the irreversible
         # archived status. ``done`` is reversible in review/controller flows,
         # so removing its subscription would silence a later reopen. We used
@@ -706,6 +728,7 @@ class GatewayKanbanWatchersMixin:
                     # exists on the board.
                     wake_handoff = ""
                     wake_review_detail = ""
+                    wake_external_details = []
                     # Crash/timeout payloads can retain retry_status=ready
                     # even after the failure breaker emits gave_up and blocks
                     # the task. Current state and terminal outcomes win over
@@ -749,6 +772,10 @@ class GatewayKanbanWatchersMixin:
                                 f"✔ {board_tag}{tag}Kanban {sub['task_id']} done"
                                 f" — {title}{handoff}"
                             )
+                        elif kind == "external_wait_due":
+                            detail = _external_wait_attention(ev, task)
+                            wake_external_details.append(detail)
+                            msg = f"⚠ {board_tag}Kanban {sub['task_id']}: {detail}"
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
@@ -1002,6 +1029,7 @@ class GatewayKanbanWatchersMixin:
                             "completed", "gave_up", "crashed", "timed_out",
                             "blocked", "review_requested", "changes_requested",
                             "block_loop_detected", "running_progress_warning",
+                            "external_wait_due",
                         )
                         _wake_kinds = (
                             {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
@@ -1045,6 +1073,7 @@ class GatewayKanbanWatchersMixin:
                             if "timed_out" in _wake_kinds:
                                 _parts.append(t("gateway.kanban.wake.timed_out") if retry_pending else "timed out")
                             if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
+                            if "external_wait_due" in _wake_kinds: _parts.append("external wait requires owner attention")
                             if "review_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.review_requested"))
                             if "changes_requested" in _wake_kinds: _parts.append(t("gateway.kanban.wake.changes_requested"))
                             if "block_loop_detected" in _wake_kinds: _parts.append(t("gateway.kanban.wake.block_loop_detected"))
@@ -1078,9 +1107,12 @@ class GatewayKanbanWatchersMixin:
                                     "gateway.kanban.wake.review_detail",
                                     reason=wake_review_detail,
                                 )
-                            _synth += "\n\n" + t(
-                                "gateway.kanban.wake.guidance"
-                            )
+                            if wake_external_details:
+                                _synth += "\n\n" + "\n".join(wake_external_details)
+                            else:
+                                _synth += "\n\n" + t(
+                                    "gateway.kanban.wake.guidance"
+                                )
 
                         if continuation_reason:
                             _synth = (
