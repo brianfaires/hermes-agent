@@ -248,33 +248,32 @@ def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch)
 
 
 def test_process_tool_redacts_explicit_kill_output(monkeypatch):
+    import agent.redact as redact_module
     from tools import process_registry as pr_module
 
+    secret = "opaque-value"
     registry = ProcessRegistry()
     session = ProcessSession(
         id="proc_kill_redacted",
         command="printenv",
         task_id="task",
         started_at=1.0,
-        output_buffer="PRIVATE_TOKEN=opaque-value\n",
+        output_buffer=f"PRIVATE_TOKEN={secret}\nHOME=/home/user\n",
         exited=True,
         exit_code=0,
     )
     registry._finished[session.id] = session
     monkeypatch.setattr(pr_module, "process_registry", registry)
-
-    def _redact(result):
-        assert result["output"] == "PRIVATE_TOKEN=opaque-value\n"
-        result["output"] = "PRIVATE_TOKEN=<redacted>\n"
-        return result
-
-    monkeypatch.setattr(pr_module, "_redact_process_result", _redact)
+    monkeypatch.setattr(redact_module, "_REDACT_ENABLED", True)
 
     result = json.loads(pr_module._handle_process({
         "action": "kill",
         "session_id": session.id,
     }))
-    assert result["output"] == "PRIVATE_TOKEN=<redacted>\n"
+    assert result["status"] == "already_exited"
+    assert secret not in json.dumps(result)
+    assert "PRIVATE_TOKEN=***\n" in result["output"]
+    assert "HOME=/home/user\n" in result["output"]
 
 
 def test_autonomous_completion_redacts_real_command_and_output_secrets(monkeypatch):
