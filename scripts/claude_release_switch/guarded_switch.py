@@ -40,7 +40,7 @@ def path(value, private=False, directory=False, literal_only=True):
     s = p.stat()
     require(stat.S_ISDIR(s.st_mode) if directory else stat.S_ISREG(s.st_mode), "wrong file type")
     if private:
-        require(s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == (0o700 if directory else 0o600),
+        require(s.st_uid == os.getuid() and stat.S_IMODE(s.st_mode) == (0o700 if directory else 0o600),  # windows-footgun: ok — Linux/systemd-only guard
                 "expected owner-private path")
         if not directory:
             require(s.st_nlink == 1, "hardlinked private file")
@@ -141,7 +141,7 @@ class Systemd:
     def ctl(self, verb, unit):
         e = env()
         # User bus addressing only; never import the calling model's environment.
-        e["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+        e["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"  # windows-footgun: ok — Linux/systemd-only guard
         return command(["/usr/bin/systemctl", "--user", verb, unit], "/", e)
 
     def show(self, unit):
@@ -178,7 +178,7 @@ class Systemd:
                 "executor stop/recovery budget must be 5 to 10 minutes")
         group = s.get("ControlGroup", "")
         require(group.startswith("/") and ".." not in group.split("/"), "invalid executor cgroup")
-        require(f"0::{group}" in Path("/proc/self/cgroup").read_text().splitlines(), "outside executor cgroup")
+        require(f"0::{group}" in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines(), "outside executor cgroup")
         expected = " ".join([self.m["interpreter"], "-I", "-S", "-B", str(Path(__file__).resolve()),
                              "recover", self.filename, "--sha256", self.sha])
         hook = s.get("ExecStopPost", "")
@@ -190,7 +190,7 @@ class Systemd:
                     s.get("ControlPID") == str(os.getpid()), "not fenced ExecStopPost")
             root = Path("/sys/fs/cgroup") / group.lstrip("/")
             files = [root / "cgroup.procs", *root.glob("**/*/cgroup.procs")]
-            members = {int(pid) for f in files for pid in f.read_text().split()}
+            members = {int(pid) for f in files for pid in f.read_text(encoding="utf-8").split()}
             require(members == {os.getpid()}, "executor descendants still alive")
         else:
             require(s.get("SubState") == "running" and int(s.get("MainPID", "0")) > 0,
@@ -287,7 +287,7 @@ def atomic(state_dir, state):
         path(str(destination), private=True)
     fd, name = tempfile.mkstemp(prefix=".transaction-", dir=state_dir)
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(state, f, sort_keys=True)
             f.write("\n")
             f.flush()
