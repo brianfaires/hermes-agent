@@ -30,7 +30,8 @@ reviewed smoke script must arrange any required existing dependency paths itself
 under `-I -S -B`; it must not install anything or rely on startup `.pth` execution.
 
 The JSON manifest requires these fields (placeholders are not executable).
-The sole optional field, `current`, is restricted to recovery-only binding below:
+The optional `current` field is restricted to recovery-only binding below unless
+`promotion` explicitly selects the separate promotion contract described later:
 
 ```json
 {
@@ -57,8 +58,8 @@ repository and service, including transactions with different state directories.
 The per-transaction lock is not a host-wide release scheduler.
 
 The ordinary manifest may switch only between its two existing exact local branch tips.
-No fetch, merge, push, branch advancement, reset, clean, ref rewriting, package
-changes, config restoration, or database restoration exists. Both tips must be
+In this frozen-tip mode there is no fetch, merge, push, branch advancement,
+reset, clean, ref rewriting, package change, config restoration, or database restoration. Both tips must be
 source-compatible with the installed dependencies, configuration and data; that
 is an adoption prerequisite. Only regular tracked source files are
 supported; submodules and tracked symlinks fail closed. Git filters (including
@@ -80,7 +81,7 @@ For an intentional source-only recovery, set `target` and `known_good` to
 **identical branch/SHA/tree objects** for the approved known-good destination.
 Different SHA/tree values for the same branch are refused. If the checkout is
 already on that exact branch, no additional field is needed. If baseline source
-is on another branch, add the sole optional manifest field:
+is on another branch, add the optional manifest field:
 
 ```json
 "current": {"branch": "baseline-source", "sha": "40-lowercase-hex", "tree": "40-lowercase-hex"}
@@ -101,6 +102,113 @@ recorded/returned as `recovered` (exit **2**, including completed-hook readback)
 never `switched`. The executor must preserve that outcome. `recover` alone still
 requires the matching durable arm and fenced hook; without an arm it returns
 `not_armed` and performs no source or service action.
+
+## Explicit promotion mode (offline extension; parent owns release)
+
+Omitting `promotion` keeps the frozen-tip contract. Promotion is a fresh second
+transaction after an external live PASS on candidate C; startup is not that PASS.
+Before its snapshot, the parent must preserve G on a dedicated branch and freeze
+candidate C. `target` binds **main at C**, `known_good` binds the **preserved branch
+at G**, and `current` binds the **candidate branch at C**. All three source objects
+use the existing branch/SHA/tree schema. Initial HEAD must be `current`.
+The additional manifest field is:
+
+```json
+"promotion": {
+  "old_main": {"branch": "main", "sha": "G", "tree": "G-tree"},
+  "live_pass": {"path": "/private/live-pass.json", "sha256": "receipt-SHA256"},
+  "publication": {
+    "remote": "origin",
+    "url": "https://github.com/brianfaires/hermes-agent.git",
+    "ref": "refs/heads/main",
+    "old": "G",
+    "new": "C",
+    "tracking_ref": "refs/remotes/origin/main",
+    "route": "brianfaires-gh"
+  }
+}
+```
+
+Replace symbolic hashes with full lowercase hex values; no release commit is
+hardcoded. The private 0600 PASS receipt in a private 0700 directory outside the
+checkout must have exactly these fields, with the candidate source object and
+runtime/service identity matching this transaction:
+
+```json
+{
+  "verdict": "PASS",
+  "source": {"branch": "candidate", "sha": "C", "tree": "C-tree"},
+  "repo": "/absolute/canonical/repository",
+  "service": "exact-gateway.service",
+  "invocation": "baseline-InvocationID",
+  "interpreter": "/absolute/canonical/python"
+}
+```
+
+The digest binds the external verdict, not a guard-generated health assertion.
+The parent owns evidence collection, the actual running executable/invocation
+binding, and authorization. Missing, changed or mismatched evidence fails before
+stop. Recovery does not need the PASS file or an available remote.
+
+Preflight verifies G→C ancestry, old main, candidate and preserved branch/tree,
+clean exact source/index, origin URL, tracking mapping/tip, and actual remote tip.
+`origin/main` must initially be G; actual remote main may be G or already C.
+Any other remote value fails preflight. Only the usual origin wildcard fetch
+mapping or its exact main-only equivalent is supported. Partial clones and
+publication overrides (URL rewriting, credential/HTTP settings, includes,
+push options, alternate origin push URLs/programs) are refused. No fetch occurs.
+
+After durable arm and stop, the guard switches main at G and smokes it, writes
+`ff_intent`, and runs `merge --ff-only` to the exact C. It verifies bytes/index,
+writes `ff_complete`, and smokes C. Only the baseline ref map or the declared
+main-at-C map is accepted across the FF journal boundary; the latter requires
+durable FF intent. A completed FF cannot revert to the old map. The preserved
+branch, candidate, every other ref, repository identity and configuration remain
+bound. Partial checkout/dirt still fails closed.
+
+The guard then journals the exact publication object with status `unknown`,
+reads actual remote main, pushes the single non-force C:main refspec once only
+if remote is G, and verifies remote is C. Remote already C skips the push.
+No force, force-with-lease, fetch, retry, branch deletion or remote rollback is
+used. Only after publication intent may origin/main advance G→C; a compare-and-swap
+local `update-ref` reconciles it if Git did not. No other tracking ref may change.
+Publication success and source verification precede start.
+
+The publication route is deliberately fixed: origin's approved GitHub URL,
+`HOME=/home/brian`, username `brianfaires`, and the existing
+`/usr/bin/gh auth git-credential` helper scoped to https://github.com. Only the
+publication read/push commands get that HOME/helper. Source verification retains
+`HOME=/nonexistent` and disabled global/system Git config. The guard never reads,
+copies or discovers auth files itself, accepts no command/environment callbacks,
+and changes no configuration. A separate `disposable-local` route accepts only a
+canonical `/tmp/...` bare repository for offline tests and uses no credentials.
+That remote's existence is checked before arm, not as a recovery prerequisite.
+
+After a publication failure/interruption, recovery first restores the preserved
+G branch, smokes it, and starts it. Main remains C if FF happened; published
+history is never rewound. Recovery then attempts **one readback, never a push**.
+`publication_status` is `old`, `new`, `unrelated` (including missing ref), or
+`unknown` when observation failed. An unknown result cannot grant replay or be
+reported as unpublished. A `new` observation permits exact tracking reconciliation.
+A lost remote cannot prevent source restoration/start. The completed receipt may
+therefore describe recovered G with main C and unresolved publication. Later
+history reconciliation belongs to the parent through a separately reviewed
+non-force recovery/revert commit, not this transaction.
+
+Existing original-invocation, timeout-to-fence, ambiguous-start, single-use,
+smoke-before-start and fenced-hook rules apply unchanged. A publication timeout
+returns `awaiting_fence`; the forward path does not reconcile while its executor
+might still have descendants. Completed-hook checks do not repeat remote reads
+or pushes. Death during recovery's post-start readback leaves the durable unknown
+status; parent observation must reconcile it.
+
+**External writer exclusion also covers remote main.** The non-force push has a
+fresh pre-push read and a post-push read, not a server-side expected-old lease.
+It cannot prove that another writer did not move an ancestral remote tip between
+those reads. Parent must retain the approved exclusive publication window; this
+extension does not create remote locking or authorize force-based publication.
+Offline tests qualify disposable Git behavior, not the GitHub credential route,
+actual service manager lifecycle, or release readiness.
 
 ## Proposed executor integration (not installed by this task)
 
@@ -224,11 +332,11 @@ uses no Hermes imports, and isolates HOME/HERMES_HOME for all child processes.
 Run the offline files only through the canonical runner:
 
 ```text
-scripts/run_tests.sh tests/scripts/test_guarded_switch.py tests/scripts/test_guarded_switch_harness_safety.py tests/scripts/test_guarded_switch_systemd.py -q
+scripts/run_tests.sh tests/scripts/test_guarded_switch.py tests/scripts/test_guarded_switch_harness_safety.py tests/scripts/test_guarded_switch_systemd.py tests/scripts/test_guarded_switch_promotion.py -q
 ```
 
-The integration candidate is five files: this document, `guarded_switch.py`,
-and all three test files above. Include the fifth file,
+The integration candidate includes: this document, `guarded_switch.py`,
+the three existing test files above, and `test_guarded_switch_promotion.py`. Include
 `test_guarded_switch_harness_safety.py`, in integration and review; it is part
 of the manager-isolation boundary even when still untracked in a source worktree.
 

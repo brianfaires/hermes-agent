@@ -2,7 +2,7 @@
 """Single-use, source-only transaction. See guarded_switch.md before adoption.
 
 The CLI has no fixture/service override. Tests inject an adapter through execute().
-No model, ref updates, forced checkout, cleanup, installation or release acceptance.
+No model, forced checkout, cleanup, installation or release acceptance.
 """
 import argparse
 from decimal import Decimal
@@ -83,7 +83,7 @@ def load_manifest(filename, sha):
     raw = private_read(Path(filename))
     require(digest(raw) == sha, "manifest digest changed")
     m = json.loads(raw)
-    require(set(m) - {"current"} == {"repo", "target", "known_good", "service", "baseline_invocation",
+    require(set(m) - {"current", "promotion"} == {"repo", "target", "known_good", "service", "baseline_invocation",
                        "executor", "state_dir", "interpreter", "smoke_argv", "smoke_sha256"},
             "unexpected manifest fields")
     repo = path(m["repo"], directory=True)
@@ -100,7 +100,7 @@ def load_manifest(filename, sha):
             literal(spec[field], r"[0-9a-f]{40}")
     require(m["target"]["branch"] != m["known_good"]["branch"] or
             m["target"] == m["known_good"], "conflicting specifications for same branch")
-    if "current" in m:
+    if "current" in m and "promotion" not in m:
         require(m["target"] == m["known_good"] and
                 m["current"]["branch"] != m["target"]["branch"],
                 "current is only supported for recovery-only from another branch")
@@ -119,6 +119,8 @@ def load_manifest(filename, sha):
     path(str(smoke.parent), private=True, directory=True)
     literal(m["smoke_sha256"], r"[0-9a-f]{64}")
     require(digest(private_read(smoke)) == m["smoke_sha256"], "smoke changed")
+    if "promotion" in m:
+        validate_promotion(m)
     return m
 
 
@@ -206,12 +208,19 @@ def identity(m):
 
 
 def source_specs(m):
-    return [m[k] for k in ("known_good", "target", "current") if k in m]
+    specs = [m[k] for k in ("known_good", "target", "current") if k in m]
+    if "promotion" in m:
+        specs.append(m["promotion"]["old_main"])
+    return specs
 
 
 def refs(m):
     repo = m["repo"]
-    for s in source_specs(m):
+    specs = source_specs(m)
+    if "promotion" in m:
+        main = m["promotion"]["old_main"]
+        specs = [s for s in specs if s["branch"] != main["branch"]] + [main]
+    for s in specs:
         git(repo, "check-ref-format", "refs/heads/" + s["branch"])
         require(git(repo, "rev-parse", "refs/heads/" + s["branch"]).strip() == s["sha"], "branch drift")
         require(git(repo, "rev-parse", s["sha"] + "^{tree}").strip() == s["tree"], "tree mismatch")
@@ -246,6 +255,9 @@ def source(m):
     git_config(m)
     branch = git(repo, "symbolic-ref", "--short", "HEAD").strip()
     specs = [s for s in source_specs(m) if s["branch"] == branch]
+    if "promotion" in m:
+        head = git(repo, "rev-parse", "HEAD").strip()
+        specs = [s for s in specs if s["sha"] == head]
     require(specs and all(s == specs[0] for s in specs), "unknown/ambiguous branch")
     s = specs[0]
     require(git(repo, "rev-parse", "HEAD").strip() == s["sha"], "unknown HEAD")
@@ -279,6 +291,112 @@ def smoke(m):
         e = env()
         e.update(HOME=home, HERMES_HOME=home, PYTHONDONTWRITEBYTECODE="1")
         command(m["smoke_argv"], m["repo"], e)
+
+
+APPROVED_URL = "https://github.com/brianfaires/hermes-agent.git"
+
+
+def validate_promotion(m):
+    p = m["promotion"]
+    require(set(p) == {"old_main", "live_pass", "publication"}, "invalid promotion")
+    old, new, good = p["old_main"], m["target"], m["known_good"]
+    require(old["branch"] == new["branch"] == "main" and old["sha"] != new["sha"] and
+            good["branch"] != "main" and good["sha"] == old["sha"] and
+            good["tree"] == old["tree"], "promotion needs preserved old main")
+    candidate = m.get("current", {})
+    require(candidate.get("branch") not in ("main", good["branch"]) and
+            candidate.get("sha") == new["sha"] and candidate.get("tree") == new["tree"],
+            "promotion needs frozen candidate source")
+    pub = p["publication"]
+    require(set(pub) == {"remote", "url", "ref", "old", "new", "tracking_ref", "route"} and
+            pub["remote"] == "origin" and pub["ref"] == "refs/heads/main" and
+            pub["tracking_ref"] == "refs/remotes/origin/main" and
+            pub["old"] == old["sha"] and pub["new"] == new["sha"], "publication binding mismatch")
+    if pub["route"] == "brianfaires-gh":
+        require(pub["url"] == APPROVED_URL, "unapproved publication URL")
+    else:
+        require(pub["route"] == "disposable-local", "unapproved publication route")
+        remote = Path(literal(pub["url"], r"/tmp/[A-Za-z0-9_./-]+"))
+        require(str(remote) == pub["url"] and ".." not in remote.parts, "not disposable remote")
+    binding = p["live_pass"]
+    require(set(binding) == {"path", "sha256"}, "invalid live PASS binding")
+    literal(binding["sha256"], r"[0-9a-f]{64}")
+    literal(binding["path"], r"/[A-Za-z0-9_./-]+")
+    require(not re.search(r"(?mi)^(extensions\.partialclone=|remote\..*\.promisor=)", git_config(m)),
+            "partial clone could fetch during local verification")
+
+
+def live_pass(m):
+    binding = m["promotion"]["live_pass"]
+    receipt = path(binding["path"], private=True)
+    require(not receipt.is_relative_to(m["repo"]), "live PASS must be outside checkout")
+    path(str(receipt.parent), private=True, directory=True)
+    raw = private_read(receipt)
+    require(digest(raw) == binding["sha256"], "live PASS digest changed")
+    require(json.loads(raw) == {"verdict": "PASS", "source": m["current"], "repo": m["repo"],
+                               "service": m["service"], "invocation": m["baseline_invocation"],
+                               "interpreter": m["interpreter"]}, "live PASS binding mismatch")
+
+
+def publication_git(m, verb):
+    """Only the bound read/push route may use the pre-approved credential helper.
+
+    Global/system Git config stays disabled, including for publication. No auth
+    discovery, config writes, inherited environment, shell or caller callback.
+    Only origin/main may change as a side effect or by explicit reconciliation.
+    """
+    pub = m["promotion"]["publication"]
+    require(verb in ("ls-remote", "push"), "unsupported publication operation")
+    e = env()
+    options = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+               "-c", "http.followRedirects=false", "-c", "http.sslVerify=true",
+               "-c", "http.proxy=", "-c", "http.extraHeader=", "-c", "push.gpgSign=false",
+               "-c", "push.recurseSubmodules=no", "-c", "push.followTags=false"]
+    if pub["route"] == "brianfaires-gh":
+        e["HOME"] = "/home/brian"
+        e["GH_PROMPT_DISABLED"] = "1"
+        options += ["-c", "credential.https://github.com.helper=/usr/bin/gh auth git-credential",
+                    "-c", "credential.https://github.com.username=brianfaires",
+                    "-c", "protocol.allow=never", "-c", "protocol.https.allow=always"]
+    else:
+        options += ["-c", "protocol.allow=never", "-c", "protocol.file.allow=always"]
+    args = (["ls-remote", "--refs", pub["url"], pub["ref"]] if verb == "ls-remote" else
+            ["push", "--porcelain", "--no-verify", pub["url"], pub["new"] + ":" + pub["ref"]])
+    return command(["/usr/bin/git", *options, "-C", m["repo"], *args], m["repo"], e)
+
+
+def publication_status(m):
+    pub = m["promotion"]["publication"]
+    observed = publication_git(m, "ls-remote").splitlines()
+    if observed == [pub["old"] + "\t" + pub["ref"]]:
+        return "old"
+    if observed == [pub["new"] + "\t" + pub["ref"]]:
+        return "new"
+    return "unrelated"
+
+
+def promotion_preflight(m, current):
+    p = m["promotion"]
+    require(current == m["current"], "promotion must begin on frozen live candidate")
+    live_pass(m)
+    if p["publication"]["route"] == "disposable-local":
+        remote = path(p["publication"]["url"], directory=True)
+        require(git(remote, "rev-parse", "--is-bare-repository").strip() == "true", "not bare remote")
+    git(m["repo"], "merge-base", "--is-ancestor", p["old_main"]["sha"], m["target"]["sha"])
+    # Reject local overrides that could redirect publication, execute helpers or
+    # change its authentication. Ordinary source verification never uses auth.
+    config = git_config(m)
+    require(not re.search(r"(?mi)^(url\.|credential\.|http\.|include|core\.sshcommand=|"
+                          r"push\.pushoption=|remote\.origin\.(pushurl|receivepack|uploadpack|mirror|push)=)", config),
+            "unsupported publication config")
+    require(git(m["repo"], "remote", "get-url", "--all", "origin").splitlines() ==
+            [p["publication"]["url"]], "origin URL mismatch")
+    require(git(m["repo"], "config", "--get-all", "remote.origin.fetch").splitlines() in
+            (["+refs/heads/*:refs/remotes/origin/*"], ["+refs/heads/main:refs/remotes/origin/main"]),
+            "unsupported tracking ref mapping")
+    require(git(m["repo"], "rev-parse", p["publication"]["tracking_ref"]).strip() ==
+            p["old_main"]["sha"], "tracking ref must start at old main")
+    require(publication_status(m) in ("old", "new"), "remote publication precondition failed")
 
 
 def atomic(state_dir, state):
@@ -321,9 +439,70 @@ class Transaction:
 
     def check(self):
         require(self.state["identity"] == identity(self.m), "repository identity changed")
-        require(self.state["refs"] == refs(self.m), "ref drift")
+        if "promotion" in self.m:
+            self.check_promotion_refs()
+        else:
+            require(self.state["refs"] == refs(self.m), "ref drift")
         require(self.state["git_config"] == git_config(self.m), "git config drift")
         return source(self.m)
+
+    def check_promotion_refs(self):
+        p = self.m["promotion"]["publication"]
+        before = dict(line.split() for line in self.state["refs"].splitlines())
+        after = {**before, p["ref"]: p["new"]}
+        published = {**after, p["tracking_ref"]: p["new"]}
+        allowed = [] if self.state.get("ff_complete") else [before]
+        if self.state.get("ff_intent"):
+            allowed.append(after)
+        if self.state.get("publication_intent"):
+            require(self.state["publication_intent"] == p, "publication intent drift")
+            allowed.append(published)
+        if self.state.get("tracking_complete"):
+            allowed = [published]
+        observed = dict(line.split() for line in
+                        git(self.m["repo"], "for-each-ref", "--format=%(refname) %(objectname)").splitlines())
+        require(observed in allowed, "ref drift outside declared promotion")
+
+    def reconcile_publication(self):
+        # Persist unknown BEFORE readback: death during observation is honest.
+        # No retry, and recovery callers have already restored the service.
+        self.save(self.state["phase"], publication_status="unknown")
+        try:
+            status = publication_status(self.m)
+        except Exception:
+            status = "unknown"
+        self.save(self.state["phase"], publication_status=status)
+        return status
+
+    def reconcile_tracking(self):
+        p = self.m["promotion"]["publication"]
+        self.check()
+        actual = git(self.m["repo"], "rev-parse", p["tracking_ref"]).strip()
+        if actual != p["new"]:
+            git(self.m["repo"], "update-ref", p["tracking_ref"], p["new"], p["old"])
+        self.check()
+        self.save(self.state["phase"], tracking_complete=True)
+
+    def promote(self):
+        self.switch(self.m["promotion"]["old_main"])
+        require(stopped(self.baseline()), "gateway not stopped before promotion")
+        live_pass(self.m)
+        self.save("promoting", ff_intent=True)
+        git(self.m["repo"], "merge", "--ff-only", "--no-edit", self.m["target"]["sha"])
+        require(self.check() == self.m["target"], "FF did not reach exact target")
+        self.save("promoting", ff_complete=True)
+        smoke(self.m)
+        require(self.check() == self.m["target"], "source changed during promotion smoke")
+        self.save("publishing", publication_intent=self.m["promotion"]["publication"],
+                  publication_status="unknown")
+        status = publication_status(self.m)
+        require(status in ("old", "new"), "remote publication precondition changed")
+        if status == "old":
+            # An exact non-force refspec; never replay this operation in recovery.
+            publication_git(self.m, "push")
+        require(publication_status(self.m) == "new", "publication not verified")
+        self.save("publishing", publication_status="new")
+        self.reconcile_tracking()
 
     def baseline(self):
         g = self.service.gateway()
@@ -350,9 +529,11 @@ class Transaction:
         return outcome
 
     def recover(self):
-        require(self.state["phase"] in {"armed", "stopped", "forward_failed", "awaiting_fence",
-                                        "starting", "recovering", "complete", "recovery_required"},
-                "unknown transaction phase")
+        phases = {"armed", "stopped", "forward_failed", "awaiting_fence",
+                  "starting", "recovering", "complete", "recovery_required"}
+        if "promotion" in self.m:
+            phases.update(("promoting", "publishing"))
+        require(self.state["phase"] in phases, "unknown transaction phase")
         if self.state["phase"] == "complete":
             require(self.state["outcome"] in ("switched", "recovered"), "unknown completed outcome")
             spec = self.m["target" if self.state["outcome"] == "switched" else "known_good"]
@@ -373,7 +554,12 @@ class Transaction:
         require(stopped(self.baseline()), "stop not verified")
         self.save("recovering")
         self.switch(self.m["known_good"])
-        return self.launch(self.m["known_good"], "recovered")
+        outcome = self.launch(self.m["known_good"], "recovered")
+        if self.state.get("publication_intent"):
+            # Restore/start never depends on a working remote. Read once, never push.
+            if self.reconcile_publication() == "new":
+                self.reconcile_tracking()
+        return outcome
 
 
 def execute(mode, filename, sha, adapter=Systemd):
@@ -407,9 +593,14 @@ def execute(mode, filename, sha, adapter=Systemd):
             for spec in source_specs(m):
                 source_entries(m["repo"], spec)
             current = source(m)
+            if "promotion" in m:
+                promotion_preflight(m, current)
             smoke(m)
             require(source(m) == current and refs(m) == frozen_refs and git_config(m) == config,
                     "preflight source/config changed")
+            if "promotion" in m:
+                require(identity(m) == ident, "preflight repository identity changed")
+                live_pass(m)
             g = service.gateway()
             require(active(g) and g["invocation"] == m["baseline_invocation"], "stale baseline invocation")
             require(service.executor(False) == invocation,
@@ -426,7 +617,10 @@ def execute(mode, filename, sha, adapter=Systemd):
                 service.stop()
                 require(stopped(tx.baseline()), "stop not verified")
                 tx.save("stopped")
-                tx.switch(m["target"])
+                if "promotion" in m:
+                    tx.promote()
+                else:
+                    tx.switch(m["target"])
                 outcome = "recovered" if m["target"] == m["known_good"] else "switched"
                 return tx.launch(m["target"], outcome)
             except subprocess.TimeoutExpired:
