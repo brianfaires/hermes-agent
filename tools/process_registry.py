@@ -1645,7 +1645,7 @@ class ProcessRegistry:
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
         if was_running and session.notify_on_complete:
             from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output_tail = _redacted_process_output(session)[-2000:]
             notification = {
                 "type": "completion",
                 "session_id": session.id,
@@ -2132,7 +2132,7 @@ class ProcessRegistry:
         self._reconcile_local_exit(session)
 
         with session._lock:
-            output_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
+            output_preview = _redacted_process_output(session)[-1000:]
 
         result = {
             "session_id": session.id,
@@ -2171,7 +2171,7 @@ class ProcessRegistry:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
+            full_output = _redacted_process_output(session)
 
         lines = full_output.splitlines()
         total_lines = len(lines)
@@ -2269,7 +2269,7 @@ class ProcessRegistry:
                     "exit_code": session.exit_code,
                     "completion_reason": session.completion_reason,
                     "termination_source": session.termination_source,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
+                    "output": _redacted_process_output(session)[-2000:],
                 }
                 if timeout_note:
                     result["timeout_note"] = timeout_note
@@ -2279,7 +2279,7 @@ class ProcessRegistry:
                 result = {
                     "status": "interrupted",
                     "command": session.command,
-                    "output": strip_ansi(session.output_buffer[-1000:]),
+                    "output": _redacted_process_output(session)[-1000:],
                     "note": "User sent a new message -- wait interrupted",
                 }
                 if timeout_note:
@@ -2294,7 +2294,7 @@ class ProcessRegistry:
         result = {
             "status": "timeout",
             "command": session.command,
-            "output": strip_ansi(session.output_buffer[-1000:]),
+            "output": _redacted_process_output(session)[-1000:],
             # A wait window elapsing is NOT a failure — 511 exact-duplicate
             # process calls in a production window show models re-issuing
             # identical waits after misreading this result as an error.
@@ -2360,7 +2360,7 @@ class ProcessRegistry:
                     "exit_code": session.exit_code,
                     "completion_reason": session.completion_reason,
                     "termination_source": session.termination_source,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
+                    "output": _redacted_process_output(session)[-2000:],
                 }
             # Only suppress the autonomous turn after its output is present in
             # the explicit kill result, matching wait/log consumption.
@@ -2399,7 +2399,7 @@ class ProcessRegistry:
                     with session._lock:
                         session.exited = True
                         session.exit_code = None
-                        output = strip_ansi(session.output_buffer[-2000:])
+                        output = _redacted_process_output(session)[-2000:]
                     if consume_output:
                         self._completion_consumed.add(session_id)
                     self._move_to_finished(session)
@@ -2431,7 +2431,7 @@ class ProcessRegistry:
             # exposing ``exited`` to watcher tasks. This closes the delayed
             # notification race without discarding the terminal transcript.
             with session._lock:
-                output = strip_ansi(session.output_buffer[-2000:])
+                output = _redacted_process_output(session)[-2000:]
                 if consume_output:
                     self._completion_consumed.add(session_id)
                 session.exited = True
@@ -2597,15 +2597,17 @@ class ProcessRegistry:
 
         result = []
         for s in all_sessions:
+            from agent.redact import redact_terminal_output
+
             entry = {
                 "session_id": s.id,
-                "command": s.command[:200],
+                "command": redact_terminal_output(s.command)[:200],
                 "cwd": s.cwd,
                 "pid": s.pid,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
                 "uptime_seconds": int(time.time() - s.started_at),
                 "status": "exited" if s.exited else "running",
-                "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                "output_preview": _redacted_process_output(s)[-200:],
             }
             # Flag processes surfaced only because they share the gateway
             # session (not the current task) — these are the long-lived
@@ -3409,6 +3411,17 @@ PROCESS_SCHEMA = {
 }
 
 
+def _redacted_process_output(session: ProcessSession) -> str:
+    """Mask the retained buffer before preview or line pagination loses context.
+
+    Raw retention and already-evicted prefixes are outside this output boundary.
+    """
+    from agent.redact import redact_terminal_output
+    from tools.ansi_strip import strip_ansi
+
+    return redact_terminal_output(strip_ansi(session.output_buffer), session.command)
+
+
 def _redact_process_result(result: dict) -> dict:
     """Redact secrets from background-process output before it reaches the
     model, session.db, and CLI display.
@@ -3422,7 +3435,7 @@ def _redact_process_result(result: dict) -> dict:
     """
     if not isinstance(result, dict):
         return result
-    from agent.redact import redact_sensitive_text, redact_terminal_output
+    from agent.redact import redact_terminal_output
 
     command = result.get("command") or ""
     for field in ("output", "output_preview"):
@@ -3430,7 +3443,7 @@ def _redact_process_result(result: dict) -> dict:
         if isinstance(value, str) and value:
             result[field] = redact_terminal_output(value, command)
     if isinstance(result.get("command"), str) and result["command"]:
-        result["command"] = redact_sensitive_text(result["command"], code_file=True)
+        result["command"] = redact_terminal_output(result["command"])
     return result
 
 

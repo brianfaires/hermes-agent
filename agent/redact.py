@@ -153,7 +153,7 @@ _SECRET_ENV_NAMES = r"(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PW|CREDE
 # Uppercase keys keep the legacy embedded match (``MYTOKEN=…``, ``FOO_SECRET``)
 # — an all-caps key is almost never prose.
 _ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
+    rf"(?<![A-Za-z0-9_])([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})[ \t]*=[ \t]*",
 )
 # Lowercase env names: only underscore-boundary forms (``openai_key=…``,
 # ``FAL_KEY=…``, ``db_pw=…``) — NOT bare ``password=``/``token=``/``secret=``,
@@ -163,7 +163,7 @@ _ENV_ASSIGN_RE = re.compile(
 # of a long non-matching opaque payload, making strict compaction redaction
 # quadratic while holding the GIL (#99255).
 _ENV_ASSIGN_LOWER_RE = re.compile(
-    rf"(?<![a-z0-9_])([a-z0-9_]+(?:_|^)(?:key|pass|pw|token|secret|password|passwd|credential|auth)(?=[^a-z0-9_]|$))\s*=\s*(['\"]?)(\S+)\2",
+    rf"(?<![a-z0-9_])([a-z0-9_]+(?:_|^)(?:key|pass|pw|token|secret|password|passwd|credential|auth)(?=[^a-z0-9_]|$))[ \t]*=[ \t]*",
     re.IGNORECASE,
 )
 
@@ -857,21 +857,13 @@ def redact_sensitive_text(
     if not code_file:
         if "=" in text:
             def _redact_env(m):
+                # Config patterns retain their bounded, non-shell value rules.
                 name, quote, value = m.group(1), m.group(2), m.group(3)
-                # Programmatic env lookups reference variable *names*, not
-                # secret values — masking them corrupts code snippets in
-                # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
-                if _ENV_LOOKUP_VALUE_RE.match(value):
-                    return m.group(0)
-                # Keyword must sit at a word boundary within the key —
-                # ``author=Smith`` / ``press.secretary=…`` are prose, not
-                # credentials (ported from nearai/ironclaw#6129). All-caps
-                # keys (the _ENV_ASSIGN_RE shape) short-circuit to legacy
-                # embedded matching inside the helper.
-                if not _key_has_secret_keyword(name):
+                if _ENV_LOOKUP_VALUE_RE.match(value) or not _key_has_secret_keyword(name):
                     return m.group(0)
                 return f"{name}={quote}{_mask_token(value)}{quote}"
-            text = _ENV_ASSIGN_RE.sub(_redact_env, text)
+
+            text = _redact_env_assignments(text, _ENV_ASSIGN_RE)
             # Lowercase env names (``openai_key=…``). Skip URLs — the query
             # string may contain ``token=``/``key=`` params that are
             # intentionally passed through (see note near the bottom of this
@@ -879,7 +871,7 @@ def redact_sensitive_text(
             # case). The uppercase regex above is all-caps-only, so it never
             # matches URL params; the lowercase one would (issue #77484).
             if "://" not in text:
-                text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
+                text = _redact_env_assignments(text, _ENV_ASSIGN_LOWER_RE)
             # Lowercase/dotted config keys (issue #16413). Skip URLs entirely —
             # web-URL query params are intentionally passed through (see note
             # near the bottom of this function); _DB_CONNSTR_RE still guards
@@ -1111,6 +1103,68 @@ def is_env_dump_command(command: str | None) -> bool:
     return False
 
 
+def _redact_env_assignments(text: str, pattern: re.Pattern) -> str:
+    """Mask shell words without losing quoted/escaped whitespace or concatenation.
+
+    An open quote consumes the remaining available text. This cannot recover
+    context already lost to upstream capture limits or arbitrary stream chunks.
+    """
+    parts = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor or not _key_has_secret_keyword(match.group(1)):
+            continue
+        start = match.end()
+        # The lookup regex recognizes prefixes of at most 11 characters.
+        # Keep its anchored matching without copying every remaining suffix.
+        if _ENV_LOOKUP_VALUE_RE.match(text[start:start + 12]):
+            continue
+        # Argv renderings can quote NAME=value or the whole --setenv=NAME=value
+        # option (as shlex.join does). Retain either opening quote for scanning.
+        word_start = match.start(1)
+        if text[max(0, word_start - len("--setenv=")):word_start] == "--setenv=":
+            word_start -= len("--setenv=")
+        outer = text[word_start - 1] if word_start else ""
+        outer = outer if outer in ("'", '"') else ""
+        quote = outer
+        end = start
+        while end < len(text):
+            char = text[end]
+            if char == "\\" and quote != "'":
+                end = min(end + 2, len(text))
+                continue
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in ("'", '"'):
+                quote = char
+            elif char.isspace():
+                break
+            end += 1
+        value = text[start:end]
+        if not value:
+            continue
+        # Fully mask compound words; preserving token edges would expose
+        # separate plaintext fragments of quoted or escaped values.
+        if outer or any(c.isspace() or c in "\\\"'" for c in value):
+            # Preserve line counts for process-log pagination.
+            masked = "***" + "\n" * value.count("\n") + (outer if not quote else "")
+        else:
+            masked = _mask_token(value)
+        parts.extend((text[cursor:start], masked))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+_DIAGNOSTIC_COMMAND_RE = re.compile(
+    r"(?:^|[\s|;&'\"])(?:/[^\s'\"]*/)?(?:ps|systemctl|journalctl)(?=$|[\s|;&'\"])"
+)
+_SETENV_ASSIGN_RE = re.compile(
+    r"(?<=--setenv=)[\"']?([A-Za-z_][A-Za-z0-9_]*)="
+)
+
+
 def redact_terminal_output(
     output: str, command: str | None = None, *, force: bool = False
 ) -> str:
@@ -1128,8 +1182,12 @@ def redact_terminal_output(
       Per AGENTS.md, ``.env`` files contain only secrets, so the generic
       ENV pass is the right one (keys whose names carry no secret keyword
       can still slip through it — same limit as the env-dump path).
+    - ps/systemctl/journalctl diagnostic command tokens, including absolute
+      paths and shell wrappers → ``code_file=False``. This is a conservative
+      lexical hint, not a complete shell parser.
     - anything else (or unknown command) → ``code_file=True`` to avoid
-      false positives on source/config dumps.
+      false positives on source/config dumps; explicit ``--setenv=NAME=value``
+      argv assignments are still masked by name.
 
     ``force=True`` bypasses the global ``security.redact_secrets`` preference
     for safety boundaries that must never emit raw credentials.
@@ -1137,7 +1195,14 @@ def redact_terminal_output(
     if not output:
         return output
     cmd = command or ""
-    code_file = not (is_env_dump_command(cmd) or _command_reads_env_file(cmd))
+    code_file = not (
+        is_env_dump_command(cmd) or _command_reads_env_file(cmd)
+        or _DIAGNOSTIC_COMMAND_RE.search(cmd)
+    )
+    if code_file and (force or _REDACT_ENABLED):
+        # An explicit argv assignment supplies its own context even when the
+        # producer is unknown. Do not enable generic masking on source dumps.
+        output = _redact_env_assignments(output, _SETENV_ASSIGN_RE)
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 

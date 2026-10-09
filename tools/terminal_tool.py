@@ -3643,6 +3643,93 @@ def terminal_tool(
             spill_total_chars = result.get("output_total_chars")
             spill_file_path = result.get("full_output_path")
 
+            # Backend head/tail capture can have lost an assignment's name.
+            # Recover from the bounded spill BEFORE redaction/presentation; a
+            # tail with unknown context is never a safe redaction input.
+            from agent.redact import redact_terminal_output, _REDACT_ENABLED
+            from tools.ansi_strip import strip_ansi
+            from tools.environments.base import BaseEnvironment, _BoundedOutputCollector
+            from tools.tool_output_limits import get_max_bytes
+
+            # These backend annotations are rendered separately from the stream
+            # and therefore absent from the spill. Recover only fixed terminal
+            # suffixes with matching status, never arbitrary contextless tails.
+            backend_suffix = ""
+            if returncode == 130 and output.endswith("\n[Command interrupted]"):
+                backend_suffix = "\n[Command interrupted]"
+            elif returncode == 124:
+                status_match = re.search(
+                    r"\n\[Command timed out after [0-9]{1,12}(?:\.[0-9]{1,12})?s\]\Z",
+                    output,
+                )
+                if status_match:
+                    backend_suffix = status_match.group(0)
+            if isinstance(result.get("stdin_error"), str) and result["stdin_error"]:
+                # Unlike fixed status text, error metadata can carry secrets.
+                # It is diagnostic text even when the command displays source.
+                backend_suffix += redact_terminal_output(
+                    strip_ansi(f"\n[stdin write failed: {result['stdin_error']}]"), "env"
+                )
+
+            spill_note = None
+            recovered_output = None
+            if spill_file_path:
+                try:
+                    from tools.spill_safety import write_text_exclusive
+
+                    # Bound the read even for a backend-supplied oversized file.
+                    capture_cap = _BoundedOutputCollector._SPILL_CAP_CHARS
+                    with Path(spill_file_path).open(encoding="utf-8", errors="replace") as stream:
+                        raw_spill = stream.read(capture_cap + 1)
+                    complete = (
+                        len(raw_spill) <= capture_cap
+                        and len(raw_spill) == spill_total_chars
+                    )
+                    # execute() already removed the wrapper's CWD marker from
+                    # its preview, but the collector spilled it verbatim. Reuse
+                    # that parser without mutating the shared environment's cwd.
+                    spill_result = {"output": raw_spill[:capture_cap]}
+                    cwd_marker = getattr(env, "_cwd_marker", None)
+                    if isinstance(cwd_marker, str) and cwd_marker:
+                        from types import SimpleNamespace
+
+                        BaseEnvironment._extract_cwd_from_output(
+                            SimpleNamespace(_cwd_marker=cwd_marker), spill_result
+                        )
+                    safe_spill = redact_terminal_output(
+                        strip_ansi(spill_result["output"]), command
+                    )
+                    if not complete:
+                        spill_note = (
+                            "[Capture incomplete; showing the redacted captured "
+                            "prefix only. Tail omitted because its context is unavailable.]"
+                        )
+                        safe_spill += "\n" + spill_note
+                    write_text_exclusive(
+                        Path(spill_file_path), safe_spill, private=True,
+                        overwrite=True, errors="replace",
+                    )
+                    recovered_output = safe_spill
+                except Exception:
+                    logger.debug("spill redaction failed; dropping spill handle", exc_info=True)
+                    try:
+                        Path(spill_file_path).unlink()
+                    except OSError:
+                        pass
+                    spill_file_path = None
+
+            if recovered_output is None and _REDACT_ENABLED and "\n\n... [OUTPUT TRUNCATED - " in output:
+                prefix = output.split("\n\n... [OUTPUT TRUNCATED - ", 1)[0]
+                recovered_output = redact_terminal_output(strip_ansi(prefix), command)
+                recovered_output += (
+                    "\n[Complete capture unavailable; showing the redacted captured "
+                    "prefix only. Tail omitted because its context is unavailable.]"
+                )
+            if recovered_output is not None and _REDACT_ENABLED:
+                preview = _BoundedOutputCollector(get_max_bytes())
+                preview.append(recovered_output)
+                output = preview.render(suffix=backend_suffix)
+
             # Add helpful message for sudo failures in messaging context
             output = _handle_sudo_failure(output, env_type)
 
@@ -3684,6 +3771,9 @@ def terminal_tool(
             except Exception:
                 pass
             
+            # Mask hook replacements too, before final presentation truncation.
+            output = redact_terminal_output(strip_ansi(output).strip(), command) if output else ""
+
             # Truncate output if too long, keeping both head and tail
             from tools.tool_output_limits import get_max_bytes
             MAX_OUTPUT_CHARS = get_max_bytes()
@@ -3696,23 +3786,6 @@ def terminal_tool(
                     f"out of {len(output)} total] ...\n\n"
                 )
                 output = output[:head_chars] + truncated_notice + output[-tail_chars:]
-
-            # Strip ANSI escape sequences so the model never sees terminal
-            # formatting — prevents it from copying escapes into file writes.
-            from tools.ansi_strip import strip_ansi
-            output = strip_ansi(output)
-
-            # Redact secrets from command output. For source/config dumps
-            # (MAX_TOKENS=100, "apiKey": "x" fixtures, postgresql:// f-string
-            # templates) the ENV/JSON/template passes are skipped to avoid
-            # false positives (code_file=True). But for env-dump commands
-            # (env/printenv/set/export/declare) the output IS a KEY=value
-            # credential dump, so redact_terminal_output runs the ENV pass
-            # (code_file=False) to mask opaque tokens with no vendor prefix.
-            # Real prefixes, auth headers, JWTs, private keys are masked in
-            # both modes. See issue #43025.
-            from agent.redact import redact_terminal_output
-            output = redact_terminal_output(output.strip(), command) if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
@@ -3766,42 +3839,16 @@ def terminal_tool(
                     result_dict["cwd"] = str(post_cwd)
             except Exception:
                 pass
-            # Truncation metadata (codex/opencode/goose pattern): report the
-            # pre-truncation size and a spill-file handle so the model can
-            # retrieve the omitted middle with read_file/search_files instead
-            # of re-running the command. The spill was written raw by the
-            # collector; redact it here with the same pass as the visible
-            # output so no secret persists unmasked on disk.
+            # Only expose a spill handle after its bounded contents were redacted.
             if spill_file_path:
-                try:
-                    _sp = Path(spill_file_path)
-                    raw_spill = _sp.read_text(encoding="utf-8", errors="replace")
-                    from tools.spill_safety import write_text_exclusive
-
-                    # Rewrite in place via lstat-checked unlink + exclusive
-                    # create so the redacted copy can't be diverted through a
-                    # symlink planted between the collector's write and now.
-                    write_text_exclusive(
-                        _sp,
-                        redact_terminal_output(strip_ansi(raw_spill), command),
-                        private=True,
-                        overwrite=True,
-                        errors="replace",
-                    )
-                    result_dict["output_total_chars"] = spill_total_chars
-                    result_dict["full_output_path"] = spill_file_path
-                    result_dict["truncation_note"] = (
-                        "Output exceeded the capture window (head+tail shown). "
-                        f"Full output ({spill_total_chars:,} chars) saved to "
-                        f"{spill_file_path} — search it with search_files or page it "
-                        "with read_file instead of re-running the command."
-                    )
-                except Exception:
-                    logger.debug("spill redaction failed; dropping spill handle", exc_info=True)
-                    try:
-                        Path(spill_file_path).unlink()
-                    except OSError:
-                        pass
+                result_dict["output_total_chars"] = spill_total_chars
+                result_dict["full_output_path"] = spill_file_path
+                result_dict["truncation_note"] = spill_note or (
+                    "Output exceeded the capture window (head+tail shown). "
+                    f"Full output ({spill_total_chars:,} chars) saved to "
+                    f"{spill_file_path} — search it with search_files or page it "
+                    "with read_file instead of re-running the command."
+                )
             try:
                 from agent.verification_evidence import record_terminal_result
 
