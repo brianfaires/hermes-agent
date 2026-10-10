@@ -91,6 +91,13 @@ def _native_episode(conn, sub, reason, event):
     """An immutable native admission, not editable scalar episode metadata."""
     identity = {"reason": reason, "profile": sub["notifier_profile"],
                 "job_id": sub["chat_id"], "profile_home": str(get_hermes_home())}
+    if reason == "next_selection":
+        for row in conn.execute(
+                "SELECT created_at,payload FROM task_events WHERE task_id=? "
+                "AND kind='continuation_reason_admitted' ORDER BY id", (sub['task_id'],)):
+            if json.loads(row['payload']) == {**identity, "event": event}:
+                return event, row['created_at']
+        return None
     boundary = 0
     for row in conn.execute(
             "SELECT id, payload FROM task_events WHERE task_id = ? "
@@ -119,6 +126,194 @@ def _native_episode(conn, sub, reason, event):
     return None
 
 
+def register_standing_coordination(conn, *, card, profile, job_id,
+                                   authority_actor, authority_reference):
+    """Owner registration of one selected card; never upgrade an existing grant.
+
+    The caller verifies attribution and bounded scope before calling. This is
+    coordination permission only, not permission to execute or release holds.
+    """
+    if (authority_actor != "Brian" or not isinstance(authority_reference, str)
+            or not authority_reference.strip() or not profile_matches_home(profile)
+            or not job_id):
+        raise ValueError("exact attributable owner/home/job required")
+    with kb.write_txn(conn):
+        task = kb.get_task(conn, card)
+        if task is None or not task.assignee or not profile_exists(task.assignee):
+            raise ValueError("existing assigned card required")
+        subscriptions = kb.list_notify_subs(conn, card)
+        if any('authority_expires_at' in (s.get('delivery_metadata') or {})
+               or (s['platform'] == 'continuation' and s['chat_id'] == job_id)
+               for s in subscriptions):
+            raise ValueError("existing subscription must not be upgraded or renewed")
+        metadata = {
+            "authority_actor": authority_actor, "authority_reference": authority_reference,
+            "authority_mode": "standing_coordination", "authority_task_id": card,
+            "authority_assignee": task.assignee, "authority_home": str(get_hermes_home()),
+            "authority_job_id": job_id, "authority_paused": False, "authority_revoked": False,
+            "procedure": PROCEDURE}
+        conn.execute(
+            "INSERT INTO kanban_notify_subs "
+            "(task_id,platform,chat_id,thread_id,notifier_profile,delivery_mode,"
+            "delivery_metadata,created_at,last_event_id) VALUES (?, 'continuation', ?, '', ?, "
+            "'wake', ?, ?, COALESCE((SELECT MAX(id) FROM task_events WHERE task_id=?),0))",
+            (card, job_id, profile, json.dumps(metadata, sort_keys=True), int(time.time()), card))
+
+
+def _standing_valid(sub, task):
+    from cron.jobs import get_job, is_job_runnable
+    m = sub.get('delivery_metadata') or {}
+    job = get_job(sub['chat_id'])
+    return (m.get('authority_mode') == 'standing_coordination'
+            and 'authority_expires_at' not in m
+            and m.get('authority_actor') == 'Brian'
+            and isinstance(m.get('authority_reference'), str) and bool(m['authority_reference'].strip())
+            and m.get('authority_task_id') == task.id
+            and m.get('authority_assignee') == task.assignee
+            and m.get('authority_home') == str(get_hermes_home())
+            and m.get('authority_job_id') == sub['chat_id']
+            and m.get('authority_paused') is False and m.get('authority_revoked') is False
+            and m.get('procedure') == PROCEDURE
+            and sub.get('platform') == 'continuation' and not sub.get('thread_id')
+            and sub.get('delivery_mode') == 'wake'
+            and job is not None and is_job_runnable(job)
+            and job.get('attach_to_session') is False
+            and bool(job.get('script')) and job.get('monitor_script') == job.get('script')
+            and not job.get('continuity') and not job.get('context_from'))
+
+
+def _selection_trigger(conn, card):
+    task = kb.get_task(conn, card)
+    if task is None or task.claim_lock or task.current_run_id is not None:
+        return None
+    kind = {'done': 'completed', 'blocked': 'blocked'}.get(task.status)
+    if kind is None:
+        return None
+    row = conn.execute("SELECT id, kind FROM task_events WHERE task_id=? "
+                       "AND kind IN ('completed','blocked','gave_up','unblocked','created','status') "
+                       "ORDER BY id DESC LIMIT 1", (card,)).fetchone()
+    return row['id'] if row and (row['kind'] == kind or
+                               (task.status == 'blocked' and row['kind'] == 'gave_up')) else None
+
+
+def _selection_identity(sub, event):
+    return dict(event=event, profile=sub['notifier_profile'], job_id=sub['chat_id'],
+                profile_home=str(get_hermes_home()))
+
+
+def _selection_receipt(conn, sub, event):
+    identity = _selection_identity(sub, event)
+    for row in conn.execute("SELECT payload FROM task_events WHERE task_id=? "
+                            "AND kind='continuation_selection_closed'", (sub['task_id'],)):
+        p = json.loads(row['payload'])
+        if all(p.get(k) == v for k, v in identity.items()):
+            return p
+    return None
+
+
+def _selection_sub(conn, card, profile, job_id):
+    return next((s for s in kb.list_notify_subs(conn, card)
+                 if s['platform'] == 'continuation' and s['chat_id'] == job_id
+                 and not s.get('thread_id') and s['notifier_profile'] == profile), None)
+
+
+def bind_next_selection(conn, *, card, event, profile, job_id, next_card,
+                        max_in_progress=1, max_per_profile=1):
+    """Record Rook's exact choice before ordinary authorized dispatch; never launch."""
+    with kb.write_txn(conn):
+        sub = _selection_sub(conn, card, profile, job_id)
+        if (sub is None or _selection_trigger(conn, card) != event
+                or admission_reason(conn, sub, profile=profile,
+                                    max_in_progress=max_in_progress,
+                                    max_per_profile=max_per_profile) != 'next_selection'):
+            return False
+        target = kb.get_task(conn, next_card)
+        if (target is None or next_card == card or target.status != 'ready'
+                or target.claim_lock or target.current_run_id is not None
+                or not target.assignee or not profile_exists(target.assignee)
+                or kb.has_active_control_hold(conn, next_card)
+                or not kb._parents_satisfied(conn, next_card)
+                or kb.check_respawn_guard(conn, next_card, lane='ready') is not None
+                or conn.execute("SELECT COUNT(*) FROM tasks WHERE status='running' AND assignee=?",
+                                (target.assignee,)).fetchone()[0] >= max_per_profile):
+            return False
+        target_sub = _selection_sub(conn, next_card, profile, job_id)
+        if target_sub is None or not _standing_valid(target_sub, target):
+            return False
+        identity = _selection_identity(sub, event)
+        # A selected target is reserved by one unresolved native binding. A
+        # restart or another source completion must not dispatch it twice.
+        for row in conn.execute("SELECT task_id,payload FROM task_events "
+                                "WHERE kind='continuation_selection_bound'"):
+            other = json.loads(row['payload'])
+            if other.get('next_card') != next_card or (
+                    row['task_id'] == card and all(other.get(k) == v for k, v in identity.items())):
+                continue
+            closed = any(
+                all(json.loads(r['payload']).get(k) == other.get(k)
+                    for k in ('event', 'profile', 'job_id', 'profile_home', 'next_card'))
+                for r in conn.execute("SELECT payload FROM task_events WHERE task_id=? "
+                                      "AND kind='continuation_selection_closed'", (row['task_id'],)))
+            if not closed:
+                return False
+        previous = _selection_binding(conn, card, identity)
+        if previous:
+            return previous[1]['next_card'] == next_card
+        kb._append_event(conn, card, 'continuation_selection_bound', {
+            **identity, 'next_card': next_card, 'assignee': target.assignee,
+            'model': target.model_override, 'provider': target.provider_override})
+        return True
+
+
+def _selection_binding(conn, card, identity):
+    for row in conn.execute("SELECT id,payload FROM task_events WHERE task_id=? "
+                            "AND kind='continuation_selection_bound' ORDER BY id", (card,)):
+        p = json.loads(row['payload'])
+        if all(p.get(k) == v for k, v in identity.items()):
+            return row['id'], p
+    return None
+
+
+def acknowledge_next_selection(conn, *, card, event, profile, job_id, next_card, effect_event):
+    """Close only with the selected card's native spawned run, never model success."""
+    with kb.write_txn(conn):
+        sub = _selection_sub(conn, card, profile, job_id)
+        source = kb.get_task(conn, card)
+        if (sub is None or source is None or is_engaged() or not profile_matches_home(profile)
+                or not _standing_valid(sub, source) or _selection_trigger(conn, card) != event):
+            return False
+        bound = _selection_binding(conn, card, _selection_identity(sub, event))
+        if not bound or type(effect_event) is not int or effect_event <= bound[0]:
+            return False
+        p = bound[1]
+        target = kb.get_task(conn, next_card)
+        target_sub = _selection_sub(conn, next_card, profile, job_id)
+        if target is None or target_sub is None or not _standing_valid(target_sub, target):
+            return False
+        receipt = _selection_receipt(conn, sub, event)
+        if receipt:
+            return receipt['next_card'] == next_card and receipt['effect_event'] == effect_event
+        native = conn.execute("SELECT run_id,payload FROM task_events WHERE id=? AND task_id=? "
+                              "AND kind='spawned'", (effect_event, next_card)).fetchone()
+        run = kb.get_run(conn, native['run_id']) if native and native['run_id'] else None
+        spawn_pid = json.loads(native['payload']).get('pid') if native else None
+        if (p['next_card'] != next_card or target is None or run is None
+                or run.task_id != next_card or run.profile != p['assignee']
+                or target.assignee != p['assignee'] or target.model_override != p['model']
+                or target.provider_override != p['provider']
+                or not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? "
+                                    "AND kind='claimed' AND id>? AND id<?",
+                                    (next_card, run.id, bound[0], effect_event)).fetchone()
+                or type(spawn_pid) is not int or spawn_pid < 1):
+            return False
+        # _end_run clears worker_pid. The immutable claim/spawn pair above
+        # proves launch even if the worker finished before the first ack.
+        kb._append_event(conn, card, 'continuation_selection_closed', {
+            **_selection_identity(sub, event), 'next_card': next_card,
+            'effect_event': effect_event, 'run_id': run.id})
+        return True
+
+
 def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
                      max_in_progress: int = 1, max_per_profile: int = 1) -> str | None:
     """Return a reason only while the exact subscription grant is actionable.
@@ -144,6 +339,17 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
     task = kb.get_task(conn, sub["task_id"])
     if task is None:
         return None
+    if grant.get("authority_mode") == "standing_coordination":
+        if (not _standing_valid(sub, task) or not kb._parents_satisfied(conn, task.id)
+                or not task.assignee or not profile_exists(task.assignee)):
+            return None
+        event = _selection_trigger(conn, task.id)
+        if not event or _selection_receipt(conn, sub, event):
+            return None
+        if (kb.count_running_tasks(conn) + kb.count_running_tasks_other_boards() >= max_in_progress
+                or kb._memory_pressure_level() == "critical"):
+            return None
+        return "next_selection"
     if (grant.get("authority_actor") != "Brian"
             or not isinstance(grant.get("authority_reference"), str)
             or not grant["authority_reference"].strip()
@@ -247,7 +453,8 @@ def admission_reason(conn, sub: dict, *, profile: str, profile_home=None,
 
 
 def collect_wakeup(conn, *, job_id: str, profile: str,
-                   max_in_progress: int = 1, max_per_profile: int = 1) -> dict:
+                   max_in_progress: int = 1, max_per_profile: int = 1,
+                   standing_only: bool = False) -> dict:
     """Observe one scoped cron transition; native monitor/claim gates own dedup.
 
     A failed/interrupted observation never advances the Kanban cursor. After
@@ -262,6 +469,11 @@ def collect_wakeup(conn, *, job_id: str, profile: str,
             if (sub.get("platform") != "continuation" or sub.get("chat_id") != job_id
                     or sub.get("thread_id")):
                 continue
+            # The script adapter may admit standing coordination under user
+            # pins without granting that job access to legacy obligations.
+            if standing_only and (sub.get("delivery_metadata") or {}).get(
+                    "authority_mode") != "standing_coordination":
+                continue
             reason = admission_reason(conn, sub, profile=profile,
                                       max_in_progress=max_in_progress,
                                       max_per_profile=max_per_profile)
@@ -271,6 +483,9 @@ def collect_wakeup(conn, *, job_id: str, profile: str,
                 conn, task_id=sub["task_id"], platform="continuation", chat_id=job_id,
                 kinds=EVENT_KINDS,
             )
+            if reason == "next_selection":
+                cursor = _selection_trigger(conn, sub["task_id"])
+                events = [{"id": cursor}] if cursor else []
             if reason == "decision_required":
                 # Owner binding may postdate the real hold. Observe its native
                 # identity without rewinding the installation/delivery cursor.
@@ -345,7 +560,7 @@ def observe_pending_obligations(conn, *, job_id: str, profile: str,
         if task is None or task.status == "running" or task.claim_lock:
             continue
         metadata = sub.get("delivery_metadata") or {}
-        for reason in ("authentication_blocker", "retry_exhausted", "goal_closeout", "decision_required"):
+        for reason in ("authentication_blocker", "retry_exhausted", "goal_closeout", "decision_required", "next_selection"):
             event = metadata.get(f"reason_observed_event:{reason}")
             if type(event) is not int or event < 1:
                 continue
@@ -355,6 +570,8 @@ def observe_pending_obligations(conn, *, job_id: str, profile: str,
                 (task.id, event, *EVENT_KINDS),
             ).fetchone()
             if native is None:
+                continue
+            if reason == "next_selection" and _selection_receipt(conn, sub, event):
                 continue
             if (metadata.get(f"reason_ack_event:{reason}") == event
                     and _verified_closure(conn, sub, reason, current=True)):
@@ -563,8 +780,8 @@ def pending_escalation(conn, *, card: str, event: int) -> dict | None:
 
 def emit_gate(*, job_id: str, profile: str) -> None:
     """Supported script adapter; fail closed before any coordinator inference."""
-    if not _job_permits_inference(job_id=job_id, profile=profile):
-        print(json.dumps({"wakeAgent": False}))
-        return
+    legacy_allowed = _job_permits_inference(job_id=job_id, profile=profile)
     with kb.connect_closing() as conn:
-        print(json.dumps(collect_wakeup(conn, job_id=job_id, profile=profile), sort_keys=True))
+        print(json.dumps(collect_wakeup(
+            conn, job_id=job_id, profile=profile, standing_only=not legacy_allowed,
+        ), sort_keys=True))

@@ -51,7 +51,7 @@ def setup(tmp_path, monkeypatch):
         yield home, conn, job, task
 
 
-def install_model_sentinel(monkeypatch):
+def install_model_sentinel(monkeypatch, model="gpt-6.1-sol"):
     """Only the forbidden network/model boundary is replaced; native IO runs."""
     from agent.inference_policy import subscription_only_active
     import cron.scheduler as sched
@@ -63,7 +63,7 @@ def install_model_sentinel(monkeypatch):
         def __init__(self, **kwargs):
             assert subscription_only_active()
             assert kwargs["provider"] == "openai-codex"
-            assert kwargs["model"] == "gpt-6.1-sol"
+            assert kwargs["model"] == model
             self.kwargs = kwargs
 
         def run_conversation(self, prompt, **kwargs):
@@ -149,3 +149,52 @@ def test_paused_job_does_not_admit_on_script_or_manual_scoped_call(setup, monkey
     pause_job(job["id"], reason="operator hold")
     assert run_job(get_job(job["id"]))[2] == SILENT_MARKER
     assert observed == []
+
+
+@pytest.mark.parametrize("model,legacy_expired", [
+    ("gpt-6.1-sol", False), ("gpt-6-astra", False), ("gpt-6-astra", True),
+])
+def test_standing_selection_poll_recovers_then_quiets_only_after_spawn(setup, monkeypatch, model, legacy_expired):
+    from hermes_cli import kanban_continuation as c
+    from cron.jobs import update_job
+    home, conn, job, legacy = setup
+    update_job(job["id"], {"model": model})
+    observed = install_model_sentinel(monkeypatch, model=model)
+    cards = [kb.create_task(conn, title="Bounded existing card", assignee="ang",
+                            provider_override="openai-codex", model_override="user-task-pin")
+             for _ in range(2)]
+    for card in cards:
+        c.register_standing_coordination(conn, card=card, profile="default", job_id=job['id'],
+                                         authority_actor="Brian", authority_reference=f"test request:{card}")
+    source, target = cards
+    if model != "gpt-6.1-sol":
+        # The standing adapter must not widen the legacy job/model gate,
+        # even when a legacy obligation is otherwise actionable.
+        kb.unblock_task(conn, legacy)
+        kb._record_task_failure(conn, legacy, "authentication failed", outcome="spawn_failed", failure_limit=5)
+        if legacy_expired:
+            kb.add_notify_sub(conn, task_id=legacy, platform="continuation", chat_id=job['id'],
+                              notifier_profile="default", delivery_metadata={"authority_expires_at": 1})
+    assert run_job(get_job(job['id']))[2] == SILENT_MARKER
+    assert not observed
+    kb.block_task(conn, source, reason="retained decision", kind="needs_input")
+    # No notification is delivered: the existing monitor script recovers it.
+    assert run_job(get_job(job['id']))[0]
+    assert len(observed) == 1 and 'next_selection' in observed[0][1]
+    assert legacy not in observed[0][1]
+    assert get_job(job['id'])['model'] == model
+    wake = c.collect_wakeup(conn, job_id=job['id'], profile='default', standing_only=True)
+    args = dict(card=source, event=wake['event'], profile='default', job_id=job['id'], next_card=target)
+    assert c.bind_next_selection(conn, **args)
+    assert run_job(get_job(job['id']))[0]  # model success did not acknowledge
+    assert len(observed) == 2
+    kb.claim_task(conn, target)
+    kb._set_worker_pid(conn, target, 12345)
+    spawned = kb.list_events(conn, target)[-1].id
+    with kb.connect_closing() as reopened:
+        assert c.acknowledge_next_selection(reopened, **args, effect_event=spawned)
+    assert run_job(get_job(job['id']))[2] == SILENT_MARKER
+    assert len(observed) == 2
+    assert kb.get_task(conn, source).status == 'blocked'
+    assert kb.has_active_control_hold(conn, source)
+    assert kb.get_task(conn, target).model_override == 'user-task-pin'

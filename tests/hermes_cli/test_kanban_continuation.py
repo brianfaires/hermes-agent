@@ -894,3 +894,280 @@ def test_separate_smoke_stimulus_decision_effect_ack_and_two_quiet_repeats(board
             assert continuation.collect_wakeup(reopened, job_id="job1", profile="default") == {"wakeAgent": False}
         assert kb.list_events(reopened, stimulus) == before
         assert kb.get_task(reopened, controller).status == "ready"
+
+
+def test_standing_selected_leaf_and_exact_launch(board):
+    from cron.jobs import create_job, use_cron_store
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_continuation as c
+    with use_cron_store(get_hermes_home()):
+        job = create_job(prompt="Bounded selection", schedule="every 5m", deliver="local",
+                         script="gate.py", monitor_script="gate.py",
+                         model="user-pin", attach_to_session=False)
+        card = new_task(board)
+        c.register_standing_coordination(board, card=card, profile="default", job_id=job['id'],
+                                         authority_actor="Brian", authority_reference="test attributable request")
+        kb.complete_task(board, card)
+        wake = c.collect_wakeup(board, job_id=job['id'], profile="default")
+        assert wake['reason'] == 'next_selection'
+        target = new_task(board)
+        c.register_standing_coordination(board, card=target, profile="default", job_id=job['id'],
+                                         authority_actor="Brian", authority_reference="separate target approval")
+        args = dict(card=card, event=wake['event'], job_id=job['id'], profile='default', next_card=target)
+        assert c.bind_next_selection(board, **args)
+        assert not c.acknowledge_next_selection(board, **args, effect_event=wake['event'])
+        kb.claim_task(board, target)
+        kb._set_worker_pid(board, target, 12345)
+        effect = board.execute('SELECT MAX(id) FROM task_events WHERE task_id=?', (target,)).fetchone()[0]
+        assert c.acknowledge_next_selection(board, **args, effect_event=effect)
+        with kb.connect_closing() as reopened:
+            assert c.acknowledge_next_selection(reopened, **args, effect_event=effect)
+            assert c.collect_wakeup(reopened, job_id=job['id'], profile='default') == {'wakeAgent': False}
+        assert kb.get_task(board, target).model_override == 'gpt-6.1-sol'
+
+
+@pytest.fixture
+def standing(board):
+    from cron.jobs import create_job, use_cron_store
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_continuation as c
+    with use_cron_store(get_hermes_home()):
+        job = create_job(prompt="Bounded selection", schedule="every 5m", deliver="local",
+                         script="gate.py", monitor_script="gate.py",
+                         model="user-chosen-coordinator", attach_to_session=False)
+        cards = [kb.create_task(board, title="Existing bounded work", assignee="ang",
+                                provider_override="chosen-provider", model_override="chosen-model")
+                 for _ in range(2)]
+        for card in cards:
+            c.register_standing_coordination(board, card=card, profile="default", job_id=job['id'],
+                                             authority_actor="Brian", authority_reference=f"request:{card}")
+        yield c, job, *cards
+
+
+@pytest.mark.parametrize('finish', ['done', 'blocked'])
+def test_standing_retains_blocker_and_recovers_missed_event(board, standing, finish):
+    c, job, card, target = standing
+    assert c.collect_wakeup(board, job_id=job['id'], profile='default') == {'wakeAgent': False}
+    if finish == 'done':
+        kb.complete_task(board, card)
+    else:
+        kb.block_task(board, card, reason='retained owner decision', kind='needs_input')
+    with kb.connect_closing() as reopened:
+        first = c.collect_wakeup(reopened, job_id=job['id'], profile='default')
+        assert first['reason'] == 'next_selection'
+        assert c.collect_wakeup(reopened, job_id=job['id'], profile='default') == first
+        args = dict(card=card, event=first['event'], profile='default', job_id=job['id'], next_card=target)
+        assert c.bind_next_selection(reopened, **args)
+        assert c.bind_next_selection(reopened, **args)
+        kb.add_comment(reopened, target, author='worker', body='model success')
+        comment = kb.list_events(reopened, target)[-1].id
+        assert not c.acknowledge_next_selection(reopened, **args, effect_event=comment)
+        assert kb.claim_task(reopened, target)
+        claimed = kb.list_events(reopened, target)[-1].id
+        assert not c.acknowledge_next_selection(reopened, **args, effect_event=claimed)
+        kb._set_worker_pid(reopened, target, 12345)
+        spawned = kb.list_events(reopened, target)[-1].id
+        assert c.acknowledge_next_selection(reopened, **args, effect_event=spawned)
+        assert not c.acknowledge_wakeup(reopened, card=card, event=first['event'],
+                                       profile='default', job_id=job['id'],
+                                       reason='decision_required', effect_event=spawned)
+        assert c.collect_wakeup(reopened, job_id=job['id'], profile='default') == {'wakeAgent': False}
+    assert kb.get_task(board, card).status == finish
+    assert kb.has_active_control_hold(board, card) == (finish == 'blocked')
+    assert kb.get_task(board, target).model_override == 'chosen-model'
+    assert kb.get_task(board, target).provider_override == 'chosen-provider'
+
+
+@pytest.mark.parametrize('gate', ['paused', 'revoked', 'expired', 'job_pause', 'wrong_job',
+                                  'wrong_owner', 'wrong_home', 'estop', 'capacity'])
+def test_standing_admission_gates(board, standing, monkeypatch, gate):
+    from cron.jobs import pause_job
+    c, job, card, target = standing
+    kb.complete_task(board, card)
+    sub = _standing_subscription(board, card)
+    metadata = sub['delivery_metadata']
+    if gate in ('paused', 'revoked'):
+        metadata['authority_' + gate] = True
+    elif gate == 'expired':
+        metadata['authority_expires_at'] = int(time.time()) - 1
+    elif gate == 'wrong_home':
+        metadata['authority_home'] = '/wrong/home'
+    elif gate == 'job_pause':
+        pause_job(job['id'])
+    elif gate == 'estop':
+        from agent.estop import engage
+        engage('test stop in disposable home')
+    elif gate == 'capacity':
+        kb.claim_task(board, target)
+    kb.add_notify_sub(board, task_id=card, platform='continuation', chat_id=job['id'],
+                      notifier_profile='default', delivery_metadata=metadata)
+    before = kb.list_notify_subs(board)
+    assert c.collect_wakeup(board, job_id='wrong' if gate == 'wrong_job' else job['id'],
+                            profile='ang' if gate == 'wrong_owner' else 'default') == {'wakeAgent': False}
+    assert kb.list_notify_subs(board) == before
+
+
+def _standing_subscription(board, card):
+    return next(s for s in kb.list_notify_subs(board, card) if s['platform'] == 'continuation')
+
+
+@pytest.mark.parametrize('gate', ['unregistered', 'expired', 'revoked', 'hold', 'parents', 'claimed'])
+def test_standing_target_requires_independent_authority_and_gates(board, standing, gate):
+    c, job, card, target = standing
+    kb.complete_task(board, card)
+    wake = c.collect_wakeup(board, job_id=job['id'], profile='default')
+    if gate == 'unregistered':
+        kb.remove_notify_sub(board, task_id=target, platform='continuation', chat_id=job['id'])
+    elif gate in ('expired', 'revoked'):
+        m = _standing_subscription(board, target)['delivery_metadata']
+        m['authority_expires_at' if gate == 'expired' else 'authority_revoked'] = 1 if gate == 'expired' else True
+        kb.add_notify_sub(board, task_id=target, platform='continuation', chat_id=job['id'],
+                          notifier_profile='default', delivery_metadata=m)
+    elif gate == 'hold':
+        kb.block_task(board, target, reason='operator stop', kind='needs_input')
+    elif gate == 'parents':
+        parent = new_task(board)
+        kb.link_tasks(board, parent, target)
+    else:
+        kb.claim_task(board, target)
+    assert not c.bind_next_selection(board, card=card, event=wake['event'], profile='default',
+                                     job_id=job['id'], next_card=target)
+
+
+def test_standing_registration_cannot_launder_legacy_grant(board):
+    from hermes_cli import kanban_continuation as c
+    card = new_task(board)
+    subscribe(board, card)
+    m = kb.list_notify_subs(board, card)[0]['delivery_metadata']
+    m['authority_expires_at'] = 1
+    kb.add_notify_sub(board, task_id=card, platform='continuation', chat_id='job1',
+                      notifier_profile='default', delivery_metadata=m)
+    before = kb.list_notify_subs(board)
+    for job in ('job1', 'another-job'):
+        with pytest.raises(ValueError):
+            c.register_standing_coordination(board, card=card, profile='default', job_id=job,
+                                             authority_actor='Brian', authority_reference='old request')
+    assert kb.list_notify_subs(board) == before
+    assert c.collect_wakeup(board, job_id='job1', profile='default') == {'wakeAgent': False}
+
+
+@pytest.mark.parametrize('gate', ['source_revoke', 'target_revoke', 'job_pause', 'estop', 'wrong_owner', 'wrong_job'])
+def test_standing_ack_rechecks_gates(board, standing, monkeypatch, gate):
+    from cron.jobs import pause_job
+    c, job, card, target = standing
+    kb.complete_task(board, card)
+    event = c.collect_wakeup(board, job_id=job['id'], profile='default')['event']
+    args = dict(card=card, event=event, profile='default', job_id=job['id'], next_card=target)
+    assert c.bind_next_selection(board, **args)
+    kb.claim_task(board, target)
+    kb._set_worker_pid(board, target, 12345)
+    effect = kb.list_events(board, target)[-1].id
+    if gate.endswith('revoke'):
+        subject = card if gate == 'source_revoke' else target
+        m = _standing_subscription(board, subject)['delivery_metadata']
+        m['authority_revoked'] = True
+        kb.add_notify_sub(board, task_id=subject, platform='continuation', chat_id=job['id'],
+                          notifier_profile='default', delivery_metadata=m)
+    elif gate == 'job_pause':
+        pause_job(job['id'])
+    elif gate == 'estop':
+        from agent.estop import engage
+        engage('test stop in disposable home')
+    elif gate == 'wrong_owner':
+        args['profile'] = 'ang'
+    else:
+        args['job_id'] = 'wrong'
+    assert not c.acknowledge_next_selection(board, **args, effect_event=effect)
+    assert not any(e.kind == 'continuation_selection_closed' for e in kb.list_events(board, card))
+
+
+def test_standing_target_cannot_be_reserved_twice(board, standing):
+    c, job, card, target = standing
+    other = new_task(board)
+    c.register_standing_coordination(board, card=other, profile='default', job_id=job['id'],
+                                     authority_actor='Brian', authority_reference='other selected source')
+    for source in (card, other):
+        kb.complete_task(board, source)
+    events = {p['card']: p['event'] for p in
+              c.collect_wakeup(board, job_id=job['id'], profile='default')['exceptions']}
+    assert c.bind_next_selection(board, card=card, event=events[card], profile='default',
+                                 job_id=job['id'], next_card=target)
+    with kb.connect_closing() as reopened:
+        assert not c.bind_next_selection(reopened, card=other, event=events[other], profile='default',
+                                         job_id=job['id'], next_card=target)
+
+
+def test_standing_leaf_native_admission_contract(board):
+    """Discriminates existing admission behavior without calling a new API."""
+    from cron.jobs import create_job, use_cron_store
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_continuation as c
+    with use_cron_store(get_hermes_home()):
+        job = create_job(prompt='Bounded selection', schedule='every 5m', deliver='local',
+                         script='gate.py', monitor_script='gate.py',
+                         attach_to_session=False, model='chosen-coordinator')
+        card = kb.create_task(board, title='Existing selected leaf', assignee='ang',
+                              model_override='chosen-task', provider_override='chosen-provider')
+        kb.add_notify_sub(board, task_id=card, platform='continuation', chat_id=job['id'],
+                          notifier_profile='default', delivery_mode='wake', delivery_metadata={
+            'authority_actor': 'Brian', 'authority_reference': 'test attributable request',
+            'authority_mode': 'standing_coordination', 'authority_task_id': card,
+            'authority_assignee': 'ang', 'authority_home': str(get_hermes_home()),
+            'authority_job_id': job['id'], 'authority_paused': False, 'authority_revoked': False,
+            'procedure': c.PROCEDURE})
+        kb.complete_task(board, card)
+        sub = kb.list_notify_subs(board, card)[0]
+        assert c.admission_reason(board, sub, profile='default') == 'next_selection'
+
+
+def test_standing_capacity_open_and_closed_obligation_survive_restart(board, standing):
+    c, job, card, target = standing
+    busy = new_task(board)
+    kb.claim_task(board, busy)
+    kb.complete_task(board, card)
+    assert c.collect_wakeup(board, job_id=job['id'], profile='default') == {'wakeAgent': False}
+    kb.complete_task(board, busy)
+    with kb.connect_closing() as reopened:
+        wake = c.collect_wakeup(reopened, job_id=job['id'], profile='default')
+        args = dict(card=card, event=wake['event'], profile='default', job_id=job['id'], next_card=target)
+        assert c.observe_pending_obligations(reopened, job_id=job['id'], profile='default',
+                                             deadline_seconds=60)[0]['reason'] == 'next_selection'
+        assert c.bind_next_selection(reopened, **args)
+        kb.claim_task(reopened, target)
+        kb._set_worker_pid(reopened, target, 12345)
+        effect = kb.list_events(reopened, target)[-1].id
+        assert c.acknowledge_next_selection(reopened, **args, effect_event=effect)
+    assert c.observe_pending_obligations(board, job_id=job['id'], profile='default',
+                                         deadline_seconds=60) == []
+    assert not c.acknowledge_next_selection(board, **args, effect_event=effect + 1)
+
+
+@pytest.mark.parametrize('finish', ['completed', 'blocked', 'failed'])
+def test_standing_ack_after_target_run_ends(board, standing, finish):
+    c, job, card, target = standing
+    kb.complete_task(board, card)
+    wake = c.collect_wakeup(board, job_id=job['id'], profile='default')
+    args = dict(card=card, event=wake['event'], profile='default', job_id=job['id'], next_card=target)
+    assert c.bind_next_selection(board, **args)
+    claimed = kb.claim_task(board, target)
+    kb._set_worker_pid(board, target, 12345)
+    spawned = kb.list_events(board, target)[-1].id
+    if finish == 'completed':
+        kb.complete_task(board, target)
+    elif finish == 'blocked':
+        kb.block_task(board, target, reason='retained target blocker', kind='needs_input')
+    else:
+        kb._record_task_failure(board, target, 'worker crashed', outcome='crashed',
+                                failure_limit=1, release_claim=True, end_run=True)
+    assert kb.get_run(board, claimed.current_run_id).worker_pid is None
+    with kb.connect_closing() as reopened:
+        assert c.acknowledge_next_selection(reopened, **args, effect_event=spawned)
+        assert c.acknowledge_next_selection(reopened, **args, effect_event=spawned)
+        assert c.admission_reason(reopened, _standing_subscription(reopened, card),
+                                  profile='default') is None
+        # The finished target may itself legitimately request the next selection;
+        # the acknowledged source must never reappear in that wake.
+        payload = c.collect_wakeup(reopened, job_id=job['id'], profile='default')
+        assert payload.get('card') != card
+        assert all(item['card'] != card for item in payload.get('exceptions', []))
+        assert kb.get_task(reopened, target).status == ('done' if finish == 'completed' else 'blocked')
