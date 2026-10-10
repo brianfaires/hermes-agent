@@ -66,8 +66,8 @@ def env():
             "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
 
 
-def command(argv, cwd, environ=None):
-    p = subprocess.run(argv, cwd=cwd, env=environ or env(), capture_output=True, timeout=60)
+def command(argv, cwd, environ=None, *, timeout=60):
+    p = subprocess.run(argv, cwd=cwd, env=environ or env(), capture_output=True, timeout=timeout)
     require(p.returncode == 0, f"command failed ({p.returncode}): {argv[0]} {argv[1:3]}")
     return p.stdout.decode()
 
@@ -83,7 +83,7 @@ def load_manifest(filename, sha):
     raw = private_read(Path(filename))
     require(digest(raw) == sha, "manifest digest changed")
     m = json.loads(raw)
-    require(set(m) - {"current", "promotion"} == {"repo", "target", "known_good", "service", "baseline_invocation",
+    require(set(m) - {"current", "promotion", "idle_observer"} == {"repo", "target", "known_good", "service", "baseline_invocation",
                        "executor", "state_dir", "interpreter", "smoke_argv", "smoke_sha256"},
             "unexpected manifest fields")
     repo = path(m["repo"], directory=True)
@@ -144,7 +144,8 @@ class Systemd:
         e = env()
         # User bus addressing only; never import the calling model's environment.
         e["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"  # windows-footgun: ok — Linux/systemd-only guard
-        return command(["/usr/bin/systemctl", "--user", verb, unit], "/", e)
+        return command(["/usr/bin/systemctl", "--user", verb, unit], "/", e,
+                       timeout=120 if verb == "stop" else 60)
 
     def show(self, unit):
         return dict(line.split("=", 1) for line in self.ctl("show", unit).splitlines() if "=" in line)
@@ -155,6 +156,28 @@ class Systemd:
                 "gateway not loaded under exact service identity")
         return {"invocation": s.get("InvocationID", ""), "active": s.get("ActiveState"),
                 "pid": int(s.get("MainPID", "0"))}
+
+    def pre_arm(self, current, gateway):
+        s = self.show(self.m["service"])
+        require(s.get("Id") == self.m["service"] and
+                s.get("InvocationID") == gateway["invocation"], "gateway changed before arm")
+        require(0 < duration(s.get("TimeoutStopUSec")) <= 90,
+                "gateway stop timeout must be finite and at most 90 seconds")
+        binding = self.m.get("idle_observer", {})
+        require(set(binding) == {"path", "sha256", "home"}, "idle observer binding required")
+        script = path(binding["path"], private=True)
+        require(script.name == "observe_idle.py" and not script.is_relative_to(self.m["repo"]),
+                "expected external concrete idle observer")
+        path(str(script.parent), private=True, directory=True)
+        home = path(binding["home"], directory=True)
+        require(digest(private_read(script)) == binding["sha256"], "idle observer changed")
+        try:
+            result = json.loads(command([self.m["interpreter"], "-I", "-S", "-B", str(script),
+                                        str(home), self.m["repo"], str(gateway["pid"]),
+                                        current["sha"]], "/"))
+            return result == {"idle_not_reserved": True}
+        except (Refused, subprocess.TimeoutExpired, ValueError):
+            return False
 
     def stop(self):
         self.ctl("stop", self.m["service"])
@@ -605,6 +628,8 @@ def execute(mode, filename, sha, adapter=Systemd):
             require(active(g) and g["invocation"] == m["baseline_invocation"], "stale baseline invocation")
             require(service.executor(False) == invocation,
                     "executor changed during preflight")
+            if not service.pre_arm(current, g):
+                return "deferred_busy_or_unknown"
             state = {"manifest": sha, "executor_invocation": invocation, "identity": ident,
                      "refs": frozen_refs, "git_config": config, "phase": "armed"}
             atomic(directory, state)  # Durable BEFORE stop, even if stop fails/crashes.

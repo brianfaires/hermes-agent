@@ -56,6 +56,9 @@ class FixtureService:
     def gateway(self):
         return self.read()["gateway"]
 
+    def pre_arm(self, current, gateway):
+        return not (self.root / "busy").exists()
+
     def stop(self):
         s = self.read()
         s["actions"].append("stop")
@@ -624,6 +627,17 @@ class GuardTests(unittest.TestCase):
         self.configure(gateway={"active": "active", "pid": 999, "invocation": "d" * 32})
         self.recover(expected=1)
         self.assertEqual(self.service_data()["actions"], ["stop", "start"])
+
+    def test_busy_arriving_during_preflight_defers_without_arm(self):
+        self.smoke.write_text(self.smoke.read_text() +
+                              "(repo.parent / 'busy').touch()\n")
+        self.m["smoke_sha256"] = hashlib.sha256(self.smoke.read_bytes()).hexdigest()
+        self.freeze()
+        self.assertEqual(self.run_guard(expected=1).stdout.strip(), "deferred_busy_or_unknown")
+        self.assertFalse((self.state / "transaction.json").exists())
+        self.assertEqual(self.service_data()["actions"], [])
+        self.assertEqual(self.service_data()["gateway"]["active"], "active")
+        self.assertEqual(self.recover(expected=0).stdout.strip(), "not_armed")
 
     def test_timeout_defers_until_fence(self):
         # Exercise the timeout branch without a 60-second sleep. The real Git

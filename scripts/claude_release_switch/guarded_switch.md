@@ -44,7 +44,8 @@ The optional `current` field is restricted to recovery-only binding below unless
   "state_dir": "/absolute/private/transaction-state",
   "interpreter": "/absolute/canonical/python",
   "smoke_argv": ["/absolute/canonical/python", "-I", "-S", "-B", "/absolute/private/smoke.py", "/absolute/canonical/repository"],
-  "smoke_sha256": "64-lowercase-hex"
+  "smoke_sha256": "64-lowercase-hex",
+  "idle_observer": {"path": "/absolute/private/observe_idle.py", "sha256": "64-lowercase-hex", "home": "/absolute/fleet-home"}
 }
 ```
 
@@ -232,11 +233,14 @@ or out-of-range properties are refused, including at a second executor check
 immediately before the durable arm, after preflight smoke and source checks.
 
 The independent Claude/Codex parent may remain MainPID; the guard is allowed to
-be its child. The parent should propagate guard failure and exit promptly, but
+be its child. On `awaiting_fence`, the parent MUST exit immediately: no readbacks, reporting,
+or further tool/model calls. The transaction journal is durable evidence; reports
+belong after fenced recovery. For other failures the parent should propagate
+failure and exit promptly, but
 a surviving parent cannot postpone termination indefinitely: the finite runtime
 forces shutdown and group kill escalation before the hook. The 5–10 minute stop
 budget also gives the hook time for known-good smoke (up to 60 seconds), service
-stop/start (up to 60 seconds each), checkout and source verification. This is a
+stop (up to 120 seconds) and start (up to 60 seconds), checkout and source verification. This is a
 finite allowance, not a proof that arbitrary repository sizes or slow storage
 fit: adoption must qualify the actual recovery path within that allowance.
 A parent ignoring termination may consume one stop timeout before final kill;
@@ -274,7 +278,10 @@ an adapter through the Python API only.
   recover from the durable arm. A partially stopped service still deactivating
   with a live PID fails closed as `recovery_required`; no source switch or start
   follows that observation.
-- Commands have a 60-second timeout. Forward timeout records `awaiting_fence` and
+- Ordinary commands have a 60-second timeout. Only the shared Systemd stop
+  adapter gets 120 seconds, in both forward and recovery paths. Before arming,
+  the actual gateway `TimeoutStopUSec` must be finite, positive and at most
+  90 seconds; unknown/infinite/unsupported values refuse before any arm. Forward timeout records `awaiting_fence` and
   returns nonzero: descendants may survive the direct child's termination, so
   only the later fenced hook may recover. A surviving model parent is bounded by
   the checked executor runtime; no prompt promise or extra model turns are needed.
@@ -292,7 +299,8 @@ an adapter through the Python API only.
   fencing, corrupt state and lock contention instead return an explicit error
   without overwriting another transaction's state.
 
-Stdout distinguishes `switched`, `recovered`, `not_armed`, and `awaiting_fence`;
+Stdout distinguishes `switched`, `recovered`, `not_armed`, `deferred_busy_or_unknown`,
+and `awaiting_fence`;
 errors are JSON on stderr. Exit 0 means switched or not armed; 2 means known-good
 recovery succeeded; 1 means refused or recovery still required. Every CLI result
 has `deployment_accepted: false`. Service `active`/MainPID/InvocationID readback is
@@ -332,7 +340,7 @@ uses no Hermes imports, and isolates HOME/HERMES_HOME for all child processes.
 Run the offline files only through the canonical runner:
 
 ```text
-scripts/run_tests.sh tests/scripts/test_guarded_switch.py tests/scripts/test_guarded_switch_harness_safety.py tests/scripts/test_guarded_switch_systemd.py tests/scripts/test_guarded_switch_promotion.py -q
+scripts/run_tests.sh tests/scripts/test_guarded_switch.py tests/scripts/test_guarded_switch_harness_safety.py tests/scripts/test_guarded_switch_systemd.py tests/scripts/test_guarded_switch_promotion.py tests/scripts/test_guarded_switch_observers.py -q
 ```
 
 The integration candidate includes: this document, `guarded_switch.py`,
@@ -388,3 +396,124 @@ Those offline tests do not qualify actual systemd lifecycle semantics; the retai
 eight real-systemd cases provide that bounded toy-unit evidence. Parent review and
 fresh exact deployment binding remain necessary under standing approval.
 Historical qualification is not a current production readiness check.
+
+
+## Fresh idle observation before arm
+
+The Systemd adapter requires a pinned `idle_observer` binding. Install the reviewed
+`observe_idle.py` outside the checkout in a private directory and bind its exact
+hash and canonical fleet home. There is no caller-selected command or callback.
+The guard passes the just-verified current source SHA and gateway PID; the old
+run122 PID/SHA binding is not reused. Missing binding refuses a new forward run;
+recovery of an already armed legacy manifest remains possible.
+
+After source/smoke/promotion preflight, executor and gateway verification, the
+adapter checks the actual stop bound and runs this observation immediately before
+the durable arm. It reuses the existing control socket, all-profile cron claims
+and execution stores, board tasks/open runs, source cwd consumers and external
+drain marker. Busy/unanswered/malformed observation returns
+`deferred_busy_or_unknown` (exit 1), leaving the gateway running and journal absent.
+Missing roots or unreadable stores are unknown. The script samples gateway
+activity last, requiring the exact PID/source and a sample at most five seconds
+old. Filesystem/process scanning retains the previous observer's visibility limits.
+This narrows the stale observation gap; it is not atomic admission, a reservation,
+or a lock/drain framework. Keep the existing external writer hold and restrictions.
+
+## Disposable terminal-owner observer: proposed wiring only
+
+`terminal_observer.py` only observes the exact executor unit/invocation and the
+bound transaction journal. MainPID OR ControlPID OR an active/transitioning unit
+keeps it silent: a live ExecStopPost is not terminal. Missing/unloaded/replaced
+units are owned observation failures, never a terminal release success. Complete
+journals distinguish switched/recovered; incomplete terminal journals request
+recovery attention. No journal after exact terminal means not armed. No outcome
+confers release acceptance, retries release work, or mutates a TEST.
+
+A fresh private JSON binding has exactly these fields:
+
+- `executor`, `invocation`: exact future unit and its actual invocation, never the
+  old run122 identity. Keep the transient definition referenced through observation.
+- `manifest_sha256`, `journal`: frozen transaction digest and absolute journal path.
+- `owner`: explicit controller attention destination label; routing is separately
+  pinned in the cron job's existing `deliver`/`origin` fields.
+- `state_dir`: separate canonical 0700 directory with preprovisioned 0600 `lock`.
+- `expires_at`: absolute Unix epoch deadline, normally arm time plus 20 minutes.
+- `max_attempts`: 3 (allowed 2–5); `retry_seconds`: 60 (allowed 30–300).
+
+The binding itself is regular private 0600. Pass its SHA256 on every invocation.
+Owner-controlled files, script/interpreter and the wrapper below are part of the
+reviewed frozen packet, under the same external writer hold. No self-installation.
+
+For a future controller-authorized schedule, put a narrowly bound `.sh` wrapper
+under that scheduler profile's `HERMES_HOME/scripts/`, using literal canonical
+paths and `exec CANONICAL_PYTHON -I -S -B /private/terminal_observer.py
+/private/binding.json --sha256 EXACT_DIGEST`. The existing scheduler only accepts
+scripts under that scripts directory and does not pass script arguments, hence
+the wrapper. Use `no_agent=true`, `schedule="every 1m"`, `repeat=30`, explicit
+controller delivery routing, and a working directory outside the source checkout.
+Bind the actual executor invocation before enabling this fresh schedule. A silent
+run still consumes a scheduler repeat, so a single interrupted invocation must
+not be the only scheduled opportunity. Do not revive the expired old one-shot.
+These are proposed values and instructions, not a job created by this change.
+
+Stdout is merely a request for the scheduler to deliver. The script persists an
+attempt before stdout and retries the same token at most three times with at least
+60 seconds between attempts. It never records delivery success itself. The owner
+must receive the notice, deduplicate its stable token, and explicitly run the same
+bound script with `--ack TOKEN --receipt RECEIPT_REFERENCE`. That records actual
+owner receipt in `observer.json`; it does not acknowledge release correctness.
+Do not use cron `last_status=success`, a script attempt, or even adapter-level
+`delivery_outcome=delivered` as an owner acknowledgment. Only the owner may supply
+this receipt. Acknowledged invocations remain silent. The first notice is frozen;
+if it is an observation failure, the owner must investigate rather than treating
+it as a later terminal outcome. A failure receipt NEVER authorizes replacement or
+takeover. Before any takeover, the controller must freshly verify exact executor
+AND recovery-hook terminality; live or unverified ownership prohibits takeover.
+Acknowledging or investigating a read/identity failure is not that verification.
+
+For an unacknowledged observer, expiry is persisted independently of stdout:
+`expired=true` and `expiry_observed_at` record the deadline crossing even while
+the original owner remains live or the attempt budget is exhausted. The
+`expiry_blocker` distinguishes `owner_live`, `terminality_unverified`, and
+`unacknowledged_terminal`. A live owner still produces no stdout and consumes no
+additional emission attempt. Notice kind/token stay frozen; expiry bookkeeping
+never supplies a receipt or a terminal release verdict. If attempts remain,
+terminal expiry can emit an expiry notice; unknown identity can emit an
+expiry/unknown notice. The final emission attempt surfaces
+`unacknowledged_exhausted`; exhausted runs never emit again.
+
+The absence of an exact owner receipt in the bound `observer.json` is an
+AUTHORITATIVE blocker regardless of the cron job's final success/completed state,
+latest error, or delivery outcome. Missing/unreadable observer state is also a
+blocker, never evidence of delivery. An acknowledged observation failure remains
+an owned investigation requiring fresh exact executor and hook reconciliation.
+
+The controller must own an independent fixed end-of-window review (31 minutes in
+this proposal), with a named owner/destination, accepted review responsibility,
+receipt location, and escalation for missing state/receipt, expiry, exhaustion or
+acknowledged failure awaiting reconciliation. The parent coordinates that actual
+ownership separately; this source packet does not instantiate it. This deadline
+must not depend solely on receiving the observer notice or assume cron completed:
+`every 1m, repeat=30` is finite opportunities, not a hard 30-minute lifetime;
+downtime and completion-relative scheduling can extend it. No job is created here.
+
+The scheduler counts failed/interrupted recurring runs toward the repeat budget.
+Its job-level `last_delivery_error` describes only the latest run: a later
+successful silent tick passes `delivery_error=None`, clears an earlier delivery
+error and resets the failure streak. Thus final cron success and a cleared error
+can coexist with every notice delivery having failed. Investigate earlier attempts
+using per-execution history and saved output, plus retained delivery monitoring
+where available, not just the latest job record. The execution ledger retains
+final responses but does not store `delivery_outcome` as a column; that outcome
+is passed to monitoring, whose retention must not be assumed. Missing or pruned
+history cannot imply delivery, and output proves only what was proposed for
+sending. Even retained delivery evidence cannot replace the exact owner's receipt.
+A process killed after persistence but before stdout can lose one attempt; later
+scheduled observations retain their opportunities. A send followed by a crash
+can duplicate a token before owner acknowledgment. There is no exactly-once
+claim. The existing scheduler has no script-to-owner acknowledgment channel and
+cannot guarantee a final alert if all remaining runs/deliveries are interrupted,
+the gateway stays down, or the job budget expires while the hook remains live.
+The explicit owner receipt and final manual review address that boundary without
+global cron changes; if unattended guaranteed escalation is required, this scheme
+cannot provide it. No live delivery or outage guarantee was tested here.

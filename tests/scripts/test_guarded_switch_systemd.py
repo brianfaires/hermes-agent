@@ -166,7 +166,11 @@ def qualify(tmp_path, fault):
             print(json.dumps({'fault': fault, 'negative_control': 'stopped_and_not_restored',
                               'executor': executor, 'invocation': final['InvocationID']}))
             return
-        m = {'repo': str(repo), 'target': target, 'known_good': good,
+        idle = private / 'observe_idle.py'
+        idle.write_text("print('{\"idle_not_reserved\": true}')\n")
+        idle.chmod(0o600)
+        m = {'idle_observer': {'path': str(idle), 'sha256': hashlib.sha256(idle.read_bytes()).hexdigest(),
+                               'home': str(private)}, 'repo': str(repo), 'target': target, 'known_good': good,
              'service': gateway, 'baseline_invocation': baseline['InvocationID'],
              'executor': executor, 'state_dir': str(state), 'interpreter': python,
              'smoke_argv': [python, '-I', '-S', '-B', str(smoke), str(repo)],
