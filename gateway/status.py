@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
+from hermes_test_guard import ensure_not_production_home
 from typing import Any, Callable, NamedTuple, Optional
 from utils import atomic_json_write
 
@@ -140,9 +141,11 @@ def _get_process_hermes_home() -> Path:
     time.  See issue #56986.
     """
     val = os.environ.get("HERMES_HOME", "").strip()
-    if val:
-        return Path(val)
-    return _get_platform_default_hermes_home()
+    home = Path(val) if val else _get_platform_default_hermes_home()
+    # A test that wipes the environment lands here on the operator's live
+    # home; refuse before any identity file is read or written.
+    ensure_not_production_home(home, "gateway identity files")
+    return home
 
 
 def _canonical_hermes_home(path: Path | str) -> Path:

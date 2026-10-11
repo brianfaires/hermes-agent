@@ -761,6 +761,29 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _live_home_guard(request, monkeypatch):
+    """Wire the shared live-system guard (``hermes_test_guard``) the same way.
+
+    Covers paths that resolve the Hermes home outside ``SessionDB`` — the
+    gateway's identity files (``gateway.pid``, lock, ``gateway_state.json``)
+    — which env-wiping tests used to write into the operator's live home.
+    """
+    import hermes_test_guard as _tg  # stdlib-only; cheap to import eagerly
+
+    if request.node.get_closest_marker("live_system_guard_bypass") is not None:
+        monkeypatch.setattr(_tg, "BYPASS", True)
+        return
+    if _PRE_SANDBOX_HERMES_HOME and not _hermes_home_points_at_production(
+        _PRE_SANDBOX_HERMES_HOME
+    ):
+        monkeypatch.setattr(
+            _tg,
+            "EXTRA_DENY_ROOTS",
+            (Path(_PRE_SANDBOX_HERMES_HOME).expanduser().resolve(),),
+        )
+
+
+@pytest.fixture(autouse=True)
 def _state_db_write_guard(request, monkeypatch):
     _hs = sys.modules.get("hermes_state")
     if _hs is None or not hasattr(_hs, "_STATE_DB_GUARD_BYPASS"):
