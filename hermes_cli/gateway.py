@@ -4157,6 +4157,131 @@ def _strip_optional_systemd_directives(text: str) -> str:
     return "\n".join(filtered)
 
 
+# Directives in the generated unit whose assignments ACCUMULATE: a drop-in
+# ``Key=value`` appends to the base unit's value instead of replacing it, so
+# the base value stays live unless the drop-in first resets with ``Key=``.
+# Every other directive we generate is single-valued (last assignment wins).
+_SYSTEMD_ACCUMULATING_DIRECTIVES = frozenset({
+    "After",
+    "Wants",
+    "Requires",
+    "Before",
+    "WantedBy",
+    "RequiredBy",
+    "ExecStart",
+    "ExecStartPre",
+    "ExecStartPost",
+    "ExecReload",
+    "ExecStop",
+    "ExecStopPost",
+    "RestartForceExitStatus",
+    "RestartPreventExitStatus",
+    "SuccessExitStatus",
+    "EnvironmentFile",
+})
+
+
+def _iter_systemd_assignments(text: str):
+    """Yield ``(section, key, value)`` for each assignment in a unit/drop-in."""
+    section = ""
+    pending = ""
+    for raw in text.splitlines():
+        line = pending + raw.strip()
+        pending = ""
+        if line.endswith("\\"):
+            pending = line[:-1] + " "
+            continue
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        yield section, key.strip(), value.strip()
+
+
+def _systemd_environment_names(value: str) -> list[str] | None:
+    """Return the variable names an ``Environment=`` value assigns.
+
+    ``None`` means the value could not be parsed.
+    """
+    import shlex
+
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        return None
+    return [tok.split("=", 1)[0] for tok in tokens if "=" in tok]
+
+
+def _systemd_dropin_shadowed(unit_path: Path) -> tuple[set[tuple[str, str]], set[str]]:
+    """Return what the unit's ``<unit>.d/*.conf`` drop-ins override.
+
+    Returns ``(directives, env_names)``: ``(section, key)`` pairs whose base
+    value is fully replaced by a drop-in, and ``Environment=`` variable names a
+    drop-in reassigns. The base unit's value for any of these is dead config —
+    systemd never applies it — so a generated-vs-installed difference there is
+    unobservable at runtime and must not mark the unit outdated.
+    """
+    directives: set[tuple[str, str]] = set()
+    env_names: set[str] = set()
+    dropin_dir = unit_path.with_name(unit_path.name + ".d")
+    try:
+        confs = sorted(p for p in dropin_dir.glob("*.conf") if p.is_file())
+    except OSError:
+        return directives, env_names
+    for conf in confs:
+        try:
+            text = conf.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for section, key, value in _iter_systemd_assignments(text):
+            if key == "Environment":
+                if not value:
+                    # ``Environment=`` resets every base assignment.
+                    directives.add((section, key))
+                    continue
+                names = _systemd_environment_names(value)
+                if names:
+                    env_names.update(names)
+            elif key in _SYSTEMD_ACCUMULATING_DIRECTIVES:
+                if not value:
+                    directives.add((section, key))
+            else:
+                directives.add((section, key))
+    return directives, env_names
+
+
+def _mask_systemd_shadowed(
+    text: str, directives: set[tuple[str, str]], env_names: set[str]
+) -> str:
+    """Drop base-unit lines whose values a drop-in overrides."""
+    if not directives and not env_names:
+        return text
+    section = ""
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].strip()
+            kept.append(line)
+            continue
+        if not stripped or stripped[0] in "#;" or "=" not in stripped:
+            kept.append(line)
+            continue
+        key, value = (part.strip() for part in stripped.split("=", 1))
+        if (section, key) in directives:
+            continue
+        if key == "Environment" and env_names:
+            names = _systemd_environment_names(value)
+            if names and all(name in env_names for name in names):
+                continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _normalize_launchd_plist_for_comparison(text: str) -> str:
     """Normalize launchd plist text for staleness checks.
 
@@ -4205,11 +4330,21 @@ def systemd_unit_is_current(system: bool = False) -> bool:
     # Normalize out directives that older systemd versions silently drop
     # (RestartMaxDelaySec, RestartSteps) so a unit that differs only by
     # those directives is not perpetually flagged as outdated.
+    #
+    # Also mask anything the operator overrides in ``<unit>.d/*.conf``
+    # drop-ins: systemd never applies the base unit's value for those, so a
+    # difference there cannot matter, and flagging it would make restart
+    # rewrite the base unit forever to "fix" dead config.
+    shadowed, shadowed_env = _systemd_dropin_shadowed(unit_path)
     norm_installed = _normalize_service_definition(
-        _strip_optional_systemd_directives(installed)
+        _mask_systemd_shadowed(
+            _strip_optional_systemd_directives(installed), shadowed, shadowed_env
+        )
     )
     norm_expected = _normalize_service_definition(
-        _strip_optional_systemd_directives(expected)
+        _mask_systemd_shadowed(
+            _strip_optional_systemd_directives(expected), shadowed, shadowed_env
+        )
     )
     return norm_installed == norm_expected
 
