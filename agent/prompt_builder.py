@@ -29,6 +29,7 @@ from agent.skill_utils import (
     ORG_MIRROR_DIR_NAME,
     ORG_PROVENANCE_FILE,
     SKILL_SUPPORT_DIRS,
+    active_environments,
     extract_skill_conditions,
     extract_skill_description,
     get_all_skills_dirs,
@@ -1530,7 +1531,7 @@ _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2: entries gained org provenance fields (org_id/org_author/rel_dir) for M2
 # org-shared skills; older snapshots are discarded and rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 2
+_SKILLS_SNAPSHOT_VERSION = 3
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1687,6 +1688,9 @@ def _build_snapshot_entry(
     platforms = frontmatter.get("platforms") or []
     if isinstance(platforms, str):
         platforms = [platforms]
+    environments = frontmatter.get("environments") or []
+    if not isinstance(environments, list):
+        environments = [environments]
 
     entry = {
         "skill_name": skill_name,
@@ -1695,6 +1699,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "environments": [str(e).strip() for e in environments if str(e).strip()],
     }
     if org_id:
         entry["org_id"] = org_id
@@ -1735,8 +1740,10 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
         # a runtime environment that isn't active (e.g. kanban-only skills for
         # non-kanban users, s6-only skills outside the container). Explicit
         # loads (skill_view / --skills) bypass this — see skill_matches_environment.
+        # The snapshot keeps every skill, so return the real description: the
+        # environment can differ when a warm snapshot is read back.
         if not skill_matches_environment(frontmatter):
-            return False, frontmatter, ""
+            return False, frontmatter, extract_skill_description(frontmatter)
 
         return True, frontmatter, extract_skill_description(frontmatter)
     except Exception as e:
@@ -1892,6 +1899,7 @@ def _build_skills_system_prompt_inner(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(compact_categories or ())),
+        active_environments(),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1918,6 +1926,12 @@ def _build_skills_system_prompt_inner(
             frontmatter_name = entry.get("frontmatter_name") or skill_name
             platforms = entry.get("platforms") or []
             if not skill_matches_platform_list(platforms):
+                continue
+            # The snapshot is environment-independent; re-apply the offer-time
+            # environment gate the cold scan applied when it was written.
+            if not skill_matches_environment(
+                {"environments": entry.get("environments") or []}
+            ):
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue

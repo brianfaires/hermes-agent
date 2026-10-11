@@ -17,6 +17,7 @@ from agent.prompt_builder import (
     _find_git_root,
     _strip_yaml_frontmatter,
     build_skills_system_prompt,
+    clear_skills_system_prompt_cache,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
     _dynamic_context_file_max_chars,
@@ -305,6 +306,44 @@ class TestBuildSkillsSystemPrompt:
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
 
+
+    def test_environment_gate_survives_warm_snapshot(self, monkeypatch, tmp_path):
+        """A warm disk snapshot re-applies ``environments`` in either direction."""
+        import agent.skill_utils as skill_utils
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        d = tmp_path / "skills" / "kanban" / "board-review"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: board-review\ndescription: Review kanban cards\n"
+            "environments: [kanban]\n---\n"
+        )
+        active = {"kanban": True}
+        monkeypatch.setattr(
+            skill_utils, "_detect_environment", lambda env: active.get(env, False)
+        )
+
+        # Cold scan with kanban active writes the snapshot.
+        assert "board-review" in build_skills_system_prompt()
+        assert (tmp_path / ".skills_prompt_snapshot.json").exists()
+
+        # In-process cache is keyed on the active environments.
+        active["kanban"] = False
+        assert "board-review" not in build_skills_system_prompt()
+
+        # Warm snapshot path, kanban inactive: hidden.
+        clear_skills_system_prompt_cache()
+        assert "board-review" not in build_skills_system_prompt()
+
+        # Snapshot written while inactive still offers the skill, with its
+        # description, once kanban becomes active.
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+        assert "board-review" not in build_skills_system_prompt()
+        active["kanban"] = True
+        clear_skills_system_prompt_cache()
+        result = build_skills_system_prompt()
+        assert "board-review" in result
+        assert "Review kanban cards" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

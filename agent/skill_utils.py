@@ -392,6 +392,11 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
     return False
 
 
+def active_environments() -> tuple[str, ...]:
+    """Return the known runtime environments active in this context, sorted."""
+    return tuple(sorted(e for e in _KNOWN_ENVIRONMENTS if _detect_environment(e)))
+
+
 # ── Disabled skills ───────────────────────────────────────────────────────
 
 
