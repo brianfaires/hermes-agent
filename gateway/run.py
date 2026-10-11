@@ -1441,17 +1441,32 @@ def _warm_turn_machinery_sync() -> int:
 
     Returns the number of tool schemas materialized (logged for
     diagnosability).
+
+    Under ``gateway.multiplex_profiles`` this runs inside the default
+    profile's runtime scope (same seam as ``load_gateway_config_for_runner``):
+    unscoped ``get_secret`` fails closed there, so credential-gated
+    ``check_fn``s would raise and the probe cache would never be primed.
+    The scope is installed here, not by the caller, because
+    ``run_in_executor`` does not carry contextvars into the worker thread.
     """
     import run_agent  # noqa: F401  # heavy import graph, cached in sys.modules
     import model_tools
+    from contextlib import nullcontext
+    from agent.secret_scope import is_multiplex_active
 
-    tool_defs = model_tools.get_tool_definitions(quiet_mode=True)
-    try:
-        from agent.prompt_builder import build_context_files_prompt
+    scope = (
+        _profile_runtime_scope(get_hermes_home())
+        if is_multiplex_active()
+        else nullcontext()
+    )
+    with scope:
+        tool_defs = model_tools.get_tool_definitions(quiet_mode=True)
+        try:
+            from agent.prompt_builder import build_context_files_prompt
 
-        build_context_files_prompt()
-    except Exception:
-        logger.debug("context-file warm-up failed (non-fatal)", exc_info=True)
+            build_context_files_prompt()
+        except Exception:
+            logger.debug("context-file warm-up failed (non-fatal)", exc_info=True)
     return len(tool_defs)
 
 
