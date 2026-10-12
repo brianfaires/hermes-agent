@@ -119,7 +119,7 @@ and `observer_sha256` (the installed `runtime_observation.py` hash), plus
 string for a system interpreter). Include that config file in `files`. The installed
 launcher's `dependency_files(paths, venv_config)` implements that inventory; choosing the paths
 is a reviewed installation decision, never inferred by executing `.pth` files.
-The explicit dependency paths may live inside the checkout (the normal `.venv`
+The explicit dependency paths may live inside the checkout (the canonical `venv`
 layout), but none may classify any tracked current/candidate/rollback source file
 as a dependency. The loader verifies each dependency source against its separate
 inventory. On Python versions where `-S` disables venv prefix detection, the
@@ -131,7 +131,7 @@ source/dependency hold through recovery. Stdlib dependencies are trusted during
 bootstrap startup and must be pinned before service activation.
 
 ```bash
-/home/brian/.hermes/hermes-agent/.venv/bin/python -I -S -B -X pycache_prefix=/dev/null "$RELEASE_INSTALL/launch_gateway.py" \
+/home/brian/.hermes/hermes-agent/venv/bin/python -I -S -B -X pycache_prefix=/dev/null "$RELEASE_INSTALL/launch_gateway.py" \
   --repo /home/brian/.hermes/hermes-agent \
   --startup-json "$RELEASE_STATE/startup.json" \
   --dependencies "$RELEASE_INSTALL/dependencies.json" \

@@ -143,7 +143,7 @@ restores synthetic test paths and the read-only SDK interpreter selection:
 ```bash
 cat > ../fc37-test-python <<'SH'
 #!/bin/sh
-export FC37_SDK_PYTHON=/home/brian/.hermes/hermes-agent/.venv/bin/python
+export FC37_SDK_PYTHON=/home/brian/.hermes/hermes-agent/venv/bin/python
 export PYTHONDONTWRITEBYTECODE=1
 export TMPDIR=/home/brian/.hermes/kanban/boards/operations/workspaces/t_497a91d5/test-tmp
 export HERMES_HOME=/home/brian/.hermes/kanban/boards/operations/workspaces/t_497a91d5/test-home
@@ -170,7 +170,7 @@ Read-only signature evidence command:
 
 ```bash
 HOME="$PWD/../test-home" HERMES_HOME="$PWD/../test-home" PYTHONDONTWRITEBYTECODE=1 \
-  /home/brian/.hermes/hermes-agent/.venv/bin/python - <<'PY'
+  /home/brian/.hermes/hermes-agent/venv/bin/python - <<'PY'
 import inspect, sqlite3
 from importlib.metadata import version
 from hindsight_client import Hindsight
