@@ -486,7 +486,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
-    # Home context (shared <root>/ORG.md + the profile's <home>/AGENTS.md)
+    # Home context (config ``external_prompts`` + the profile's <home>/AGENTS.md)
     # rides with the identity, not with cwd discovery: it must reach cron and
     # Kanban sessions whose cwd never walks into the profile home.
     _home_context_excludes: Optional[set] = None

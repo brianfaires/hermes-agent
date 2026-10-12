@@ -728,6 +728,13 @@ DEFAULT_CONFIG = {
     # and override the dynamic behavior. Separate from read_file tool limits.
     "context_file_max_chars": None,
 
+    # Extra prompt files injected into every session that loads SOUL.md
+    # (gateway, CLI, cron, Kanban workers), independent of cwd discovery —
+    # e.g. a roster shared by several profiles. Expanded like
+    # skills.external_dirs (~, ${VAR}, $HERMES_HOME); relative paths resolve
+    # against HERMES_HOME. HERMES_HOME/AGENTS.md is always appended when present.
+    "external_prompts": [],
+
     # Maximum characters returned by a single read_file call.  Reads that
     # exceed this are rejected with guidance to use offset+limit.
     # 100K chars ≈ 25–35K tokens across typical tokenisers.

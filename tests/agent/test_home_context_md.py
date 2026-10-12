@@ -1,5 +1,6 @@
-"""Home context files (<root>/ORG.md and <home>/AGENTS.md) load independently
-of working-directory discovery, scoped to the agent's own profile home."""
+"""Home context files (config ``external_prompts`` and <home>/AGENTS.md) load
+independently of working-directory discovery, scoped to the agent's own
+profile home."""
 
 import threading
 from types import SimpleNamespace
@@ -18,7 +19,23 @@ def layout(tmp_path):
     profile.mkdir(parents=True)
     workspace = tmp_path / "elsewhere" / "repo"
     workspace.mkdir(parents=True)
+    for home in (root, profile):
+        _configure(home, ["~/ORG.md"])
     return SimpleNamespace(root=root, profile=profile, workspace=workspace)
+
+
+def _configure(home, entries):
+    import yaml
+
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"external_prompts": entries}), encoding="utf-8"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _home_is_root(tmp_path, monkeypatch):
+    # "~/ORG.md" in the fixture config resolves to <tmp>/hermes/ORG.md.
+    monkeypatch.setenv("HOME", str(tmp_path / "hermes"))
 
 
 def _make_agent(**overrides):
@@ -154,3 +171,43 @@ def test_fully_skipped_session_gets_no_home_context(layout, monkeypatch):
     parts = _parts(_make_agent(skip_context_files=True), layout.workspace)
 
     assert "ORG ROSTER" not in parts["stable"]
+
+
+def test_no_external_prompts_configured_loads_only_agents_md(layout):
+    (layout.root / "ORG.md").write_text("ORG ROSTER", encoding="utf-8")
+    (layout.profile / "AGENTS.md").write_text("ANG POLICY", encoding="utf-8")
+    (layout.profile / "config.yaml").write_text("model: x\n", encoding="utf-8")
+
+    out = prompt_builder.load_home_context_md(home_override=layout.profile)
+
+    assert "ORG ROSTER" not in out
+    assert "ANG POLICY" in out
+
+
+def test_external_prompts_string_relative_and_hermes_home_token(layout):
+    (layout.profile / "team.md").write_text("TEAM NOTES", encoding="utf-8")
+    (layout.profile / "extra.md").write_text("EXTRA", encoding="utf-8")
+    _configure(layout.profile, ["team.md", "$HERMES_HOME/extra.md", "missing.md"])
+
+    out = prompt_builder.load_home_context_md(home_override=layout.profile)
+
+    assert out.index("TEAM NOTES") < out.index("EXTRA")
+
+    import yaml
+
+    (layout.profile / "config.yaml").write_text(
+        yaml.safe_dump({"external_prompts": "team.md"}), encoding="utf-8"
+    )
+    out = prompt_builder.load_home_context_md(home_override=layout.profile)
+    assert "TEAM NOTES" in out and "EXTRA" not in out
+
+
+def test_external_prompts_read_from_own_home_config_not_ambient(layout, monkeypatch):
+    ops = layout.root / "profiles" / "ops"
+    ops.mkdir()
+    (layout.root / "OPS_ONLY.md").write_text("OPS ONLY", encoding="utf-8")
+    _configure(ops, ["~/OPS_ONLY.md"])
+    _configure(layout.profile, [])
+    monkeypatch.setenv("HERMES_HOME", str(ops))
+
+    assert prompt_builder.load_home_context_md(home_override=layout.profile) is None

@@ -2290,26 +2290,50 @@ def load_soul_md(
         return None
 
 
-def _hermes_root_for_home(home: Path) -> Path:
-    """The Hermes root that owns *home*: ``<root>`` for ``<root>/profiles/<p>``,
-    else *home* itself (the default profile, or a custom single-home deploy).
+def _home_external_prompts(home: Path) -> List[Path]:
+    """``external_prompts`` from *home*'s own ``config.yaml``, expanded like
+    ``skills.external_dirs`` (``~``, ``${VAR}``, ``$HERMES_HOME`` = *home*;
+    relative entries resolve against *home*).
 
-    Derived from the home rather than ambient env so a profile agent on a
-    thread that lost the HERMES_HOME ContextVar still resolves its own root.
+    Read from the agent's home rather than the ambient config so a profile
+    agent on a thread that lost the HERMES_HOME ContextVar still gets its own
+    list (#50233).
     """
-    if home.parent.name == "profiles":
-        return home.parent.parent
-    return home
+    config_path = home / "config.yaml"
+    if not config_path.is_file():
+        return []
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        logger.debug("Could not read external_prompts from %s: %s", config_path, e)
+        return []
+    entries = parsed.get("external_prompts") if isinstance(parsed, dict) else None
+    if isinstance(entries, str):
+        entries = [entries]
+    if not isinstance(entries, list):
+        return []
+    from agent.skill_utils import _expand_external_dir
+
+    paths: List[Path] = []
+    for entry in entries:
+        entry = str(entry or "").strip()
+        if not entry:
+            continue
+        p = Path(_expand_external_dir(entry, home))
+        paths.append(p if p.is_absolute() else home / p)
+    return paths
 
 
 def home_context_paths(home_override: "Path | None" = None) -> List[Path]:
-    """Home-level context files, in injection order: the shared org file
-    (``<root>/ORG.md``) then the profile's own ``<home>/AGENTS.md``.
-    Deduplicated by resolved path (for the default profile root == home)."""
+    """Home-level context files, in injection order: each configured
+    ``external_prompts`` entry, then the profile's own ``<home>/AGENTS.md``.
+    Deduplicated by resolved path."""
     home = Path(home_override) if home_override is not None else get_hermes_home()
     paths: List[Path] = []
     seen: set = set()
-    for candidate in (_hermes_root_for_home(home) / "ORG.md", home / "AGENTS.md"):
+    for candidate in [*_home_external_prompts(home), home / "AGENTS.md"]:
         key = candidate.resolve()
         if key not in seen:
             seen.add(key)
@@ -2321,7 +2345,8 @@ def load_home_context_md(
     context_length: Optional[int] = None,
     home_override: "Path | None" = None,
 ) -> Optional[str]:
-    """Load the org file and the profile-home AGENTS.md, or None if neither exists.
+    """Load ``external_prompts`` files and the profile-home AGENTS.md, or None
+    if none exists.
 
     Unlike project context, these load independently of working-directory
     discovery, so they reach every session that loads the SOUL.md identity
@@ -2348,7 +2373,7 @@ def load_home_context_md(
     if not sections:
         return None
     return (
-        "# Org and Profile Context\n\n"
+        "# Home Context\n\n"
         "The following home context files apply to every session and should be followed:\n\n"
         + "\n\n".join(sections)
     )

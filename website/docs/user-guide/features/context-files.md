@@ -112,6 +112,23 @@ Important details:
 - If the file is empty, nothing from `SOUL.md` is added to the prompt
 - If the file has content, the content is injected verbatim after scanning and truncation
 
+## Home context: `HERMES_HOME/AGENTS.md` and `external_prompts`
+
+Keep `SOUL.md` for persona. Put standing operational rules for a profile in `$HERMES_HOME/AGENTS.md`. Put files shared by several profiles, such as a team roster, in `external_prompts`:
+
+```yaml
+# config.yaml
+external_prompts:
+  - ~/.hermes/ORG.md        # ~, ${VAR} and $HERMES_HOME expand; relative paths resolve against HERMES_HOME
+```
+
+How home context loads:
+
+- It loads wherever `SOUL.md` does (CLI, gateway, cron, Kanban workers), whatever the working directory. Order: SOUL, then each `external_prompts` file, then `$HERMES_HOME/AGENTS.md`.
+- Each file is scanned and truncated on its own budget. Missing or empty files are skipped.
+- If the working directory is the profile home, the project-context walk skips `$HERMES_HOME/AGENTS.md` so it isn't injected twice.
+- Each profile reads its own `config.yaml`, so profiles can share a file or opt out.
+
 ## .cursorrules
 
 Hermes is compatible with Cursor IDE's `.cursorrules` file and `.cursor/rules/*.mdc` rule modules. If these files exist in your project root and no higher-priority context file (`.hermes.md`, `AGENTS.md`, or `CLAUDE.md`) is found, they're loaded as the project context.
