@@ -2290,6 +2290,70 @@ def load_soul_md(
         return None
 
 
+def _hermes_root_for_home(home: Path) -> Path:
+    """The Hermes root that owns *home*: ``<root>`` for ``<root>/profiles/<p>``,
+    else *home* itself (the default profile, or a custom single-home deploy).
+
+    Derived from the home rather than ambient env so a profile agent on a
+    thread that lost the HERMES_HOME ContextVar still resolves its own root.
+    """
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    return home
+
+
+def home_context_paths(home_override: "Path | None" = None) -> List[Path]:
+    """Home-level context files, in injection order: the shared org file
+    (``<root>/ORG.md``) then the profile's own ``<home>/AGENTS.md``.
+    Deduplicated by resolved path (for the default profile root == home)."""
+    home = Path(home_override) if home_override is not None else get_hermes_home()
+    paths: List[Path] = []
+    seen: set = set()
+    for candidate in (_hermes_root_for_home(home) / "ORG.md", home / "AGENTS.md"):
+        key = candidate.resolve()
+        if key not in seen:
+            seen.add(key)
+            paths.append(candidate)
+    return paths
+
+
+def load_home_context_md(
+    context_length: Optional[int] = None,
+    home_override: "Path | None" = None,
+) -> Optional[str]:
+    """Load the org file and the profile-home AGENTS.md, or None if neither exists.
+
+    Unlike project context, these load independently of working-directory
+    discovery, so they reach every session that loads the SOUL.md identity
+    (gateway, CLI, cron, Kanban workers). Each file is scanned and truncated
+    against its own budget.
+    """
+    sections: List[str] = []
+    for path in home_context_paths(home_override):
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.debug("Could not read %s: %s", path, e)
+            continue
+        if not content:
+            continue
+        content = _scan_context_content(content, path.name)
+        content = _truncate_content(
+            content, str(path), context_length=context_length,
+            read_path=str(path),
+        )
+        sections.append(f"## {path}\n\n{content}")
+    if not sections:
+        return None
+    return (
+        "# Org and Profile Context\n\n"
+        "The following home context files apply to every session and should be followed:\n\n"
+        + "\n\n".join(sections)
+    )
+
+
 def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
@@ -2343,7 +2407,11 @@ def _agents_md_directory_chain(cwd_path: Path) -> List[Path]:
     return chain
 
 
-def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
+def _load_agents_md(
+    cwd_path: Path,
+    context_length: Optional[int] = None,
+    exclude_paths: "Optional[set]" = None,
+) -> str:
     """AGENTS.md — merged directory chain from git root down to cwd.
 
     Each directory on the chain (see ``_agents_md_directory_chain``)
@@ -2365,6 +2433,8 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
             candidate = directory / name
             if not candidate.exists():
                 continue
+            if exclude_paths and candidate.resolve() in exclude_paths:
+                break  # already injected as home context
             try:
                 content = candidate.read_text(encoding="utf-8").strip()
             except Exception as e:
@@ -2459,6 +2529,7 @@ def build_context_files_prompt(
     context_length: Optional[int] = None,
     allow_install_tree_fallback: bool = False,
     home_override: "Path | None" = None,
+    exclude_paths: "Optional[set]" = None,
 ) -> str:
     """Discover and load context files for the system prompt.
 
@@ -2477,6 +2548,9 @@ def build_context_files_prompt(
 
     When *skip_soul* is True, SOUL.md is not included here (it was already
     loaded via ``load_soul_md()`` for the identity slot).
+
+    *exclude_paths* (resolved paths) skips AGENTS.md files already injected
+    by ``load_home_context_md()``, e.g. when cwd is the profile home.
     """
     if cwd is None:
         cwd = os.getcwd()
@@ -2513,7 +2587,7 @@ def build_context_files_prompt(
         # Priority-based project context: first match wins
         project_context = (
             _load_hermes_md(cwd_path, context_length)
-            or _load_agents_md(cwd_path, context_length)
+            or _load_agents_md(cwd_path, context_length, exclude_paths)
             or _load_claude_md(cwd_path, context_length)
             or _load_cursorrules(cwd_path, context_length)
         )

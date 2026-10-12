@@ -486,6 +486,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
+    # Home context (shared <root>/ORG.md + the profile's <home>/AGENTS.md)
+    # rides with the identity, not with cwd discovery: it must reach cron and
+    # Kanban sessions whose cwd never walks into the profile home.
+    _home_context_excludes: Optional[set] = None
+    if agent.load_soul_identity or not agent.skip_context_files:
+        _home_ctx = _r.load_home_context_md(_ctx_len, home_override=_agent_home(agent))
+        if _home_ctx:
+            stable_parts.append(_home_ctx)
+            _home_context_excludes = {
+                p.resolve() for p in _r.home_context_paths(_agent_home(agent))
+            }
+
     # Pointer to the docs (and, when it exists, the hermes-agent skill) for
     # user questions about Hermes itself. The skill_view() pointer is a
     # dangling reference in two cases — no skill tools in the toolset
@@ -907,7 +919,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             cwd=context_cwd, skip_soul=_soul_loaded,
             context_length=_ctx_len,
             allow_install_tree_fallback=agent.platform in ("cli", "tui"),
-            home_override=_agent_home(agent))
+            home_override=_agent_home(agent),
+            exclude_paths=_home_context_excludes)
         if context_files_prompt:
             context_parts.append(context_files_prompt)
 
