@@ -820,12 +820,43 @@ Subscriptions persist to `~/.hermes/webhook_subscriptions.json` and are hot-relo
 ## `hermes doctor`
 
 ```bash
-hermes doctor [--fix]
+hermes doctor [--fix | --db-strict]
+hermes doctor --db-integrity full [--db-timeout 600]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--fix` | Attempt automatic repairs where possible. |
+| `--fix` | Attempt automatic repairs where possible; outside the bounded/read-only database guarantee. |
+| `--db-strict` | Ordinary checks, with database-specific exit codes (not strictness for all doctor checks). Cannot combine with `--fix` or `--ack`. |
+| `--db-integrity full` | Database-only, read-only full SQLite structural check. Cannot combine with `--fix`, `--ack`, or `--live`. |
+| `--db-timeout SECONDS` | Full mode only: finite integer total budget from 2 through 86400 seconds, default 600. |
+
+Ordinary doctor's database stage uses one supervised read-only child with a
+five-second total budget (four seconds work, one second cleanup). It checks
+limited session/message reads and available fixed-name FTS reads, not full
+SQLite integrity, FTS trigger-write health, or foreign-key/application
+consistency. Counts are deliberately not collected. Other doctor sections
+are not covered by this time budget. Missing optional native tokenizers are
+reported as incomplete capability coverage; doctor does not initialize,
+download, build or load arbitrary extensions to make a probe pass.
+
+Full mode completes an unrestricted `PRAGMA main.integrity_check` or reports
+incomplete coverage; there is no quick-check fallback or automatic repair.
+Even a successful full check does not verify FTS writes, foreign keys, or
+application consistency. It can consume substantial CPU/I/O, retain WAL
+pages or delay writers. Read-only SQLite access can use shared-memory/WAL
+coordination; it is not a promise of byte-identical sidecar files. A result
+describes the checked read snapshot, not all future writes.
+
+Plain doctor keeps its legacy successful exit convention even when it reports
+database problems: exit zero is not proof of integrity. Full mode and
+`--db-strict` return 0 for completed selected checks, 1 for corruption evidence,
+3 for incomplete checks (including missing database, timeout, locks or missing
+capability), and 4 for other errors or unconfirmed cleanup. Usage errors return
+2; Ctrl-C cancels the command with 130. Corruption evidence survives a later
+timeout/error. A timeout is not corruption and never requests automatic repair.
+Cleanup uses bounded termination/kill escalation; during kernel or filesystem
+stalls resource release may remain unconfirmed, with the child PID reported.
 
 ## `hermes dump`
 

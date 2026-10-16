@@ -5890,9 +5890,11 @@ def cmd_hooks(args):
 
 def cmd_doctor(args):
     """Check configuration and dependencies."""
+    from hermes_cli.subcommands.doctor import validate_doctor_args
+    validate_doctor_args(args)
     from hermes_cli.doctor import run_doctor
 
-    run_doctor(args)
+    return run_doctor(args)
 
 
 def cmd_verify(args):

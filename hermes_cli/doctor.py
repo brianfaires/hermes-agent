@@ -9,6 +9,7 @@ import sys
 import subprocess
 import shutil
 import importlib.util
+import time
 from pathlib import Path
 
 from hermes_cli.config import (
@@ -1233,8 +1234,59 @@ def check_macos_full_disk_access() -> None:
     )
 
 
+def _run_bounded_database_stage(path, *, mode="limited", timeout=None):
+    started = time.monotonic()
+    from hermes_cli.doctor_db import run_database_checks, database_exit_code
+    total = timeout if timeout is not None else (600 if mode == "full" else 5)
+    label = "full SQLite structural integrity check" if mode == "full" else "limited read probes"
+    print(f"  state.db: {label} starting; total budget {total}s; read-only."
+          + (" May read the entire database and consume substantial CPU/I/O." if mode == "full" else ""),
+          flush=True)
+    result = run_database_checks(path, mode, timeout, started=started)
+    code = database_exit_code(result)
+    if code == 130:
+        text = "Cancelled; no integrity verdict"
+    elif result["findings"] or result["outcome"] == "corruption":
+        text = "Corruption detected at " + ", ".join(result["findings"])
+    elif code == 4:
+        text = "Probe error; no integrity verdict"
+    elif result["outcome"] == "not_present":
+        text = "not present; no integrity check performed"
+    elif code == 3:
+        text = "Check incomplete; no integrity verdict"
+    elif mode == "full":
+        text = "Full SQLite structural integrity check completed: ok"
+    else:
+        text = "Limited read probes passed"
+    print(f"  state.db: {text}. coverage={result['coverage']}; reason={result['reason']}; "
+          f"cleanup={result['cleanup']}; elapsed={result['elapsed_seconds']:.2f}s")
+    if result["cleanup"] != "confirmed":
+        print(f"  Resource release unconfirmed: PID {result['pid']}; action={result['termination']}.")
+    for table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
+        status = "completed" if table in result["completed"] else "not checked"
+        if table in result["skipped"]:
+            status = ("not attempted (table absent)" if result["skipped"][table] == "absent"
+                      else "attempted; incomplete (capability unavailable)")
+        print(f"  FTS read {table}: {status}")
+    print("  Session/message counts: not collected (bounded probe).")
+    if result["metadata"]:
+        print("  DB metadata: " + ", ".join(f"{k}={v}" for k, v in result["metadata"].items()))
+    print("  " + ("Full SQLite integrity, " if mode != "full" else "")
+          + "FTS write health, and foreign-key/application consistency were NOT checked.")
+    if code:
+        print("  No repair attempted. Incomplete/error results do not establish corruption.")
+    return code, f"state.db: {text} ({result['reason']}; cleanup={result['cleanup']})"
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
+    from hermes_cli.subcommands.doctor import validate_doctor_args
+    validate_doctor_args(args)
+    if getattr(args, "db_integrity", None) == "full":
+        print("Database-only mode; unrelated doctor checks and repairs are not run.")
+        return _run_bounded_database_stage(
+            HERMES_HOME / "state.db", mode="full", timeout=getattr(args, "db_timeout", None)
+        )[0]
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
 
@@ -1276,6 +1328,8 @@ def run_doctor(args):
     issues = []
     manual_issues = []  # issues that can't be auto-fixed
     fixed_count = 0
+    db_status = 0
+    db_issues = []
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
@@ -2041,7 +2095,13 @@ def run_doctor(args):
     
     # Check SQLite session store
     state_db_path = hermes_home / "state.db"
-    if state_db_path.exists():
+    if not should_fix:
+        db_status, db_summary = _run_bounded_database_stage(state_db_path)
+        if db_status == 130:
+            return 130
+        if db_status:
+            db_issues.append(db_summary)
+    if should_fix and state_db_path.exists():
         try:
             import sqlite3
             conn = sqlite3.connect(str(state_db_path))
@@ -2167,12 +2227,12 @@ def run_doctor(args):
                     check_info(_text + (f" {_detail}" if _detail else ""))
         except Exception as _stats_exc:
             check_info(f"state.db stats unavailable ({_stats_exc})")
-    else:
+    elif should_fix:
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
 
     # Check WAL file size (unbounded growth indicates missed checkpoints)
     wal_path = hermes_home / "state.db-wal"
-    if wal_path.exists():
+    if should_fix and wal_path.exists():
         try:
             wal_size = wal_path.stat().st_size
             if wal_size > 50 * 1024 * 1024:  # 50 MB
@@ -3412,7 +3472,7 @@ def run_doctor(args):
         pass
 
     print()
-    remaining_issues = issues + manual_issues
+    remaining_issues = issues + manual_issues + db_issues
     if should_fix and fixed_count > 0:
         print(color("─" * 60, Colors.GREEN))
         print(color(f"  Fixed {fixed_count} issue(s).", Colors.GREEN, Colors.BOLD), end="")
@@ -3432,10 +3492,11 @@ def run_doctor(args):
         for i, issue in enumerate(remaining_issues, 1):
             print(f"  {i}. {issue}")
         print()
-        if not should_fix:
+        if not should_fix and (issues or manual_issues):
             print(color("  Tip: run 'hermes doctor --fix' to auto-fix what's possible.", Colors.DIM))
     else:
         print(color("─" * 60, Colors.GREEN))
-        print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
+        print(color("  Configured checks completed; see database coverage limits above.", Colors.GREEN, Colors.BOLD))
     
     print()
+    return db_status if getattr(args, "db_strict", False) else None
