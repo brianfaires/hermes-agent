@@ -257,7 +257,9 @@ class TestCommandCodeFetchModelsPickerContract:
         assert profile is not None
         assert "base_url" in inspect.signature(profile.fetch_models).parameters
 
-    def test_resolve_provider_full(self):
+    def test_resolve_provider_full(
+        self, monkeypatch, commandcode_profile, commandcode_anthropic_profile
+    ):
         """Both profiles must resolve through the model-switch path.
 
         Regression: ``resolve_provider_full`` only knew models.dev + overlay
@@ -267,14 +269,45 @@ class TestCommandCodeFetchModelsPickerContract:
         """
         from hermes_cli.providers import resolve_provider_full
 
+        # Exercise plugin-only resolution regardless of additions to the live
+        # catalog. Keep discovery, metadata parsing and the resolver real.
+        monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+
         chat = resolve_provider_full("commandcode", {}, [])
         assert chat is not None and chat.id == "commandcode"
+        assert chat.source == "plugin-profile"
         assert chat.transport == "openai_chat"
         assert "COMMANDCODE_API_KEY" in chat.api_key_env_vars
+        assert chat.base_url == commandcode_profile.base_url
 
         anth = resolve_provider_full("commandcode-anthropic", {}, [])
         assert anth is not None and anth.id == "commandcode-anthropic"
+        assert anth.source == "plugin-profile"
         assert anth.transport == "anthropic_messages"
+        assert "COMMANDCODE_API_KEY" in anth.api_key_env_vars
+        assert anth.base_url == commandcode_anthropic_profile.base_url
+
+    def test_resolve_provider_full_catalog_precedes_plugin(
+        self, monkeypatch, commandcode_profile
+    ):
+        """A catalog entry wins over a registered plugin, without live I/O."""
+        from hermes_cli.providers import resolve_provider_full
+
+        catalog = {
+            "commandcode": {
+                "name": "Synthetic CommandCode catalog",
+                "env": ["CMD_API_KEY"],
+                "api": "https://catalog.example.invalid/v1",
+            }
+        }
+        monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: catalog)
+
+        chat = resolve_provider_full(commandcode_profile.name, {}, [])
+        assert chat is not None and chat.id == "commandcode"
+        assert chat.source == "models.dev"
+        assert chat.transport == "openai_chat"
+        assert chat.api_key_env_vars == tuple(catalog["commandcode"]["env"])
+        assert chat.base_url == catalog["commandcode"]["api"]
 
 
 # ── base_url endpoint override ───────────────────────────────────────────────
