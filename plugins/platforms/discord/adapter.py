@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -1238,6 +1239,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self._disconnecting = False
         self._missed_message_backfill_task: Optional[asyncio.Task] = None
         from hermes_constants import get_hermes_home
+        from hermes_cli.profiles import get_active_profile_name
+        self._ingress_profile = get_active_profile_name()
         from plugins.platforms.discord.recovery import DiscordRecoveryStore
         self._discord_recovery_store = DiscordRecoveryStore(self.runtime_profile_home)
         # Dedup cache: prevents duplicate bot responses when Discord
@@ -1639,36 +1642,88 @@ class DiscordAdapter(BasePlatformAdapter):
             return ("discord_intents_required", guidance, False)
         return ("discord_connect_error", f"Discord startup failed: {error}", True)
 
+    def _observe_ingress(self, stage: str, reason: str, message: Any = None) -> None:
+        """Passive metadata only, through the existing queued/rotating logger.
+
+        Sequence numbers count attempts, not durable writes. Missing records or
+        stale progress mean UNKNOWN, never proof that Discord dropped a message.
+        The owner/home are transport identities, not the routed conversation.
+        """
+        try:
+            home = getattr(self, "_runtime_profile_home", None)
+            if home is None:
+                return  # Unbound/test adapters must not borrow ambient context.
+            if not hasattr(self, "_ingress_generation"):
+                self._ingress_generation = uuid.uuid4().hex
+                self._ingress_seq = 0
+                self._ingress_received_count = 0
+            self._ingress_seq += 1
+            if stage == "received":
+                self._ingress_received_count += 1
+
+            def snowflake(value):
+                if type(value) is int and 0 < value < 2**64:
+                    return str(value)
+                return None
+
+            channel = getattr(message, "channel", None)
+            channel_id = snowflake(getattr(channel, "id", None))
+            owner = getattr(self, "_owner_profile", None)
+            profile = owner or getattr(self, "_ingress_profile", None)
+            payload = {
+                "v": 1, "profile": profile, "home": str(home),
+                "bot_id": snowflake(getattr(getattr(self._client, "user", None), "id", None)),
+                "pid": os.getpid(), "generation": self._ingress_generation,
+                "seq": self._ingress_seq, "received_count": self._ingress_received_count,
+                "timestamp": time.time(), "monotonic": time.monotonic(),
+                "stage": stage, "reason": reason,
+                "message_id": snowflake(getattr(message, "id", None)),
+                "channel_id": channel_id,
+                "thread_id": channel_id if isinstance(channel, discord.Thread) else None,
+                "parent_id": snowflake(getattr(channel, "parent_id", None)),
+            }
+            logger.info("discord_ingress %s", json.dumps(payload, separators=(",", ":")))
+        except Exception:
+            # Observation must not change admission/delivery or leak an SDK
+            # object's repr/exception text. The sequence gap exposes lost output.
+            pass
+
     def _discord_message_admission(
         self,
         message: Any,
         *,
         claim: bool,
+        observe_ingress: bool = False,
     ) -> tuple[bool, bool]:
         """Return ``(admitted, role_authorized)`` for one Discord event."""
+        def reject(reason: str) -> tuple[bool, bool]:
+            if observe_ingress:
+                self._observe_ingress("rejected", reason, message)
+            return False, False
+
         message_id = str(getattr(message, "id", ""))
         if claim:
             if self._dedup.is_duplicate(message_id):
-                return False, False
+                return reject("duplicate")
         elif self._dedup.contains(message_id):
-            return False, False
+            return reject("duplicate")
         if message.author == self._client.user:
-            return False, False
+            return reject("self_message")
         if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
-            return False, False
+            return reject("message_type")
 
         role_authorized = False
         if getattr(message.author, "bot", False):
             allow_bots = self._get_allow_bots()
             if allow_bots == "none":
-                return False, False
+                return reject("bots_disabled")
             if allow_bots == "mentions" and not self._self_is_explicitly_mentioned(message):
-                return False, False
+                return reject("bot_mention_required")
             if (
                 self._discord_bots_require_inline_mention()
                 and not self._self_is_raw_mentioned(message)
             ):
-                return False, False
+                return reject("bot_inline_mention_required")
         else:
             msg_guild = getattr(message, "guild", None)
             is_dm = isinstance(message.channel, discord.DMChannel) or msg_guild is None
@@ -1686,7 +1741,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids=msg_channel_ids,
             ):
                 self._warn_if_fail_closed_default()
-                return False, False
+                return reject("user_not_allowed")
             role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
 
         raw_self_mention = self._self_is_explicitly_mentioned(message)
@@ -1698,7 +1753,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 for mentioned in message.mentions
             )
             if other_bots_mentioned and not raw_self_mention:
-                return False, False
+                return reject("other_bot_mentioned")
             ignore_no_mention = os.getenv(
                 "DISCORD_IGNORE_NO_MENTION", "true"
             ).lower() in {"true", "1", "yes"}
@@ -1709,25 +1764,35 @@ class DiscordAdapter(BasePlatformAdapter):
                 free_channels = self._discord_free_response_channels()
                 channel_keys = self._discord_channel_keys(message, parent_id)
                 if "*" not in free_channels and not (channel_keys & free_channels):
-                    return False, False
+                    return reject("mention_required")
 
+        if observe_ingress:
+            self._observe_ingress("admitted", "adapter_policy", message)
         return True, role_authorized
 
     async def _dispatch_discord_message(self, message: Any) -> bool:
         """Apply Discord ingress policy and dispatch one live event."""
-        if not self._ready_event.is_set():
-            try:
-                await asyncio.wait_for(self._ready_event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
-                pass
-        admitted, role_authorized = self._discord_message_admission(
-            message, claim=True,
-        )
-        if not admitted:
-            return False
-        return await self._handle_message(
-            message, role_authorized=role_authorized,
-        )
+        self._observe_ingress("received", "on_message", message)
+        try:
+            if not self._ready_event.is_set():
+                try:
+                    await asyncio.wait_for(self._ready_event.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    pass
+            admitted, role_authorized = self._discord_message_admission(
+                message, claim=True, observe_ingress=True,
+            )
+            if not admitted:
+                return False
+            return await self._handle_message(
+                message, role_authorized=role_authorized,
+            )
+        except asyncio.CancelledError:
+            self._observe_ingress("error", "cancelled", message)
+            raise
+        except Exception:
+            self._observe_ingress("error", "dispatch_error", message)
+            raise
 
     # ------------------------------------------------------------------
     # gateway_platform_event fire-sites (#64176)
@@ -2070,6 +2135,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # task and leave an apparently-running adapter unrecovered.
                 healthy = False
                 reason = "health_check_error"
+            self._observe_ingress("progress", reason)
             if healthy:
                 failures = 0
                 continue
@@ -8294,6 +8360,10 @@ class DiscordAdapter(BasePlatformAdapter):
         recovered: bool = False,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
+        def observe(stage: str, reason: str) -> None:
+            if not recovered:
+                self._observe_ingress(stage, reason, message)
+
         # In server channels (not DMs), require the bot to be @mentioned
         # UNLESS the channel is in the free-response list or the message is
         # in a thread where the bot has already participated.
@@ -8349,12 +8419,14 @@ class DiscordAdapter(BasePlatformAdapter):
             if allowed_channels:
                 if "*" not in allowed_channels and not (channel_keys & allowed_channels):
                     logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_keys)
+                    observe("rejected", "channel_not_allowed")
                     return False
 
             # Check ignored channels - never respond even when mentioned
             ignored_channels = self._get_ignored_channels()
             if "*" in ignored_channels or (channel_keys & ignored_channels):
                 logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_keys)
+                observe("rejected", "channel_ignored")
                 return False
 
             free_channels = self._discord_free_response_channels()
@@ -8384,6 +8456,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if not self._self_is_explicitly_mentioned(message) and not mention_prefix:
+                    observe("rejected", "mention_required")
                     return False
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
@@ -8432,6 +8505,7 @@ class DiscordAdapter(BasePlatformAdapter):
                             self.name,
                             notify_error,
                         )
+                    observe("rejected", "auto_thread_failed")
                     return False
 
         referenced_attachments = []
@@ -8520,6 +8594,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if match_private_command(delivered_content, home=private_home):
             event = MessageEvent(text=delivered_content, message_type=MessageType.COMMAND,
                                  source=source, message_id=str(message.id), timestamp=message.created_at)
+            observe("dispatched", "handoff")
             await self.handle_message(event)
             return True
 
@@ -8738,6 +8813,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     getattr(message.author, "display_name", getattr(message.author, "name", "unknown")),
                     getattr(message.channel, "id", "unknown"),
                 )
+                observe("rejected", "mention_only")
                 return False
             event_text = "(The user sent a message with no text content)"
 
@@ -8784,7 +8860,9 @@ class DiscordAdapter(BasePlatformAdapter):
             and self._text_batch_delay_seconds > 0
         ):
             self._enqueue_text_event(event)
+            observe("dispatched", "batched")
         else:
+            observe("dispatched", "handoff")
             await self.handle_message(event)
         return True
 
