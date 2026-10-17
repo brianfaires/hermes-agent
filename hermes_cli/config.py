@@ -3515,6 +3515,56 @@ def read_raw_config() -> Dict[str, Any]:
         return data
 
 
+def load_external_prompt_paths(home: Path) -> List[Path]:
+    """Read effective prompt paths for an explicit owner, without disk writes.
+
+    Unlike the general loader, this must not initialize the home, migrate,
+    back up malformed YAML, or retain last-known-good user prompts. User
+    paths expand once with the owner's HERMES_HOME; managed values use the
+    shared overlay's process-environment expansion and take precedence.
+    """
+    from agent.skill_utils import _expand_external_dir
+    from hermes_cli.managed_scope import apply_managed_overlay
+
+    home = Path(home)
+    config_path = home / "config.yaml"
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            user = fast_safe_load(f)
+        if user is None:
+            user = {}
+        if not isinstance(user, dict):
+            raise ValueError("invalid user configuration mapping")
+    except Exception:
+        # Do not log YAML exceptions: they can contain unrelated config values.
+        logger.warning(
+            "Cannot read user config at %s; user external_prompts omitted. "
+            "Check that the file exists and contains a valid YAML mapping.",
+            config_path,
+        )
+        user = {}
+
+    managed = apply_managed_overlay({})
+    is_managed = "external_prompts" in managed
+    entries = (managed if is_managed else user).get("external_prompts")
+    if isinstance(entries, str):
+        entries = [entries]
+    if not isinstance(entries, list):
+        return []
+
+    paths: List[Path] = []
+    for entry in entries:
+        entry = str(entry or "").strip()
+        if not entry:
+            continue
+        # Managed references have already been expanded once. Never feed
+        # their replacements through user/owner expansion a second time.
+        expanded = os.path.expanduser(entry) if is_managed else _expand_external_dir(entry, home)
+        path = Path(expanded)
+        paths.append(path if path.is_absolute() else home / path)
+    return paths
+
+
 def read_user_config_raw(
     config_path: Optional[Path] = None, *, strict_mapping: bool = False
 ) -> Dict[str, Any]:

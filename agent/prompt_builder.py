@@ -2291,39 +2291,18 @@ def load_soul_md(
 
 
 def _home_external_prompts(home: Path) -> List[Path]:
-    """``external_prompts`` from *home*'s own ``config.yaml``, expanded like
+    """Effective ``external_prompts`` for *home*, with user paths expanded like
     ``skills.external_dirs`` (``~``, ``${VAR}``, ``$HERMES_HOME`` = *home*;
-    relative entries resolve against *home*).
+    relative entries resolve against *home*). Managed paths retain the shared
+    config overlay's process-environment expansion.
 
     Read from the agent's home rather than the ambient config so a profile
     agent on a thread that lost the HERMES_HOME ContextVar still gets its own
     list (#50233).
     """
-    config_path = home / "config.yaml"
-    if not config_path.is_file():
-        return []
-    try:
-        import yaml
+    from hermes_cli.config import load_external_prompt_paths
 
-        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except Exception as e:
-        logger.debug("Could not read external_prompts from %s: %s", config_path, e)
-        return []
-    entries = parsed.get("external_prompts") if isinstance(parsed, dict) else None
-    if isinstance(entries, str):
-        entries = [entries]
-    if not isinstance(entries, list):
-        return []
-    from agent.skill_utils import _expand_external_dir
-
-    paths: List[Path] = []
-    for entry in entries:
-        entry = str(entry or "").strip()
-        if not entry:
-            continue
-        p = Path(_expand_external_dir(entry, home))
-        paths.append(p if p.is_absolute() else home / p)
-    return paths
+    return load_external_prompt_paths(home)
 
 
 def home_context_paths(home_override: "Path | None" = None) -> List[Path]:

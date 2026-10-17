@@ -3,6 +3,7 @@ independently of working-directory discovery, scoped to the agent's own
 profile home."""
 
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -211,3 +212,96 @@ def test_external_prompts_read_from_own_home_config_not_ambient(layout, monkeypa
     monkeypatch.setenv("HERMES_HOME", str(ops))
 
     assert prompt_builder.load_home_context_md(home_override=layout.profile) is None
+
+
+def test_managed_prompts_override_user_with_process_env_expansion(layout, monkeypatch):
+    managed = layout.root / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    monkeypatch.setenv("HERMES_HOME", str(layout.root))
+    _configure(layout.profile, ["user.md"])
+    _configure(managed, ["${HERMES_HOME}/managed.md", "relative.md"])
+    (layout.root / "managed.md").write_text("MANAGED NOTES", encoding="utf-8")
+    (layout.profile / "user.md").write_text("USER NOTES", encoding="utf-8")
+    (layout.profile / "relative.md").write_text("RELATIVE NOTES", encoding="utf-8")
+
+    out = prompt_builder.load_home_context_md(home_override=layout.profile)
+
+    assert out is not None
+    assert "MANAGED NOTES" in out
+    assert "USER NOTES" not in out
+    assert out.index("MANAGED NOTES") < out.index("RELATIVE NOTES")
+
+
+@pytest.mark.parametrize("invalid", [None, "external_prompts: [\n", "- not-a-mapping\n"])
+def test_unavailable_user_config_warns_without_writes_or_stale_prompts(
+    layout, monkeypatch, caplog, invalid,
+):
+    managed = layout.root / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    _configure(layout.profile, ["old.md"])
+    assert prompt_builder.home_context_paths(layout.profile)[0] == layout.profile / "old.md"
+
+    config = layout.profile / "config.yaml"
+    if invalid is None:
+        config.unlink()
+    else:
+        config.write_text(invalid, encoding="utf-8")
+    before = sorted(layout.profile.iterdir())
+    with caplog.at_level("WARNING", logger="hermes_cli.config"):
+        assert prompt_builder.home_context_paths(layout.profile) == [layout.profile / "AGENTS.md"]
+    assert str(config) in caplog.text
+    assert "user external_prompts omitted" in caplog.text
+    assert sorted(layout.profile.iterdir()) == before
+    if invalid is not None:
+        assert config.read_text(encoding="utf-8") == invalid
+
+    _configure(managed, ["managed.md"])
+    assert prompt_builder.home_context_paths(layout.profile) == [
+        layout.profile / "managed.md", layout.profile / "AGENTS.md",
+    ]
+    assert sorted(layout.profile.iterdir()) == before
+
+
+@pytest.mark.parametrize("managed_source", [False, True])
+def test_prompt_path_expansion_is_single_pass_in_thread(layout, monkeypatch, managed_source):
+    managed = layout.root / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    monkeypatch.setenv("HERMES_HOME", str(layout.root))
+    monkeypatch.setenv("PROMPT_DIR", "${HERMES_HOME}/literal")
+    # The replacement contains another token: do not reinterpret it.
+    source = managed if managed_source else layout.profile
+    _configure(source, ["${HERMES_HOME}/owner.md", "${PROMPT_DIR}/notes.md", "~/tilde.md"])
+    result = []
+    thread = threading.Thread(target=lambda: result.extend(
+        prompt_builder.home_context_paths(layout.profile)
+    ))
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    owner = layout.root if managed_source else layout.profile
+    assert result == [
+        owner / "owner.md",
+        layout.profile / "${HERMES_HOME}" / "literal" / "notes.md",
+        Path.home() / "tilde.md",
+        layout.profile / "AGENTS.md",
+    ]
+
+
+@pytest.mark.parametrize("entries", [[], None, False, {}, ""])
+def test_managed_empty_or_invalid_prompt_list_does_not_fall_back(layout, monkeypatch, entries):
+    managed = layout.root / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    _configure(layout.profile, ["user.md"])
+    _configure(managed, entries)
+    assert prompt_builder.home_context_paths(layout.profile) == [layout.profile / "AGENTS.md"]
+
+
+def test_prompt_order_and_resolved_dedup_are_preserved(layout):
+    _configure(layout.profile, ["team.md", "./team.md", "", None, "AGENTS.md", "last.md"])
+    assert prompt_builder.home_context_paths(layout.profile) == [
+        layout.profile / "team.md", layout.profile / "AGENTS.md", layout.profile / "last.md",
+    ]
