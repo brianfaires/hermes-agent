@@ -55,6 +55,9 @@ def _connect() -> sqlite3.Connection:
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     from hermes_cli.sqlite_util import add_column_if_missing
+    from cron.execution_results import initialize_results
+
+    initialize_results(conn)
 
     conn.execute(
         """CREATE TABLE IF NOT EXISTS executions (
@@ -199,6 +202,9 @@ def touch_execution_progress(execution_id: str) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
+    from cron.execution_results import retain_terminal_results
+
+    retain_terminal_results(conn)
     conn.execute(
         """DELETE FROM executions WHERE id IN (
              SELECT id FROM executions
@@ -311,7 +317,7 @@ def mark_execution_running(execution_id: str) -> Optional[dict[str, Any]]:
 
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
-    delivery_outcome: Optional[str] = None,
+    delivery_outcome: Optional[str] = None, final_response: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten."""
     now = _hermes_now().isoformat()
@@ -328,8 +334,11 @@ def finish_execution(
         )
         if cur.rowcount != 1:
             return None
-        _prune_unlocked(conn)
+        from cron.execution_results import retain_terminal_result
+
         record = _fetch(conn, execution_id)
+        retain_terminal_result(conn, record, final_response=final_response)
+        _prune_unlocked(conn)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     record_cron_finish(record, delivery_outcome)
     return record

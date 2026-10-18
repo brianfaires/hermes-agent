@@ -515,7 +515,8 @@ from cron.jobs import (
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
     save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
 from cron import store_health
-from cron.execution_identity import enter_cron_execution, exit_cron_execution
+from cron.execution_identity import exit_cron_execution
+from cron.scheduler_execution_receipts import start_owned_run
 from cron.executions import (
     _TERMINAL_STATES, HANDOFF_ADOPTION_GRACE_SECONDS, create_execution, finish_execution,
     get_execution, mark_execution_handoff_pending, mark_execution_running,
@@ -3044,6 +3045,7 @@ class _RunDelivery:
     agent_declared: bool = False
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
+    final_response: Optional[str] = None
     side_effect_ownership_lost: bool = False
 
 
@@ -3200,7 +3202,8 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         # Failure ping left the process (or had a configured target): mark the incident alerted.
         _mark_incident_alerted(d.failure_incident_id)
     finish_execution(
-        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome,
+        final_response=d.final_response)
     return True
 
 
@@ -3291,16 +3294,6 @@ def _fire_secret_scope():
         _reset_fire_secret_scope(tokens)
 
 
-def _start_owned_run(job: dict, execution_id: str) -> Optional[contextvars.Token]:
-    """Win the run's ``claimed`` → ``running`` CAS and bind its cron identity; ``None`` when the run
-    lost ownership first. A restart-safe worker already won it by adopting the row."""
-    if os.environ.get("_HERMES_CRON_EXTERNAL_WORKER") == execution_id:
-        record = get_execution(execution_id)
-    elif (record := mark_execution_running(execution_id)) is None:
-        return None
-    return enter_cron_execution(job, execution_id, record or {})
-
-
 def _run_one_job_body(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, claim_lost: Optional[_CancelEventLike] = None,
@@ -3345,7 +3338,7 @@ def _run_one_job_body(
         # Detached workers transition to running while adopting; in-process paths must win the
         # claimed->running CAS here before any user script or agent side effect may begin.
         # The identity plugins read via ctx.current_cron_execution() is bound only on that win.
-        _identity_token = _start_owned_run(job, execution_id)
+        _identity_token = start_owned_run(job, execution_id)
         if _identity_token is None:
             logger.warning("Cron job %s lost execution ownership before start; skipping", job["id"])
             return True
@@ -3402,7 +3395,8 @@ def _run_one_job_body(
 
         # Agent is still live through delivery; wrap ALL of save/compose/deliver in try/finally so a
         # raise anywhere still tears the deferred agent down.
-        d = _RunDelivery(job=job, success=success, error=error, agent_declared=agent_declared)
+        d = _RunDelivery(job=job, success=success, error=error, agent_declared=agent_declared,
+                         final_response=final_response)
         try:
             _save_compose_deliver(
                 d, fence, final_response, output, adapters=adapters, loop=loop, verbose=verbose,
