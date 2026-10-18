@@ -771,6 +771,18 @@ def register(ctx):
 
 The dispatched tool goes through the normal approval, redaction, and budget pipelines — it's a real tool invocation, not a shortcut around them.
 
+### Session prompt sections
+
+`ctx.register_system_prompt_section(id, content, position="after_memory", max_chars=4000)`
+adds bounded policy text when the session prompt is built. A callable receives read-only
+session metadata, including `session_id`, `model`, `provider`, `platform`, `profile_name`,
+`cwd`, and `skip_context_files`. The last field is a boolean: when true, native project
+context is disabled, so a plugin must not deduplicate required policy against those files.
+The host freezes section bytes within the session and restores them from the persisted
+prompt on resume; compression is the supported rebuild boundary. Limits are 4,000 characters
+per section and 8,000 in total. Oversized text is skipped with a warning; plugins supplying
+mandatory policy should diagnose excess explicitly instead of silently truncating it.
+
 ### Store settings and runtime state
 
 Use plugin-relative config keys for user-visible behavior. Hermes resolves them
