@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent import agent_init, agent_init_fallback
+
 
 def _agent(provider="openrouter"):
     return SimpleNamespace(
@@ -61,7 +63,6 @@ def test_fully_refusing_ladder_warns_with_each_reason(
     monkeypatch, caplog, primary, ladder, pool_available, raise_match, expected
 ):
     """Primary resolves no client; deepseek resolves none (missing key), kimi raises."""
-    from agent import agent_init
 
     def _fake_resolve(provider, model=None, **kwargs):
         if provider == "kimi":
@@ -78,7 +79,7 @@ def test_fully_refusing_ladder_warns_with_each_reason(
 
     with caplog.at_level(logging.WARNING, logger="run_agent"):
         with pytest.raises(RuntimeError, match=raise_match):
-            agent_init._routed_client_kwargs(_agent(primary), ladder, 60)
+            agent_init_fallback.routed_client_kwargs(_agent(primary), ladder, 60)
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1
@@ -90,7 +91,6 @@ def test_fully_refusing_ladder_warns_with_each_reason(
 
 def test_recovered_ladder_does_not_warn(monkeypatch, caplog):
     """An entry refusing while a later one serves the init is degraded config, not a failure."""
-    from agent import agent_init
 
     class _Client:
         pass
@@ -112,7 +112,7 @@ def test_recovered_ladder_does_not_warn(monkeypatch, caplog):
 
     agent = _agent()
     with caplog.at_level(logging.WARNING, logger="run_agent"):
-        kwargs = agent_init._routed_client_kwargs(agent, _LADDER, 60)
+        kwargs = agent_init_fallback.routed_client_kwargs(agent, _LADDER, 60)
 
     assert kwargs == {"api_key": "k"}
     assert agent.provider == "kimi"

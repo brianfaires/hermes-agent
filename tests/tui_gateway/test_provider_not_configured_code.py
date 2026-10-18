@@ -72,7 +72,7 @@ class TestAgentInitRaisesTheNamedError:
     def test_no_provider_configured_at_all(self, monkeypatch, tmp_path):
         from types import SimpleNamespace
 
-        from agent.agent_init import _routed_client_kwargs
+        from agent.agent_init_fallback import routed_client_kwargs
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         # Nothing resolves and no fallback chain: the end of the ladder.
@@ -81,19 +81,19 @@ class TestAgentInitRaisesTheNamedError:
                                 _fallback_activated=False, _explicit_provider="")
 
         with pytest.raises(ProviderNotConfiguredError, match="No LLM provider configured"):
-            _routed_client_kwargs(agent, None, 60)
+            routed_client_kwargs(agent, None, 60)
 
     def test_explicit_provider_without_credentials(self, monkeypatch, tmp_path):
         from types import SimpleNamespace
 
-        from agent.agent_init import _routed_client_kwargs
+        from agent.agent_init_fallback import routed_client_kwargs
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         agent = SimpleNamespace(provider="minimax-oauth", model="m", base_url=None, api_key=None,
                                 _fallback_activated=False, _explicit_provider="minimax-oauth")
 
         with pytest.raises(ProviderNotConfiguredError, match=r"hermes auth add minimax-oauth"):
-            _routed_client_kwargs(agent, None, 60)
+            routed_client_kwargs(agent, None, 60)
 
     def test_the_type_is_a_runtime_error(self):
         """Existing `except RuntimeError` handlers keep catching it."""

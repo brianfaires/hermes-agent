@@ -17,7 +17,7 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
 from tools import async_delegation as ad
-from tui_gateway import server
+from tui_gateway import server, runtime_fallback
 from tui_gateway.transport import bind_transport, reset_transport
 
 
@@ -20530,7 +20530,7 @@ class TestResolveRuntimeWithFallback:
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             lambda **kw: expected,
         )
-        resolution = server._resolve_runtime_with_fallback(
+        resolution = runtime_fallback.resolve_runtime_with_fallback(
             {"requested": "openai"}
         )
         assert resolution.runtime == expected
@@ -20557,7 +20557,7 @@ class TestResolveRuntimeWithFallback:
             "_load_fallback_model",
             lambda: [{"provider": "deepseek", "model": "deepseek-v4-pro"}],
         )
-        resolution = server._resolve_runtime_with_fallback(
+        resolution = runtime_fallback.resolve_runtime_with_fallback(
             {"requested": "openai-codex"},
         )
         assert resolution.runtime == fallback_runtime
@@ -20591,7 +20591,7 @@ class TestResolveRuntimeWithFallback:
             ],
         )
 
-        resolution = server._resolve_runtime_with_fallback(
+        resolution = runtime_fallback.resolve_runtime_with_fallback(
             {"requested": "openai-codex"}
         )
 
@@ -20630,7 +20630,7 @@ class TestResolveRuntimeWithFallback:
                 }
             ],
         )
-        resolution = server._resolve_runtime_with_fallback(
+        resolution = runtime_fallback.resolve_runtime_with_fallback(
             {"requested": "openai-codex"}
         )
         assert resolution.used_fallback is True
@@ -20655,7 +20655,7 @@ class TestResolveRuntimeWithFallback:
         import pytest
 
         with pytest.raises(AuthError, match="No credentials for openai-codex"):
-            server._resolve_runtime_with_fallback(
+            runtime_fallback.resolve_runtime_with_fallback(
                 {"requested": "openai-codex"},
             )
 
@@ -20682,7 +20682,7 @@ class TestResolveRuntimeWithFallback:
                 {"provider": "anthropic", "model": "claude-sonnet-4-6"},
             ],
         )
-        resolution = server._resolve_runtime_with_fallback(
+        resolution = runtime_fallback.resolve_runtime_with_fallback(
             {"requested": "openai-codex"},
         )
         assert resolution.runtime == fallback_runtime

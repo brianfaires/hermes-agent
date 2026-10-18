@@ -30,7 +30,8 @@ reconnecting client re-renders the still-open questions). A client says once per
 answers them (`client.capabilities {server_requests: true}`, sent by the shared channel on `gateway.ready`);
 a WebSocket client that never did is an app build older than server→client requests, and `send()` fails
 fast for it instead of stalling the agent for the deadline. Desktop reaches the same server over WebSocket
-via `apps/shared` (`JsonRpcGatewayClient`, `onRequest`). New RPC = a new `methods_<topic>.py` or an entry
+via `apps/shared` (`JsonRpcGatewayClient`, `onRequest`). Provider fallback resolution lives in `runtime_fallback.py`; it records a fact only after selecting a complete provider/model pair.
+New RPC = a new `methods_<topic>.py` or an entry
 in an existing topical sibling, registered in the table — no `if method == ...` chain (root shape rules).
 
 **The wire is declared in Python and generated for TypeScript** (`tui_gateway/contracts/`). Every method

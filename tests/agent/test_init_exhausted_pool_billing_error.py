@@ -4,7 +4,7 @@
 credits hit the generic "No LLM provider configured. Run `hermes model` …" message — actively
 misleading, because a *different* provider (the config default) was configured and working and only
 the session's override pool was burned. The ``openrouter`` / ``custom`` branch of
-``_routed_client_kwargs`` has no provider-specific missing-credentials message, so it fell through to
+``routed_client_kwargs`` has no provider-specific missing-credentials message, so it fell through to
 the setup message; named providers fell through to the "no API key was found" one. Both must instead
 name the exhausted pool, its provider and its last error code.
 """
@@ -92,7 +92,7 @@ def _patch_no_routed_client(monkeypatch):
 )
 def test_exhausted_pool_raises_typed_billing_error(monkeypatch, provider, model):
     """Every provider with a fully burned pool names the billing failure, not setup/missing-key."""
-    from agent import agent_init
+    from agent import agent_init_fallback
     from agent.auxiliary_unavailable import ProviderCredentialsExhaustedError
 
     _patch_no_routed_client(monkeypatch)
@@ -101,7 +101,7 @@ def test_exhausted_pool_raises_typed_billing_error(monkeypatch, provider, model)
     )
 
     with pytest.raises(ProviderCredentialsExhaustedError) as excinfo:
-        agent_init._routed_client_kwargs(_agent(provider, model), None, 60)
+        agent_init_fallback.routed_client_kwargs(_agent(provider, model), None, 60)
 
     message = str(excinfo.value)
     assert excinfo.value.provider == provider
@@ -116,7 +116,7 @@ def test_exhausted_pool_raises_typed_billing_error(monkeypatch, provider, model)
 
 def test_healthy_pool_keeps_the_existing_diagnostic(monkeypatch):
     """A usable credential must not be misreported as exhausted."""
-    from agent import agent_init
+    from agent import agent_init_fallback
 
     _patch_no_routed_client(monkeypatch)
     monkeypatch.setattr(
@@ -124,12 +124,12 @@ def test_healthy_pool_keeps_the_existing_diagnostic(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="No LLM provider configured"):
-        agent_init._routed_client_kwargs(_agent("openrouter"), None, 60)
+        agent_init_fallback.routed_client_kwargs(_agent("openrouter"), None, 60)
 
 
 def test_empty_pool_keeps_the_existing_diagnostic(monkeypatch):
     """No read of the pool (empty / unreadable) must not invent an exhaustion verdict."""
-    from agent import agent_init
+    from agent import agent_init_fallback
 
     _patch_no_routed_client(monkeypatch)
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def test_empty_pool_keeps_the_existing_diagnostic(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="No LLM provider configured"):
-        agent_init._routed_client_kwargs(_agent("openrouter"), None, 60)
+        agent_init_fallback.routed_client_kwargs(_agent("openrouter"), None, 60)
 
 
 def test_pool_billing_message_names_billing_entry():
@@ -181,7 +181,7 @@ def test_openrouter_quota_cooldown_still_reports_the_cooldown(monkeypatch, tmp_p
     Regression guard for the openrouter/custom fall-through this fix widens: previously only named
     providers reached ``pool_cooldown_message``.
     """
-    from agent import agent_init
+    from agent import agent_init_fallback
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -221,7 +221,7 @@ def test_openrouter_quota_cooldown_still_reports_the_cooldown(monkeypatch, tmp_p
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        agent_init._routed_client_kwargs(_agent("openrouter", "z-ai/glm-5.3"), None, 60)
+        agent_init_fallback.routed_client_kwargs(_agent("openrouter", "z-ai/glm-5.3"), None, 60)
 
     message = str(excinfo.value)
     assert "cooling down" in message
