@@ -703,3 +703,9 @@ This is the same trust model that applies to everything the agent reads: web pag
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter | `false` |
 | `WEBHOOK_PORT` | HTTP server port for receiving webhooks | `8644` |
 | `WEBHOOK_SECRET` | Global HMAC secret (used as fallback when routes don't specify their own) | _(none)_ |
+
+Route scripts that time out run inside an owned subprocess group (or the native
+Windows containment job). Timeout cleanup stops the owned tree and drains captured
+pipes within a bound, including descendants holding stdout after the script exits.
+Unrelated processes are outside that group. The request retains the existing
+ignored-script response; this does not add a generic script-trigger service.
