@@ -193,3 +193,10 @@ operations are HOME-anchored (`_get_profiles_root()` returns
 `hermes -p coder profile list` sees all profiles regardless of which one is active — intentional.
 Profile-safe coding rules are in the root `AGENTS.md`; multiplex secret-scope rules in
 `gateway/AGENTS.md`.
+
+
+The shared browser debug-port selector probes IPv4 and IPv6 loopback availability
+before scanning candidate ports. An unsupported family or unconfigured loopback does
+not make every candidate busy. Every available family still has to accept the candidate;
+unknown probe errors retain that family. The bounded search keeps its previous fallback,
+and binding remains advisory because the browser starts after the probe sockets close.

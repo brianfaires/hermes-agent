@@ -8,6 +8,7 @@ loopback CDP port (dual-stack: IPv4 first, then IPv6).
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import ntpath
@@ -983,19 +984,28 @@ def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
 
 
 def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: int = 10) -> int:
-    """First port after ``preferred`` bindable on both loopbacks; ``preferred + 1`` if none binds
-    (the launch then fails with a clear browser-side error instead of silently doing nothing)."""
-    def bindable(family, host, port) -> bool:
+    """First candidate bindable on available loopbacks; keep the existing bounded fallback.
+
+    A bind to port zero distinguishes an unavailable family/address from an occupied candidate.
+    Unknown probe errors retain that loopback, so they cannot hide a collision on a usable family.
+    """
+    def bind_error(family, host, port):
         try:
             with socket.socket(family, socket.SOCK_STREAM) as sock:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind((host, port))
-            return True
-        except OSError:
-            return False
-    loopbacks = ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1"))
+        except OSError as exc:
+            return exc
+        return None
+
+    unavailable = {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL, errno.ENODEV}
+    loopbacks = []
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        error = bind_error(family, host, 0)
+        if error is None or error.errno not in unavailable:
+            loopbacks.append((family, host))
     ports = range(preferred + 1, preferred + 1 + attempts)
-    return next((p for p in ports if all(bindable(f, h, p) for f, h in loopbacks)), preferred + 1)
+    return next((p for p in ports if all(bind_error(f, h, p) is None for f, h in loopbacks)), preferred + 1)
 
 
 def manual_chrome_debug_command(port: int = DEFAULT_BROWSER_CDP_PORT, system: str | None = None) -> str | None:
