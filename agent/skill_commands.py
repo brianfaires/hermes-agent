@@ -11,13 +11,13 @@ from typing import Any, Dict, Mapping, Optional
 from hermes_constants import display_hermes_home
 from agent.prompt_cache_boundary import register_stable_prefix
 from agent.skill_preprocessing import load_skills_config as _load_skills_config, preprocess_skill_content
-from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX
+from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX, active_environments
 
 logger = logging.getLogger(__name__)
 
 # Multi-slot skill-command cache keyed by the full resolved identity
 # (_resolve_skill_commands_platform(), _resolve_skill_commands_home(),
-# _resolve_skill_commands_project()). The previous single-slot memo held ONE
+# _resolve_skill_commands_project(), active_environments()). The previous single-slot memo held ONE
 # (platform, home, project) triple; a Desktop serve process whose identity
 # flaps across requests (profile-home overrides, per-session project roots)
 # missed on every poll and rescanned the whole skills dir ~3x/5s, re-logging
@@ -219,6 +219,11 @@ def _resolve_skill_commands_project() -> Optional[str]:
     from agent.skill_utils import find_project_root
     root = find_project_root()
     return str(root) if root is not None else None
+
+
+def _skill_command_cache_key() -> tuple:
+    return (_resolve_skill_commands_platform(), _resolve_skill_commands_home(),
+            _resolve_skill_commands_project(), active_environments())
 
 
 def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
@@ -480,7 +485,7 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
     Builds a local map and publishes once at the end: writing straight into the
     global exposed partial results to overlapping scans, which then logged
     bogus "already claimed" collisions against their own incumbents."""
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
     # partial results visible to everything else in the process: a second, overlapping scan deduped against
     # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
@@ -521,7 +526,7 @@ def get_skill_commands() -> dict[str, dict[str, Any]]:
 
     See #14536, #88023, #114359, #104849.
     """
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     with _publish_lock:
         cached = _skill_commands_by_key.get(key)
     if cached is not None:
@@ -562,7 +567,7 @@ def get_plugin_skill_commands() -> dict[str, dict[str, Any]]:
     discover_plugins()  # no-op once this home is discovered
     manager = get_plugin_manager()
     metadata = manager.list_plugin_skill_metadata()
-    tag = (str(get_hermes_home()), tuple(str(m.get("name") or "") for m in metadata))
+    tag = (str(get_hermes_home()), tuple(str(m.get("name") or "") for m in metadata), active_environments())
     with _publish_lock:
         cached, is_fresh = _plugin_skill_commands, _plugin_skill_commands_tag == tag
     if not is_fresh:
@@ -632,7 +637,7 @@ def _merge_interactive_skill_commands(
 def get_interactive_skill_commands() -> dict[str, dict[str, Any]]:
     """Filesystem skills plus profile-scoped plugin skills; never use for
     messaging/native command menus (plugin skills are CLI/TUI/desktop only)."""
-    identity = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    identity = _skill_command_cache_key()
     commands = _merge_interactive_skill_commands(get_skill_commands(), get_plugin_skill_commands())
     with _publish_lock:
         _last_interactive_skill_commands_by_key[identity] = dict(commands)
@@ -662,7 +667,7 @@ def reload_skills() -> dict[str, Any]:
     skills are called by name, so ``/reload-skills`` costs no cache reset. The
     plugin projection is rebuilt too, so a plugin enabled/disabled/installed
     since the last scan shows up without a restart."""
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     with _publish_lock:
         before_commands = _last_interactive_skill_commands_by_key.get(key)
     if before_commands is None:
