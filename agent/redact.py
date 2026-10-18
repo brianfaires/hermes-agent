@@ -512,7 +512,7 @@ _SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNO
 # quadratic, one core at 100% for hours while holding the GIL.
 _TELEGRAM_RE = re.compile(r"(?<!\d)(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 
-_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----")
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END[A-Z ]*PRIVATE KEY-----|\Z)")
 
 # Database connection strings: protocol://user:PASSWORD@host. The userinfo and
 # password groups forbid whitespace so a match can never span a line break (a
@@ -713,6 +713,8 @@ def _redact_python_repr_fields(text: str) -> str:
 
 def _redact_python_diagnostic_repr_fields(text: str) -> str:
     """Mask repr fields only on pytest/error lines in source-preserving output."""
+    from agent.redact_partial import redact_partial_repr
+
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
         ending = ""
@@ -728,7 +730,7 @@ def _redact_python_diagnostic_repr_fields(text: str) -> str:
         if match is not None:
             lines[index] = (
                 match.group("prefix")
-                + _redact_python_repr_fields(match.group("body"))
+                + _redact_python_repr_fields(redact_partial_repr(match.group("body")))
                 + ending
             )
     return "".join(lines)
@@ -825,7 +827,9 @@ def _redact_assignments(text: str, *, mask_nonreusable: bool = False) -> str:
     truncated key and could write it back as a dead credential (#35519)."""
     mask = _mask_token_nonreusable if mask_nonreusable else _mask_token
     if "=" in text:
+        from agent.redact_partial import QUOTED_ENV_ASSIGNMENT
         _redact_env = _assignment_sub(lambda g: f"{g[0]}={g[1]}{mask(g[2])}{g[1]}", check_keyword=True)
+        text = QUOTED_ENV_ASSIGNMENT.sub(_redact_env, text)
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
         if "://" not in text:  # lowercase names would match URL params
             # Skip URLs — the query string may contain ``token=``/``key=`` params that are intentionally
@@ -1182,7 +1186,7 @@ def redact_terminal_output(output: str, command: str | None = None, *, force: bo
     # Source-preserving output still gets the Python-repr pass on high-confidence
     # diagnostic lines (pytest ``E   `` introspection, final exception lines): that is
     # where {'BRAVE_API_KEY': '…'} leaks, not in source dumps.
-    if code_file and (force or _redact_enabled()) and ":" in redacted and "'" in redacted:
+    if (force or _redact_enabled()) and ":" in redacted and any(quote in redacted for quote in ("'", '"')):
         redacted = _redact_python_diagnostic_repr_fields(redacted)
     return redacted
 

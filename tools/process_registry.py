@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from tools import process_registry_output as process_output
 
 _IS_WINDOWS = platform.system() == "Windows"
 # systemd transient scopes exist only on Linux; gate every scope-path branch on this
@@ -518,13 +519,6 @@ def _not_found(session_id: str) -> dict:
     return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
 
-def _output_tail(session: "ProcessSession", n: int) -> str:
-    """Last *n* chars of the session output with ANSI sequences stripped."""
-    from tools.ansi_strip import strip_ansi
-
-    return strip_ansi(session.output_buffer[-n:])
-
-
 def _completion_output(session: "ProcessSession") -> dict:
     """``output`` sized by the session's ``completion_output_chars`` plus ``output_cut`` when trimmed.
 
@@ -533,7 +527,7 @@ def _completion_output(session: "ProcessSession") -> dict:
     carry the same whole reply and the same cut marker (#115334)."""
     limit = session.completion_output_chars or COMPLETION_OUTPUT_CHARS
     cut = len(session.output_buffer) - limit
-    return {"output": _output_tail(session, limit), **({"output_cut": cut} if cut > 0 else {})}
+    return {"output": process_output.tail_output(session, limit), **({"output_cut": cut} if cut > 0 else {})}
 
 
 @dataclass
@@ -558,6 +552,8 @@ class ProcessSession:
     completion_reason: str = "exited"           # exited|killed|lost|failed_start|already_exited
     termination_source: str = ""                # process.kill|kill_all|backend_lost|failed_start
     output_buffer: str = ""                     # Rolling tail (last max_output_chars)
+    _output_starts_midline: bool = False
+    _output_pem_prefix: str = ""
     max_output_chars: int = MAX_OUTPUT_CHARS
     detached: bool = False                      # Recovered from checkpoint (no pipe)
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
@@ -633,6 +629,7 @@ class ProcessSession:
         self.output_buffer += text
         self.total_output_chars += len(text)
         if len(self.output_buffer) > self.max_output_chars:
+            process_output.retain_context(self, self.output_buffer, len(self.output_buffer) - self.max_output_chars)
             self.output_buffer = self.output_buffer[-self.max_output_chars:]
 
     def mark_exited(self, exit_code, reason: str = "exited", source: str = "") -> None:
@@ -786,13 +783,13 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
         session._heartbeat_last = now
         with session._lock:
             delta = session.total_output_chars - session._heartbeat_total_at_last
-            output = session.output_buffer[-delta:] if delta > 0 else ""
+            output = process_output.tail_output(session, delta) if delta > 0 else ""
             session._heartbeat_total_at_last = session.total_output_chars
         if not output:
             return
         if len(output) > HEARTBEAT_OUTPUT_CHARS:
             cut = len(output) - HEARTBEAT_OUTPUT_CHARS
-            output = f"...({cut} earlier characters omitted)\n" + output[-HEARTBEAT_OUTPUT_CHARS:]
+            output = process_output.heartbeat_limit(output, HEARTBEAT_OUTPUT_CHARS, cut)
         session._heartbeat_seq += 1
         notification = {
             **self._watch_event_base(session),
@@ -803,7 +800,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             "output": output,
             "started_at": session.started_at,
         }
-        _redact_process_result(notification)
+        process_output.redact_process_result(notification)
         self.completion_queue.put(notification)
 
     @staticmethod
@@ -877,9 +874,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             if lifetime_exhausted:
                 session._watch_disabled = True
                 session.notify_on_complete = True
-        output = "\n".join(matched_lines[:20])
-        if len(output) > 2000:
-            output = output[:2000] + "\n...(truncated)"
+        output = process_output.watch_output(matched_lines, session, matched_pattern)
         if self._global_watch_admit(now):
             notification = {
                 **self._watch_event_base(session),
@@ -888,7 +883,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                 "output": output,
                 "suppressed": suppressed,
             }
-            _redact_process_result(notification)
+            process_output.redact_process_result(notification)
             self.completion_queue.put(notification)
         # Even when the breaker drops the final match, still explain the silence.
         if lifetime_exhausted:
@@ -1489,6 +1484,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                             return
                         session.output_buffer += delta
                         if len(session.output_buffer) > session.max_output_chars:
+                            process_output.retain_context(session, session.output_buffer, len(session.output_buffer) - session.max_output_chars)
                             session.output_buffer = session.output_buffer[-session.max_output_chars:]
                     self._check_watch_patterns(session, delta)
                     self._emit_output(session, delta)
@@ -1635,7 +1631,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                 # consumer-observed completion timestamp).
                 "started_at": session.started_at,
             }
-            _redact_process_result(notification)
+            process_output.redact_process_result(notification)
             self.completion_queue.put(notification)
 
     @staticmethod
@@ -2032,7 +2028,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
         # Read with the preview under the lock the reader appends and exits under, so the
         # finalization check describes the output actually returned.
         with session._lock:
-            output_preview = _output_tail(session, 1000)
+            output_preview = process_output.tail_output(session, 1000)
             exited, finalizing = session.exited, self._reader_finalizing(session)
         result = {
             **self._status_head(session), "pid": session.pid,
@@ -2057,7 +2053,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
         if session is None:
             return _not_found(session_id)
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
+            full_output = strip_ansi(process_output.capture_source(session))
             exited, finalizing = session.exited, self._reader_finalizing(session)
         lines = full_output.splitlines()
         total_lines = len(lines)
@@ -2075,7 +2071,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             stop = slice(offset, offset + limit).indices(total_lines)[1]
             observed_completion_output = total_lines == 0 or (bool(selected) and stop == total_lines)
         result = {
-            **self._status_head(session), "output": "\n".join(selected),
+            **self._status_head(session), "output": process_output.line_output(full_output, offset, limit),
             "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
             self._completion_consumed.add(session_id)
@@ -2116,7 +2112,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
-                    "status": "interrupted", "command": session.command, "output": _output_tail(session, 1000),
+                    "status": "interrupted", "command": session.command, "output": process_output.tail_output(session, 1000),
                     "note": "User sent a new message -- wait interrupted"}
             elif _consume_yield(threading.current_thread().ident):
                 # A steer/redirect landed mid-turn: redirect() asks tool workers to YIELD so
@@ -2124,7 +2120,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                 # process is untouched and still notify-tracked; the model should read the
                 # steer text and respond, not re-issue the wait (kimi-code#3697 class).
                 result = {
-                    "status": "interrupted", "command": session.command, "output": _output_tail(session, 1000),
+                    "status": "interrupted", "command": session.command, "output": process_output.tail_output(session, 1000),
                     "process_running": True,
                     "note": ("User sent a new message -- wait released; the process is still "
                              "running and you will be notified on exit. Respond to the user now.")}
@@ -2137,7 +2133,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
                 break
             session._completion_event.wait(timeout=min(1.0, remaining))
         result = {
-            "status": "timeout", "command": session.command, "output": _output_tail(session, 1000),
+            "status": "timeout", "command": session.command, "output": process_output.tail_output(session, 1000),
             # Not a failure — models re-issued identical waits after misreading this as an error.
             "process_running": True}
         base_note = (
@@ -2425,14 +2421,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             self._reconcile_local_exit(s)
             entry = {
                 "session_id": s.id,
-                "command": s.command[:200],
+                "command": process_output.command_preview(s.command),
                 "cwd": s.cwd,
                 "pid": s.pid,
                 "owner_task_id": s.owner_task_id,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
                 "uptime_seconds": int(time.time() - s.started_at),
                 "status": "exited" if s.exited else "running",
-                "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                "output_preview": process_output.tail_output(s, 200) if s.output_buffer else "",
             }
             # Flag processes surfaced only because they share the gateway session (not the current task) —
             # these are the long-lived background processes a user may have forgotten about (#29177).
@@ -2668,32 +2664,6 @@ def transform_process_output(output: str, *, command: str, returncode: Optional[
     return _apply_output_transform_hook(command, output, returncode, task_id or "", "")
 
 
-def _redact_process_result(result: dict) -> dict:
-    """Transform, then redact secrets from background-process output before it reaches the
-    model, session.db and CLI, mirroring the foreground ``terminal`` pipeline (hook first,
-    redaction after) so the two surfaces can't diverge. Respects ``security.redact_secrets``;
-    ``redact_terminal_output`` picks ``code_file`` from the recorded command.
-
-    The command string itself is also redacted in case it carried an inline credential. See #43025.
-    """
-    if not isinstance(result, dict):
-        return result
-    from agent.redact import redact_sensitive_text, redact_terminal_output
-
-    command = result.get("command") or ""
-    # The hook's task_id is the process OWNER's (poll/log/wait results carry only session_id).
-    task_id = str(result.get("task_id") or "")
-    if not task_id and (session := process_registry.get(str(result.get("session_id") or ""))) is not None:
-        task_id = str(getattr(session, "task_id", "") or "")
-    for key in ("output", "output_preview"):
-        if isinstance(value := result.get(key), str) and value:
-            value = transform_process_output(value, command=command, returncode=result.get("exit_code"), task_id=task_id)
-            result[key] = redact_terminal_output(value, command)
-    if isinstance(command, str) and command:
-        result["command"] = redact_sensitive_text(command, code_file=True)
-    return result
-
-
 def _list_processes(task_id) -> dict:
     # Also surface session-scoped background processes (e.g. a forgotten preview
     # server): they share the gateway session_key and can block session reset.
@@ -2703,7 +2673,7 @@ def _list_processes(task_id) -> dict:
         from tools.approval_context import get_current_session_key
         session_key = get_current_session_key(default="") or ""
     return {"processes": [
-        _redact_process_result(p)
+        process_output.redact_process_result(p)
         for p in process_registry.list_sessions(
             task_id=task_id, session_key=session_key or None, include_retained=True)]}
 
@@ -2777,7 +2747,7 @@ def _handle_process(args, **kw):
             return tool_error(f"session_id is required for {action}")
         handler, redact = _SESSION_ACTIONS[action]
         result = handler(session_id, args)
-        return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
+        return json.dumps(process_output.redact_process_result(result) if redact else result, ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
 
 

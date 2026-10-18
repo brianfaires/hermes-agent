@@ -48,6 +48,8 @@ class _BoundedOutputCollector:
         self._spill_fh: IO[str] | None = None
         self._spill_chars = 0
         self._spill_capped = False
+        self.redaction_command = None
+        self._render_suffix = ""
 
     def _maybe_spill(self, text: str) -> None:
         """Tee ``text`` to the spill file (opened lazily on first overflow)."""
@@ -141,6 +143,7 @@ class _BoundedOutputCollector:
     def render(self, *, suffix: str = "") -> str:
         """Render within ``max_chars``, preserving a required status suffix."""
         with self._lock:
+            self._render_suffix = suffix
             if len(suffix) >= self.max_chars:
                 return suffix[-self.max_chars :]
 
@@ -166,7 +169,7 @@ class _BoundedOutputCollector:
             return head[:head_chars] + notice[:available] + rendered_tail + suffix
 
 
-def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollector:
+def _new_output_collector(proc, bounded_capture: bool, command: str | None = None) -> _BoundedOutputCollector:
     """Build the collector for one ``_wait_for_process`` call. ``bounded_capture`` (foreground
     terminal path only) caps retention at ``tool_output.max_bytes`` and tees overflow to a
     spill file under ``$HERMES_HOME/cache/terminal-output`` (created only on actual overflow;
@@ -193,13 +196,18 @@ def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollecto
                     pass
     except Exception:
         spill_path = None
-    return _BoundedOutputCollector(capture_limit, spill_path=spill_path)
+    collector = _BoundedOutputCollector(capture_limit, spill_path=spill_path)
+    collector.redaction_command = command
+    return collector
 
 
 def _finalize_wait_result(collector: _BoundedOutputCollector, rendered: str, returncode: int | None) -> dict:
     """Assemble a wait result, attaching spill metadata when overflow occurred."""
     result = {"output": rendered, "returncode": returncode}
     spill = collector.close_spill()
+    if collector.redaction_command is not None:
+        from tools.environments.output_redaction import redact_spilled_output
+        result["output"] = redact_spilled_output(collector, rendered, spill)
     if spill:
         result["output_total_chars"] = collector.total_chars
         result["full_output_path"] = spill

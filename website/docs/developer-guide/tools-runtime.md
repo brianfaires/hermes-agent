@@ -248,3 +248,18 @@ Tool calls may execute sequentially or concurrently depending on the tool mix an
 - [Built-in Tools Reference](../reference/tools-reference.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [ACP Internals](./acp-internals.md)
+
+Terminal redaction runs before display head/tail truncation. For foreground
+capture overflow, the private spill supplies complete context for masking before
+the bounded hook input is built. If the spill is unavailable or exceeds its native
+5 million character cap, the result explains that redaction context is unavailable
+and keeps the interruption/timeout suffix; it does not show detached fragments.
+The configured live-output redaction opt-out remains supported.
+
+Background previews carry retained context internally through
+`tools/process_registry_output.py`; transforms and redaction run before tail or
+line selection. Rolling-buffer eviction omits a first partial line and preserves
+only a non-secret PEM boundary marker while a private key spans eviction. Later
+complete output lines remain visible. Durable process receipts and gateway watcher
+messages also redact before selecting their tails. No second process log or
+notification queue is introduced.
