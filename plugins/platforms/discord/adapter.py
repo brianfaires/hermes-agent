@@ -1257,13 +1257,14 @@ def _read_discord_prompt_timeout() -> int:
     return seconds
 
 
+from plugins.platforms.discord.adapter_transport import DiscordTransportMixin
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
 from plugins.platforms.discord.adapter_slash_auth import DiscordSlashAuthMixin
 from plugins.platforms.discord.adapter_thread_titles import DiscordThreadTitlesMixin, SemanticThreadRenames
 from plugins.platforms.discord.adapter_voice_info import DiscordVoiceInfoMixin
 
 
-class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
+class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
                      BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
@@ -1534,7 +1535,7 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
                 finally:
                     self._client = None
                     self._ready_event.clear()
-            self._client = commands.Bot(
+            self._client = self._build_client(
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
                 allowed_mentions=_build_allowed_mentions(getattr(self.config, "extra", None)),
@@ -5409,18 +5410,6 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
             logger.warning("[%s] Failed to fetch channel history: %s", self.name, e)
             return ""
 
-    async def _resolve_channel(self, channel_id: Any) -> Any:
-        """Cached ``get_channel`` first, REST ``fetch_channel`` on miss (raises on API error).
-
-        Every outbound target funnels through here (home channel, cron ``discord:<target>``,
-        thread metadata), so a pasted channel link is accepted at this one boundary instead of
-        dying in ``int()`` as a generic send failure."""
-        if isinstance(channel_id, str):
-            channel_id = discord_channel_id_from_link(channel_id.strip()) or channel_id
-        channel = self._client.get_channel(int(channel_id))
-        if not channel:
-            channel = await self._client.fetch_channel(int(channel_id))
-        return channel
 
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""

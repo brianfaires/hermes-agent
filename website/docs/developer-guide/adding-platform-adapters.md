@@ -842,3 +842,7 @@ async def disconnect(self):
 | `weixin.py` | Long-poll + CDN | High | Media handling, encryption |
 | `plugins/platforms/wecom/callback_adapter.py` | Callback/webhook | Medium | HTTP server, AES crypto, multi-app |
 | `plugins/platforms/irc/adapter.py` | Long-poll + IRC protocol | High | Full-featured plugin adapter with scoped token lock |
+
+### Discord transport customization
+
+Discord adapter subclasses may override `_build_client(**options)` to add supported SDK transport options before the first login. Delegate to `super()._build_client(**options)` to retain native Bot construction. For example, a profile-owned adapter extension can supply the SDK's `http_trace` aiohttp configuration for a common pre-write policy boundary. Native connection, drain and reconnect still own the client lifecycle. Client construction and cached/REST channel resolution live in `plugins/platforms/discord/adapter_transport.py`. A registry replacement must preserve native metadata and cover its standalone sender separately; SDK transport options do not apply to disconnected REST helpers.
