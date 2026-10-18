@@ -3494,29 +3494,9 @@ class ContextCompressor(
         return f"  {fn.get('name', '?')}({args})"
 
     def _serialize_records_for_summary(self, turns: list[dict[str, Any]]) -> list[str]:
-        """Serialize turns into a list of labeled, redacted records for the summarizer."""
-        # Lazy import: agent_runtime_helpers pulls heavy transitive imports.
-        from agent.agent_runtime_helpers import strip_think_blocks
-        parts = []
-        for msg in turns:
-            role = msg.get("role", "unknown")
-            content = msg.get("content")
-            if isinstance(content, list):
-                content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
-            content = _redact_compaction_text(content or "")
-            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
-            # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
-            if role == "assistant" and content:
-                content = strip_think_blocks(None, content)
-            if len(content) > self._CONTENT_MAX:
-                content = elide_middle(content, self._CONTENT_HEAD, self._CONTENT_TAIL)
-            if role == "tool":
-                parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
-                continue
-            if role == "assistant" and msg.get("tool_calls", []):
-                content += "\n[Tool calls:\n" + "\n".join(map(self._render_tool_call_for_summary, msg["tool_calls"])) + "\n]"
-            parts.append(f"[{role.upper()}]: {content}")
-        return parts
+        """Serialize redacted conversational content, including distinct TTS speech."""
+        from agent.compression_speech import serialize_records
+        return serialize_records(self, turns)
 
     def _serialize_for_summary(self, turns: list[dict[str, Any]]) -> str:
         """Serialize turns into labeled, redacted text for the summarizer."""
@@ -3524,6 +3504,8 @@ class ContextCompressor(
 
     def _fallback_anchors(self, turns_to_summarize: list[dict[str, Any]]) -> dict[str, list[str]]:
         """Locally extractable anchors: user asks, actions, files, blockers, last dropped turns."""
+        from agent.compression_speech import summary_text
+
         user_asks: list[str] = []
         assistant_actions: list[str] = []
         tool_actions: list[str] = []
@@ -3540,7 +3522,7 @@ class ContextCompressor(
                 call_id = str(_tc_get(tc, "id") or "")
                 if call_id:
                     call_id_to_tool[call_id] = (name, args)
-                if args:
+                if args and name != "text_to_speech":
                     try:
                         parsed = json.loads(args)
                     except Exception:
@@ -3548,7 +3530,9 @@ class ContextCompressor(
                     _collect_paths_from_jsonish(parsed, relevant_files)
         for msg in turns_to_summarize:
             role = msg.get("role", "unknown")
-            text = _compact_fallback_turn(msg.get("content"))
+            if role == "tool" and call_id_to_tool.get(str(msg.get("tool_call_id") or ""), ("", ""))[0] == "text_to_speech":
+                continue
+            text = _compact_fallback_turn(summary_text(msg))
             _collect_path_mentions(text, relevant_files)
             synthetic_user = role == "user" and self._is_synthetic_compression_user_turn(msg)
             tool_names = [_extract_tool_call_name_and_args(tc)[0] for tc in (msg.get("tool_calls") or [])] if role == "assistant" else []
@@ -3565,7 +3549,7 @@ class ContextCompressor(
             if role == "user" and text and not synthetic_user:
                 user_asks.append(text)
             elif role == "assistant":
-                if tool_names:
+                if any(name != "text_to_speech" for name in tool_names):
                     assistant_actions.append("Called tool(s): " + ", ".join(tool_names[:6]))
                 elif text:
                     assistant_actions.append(text)
