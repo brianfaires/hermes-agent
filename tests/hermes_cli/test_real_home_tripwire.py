@@ -229,3 +229,44 @@ def test_hermes_exported_scratch_tmp_is_not_the_test_temp_root(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('writer', ['state-db', 'gateway-status'])
+def test_environment_wipe_cannot_write_simulated_production_state(tmp_path, monkeypatch, writer):
+    """The captured tripwire survives clear=True, including the status writer's thread."""
+    from unittest.mock import patch
+    from tests import conftest
+    from gateway import status
+    import hermes_state
+
+    user = tmp_path / 'simulated-user'
+    protected = user / '.hermes'
+    protected.mkdir(parents=True)
+    database = protected / 'state.db'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE sentinel (value TEXT)')
+        connection.execute("INSERT INTO sentinel VALUES ('unchanged')")
+    connection.close()
+    status_file = protected / 'gateway_state.json'
+    status_file.write_text('{"marker":"unchanged"}', encoding='utf-8')
+    before = {path: path.read_bytes() for path in (database, status_file)}
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, 'home', lambda: user)
+        scoped.setenv('HERMES_HOME', str(protected))
+        scoped.setattr(conftest, '_REAL_HERMES_ROOT_CANDIDATES', [protected])
+        with patch.dict(os.environ, {}, clear=True):
+            if writer == 'state-db':
+                with pytest.raises(AssertionError, match='REAL hermes home') as refused:
+                    hermes_state.SessionDB()
+                assert str(protected) in str(refused.value)
+            else:
+                assert status._get_runtime_status_path() == status_file
+                with pytest.raises(AssertionError, match='REAL hermes home'):
+                    status.write_runtime_status(gateway_state='running')
+                background = status._RuntimeStatusWriter()
+                generation = background.submit(status_file, {'gateway_state': 'running'})
+                assert background.wait(generation, timeout=5) is False
+                assert isinstance(background._last_error, AssertionError)
+                assert 'REAL hermes home' in str(background._last_error)
+    assert {path: path.read_bytes() for path in before} == before
