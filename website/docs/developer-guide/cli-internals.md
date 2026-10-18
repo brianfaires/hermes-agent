@@ -200,3 +200,11 @@ before scanning candidate ports. An unsupported family or unconfigured loopback 
 not make every candidate busy. Every available family still has to accept the candidate;
 unknown probe errors retain that family. The bounded search keeps its previous fallback,
 and binding remains advisory because the browser starts after the probe sockets close.
+
+Gateway systemd staleness checks apply operator drop-ins to both installed and
+newly generated base settings before comparison. Manager-reported `DropInPaths`
+cover generic, runtime and vendor overrides; adjacent `<unit>.d/*.conf` files
+also cover offline setup. Scalar replacements, individual environment variables
+and resettable command lists override old base values. Dependency additions keep
+base dependencies live. A difference that survives these overrides still needs
+repair; an overridden base value does not trigger a unit rewrite.
