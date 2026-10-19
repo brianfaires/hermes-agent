@@ -117,12 +117,14 @@ def refresh_agent_mcp_tools(
     first turn) a same-name schema change is published. The caller has already
     accepted the cache break, or nothing has been cached yet."""
     from model_tools import get_tool_definitions
+    from tools.tool_search_pinning import agent_pinned_tools
     from tools.registry import registry
     enabled, disabled = _resolve_refresh_toolsets(agent, enabled_override, disabled_override)
     # Generation captured BEFORE the slow get_tool_definitions call (a slower caller holding an
     # OLDER set must not clobber a newer one); definitions computed OUTSIDE the lock.
     snapshot_generation = registry._generation
-    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or [])
+    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode,
+                                         pinned_tools=agent_pinned_tools(agent)) or [])
     new_names = {_def_name(t) for t in new_defs}
     # Post-build families re-appended on LOCALS only; live attributes untouched until publish.
     staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
@@ -175,7 +177,9 @@ def persist_agent_tool_names(agent) -> None:
     if not db or not session_id:
         return
     try:
-        db.update_session_tool_names(session_id, {"version": tool_pin_version(), "tools": _agent_tool_defs(agent)})
+        from tools.tool_search_pinning import pin_preferences
+        db.update_session_tool_names(session_id, {"version": tool_pin_version(), "tools": _agent_tool_defs(agent),
+                                                  **pin_preferences(agent)})
     except Exception:
         logger.debug("tool_names persist skipped", exc_info=True)
 
@@ -214,10 +218,13 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
     if not pinned:
         return False
     from tools.registry import registry
+    same_code = version is not None and version == tool_pin_version()
+    if same_code:
+        from tools.tool_search_pinning import restore_pin_preferences
+        restore_pin_preferences(agent, saved)
     fresh_defs = _agent_tool_defs(agent)
     fresh = {_def_name(t): t for t in fresh_defs}
     registered_names = {entry.name for entry in registry.get_all_entries()}
-    same_code = version is not None and version == tool_pin_version()
 
     def _pinned_def(item):
         name = item if isinstance(item, str) else _def_name(item)
@@ -238,7 +245,7 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
     merged_names = {_def_name(t) for t in merged}
     _reinject_authorized_dynamic_tools(agent, merged, merged_names)
     merged, merged_names = _drop_session_tools(agent, merged, merged_names)
-    changed = merged != fresh_defs
+    changed = merged != _agent_tool_defs(agent)
     if changed:
         with _agent_tools_lock:
             agent.tools = merged
