@@ -22,9 +22,14 @@ class TelegramTextIngressMixin:
             thread_id=self._effective_message_thread_id(message))
         return match_private_command(text, home=private_home_for_source(source)) is not None
 
-    async def _private_text_ingress(self, msg, update):
-        if not (msg.text or msg.caption or '').lstrip().startswith('/'):
+    async def _private_text_ingress(self, msg, update, *, admitted=False):
+        if not self._private_telegram_match(msg):
             return False
+        # Command ingress already passed the native policy. Text/media ingress
+        # must apply it before capture or a private rejection response, without
+        # observing the body of a rejected private command.
+        if not admitted and not self._should_process_message(msg, is_command=True):
+            return True
         from plugins.platforms.telegram.adapter import MessageType
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = msg.text or msg.caption or ''
@@ -60,7 +65,7 @@ class TelegramTextIngressMixin:
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
             return
-        if await self._private_text_ingress(msg, update):
+        if await self._private_text_ingress(msg, update, admitted=True):
             return
         await self._ensure_forum_commands(msg)
         event = await self._build_triggered_event(msg, update, MessageType.COMMAND)
