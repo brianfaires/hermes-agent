@@ -1,5 +1,9 @@
 """Tests for hermes backup and import commands."""
 
+# Settle independent CLI and agent bootstrap before per-test live-home guards.
+import hermes_cli.main
+import run_agent
+
 import json
 import os
 import socket
@@ -13,10 +17,6 @@ from unittest.mock import patch
 
 import pytest
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _no_real_gateway_service(monkeypatch):
