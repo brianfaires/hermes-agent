@@ -613,7 +613,7 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
     out_path = _resolve_backup_output_path(args.output)
     scan_started = time.monotonic()
     logger.info("backup phase=scan status=started")
-    print(f"Scanning {display_hermes_home()} ...")
+    print(f"Scanning {display_hermes_home(hermes_root)} ...")
     skipped_dirs: set = set()
     files_to_add: list[tuple[Path, Path]] = list(_iter_backup_files(hermes_root, out_path, skipped_dirs))
     external_to_add, skipped_external = _collect_external_entries()
@@ -658,7 +658,7 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
           f"  Compressed:  {_format_size(zip_size)}\n"
           f"  Time:        {elapsed:.1f}s")
     if external_to_add:
-        print(f"\n  Included {len(external_to_add)} memory-provider file(s) stored outside {display_hermes_home()}.")
+        print(f"\n  Included {len(external_to_add)} memory-provider file(s) stored outside {display_hermes_home(hermes_root)}.")
     if skipped_external:
         print(f"\n  Skipped {len(skipped_external)} memory-provider path(s) outside your home directory "
               "(not portable):\n" + "\n".join(f"    {p}" for p in sorted(skipped_external)[:10]))
