@@ -682,24 +682,15 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         pid = int(row["worker_pid"])
         tid = row["id"]
         started_at = _kb._row_get(row, "worker_started_at")
-        if started_at == UNVERIFIED_WORKER_FINGERPRINT and _kb._pid_alive(pid):
-            # Fingerprint capture failed at spawn: we cannot prove this live PID is our worker, so
-            # it is neither signalled nor released beside (duplicate). It is reclaimed once it exits.
-            _kb._log.warning("kanban: task %s worker pid %s exceeded max runtime but has no verified "
-                             "identity; not signalled", tid, pid)
+        termination = _kb._terminate_reclaimed_worker(
+            pid, lock, signal_fn=signal_fn, started_at=started_at,
+        )
+        if _worker_survived_termination(termination) or _worker_alive(pid, started_at):
+            _defer_reclaim_for_live_worker(
+                conn, tid, lock, now, termination, reason="max_runtime_worker_alive",
+            )
             continue
-        # SIGTERM then SIGKILL after 5 s grace; workers wanting a cleaner
-        # shutdown install their own SIGTERM handler. A recycled PID (fingerprint
-        # mismatch) is never signalled: the worker is already gone.
-        killed = False
-        kill = _kill_fn(signal_fn)
-        if kill is not None and not (_kb._pid_alive(pid) and _pid_recycled(pid, started_at)):
-            with contextlib.suppress(ProcessLookupError, OSError):
-                kill(pid, signal.SIGTERM)
-            # Short polling wait — no time.sleep on the write txn.
-            _poll_worker_exit(pid, started_at)
-            if _worker_alive(pid, started_at):
-                killed = _sigkill(kill, pid)
+        killed = bool(termination.get("sigkill"))
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
