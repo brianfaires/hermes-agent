@@ -2,7 +2,16 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class DiscordChannelPolicy:
+    """An admitted channel's routing and history decisions from the same policy."""
+    free_response: bool
+    voice_linked: bool
+    mention_gap: bool
 
 
 class DiscordPrivateIngressMixin:
@@ -17,21 +26,24 @@ class DiscordPrivateIngressMixin:
         is_thread = isinstance(channel, getattr(discord, "Thread", ()))
         return (str(chan_id) if is_thread else None), str(chan_id)
 
-
-    def _discord_channel_policy(self, message, channel_keys, *, mention_prefix=False):
+    def _discord_channel_policy(self, message, channel_keys, *, mention_prefix=False) -> Optional[DiscordChannelPolicy]:
         """Apply the same configured channel and trigger gates before any dispatch."""
         allowed = self._get_allowed_channels()
         ignored = self._get_ignored_channels()
         if ((allowed and "*" not in allowed and not (channel_keys & allowed))
                 or "*" in ignored or channel_keys & ignored):
-            return False, False, False
+            return None
         free_channels = self._discord_free_response_channels()
         voice_linked = str(message.channel.id) in {str(value) for value in self._voice_text_channels.values()}
         free = "*" in free_channels or bool(channel_keys & free_channels) or voice_linked
-        triggered = (not self._discord_require_mention() or free or self._in_bot_thread(message)
+        require_mention = self._discord_require_mention()
+        in_bot_thread = self._in_bot_thread(message)
+        triggered = (not require_mention or free or in_bot_thread
                      or mention_prefix or self._self_is_explicitly_mentioned(message)
                      or self._is_bot_tag_debounce_continuation(message))
-        return triggered, free, voice_linked
+        if not triggered:
+            return None
+        return DiscordChannelPolicy(free, voice_linked, require_mention and not free and not in_bot_thread)
 
     def _private_discord_channel_allowed(self, message):
         from plugins.platforms.discord.adapter import discord
@@ -39,7 +51,7 @@ class DiscordPrivateIngressMixin:
             return True
         parent_id = self._get_parent_channel_id(message.channel)
         keys = self._discord_channel_keys(message, parent_id)
-        return self._discord_channel_policy(message, keys)[0]
+        return self._discord_channel_policy(message, keys) is not None
 
     def _private_discord_event(self, message, role_authorized=False):
         from gateway.platforms.event import MessageEvent, MessageType

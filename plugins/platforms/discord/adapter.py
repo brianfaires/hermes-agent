@@ -6163,11 +6163,13 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
             channel_keys = self._discord_channel_keys(message, parent_channel_id)
-            admitted, is_free_channel, is_voice_linked_channel = self._discord_channel_policy(
+            channel_policy = self._discord_channel_policy(
                 message, channel_keys, mention_prefix=mention_prefix)
-            if not admitted:
+            if channel_policy is None:
                 logger.debug("[%s] Ignoring message outside channel or mention policy: %s", self.name, channel_keys)
                 return False
+            is_free_channel = channel_policy.free_response
+            is_voice_linked_channel = channel_policy.voice_linked
         # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
@@ -6269,9 +6271,8 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
         if not _is_dm and self._discord_history_backfill():
             # Backfill on a gap: mention-gated channels, any thread (processing/restart gaps), any
             # reply (hydrate context around the referenced message). DMs/fresh auto-threads: nothing.
-            _has_mention_gap = require_mention and not is_free_channel and not in_bot_thread
             _is_reply = message.reference is not None
-            if (_has_mention_gap or is_thread or _is_reply) and auto_threaded_channel is None:
+            if (channel_policy.mention_gap or is_thread or _is_reply) and auto_threaded_channel is None:
                 _backfill_text = await self._fetch_channel_context(
                     message.channel, before=message,
                     reply_target=self._reply_target(message.reference) if _is_reply else None,
