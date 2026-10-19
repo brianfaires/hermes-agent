@@ -771,11 +771,8 @@ def _requested_survivor_ids(params):
     return {row for row in ids if isinstance(row, int) and not isinstance(row, bool)} if isinstance(ids, list) else None
 
 
-def _submit_conversational_prompt(rid, params: dict) -> dict:
-    from hermes_cli.input_sanitize import sanitize_user_prompt_text
-    sid = params.get("session_id", "")
-    raw_text = params.get("text", "")
-    text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
+def _submit_display_fields(params):
+    """Keep off-screen presentation metadata separate from turn admission."""
     # Off-screen sends (widget intents) type the row so no client renders a bubble;
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
@@ -785,6 +782,15 @@ def _submit_conversational_prompt(rid, params: dict) -> dict:
         if isinstance(title_preview, str) and title_preview.strip()
         else None
     )
+    return display_kind, display_metadata
+
+
+def _submit_conversational_prompt(rid, params: dict) -> dict:
+    from hermes_cli.input_sanitize import sanitize_user_prompt_text
+    sid = params.get("session_id", "")
+    raw_text = params.get("text", "")
+    text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
+    display_kind, display_metadata = _submit_display_fields(params)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
     if params.get("interrupted"):
