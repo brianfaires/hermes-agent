@@ -147,7 +147,7 @@ def _assert_not_delegated_child_mutation(path: str | Path | None = None) -> None
     from agent.delegation_context import kanban_path_is_fenced
 
     if kanban_path_is_fenced(kanban_home() if path is None else path):
-        raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
+        raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards; non-owning cron sessions share this lineage fence")
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:

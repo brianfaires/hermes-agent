@@ -14,8 +14,8 @@ from typing import Iterator, Mapping, MutableMapping, overload
 
 _DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
 # Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
-# so delegate_task-specific behaviour (subprocess env scrubbing, its error strings) is unchanged.
-_NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool] = ContextVar("hermes_non_dispatcher_owned_context", default=False)
+# so delegate_task-specific behaviour remains unchanged; a worker-launched cron captures its lineage root.
+_NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool | str] = ContextVar("hermes_non_dispatcher_owned_context", default=False)
 
 DELEGATED_CHILD_ENV_MARKER = "HERMES_DELEGATED_CHILD_CONTEXT"
 
@@ -45,12 +45,15 @@ def is_delegated_child_context() -> bool:
     return bool(_DELEGATED_CHILD_CONTEXT.get())
 
 
-def enter_non_dispatcher_owned_context() -> Token[bool]:
+def enter_non_dispatcher_owned_context() -> Token[bool | str]:
     """Token form of :func:`non_dispatcher_owned_context` for long try/finally scopes."""
-    return _NON_DISPATCHER_OWNED_CONTEXT.set(True)
+    inherited = _NON_DISPATCHER_OWNED_CONTEXT.get()
+    fence = (inherited if isinstance(inherited, str) else
+             _fenced_kanban_root() if os.environ.get("HERMES_KANBAN_TASK") else True)
+    return _NON_DISPATCHER_OWNED_CONTEXT.set(fence)
 
 
-def exit_non_dispatcher_owned_context(token: Token[bool]) -> None:
+def exit_non_dispatcher_owned_context(token: Token[bool | str]) -> None:
     """Restore the flag saved by :func:`enter_non_dispatcher_owned_context`."""
     _NON_DISPATCHER_OWNED_CONTEXT.reset(token)
 
@@ -133,7 +136,9 @@ def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[
     onto its scratch root and unfence the real one).
     """
     cleaned = {k: v for k, v in env.items() if k not in KANBAN_ENV_KEYS}
-    inherited = str(env.get(DELEGATED_CHILD_ENV_MARKER) or "")
+    context_fence = _NON_DISPATCHER_OWNED_CONTEXT.get()
+    inherited = str(env.get(DELEGATED_CHILD_ENV_MARKER) or
+                    (context_fence if isinstance(context_fence, str) else ""))
     cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited if inherited and inherited != "1" else _fenced_kanban_root()
     return cleaned
 
@@ -145,7 +150,10 @@ def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
     fenced root the marker carries. A legacy ``"1"`` marker fences everything."""
     if _DELEGATED_CHILD_CONTEXT.get():
         return True
+    context_fence = _NON_DISPATCHER_OWNED_CONTEXT.get()
     marker = os.environ.get(DELEGATED_CHILD_ENV_MARKER, "")
+    if not marker and isinstance(context_fence, str):
+        marker = context_fence
     if not marker:
         return False
     if marker == "1":
@@ -178,7 +186,9 @@ def delegated_child_subprocess_env(
     Location and credentials are untouched; callers retain their existing secret policy.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
     """
-    if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
+    if not (is_delegated_child_process_context()
+            or isinstance(_NON_DISPATCHER_OWNED_CONTEXT.get(), str)
+            or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)
     return scrub_kanban_env(os.environ if env is None else env)
