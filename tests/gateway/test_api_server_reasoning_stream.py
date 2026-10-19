@@ -5,6 +5,9 @@ The agent's structured ``reasoning_callback`` reaches ``/v1/chat/completions`` a
 kept distinct from answer text with monotonic ``sequence_number``.
 """
 
+# The stream fallback uses the real agent; import before live-home guards.
+import run_agent
+
 import asyncio
 import json
 import time

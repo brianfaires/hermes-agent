@@ -1,5 +1,6 @@
 """Render validated standalone image controls for remote API frontends."""
 import base64
+import logging
 from pathlib import Path
 
 from gateway import media_directives
@@ -7,6 +8,7 @@ from gateway import media_directives
 _MIME = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
          '.webp': 'image/webp', '.bmp': 'image/bmp'}
 _MAX_BYTES = 5 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def _data_url(path):
@@ -44,4 +46,5 @@ def resolve_media_to_data_urls(text):
         return original
     except Exception:
         # Invalid paths/config must leave a readable response, never break the API turn.
+        logger.debug("Unable to render API media directives", exc_info=True)
         return text

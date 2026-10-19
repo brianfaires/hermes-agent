@@ -1200,7 +1200,7 @@ class OpenAICompatRoutesMixin:
         response_data = {
             "id": response_id, "object": "response", "status": "completed",
             "created_at": created_at, "model": body.get("model", self._model_name),
-            "output": self._extract_output_items(result, start_index=output_start_index),
+            "output": self._extract_output_items(dict(result, final_response=final_response), start_index=output_start_index),
             "usage": _responses_usage_payload(usage)}
         if store:
             response_store = self._current_response_store()
