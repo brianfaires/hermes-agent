@@ -7,6 +7,9 @@ Without this, a concurrent `hermes kanban boards switch` from another session
 can flip the global current-board file mid-turn and silently divert the
 shell calls to a different DB.
 """
+
+# cmd_chat tests need main-entry bootstrap before per-test live-home guards.
+import hermes_cli.main
 import importlib
 import os
 
