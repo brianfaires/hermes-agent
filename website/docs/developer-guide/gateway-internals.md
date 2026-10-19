@@ -379,3 +379,18 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - [ACP Internals](./acp-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)
+
+Outbound `MEDIA:` controls occupy their own lines. The shared
+`gateway/media_directives.py` parser checks original line eligibility before code
+or JSON masking, so masking cannot promote prose into a control. Closed or
+unfinished backtick/tilde fences stay literal. Complete spaced paths validate on
+disk; delivery never shortens a prose suffix into an existing file. Multiple
+attachments use separate lines. Standalone cosmetic Markdown wrappers remain
+supported, as do native voice/document controls and the terminal sentinel.
+
+Bare-file fallback accepts complete standalone paths and leaves prose references
+unchanged. Final extraction, streaming cleanup and the API image renderer share
+these rules; `gateway/platforms/api_server_media.py` owns data-URL rendering.
+The old token lexer supplies historical dedup hints only. Trusted current-turn
+producer artifacts retain their native allowlist and history/ownership gates;
+literal examples in model prose cannot suppress a real producer control.

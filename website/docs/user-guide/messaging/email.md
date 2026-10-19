@@ -153,7 +153,7 @@ Replies are sent via SMTP with proper email threading:
 
 ### File Attachments
 
-The agent can send file attachments in replies. Include `MEDIA:/path/to/file` in the response and the file is attached to the outgoing email.
+The agent can send file attachments in replies. Put `MEDIA:/path/to/file` on its own line in the response and the file is attached to the outgoing email.
 
 ### Skipping Attachments
 

@@ -1416,7 +1416,7 @@ def _strip_auto_continue_noise(content: Any) -> Any:
 _JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")
 
 
-# Extension-anchored MEDIA: matcher (mirrors the dispatch site); a bare ``MEDIA:`` in prose never auto-appends.
+# Token lexer for trusted producer results and historical hints, never the outbound-text parser.
 _TOOL_MEDIA_RE = re.compile(
     r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
     r'mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|'
@@ -1503,9 +1503,9 @@ def _collect_history_media_paths(agent_history: list[dict[str, Any]]) -> set:
             path = match.group(1).strip().rstrip('",}')
             if path:
                 paths.add(path)
-        # The regex misses quoted/spaced paths extract_media accepts; use the same extractor to dedup.
-        media_files, _ = BasePlatformAdapter.extract_media(content)
-        paths.update(path for path, _is_voice in media_files)
+        # Historical hints retain the old quoted/spaced token grammar; this never requests delivery.
+        from gateway.media_directives import historical_paths
+        paths.update(historical_paths(content))
 
     for msg in agent_history:
         role = msg.get("role")

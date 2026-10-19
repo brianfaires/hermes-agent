@@ -662,7 +662,7 @@ def hud_surface_note(valid_tool_names: set[str] | None = None,
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 _MEDIA_NATIVE = (
-    "You can send files natively: write MEDIA:/absolute/path/to/file in your response. "
+    "You can send files natively: write MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. "
 )
 
 _LOCAL_CRON_DELIVERY_NOTE = (
@@ -698,14 +698,14 @@ PLATFORM_HINTS = {
     "discord": (
         "You are in a Discord server or group chat communicating with your user. Discord renders standard "
         "markdown natively (bold, italic, code blocks, links); tables are NOT supported — use bullet lists "
-        "or labeled lines. You can send media files natively: include MEDIA:/absolute/path/to/file in your "
-        "response. Images (.png, .jpg, .webp) are sent as photo attachments, audio as file attachments. You "
+        "or labeled lines. You can send media files natively: include MEDIA:/absolute/path/to/file on its own "
+        "line, outside prose or code blocks. Images (.png, .jpg, .webp) are sent as photo attachments, audio as file attachments. You "
         "can also include image URLs in markdown format ![alt](url) and they will be sent as attachments."
     ),
     "slack": (
         "You are in a Slack workspace communicating with your user. Standard markdown is auto-converted to Slack "
         "formatting (bold, headers, links, code); tables are NOT supported — use bullet lists or labeled lines. You "
-        "can send media files natively: include MEDIA:/absolute/path/to/file in your response. Images (.png, .jpg, "
+        "can send media files natively: include MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. Images (.png, .jpg, "
         ".webp) are uploaded as photo attachments, audio as file attachments. You can also include image URLs in "
         "markdown format ![alt](url) and they will be uploaded as attachments."
     ),
@@ -717,7 +717,7 @@ PLATFORM_HINTS = {
     "email": (
         "You are communicating via email. Write clear, well-structured responses suitable for email. Use "
         "plain text formatting (no markdown). Keep responses concise but complete. You can send file "
-        "attachments — include MEDIA:/absolute/path/to/file in your response. The subject line is preserved "
+        "attachments — include MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. The subject line is preserved "
         "for threading. Do not include greetings or sign-offs unless contextually appropriate."
     ),
     "cron": (
@@ -776,7 +776,7 @@ PLATFORM_HINTS = {
     "mattermost": (
         "You are in a Mattermost workspace communicating with your user. Mattermost renders standard "
         "Markdown — headings, bold, italic, code blocks, and tables all work. You can send media files "
-        "natively: include MEDIA:/absolute/path/to/file in your response. Images (.jpg, .png, .webp) are "
+        "natively: include MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. Images (.jpg, .png, .webp) are "
         "uploaded as photo attachments, audio and video as file attachments. Image URLs in markdown format "
         "![alt](url) are rendered as inline previews automatically."
     ),
@@ -791,14 +791,14 @@ PLATFORM_HINTS = {
     "feishu": (
         "You are in a Feishu (Lark) workspace communicating with your user. Feishu renders Markdown in "
         "messages — bold, italic, code blocks, and links are supported. You can send media files natively: "
-        "include MEDIA:/absolute/path/to/file in your response. Images (.jpg, .png, .webp) are uploaded and "
+        "include MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. Images (.jpg, .png, .webp) are uploaded and "
         "displayed inline, audio files as native voice messages (non-Opus formats are transcoded "
         "automatically; without ffmpeg they fall back to file attachments), and other files as attachments."
     ),
     "weixin": (
         "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when it improves readability, "
         "but keep the message compact and chat-friendly. You can send media files natively: include "
-        "MEDIA:/absolute/path/to/file in your response. Images are sent as native photos, videos play inline when "
+        "MEDIA:/absolute/path/to/file on its own line, outside prose or code blocks. Images are sent as native photos, videos play inline when "
         "supported, and other files arrive as downloadable documents. You can also include image URLs in markdown "
         "format ![alt](url) and they will be downloaded and sent as native media when possible."
     ),
