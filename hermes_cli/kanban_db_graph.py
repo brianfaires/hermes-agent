@@ -12,14 +12,14 @@ def inherit_creator_origin(
     """Copy durable origin inside creation's transaction, never adding dependencies."""
     if not creator_task_id:
         return
-    from hermes_cli.kanban_db import _inherit_notify_subs
+    from hermes_cli.kanban_db_notify import inherit_notify_subs
 
     conn.execute(
         "UPDATE tasks SET session_id = COALESCE(session_id, "
         "(SELECT session_id FROM tasks WHERE id = ?)) WHERE id = ?",
         (creator_task_id, task_id),
     )
-    _inherit_notify_subs(conn, task_id, (creator_task_id,), created_at=created_at)
+    inherit_notify_subs(conn, task_id, (creator_task_id,), created_at=created_at)
 
 
 def initial_task_state(
