@@ -125,12 +125,17 @@ def _profile_author(default: str = "specifier") -> str:
 
 def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
+    from hermes_cli.kanban_control_holds import has_active_control_hold
+
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        held = has_active_control_hold(conn, task_id)
     if task is None:
         return None, "unknown task id"
     if task.status != "triage":
         return None, f"task is not in triage (status={task.status!r})"
+    if held:
+        return None, "task is held for explicit operator release"
     return task, ""
 
 
@@ -238,4 +243,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+    from hermes_cli.kanban_control_holds import has_active_control_hold
+
+    with kbc.connect_closing() as conn:
+        return [t.id for t in tasks if not has_active_control_hold(conn, t.id)]

@@ -104,6 +104,8 @@ def decompose_triage_task(
         write_txn, recompute_ready,
     )
 
+    from hermes_cli.kanban_control_holds import has_active_control_hold
+
     if not children:
         return None
     if root_assignee is not None:
@@ -118,7 +120,8 @@ def decompose_triage_task(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
-        if root_row is None or root_row["status"] != "triage":
+        if (root_row is None or root_row["status"] != "triage"
+                or has_active_control_hold(conn, task_id)):
             return None
         # Dependency links alone do not imply lineage. The completion event is
         # committed with the graph, and survives re-triage or unlinking.

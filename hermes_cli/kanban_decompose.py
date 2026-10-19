@@ -340,4 +340,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+    from hermes_cli.kanban_control_holds import has_active_control_hold
+
+    with kbc.connect_closing() as conn:
+        return [row.id for row in rows if not has_active_control_hold(conn, row.id)]
