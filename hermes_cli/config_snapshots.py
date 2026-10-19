@@ -4,6 +4,8 @@ from __future__ import annotations
 from functools import wraps
 from pathlib import Path
 
+from ruamel.yaml.representer import SafeRepresenter
+
 
 class ConfigConflictError(RuntimeError):
     """The file changed after a caller read the state it is trying to save."""
@@ -17,6 +19,10 @@ class ConfigSnapshot(dict):
         result.source_path = self.source_path
         result.source_revision = self.source_revision
         return result
+
+
+# Revision metadata belongs to the process, never to serialized configuration.
+SafeRepresenter.add_representer(ConfigSnapshot, SafeRepresenter.represent_dict)
 
 
 def _canonical(path):
@@ -35,25 +41,32 @@ def _revision(path):
         return ("unreadable",)
 
 
+def read_config_snapshot(path, reader):
+    """Version a mutable read without locking the runtime's read-only hot path."""
+    from hermes_cli import config
+    path = _canonical(path)
+    for _ in range(2):
+        before = _revision(path)
+        state = reader()
+        after = _revision(path)
+        if isinstance(state, config.FailedConfigRead):
+            return state
+        if before == after:
+            snapshot = ConfigSnapshot(state)
+            snapshot.source_path = path
+            snapshot.source_revision = after
+            return snapshot
+    raise ConfigConflictError(f'Configuration changed while reading {path}; reload and retry')
+
+
 def config_snapshot_reader(function):
-    """Version mutable loader results without locking the runtime's read-only hot path."""
+    """Attach source identity to raw mutable loader results."""
     @wraps(function)
     def read(*args, **kwargs):
         from hermes_cli import config
         path = args[0] if args else kwargs.get('config_path')
-        path = _canonical(path if path is not None else config.get_config_path())
-        for _ in range(2):
-            before = _revision(path)
-            state = function(*args, **kwargs)
-            after = _revision(path)
-            if isinstance(state, config.FailedConfigRead):
-                return state
-            if before == after:
-                snapshot = ConfigSnapshot(state)
-                snapshot.source_path = path
-                snapshot.source_revision = after
-                return snapshot
-        raise ConfigConflictError(f'Configuration changed while reading {path}; reload and retry')
+        return read_config_snapshot(path if path is not None else config.get_config_path(),
+                                    lambda: function(*args, **kwargs))
     return read
 
 

@@ -586,7 +586,7 @@ def ensure_hermes_home():
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS
 from hermes_cli.config_transactions import config_mutation_lock
-from hermes_cli.config_snapshots import config_save_transaction, config_snapshot_reader
+from hermes_cli.config_snapshots import config_save_transaction, config_snapshot_reader, read_config_snapshot
 from hermes_cli.config_providers import (
     _API_MODE_ALIASES, _CAMEL_ALIASES, _KNOWN_PROVIDER_KEYS, _PROVIDER_NORMALIZE_WARNED,
     _canonical_api_mode, _coerce_ssl_verify, _custom_provider_entry_to_provider_config,
@@ -2022,12 +2022,11 @@ def atomic_config_replace(
         config_path, data, allow_omissions=True, extra_content_on_create=extra_content_on_create)
 
 
-@config_snapshot_reader
 def load_config() -> dict[str, Any]:
     """Load the merged configuration (DEFAULT_CONFIG + config.yaml + managed scope, env-expanded).
     Cached on the file signature; returns a deepcopy since most call sites mutate the result.
     Read-only hot paths should use ``load_config_readonly()`` to skip the deepcopy."""
-    return _load_config_impl(want_deepcopy=True)
+    return read_config_snapshot(get_config_path(), lambda: _load_config_impl(want_deepcopy=True))
 
 
 def load_config_readonly() -> dict[str, Any]:

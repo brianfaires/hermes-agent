@@ -60,3 +60,12 @@ def test_snapshot_cannot_be_saved_to_another_profile(document, tmp_path, monkeyp
     with pytest.raises(RuntimeError, match='changed since it was read'):
         config.save_config(state)
     assert not (other / 'config.yaml').exists()
+
+
+def test_snapshot_serializes_as_a_plain_mapping(document):
+    import json
+    import hermes_yaml as yaml
+    state = config.read_user_config_raw()
+    assert yaml.safe_load(yaml.safe_dump(state)) == state
+    assert json.loads(json.dumps(state)) == state
+    assert set(state) == {'custom', 'plugins'}
