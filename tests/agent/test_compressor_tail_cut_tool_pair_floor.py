@@ -21,6 +21,9 @@ group and the call/result pair is summarised together.
 
 from __future__ import annotations
 
+# The pairing helper uses the real agent; settle bootstrap before live-home guards.
+import run_agent
+
 import itertools
 
 import pytest

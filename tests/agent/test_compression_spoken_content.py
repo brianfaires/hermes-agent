@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 # Settle native update recovery before the per-test live-home I/O guard.
-import hermes_bootstrap  # noqa: F401
+import hermes_bootstrap
 
 from agent.context_compressor import ContextCompressor
 

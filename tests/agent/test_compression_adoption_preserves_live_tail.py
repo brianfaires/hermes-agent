@@ -25,6 +25,10 @@ summarizer instead.
 
 from __future__ import annotations
 
+# Import the real agent before per-test live-home guards install.
+import run_agent
+
+
 import copy
 import os
 from pathlib import Path

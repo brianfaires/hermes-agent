@@ -10,6 +10,9 @@ the newest *live* attempt: a registration stack where each attempt removes only
 its own entry.
 """
 
+# Import the real agent before per-test live-home guards install.
+import run_agent
+
 import os
 import threading
 from pathlib import Path
