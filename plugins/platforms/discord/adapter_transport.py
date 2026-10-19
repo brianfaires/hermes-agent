@@ -23,4 +23,3 @@ class DiscordTransportMixin:
         if not channel:
             channel = await self._client.fetch_channel(int(channel_id))
         return channel
-
