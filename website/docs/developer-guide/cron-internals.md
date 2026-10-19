@@ -411,3 +411,11 @@ hermes cron remove <job_id>         # Delete a job
 - [Cron Feature Guide](../user-guide/features/cron.md)
 - [Gateway Internals](./gateway-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
+
+Attached scripts and `no_agent` cron scripts normalize their child environment
+through the same `systemd_user_bus_env` helper as restart-safe workers. On Linux,
+a secure runtime directory and its socket owned by the current Unix user supply
+`XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` at each script spawn. Profile home
+and secret scoping still come from the native subprocess environment builder;
+profiles served by one Unix user share that user's manager. The parent process
+environment is not changed, and the helper does not create a bus or start services.
