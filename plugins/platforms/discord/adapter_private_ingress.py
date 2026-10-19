@@ -1,4 +1,4 @@
-"""Private commands before Discord auto-threading and conversational backfill."""
+"""Shared channel policy and direct commands before Discord conversational dispatch."""
 from __future__ import annotations
 
 import re
@@ -17,6 +17,29 @@ class DiscordPrivateIngressMixin:
         is_thread = isinstance(channel, getattr(discord, "Thread", ()))
         return (str(chan_id) if is_thread else None), str(chan_id)
 
+
+    def _discord_channel_policy(self, message, channel_keys, *, mention_prefix=False):
+        """Apply the same configured channel and trigger gates before any dispatch."""
+        allowed = self._get_allowed_channels()
+        ignored = self._get_ignored_channels()
+        if ((allowed and "*" not in allowed and not (channel_keys & allowed))
+                or "*" in ignored or channel_keys & ignored):
+            return False, False, False
+        free_channels = self._discord_free_response_channels()
+        voice_linked = str(message.channel.id) in {str(value) for value in self._voice_text_channels.values()}
+        free = "*" in free_channels or bool(channel_keys & free_channels) or voice_linked
+        triggered = (not self._discord_require_mention() or free or self._in_bot_thread(message)
+                     or mention_prefix or self._self_is_explicitly_mentioned(message)
+                     or self._is_bot_tag_debounce_continuation(message))
+        return triggered, free, voice_linked
+
+    def _private_discord_channel_allowed(self, message):
+        from plugins.platforms.discord.adapter import discord
+        if isinstance(message.channel, discord.DMChannel) or message.guild is None:
+            return True
+        parent_id = self._get_parent_channel_id(message.channel)
+        keys = self._discord_channel_keys(message, parent_id)
+        return self._discord_channel_policy(message, keys)[0]
 
     def _private_discord_event(self, message, role_authorized=False):
         from gateway.platforms.event import MessageEvent, MessageType
@@ -51,10 +74,11 @@ class DiscordPrivateIngressMixin:
             # Recovery must not duplicate private captures after a restart.
             if recovered:
                 return False
-            admitted, role_grant = self._discord_message_admission(message, claim=False)
-            if not admitted:
+            # Live ingress already authorizes the user and claims dedup. Rechecking
+            # that claim here would reject every message that reached this handler.
+            if not self._private_discord_channel_allowed(message):
                 return False
-            event = self._private_discord_event(message, role_authorized or role_grant)
+            event = self._private_discord_event(message, role_authorized)
             await self._dispatch_private_event(event)
             return True
         return await self._handle_conversational_message(message, role_authorized, recovered=recovered)
