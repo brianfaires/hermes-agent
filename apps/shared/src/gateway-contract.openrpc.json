@@ -421,6 +421,24 @@
       }
     },
     {
+      "name": "command.private",
+      "summary": "Dispatch explicitly private plugin input before history, observers or model turns.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/CommandPrivateParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/CommandPrivateResult"
+        }
+      }
+    },
+    {
       "name": "command.resolve",
       "summary": "Canonical registry command for a name or alias.",
       "params": [
@@ -8316,6 +8334,75 @@
           "type"
         ],
         "title": "CommandDispatchResult",
+        "type": "object"
+      },
+      "CommandPrivateParams": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Session Id"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "attachments": {
+            "default": false,
+            "title": "Attachments",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "CommandPrivateParams",
+        "type": "object"
+      },
+      "CommandPrivateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "handled": {
+            "title": "Handled",
+            "type": "boolean"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output"
+          }
+        },
+        "required": [
+          "handled"
+        ],
+        "title": "CommandPrivateResult",
         "type": "object"
       },
       "CommandResolveParams": {
@@ -27246,6 +27333,30 @@
             ],
             "default": null,
             "title": "Voice Stopped"
+          },
+          "private_command": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Private Command"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output"
           },
           "user_row_id": {
             "anyOf": [

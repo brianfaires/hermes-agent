@@ -1258,13 +1258,14 @@ def _read_discord_prompt_timeout() -> int:
 
 
 from plugins.platforms.discord.adapter_transport import DiscordTransportMixin
+from plugins.platforms.discord.adapter_private_ingress import DiscordPrivateIngressMixin
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
 from plugins.platforms.discord.adapter_slash_auth import DiscordSlashAuthMixin
 from plugins.platforms.discord.adapter_thread_titles import DiscordThreadTitlesMixin, SemanticThreadRenames
 from plugins.platforms.discord.adapter_voice_info import DiscordVoiceInfoMixin
 
 
-class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
+class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
                      BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
@@ -1809,16 +1810,6 @@ class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitl
         return await self._handle_message(message, role_authorized=role_authorized)
 
     # --- gateway_platform_event fire-sites ---
-
-    def _thread_id_and_chat_for_channel(self, channel) -> tuple[Optional[str], Optional[str]]:
-        """Return ``(thread_id, chat_id)``; for a thread chat_id is the thread id (dispatch session key)."""
-        if channel is None:
-            return None, None
-        chan_id = getattr(channel, "id", None)
-        if chan_id is None:
-            return None, None
-        is_thread = isinstance(channel, getattr(discord, "Thread", ()))
-        return (str(chan_id) if is_thread else None), str(chan_id)
 
     def _source_for_platform_event(
         self, *, chat_id: str, user_id: Optional[str], user_name: Optional[str],
@@ -5296,6 +5287,8 @@ class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitl
                 nonlocal has_unverified
                 if msg.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return None
+                if self._is_private_discord_message(msg):
+                    return None
                 content = getattr(msg, "clean_content", msg.content) or ""
                 if (
                     str(getattr(msg, "id", "")) in self._nonconversational_messages
@@ -6124,7 +6117,7 @@ class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitl
                 return _Snowflake(int(_ref_mid))
         return None
 
-    async def _handle_message(
+    async def _handle_conversational_message(
         self, message: DiscordMessage, role_authorized: bool = False, *, recovered: bool = False,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""

@@ -511,7 +511,10 @@ class _PollingStallError(RuntimeError):
     """
 
 
-class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
+from plugins.platforms.telegram.adapter_private_ingress import TelegramTextIngressMixin
+
+
+class TelegramAdapter(TelegramTextIngressMixin, TelegramHeldInboundMixin, BasePlatformAdapter):
     """Telegram bot adapter: users/groups, MarkdownV2 replies, forum topics, media."""
 
     # Bound for the per-(chat_id, status_key) status-message cache; FIFO half-trim on overflow.
@@ -6463,39 +6466,6 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         await self._cache_replied_media(msg, event)
         return self._apply_telegram_group_observe_attribution(event)
 
-    async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming text; buffers client-split chunks into one MessageEvent."""
-        msg = self._effective_update_message(update)
-        if not msg or not msg.text:
-            return
-        # Auth check first: blocked users must not reach batching, the observed transcript, or the agent.
-        if not self._is_user_authorized_from_message(msg):
-            self._log_blocked_user(msg)
-            return
-        if not self._gate_or_observe(msg, update, MessageType.TEXT):
-            return
-        await self._ensure_forum_commands(update.message)
-        self._enqueue_text_event(await self._build_triggered_event(msg, update, MessageType.TEXT))
-
-    async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming command messages."""
-        msg = self._effective_update_message(update)
-        if not msg or not msg.text:
-            return
-        if not self._should_process_message(msg, is_command=True):
-            return
-        if not self._is_user_authorized_from_message(msg):
-            self._log_blocked_user(msg)
-            return
-        await self._ensure_forum_commands(msg)
-        event = await self._build_triggered_event(msg, update, MessageType.COMMAND)
-        # A >4096-char command paste arrives as a near-limit COMMAND chunk plus TEXT continuations; dispatching
-        # immediately would orphan them. Near-limit commands go through text batching.
-        if len(event.text or "") >= self._SPLIT_THRESHOLD:
-            self._enqueue_text_event(event)
-            return
-        await self.handle_message(event)
-
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
@@ -6784,6 +6754,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg, level=logging.INFO, what="media from unauthorized user")
             return
+        if await self._private_text_ingress(msg, update):
+            return
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
                 _event = self._build_message_event(msg, self._media_message_type(msg), update_id=update.update_id)
@@ -7043,6 +7015,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         if not message.reply_to_message:
             return None, None
         reply_to_id = str(message.reply_to_message.message_id)
+        if self._private_telegram_match(message.reply_to_message):
+            return reply_to_id, None
         quote = getattr(message, "quote", None)
         quote_text = getattr(quote, "text", None) if quote is not None else None
         if quote_text:
