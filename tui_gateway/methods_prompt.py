@@ -785,6 +785,13 @@ def _submit_display_fields(params):
     return display_kind, display_metadata
 
 
+def _mark_speech_interruption(params):
+    if params.get("interrupted"):
+        # Client-side barge-in: latch so this turn's model message carries the note.
+        from tools.tts_streaming import mark_speech_interrupted
+        mark_speech_interrupted()
+
+
 def _submit_conversational_prompt(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")
@@ -793,10 +800,7 @@ def _submit_conversational_prompt(rid, params: dict) -> dict:
     display_kind, display_metadata = _submit_display_fields(params)
     if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
-    if params.get("interrupted"):
-        # Client-side barge-in: latch so this turn's model message carries the note.
-        from tools.tts_streaming import mark_speech_interrupted
-        mark_speech_interrupted()
+    _mark_speech_interruption(params)
     session, err = _sess_nowait(params, rid)
     if err:
         return err
