@@ -617,8 +617,7 @@ class PluginContext:
         ``True`` means a host accepted the request, not that the turn completed.
         """
         from hermes_cli.plugins_injection import inject_plugin_message
-        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin,
-                                     expected_session_id=expected_session_id)
+        return inject_plugin_message(self, content, role, session_key=session_key, origin=origin, expected_session_id=expected_session_id)
 
     def _gateway_injection_allowed(self) -> bool:
         """Return whether this plugin may trigger gateway session turns (read from the plugin's

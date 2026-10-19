@@ -81,7 +81,6 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
             async with self._async_profile_scope_for_source(source):
                 _hook_results = await _ainvoke_hook(
                     "pre_gateway_dispatch", event=event, gateway=self,
-                    # Bare-runner tests may omit the session store.
                     session_store=getattr(self, "session_store", None),
                 )
         except Exception as _hook_exc:
