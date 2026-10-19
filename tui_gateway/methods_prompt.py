@@ -734,45 +734,10 @@ _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
-    from tui_gateway import server
-    from tui_gateway.private_commands import dispatch
-    private = dispatch(server, rid, params, params.get('text', ''), result_kind='prompt')
-    return private if private is not None else _submit_conversational_prompt(rid, params)
-
-
-def _claim_conversational_submit(rid, sid, session, text, params, transport,
-                                 internal_hosted_submit, has_truncation, turn_author, display_kind):
-    """Claim an idle session, retrying if a concurrent busy turn finishes."""
-    while True:
-        with session["history_lock"]:
-            if not session.get("running"):
-                break
-            if internal_hosted_submit:
-                return _err(rid, 4091, "hosted room member session is busy")
-            busy_transport = transport or session.get("transport")
-        if has_truncation:
-            # A rewind/edit/restore/regenerate must land as a truncation, never as a
-            # steered correction or a plain follow-up queued to run after the live
-            # turn — either would silently drop the history cut the user asked for.
-            # Signal busy so the caller's own interrupt-then-retry loop (already
-            # built for exactly this race — see desktop's `runRewindSubmit`) waits
-            # for `running` to clear and resubmits with the truncation intact.
-            return _err(rid, 4009, "session busy")
-        busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
-            display_kind=display_kind)
-        if busy_response is not None:
-            return busy_response
-    return None
-
-
-def _requested_survivor_ids(params):
-    ids = params.get("rebind_survivor_row_ids")
-    return {row for row in ids if isinstance(row, int) and not isinstance(row, bool)} if isinstance(ids, list) else None
-
-
-def _submit_display_fields(params):
-    """Keep off-screen presentation metadata separate from turn admission."""
+    from hermes_cli.input_sanitize import sanitize_user_prompt_text
+    sid = params.get("session_id", "")
+    raw_text = params.get("text", "")
+    text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
     # Off-screen sends (widget intents) type the row so no client renders a bubble;
     # whitelisted to "hidden" — this RPC must not mint kinds.
     display_kind = "hidden" if params.get("display_kind") == "hidden" else None
@@ -782,25 +747,12 @@ def _submit_display_fields(params):
         if isinstance(title_preview, str) and title_preview.strip()
         else None
     )
-    return display_kind, display_metadata
-
-
-def _mark_speech_interruption(params):
+    if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
+        return stopped
     if params.get("interrupted"):
         # Client-side barge-in: latch so this turn's model message carries the note.
         from tools.tts_streaming import mark_speech_interrupted
         mark_speech_interrupted()
-
-
-def _submit_conversational_prompt(rid, params: dict) -> dict:
-    from hermes_cli.input_sanitize import sanitize_user_prompt_text
-    sid = params.get("session_id", "")
-    raw_text = params.get("text", "")
-    text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
-    display_kind, display_metadata = _submit_display_fields(params)
-    if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
-        return stopped
-    _mark_speech_interruption(params)
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -848,11 +800,35 @@ def _submit_conversational_prompt(rid, params: dict) -> dict:
             return refusal
         if (t := current_transport()) is not None:
             _rebind_live_transport(sid, session, t)
-    busy_response = _claim_conversational_submit(
-        rid, sid, session, text, params, t, internal_hosted_submit, has_truncation, turn_author, display_kind)
-    if busy_response is not None:
-        return busy_response
-    requested_rebind_ids = _requested_survivor_ids(params)
+    # Claim the turn against a possibly-running session (busy/queued reply, else fall
+    # through once ``running`` is observed False).  The provider interrupt happens after
+    # history_lock is released (a non-interruptible tool may hold it); if the old turn
+    # finished between the two acquisitions, retry the claim rather than strand this
+    # prompt in a queue whose drain already ran.
+    while True:
+        with session["history_lock"]:
+            if not session.get("running"):
+                break
+            if internal_hosted_submit:
+                return _err(rid, 4091, "hosted room member session is busy")
+            busy_transport = t or session.get("transport")
+        if has_truncation:
+            # A rewind/edit/restore/regenerate must land as a truncation, never as a
+            # steered correction or a plain follow-up queued to run after the live
+            # turn — either would silently drop the history cut the user asked for.
+            # Signal busy so the caller's own interrupt-then-retry loop (already
+            # built for exactly this race — see desktop's `runRewindSubmit`) waits
+            # for `running` to clear and resubmits with the truncation intact.
+            return _err(rid, 4009, "session busy")
+        busy_response = _handle_busy_submit(
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
+            display_kind=display_kind)
+        if busy_response is not None:
+            return busy_response
+    raw_rebind_ids = params.get("rebind_survivor_row_ids")
+    requested_rebind_ids = (
+        {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
+        if isinstance(raw_rebind_ids, list) else None)
     err, survivor_fields = _lock_in_submit_turn(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
@@ -900,11 +876,10 @@ def _submit_conversational_prompt(rid, params: dict) -> dict:
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
-    from agent.memory_provider import spawn_context_thread
-    run_thread = spawn_context_thread(
+    run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
             rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
-        name="hermes-prompt-submit", daemon=True)
+        daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread
     run_thread.start()

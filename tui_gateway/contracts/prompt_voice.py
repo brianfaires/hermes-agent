@@ -67,8 +67,6 @@ class PromptSubmitResult(Result):
 
     status: PromptSubmitStatus | None = None
     voice_stopped: bool | None = None
-    private_command: bool | None = None
-    output: str | None = None
     # The row written for THIS accepted input, captured before the worker can consume it.
     # Absent on queued/steered/redirected inputs and whenever persistence is not yet proven.
     user_row_id: int | None = None

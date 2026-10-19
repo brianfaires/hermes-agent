@@ -1258,14 +1258,13 @@ def _read_discord_prompt_timeout() -> int:
 
 
 from plugins.platforms.discord.adapter_transport import DiscordTransportMixin
-from plugins.platforms.discord.adapter_private_ingress import DiscordPrivateIngressMixin
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
 from plugins.platforms.discord.adapter_slash_auth import DiscordSlashAuthMixin
 from plugins.platforms.discord.adapter_thread_titles import DiscordThreadTitlesMixin, SemanticThreadRenames
 from plugins.platforms.discord.adapter_voice_info import DiscordVoiceInfoMixin
 
 
-class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
+class DiscordAdapter(DiscordTransportMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin, DiscordSlashAuthMixin,
                      BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
@@ -1810,6 +1809,16 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
         return await self._handle_message(message, role_authorized=role_authorized)
 
     # --- gateway_platform_event fire-sites ---
+
+    def _thread_id_and_chat_for_channel(self, channel) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(thread_id, chat_id)``; for a thread chat_id is the thread id (dispatch session key)."""
+        if channel is None:
+            return None, None
+        chan_id = getattr(channel, "id", None)
+        if chan_id is None:
+            return None, None
+        is_thread = isinstance(channel, getattr(discord, "Thread", ()))
+        return (str(chan_id) if is_thread else None), str(chan_id)
 
     def _source_for_platform_event(
         self, *, chat_id: str, user_id: Optional[str], user_name: Optional[str],
@@ -5287,8 +5296,6 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 nonlocal has_unverified
                 if msg.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return None
-                if self._is_private_discord_message(msg):
-                    return None
                 content = getattr(msg, "clean_content", msg.content) or ""
                 if (
                     str(getattr(msg, "id", "")) in self._nonconversational_messages
@@ -6117,7 +6124,7 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 return _Snowflake(int(_ref_mid))
         return None
 
-    async def _handle_conversational_message(
+    async def _handle_message(
         self, message: DiscordMessage, role_authorized: bool = False, *, recovered: bool = False,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
@@ -6163,11 +6170,34 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
             channel_keys = self._discord_channel_keys(message, parent_channel_id)
-            admitted, is_free_channel, is_voice_linked_channel = self._discord_channel_policy(
-                message, channel_keys, mention_prefix=mention_prefix)
-            if not admitted:
-                logger.debug("[%s] Ignoring message outside channel or mention policy: %s", self.name, channel_keys)
+            allowed_channels = self._get_allowed_channels()
+            if allowed_channels:
+                if "*" not in allowed_channels and not (channel_keys & allowed_channels):
+                    logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_keys)
+                    return False
+            ignored_channels = self._get_ignored_channels()
+            if "*" in ignored_channels or (channel_keys & ignored_channels):
+                logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_keys)
                 return False
+            free_channels = self._discord_free_response_channels()
+            require_mention = self._discord_require_mention()
+            # Voice-linked text channel is free-response while voice is active (exact channel only).
+            voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
+            current_channel_id = str(message.channel.id)
+            is_voice_linked_channel = current_channel_id in voice_linked_ids
+            is_free_channel = (
+                "*" in free_channels
+                or bool(channel_keys & free_channels)
+                or is_voice_linked_channel
+            )
+            in_bot_thread = self._in_bot_thread(message)
+            if require_mention and not is_free_channel and not in_bot_thread:
+                if (
+                    not self._self_is_explicitly_mentioned(message)
+                    and not mention_prefix
+                    and not self._is_bot_tag_debounce_continuation(message)
+                ):
+                    return False
         # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):

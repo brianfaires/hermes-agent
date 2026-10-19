@@ -1092,20 +1092,8 @@ _SLASH_BUILTINS = {
     "compress": _cmd_compress, "compact": _cmd_compress,
     "memory": _cmd_memory, "skills": _cmd_skills}
 
-@method("command.private")
-def _(rid, params: dict) -> dict:
-    from tui_gateway import server
-    from tui_gateway.private_commands import dispatch
-    return dispatch(server, rid, params, params.get('command', '')) or _ok(rid, {'handled': False})
-
-
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
-    from tui_gateway import server
-    from tui_gateway.private_commands import dispatch
-    text = '/' + str(params.get('name') or '').lstrip('/') + ' ' + str(params.get('arg') or '')
-    if (private := dispatch(server, rid, params, text, result_kind='dispatch')) is not None:
-        return private
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
     session = _sessions.get(params.get("session_id", ""))
 
@@ -1126,10 +1114,6 @@ def _(rid, params: dict) -> dict:
 
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
-    from tui_gateway import server
-    from tui_gateway.private_commands import dispatch
-    if (private := dispatch(server, rid, params, params.get('command', ''), result_kind='slash')) is not None:
-        return private
     session, err = _sess_nowait(params, rid)
     if err:
         return err

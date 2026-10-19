@@ -14,7 +14,6 @@ import type { Msg } from '../types.js'
 import { reportSlashCommand } from './createSlashHandler.js'
 import type { ComposerActions, ComposerRefs, ComposerState, ComposerToken } from './interfaces.js'
 import { findSlashCommand } from './slash/registry.js'
-import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { submitPrompt } from './submissionCore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -254,22 +253,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const dispatchSubmission = useCallback(
-    (full: string, privateChecked = false, frozenTokens?: ComposerToken[]) => {
+    (full: string) => {
       if (!full.trim()) {
-        return
-      }
-
-      const submittedTokens = frozenTokens ?? [...composerRefs.tokensRef.current]
-      if (looksLikeSlashCommand(full) && !privateChecked) {
-        void checkPrivateCommand(
-          prepareSubmission(full, submittedTokens).text,
-          command => gw.request<PrivateCommandResult>('command.private', {
-            command, session_id: getUiState().sid,
-            attachments: submittedTokens.some(token => token.kind === 'image')
-          }).then(raw => asRpcResult<PrivateCommandResult>(raw)),
-          output => { composerActions.clearIn(); sys(output) }
-        ).then(handled => { if (!handled) dispatchSubmission(full, true, submittedTokens) })
-
         return
       }
 
@@ -278,7 +263,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       // nothing — a detached image can't be re-attached by recalling the text.
       // Idempotent on token-free text, so re-submitting a recalled entry is
       // stable.
-      const submissionTokens = submittedTokens
+      const submissionTokens = [...composerRefs.tokensRef.current]
       const submission = prepareSubmission(full, submissionTokens)
       const toHistory = submission.text
 
@@ -286,7 +271,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         const slash = prepareSlashSubmission(full, submissionTokens)
 
         appendMessage({ kind: 'slash', role: 'system', text: slash.display })
-        composerActions.pushHistory(toHistory, privateChecked)
+        composerActions.pushHistory(toHistory)
 
         const parsed = parseSlashCommand(full)
 
@@ -316,7 +301,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const live = getUiState()
 
       if (!live.sid) {
-        composerActions.pushHistory(toHistory, privateChecked)
+        composerActions.pushHistory(toHistory)
         composerActions.enqueue(full)
         composerActions.clearIn()
 
@@ -348,7 +333,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sendQueued(picked.text)
       }
 
-      composerActions.pushHistory(toHistory, privateChecked)
+      composerActions.pushHistory(toHistory)
 
       if (getUiState().busy) {
         return handleBusyInput(queueItem(full))

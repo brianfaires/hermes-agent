@@ -537,19 +537,3 @@ class BrowserManageResult(Result):
 method("browser.manage", params=BrowserManageParams, result=BrowserManageResult,
        doc="Inspect, attach to, or drop the CDP browser the tools use, or switch Browser Use mode "
            "(``use``, applies to new sessions); ``messages`` narrate a connect.")
-
-
-class CommandPrivateParams(Params):
-    command: str
-    session_id: str | None = None
-    profile: str | None = None
-    attachments: bool = False
-
-
-class CommandPrivateResult(Result):
-    handled: bool
-    output: str | None = None
-
-
-method('command.private', params=CommandPrivateParams, result=CommandPrivateResult,
-       doc='Dispatch explicitly private plugin input before history, observers or model turns.')

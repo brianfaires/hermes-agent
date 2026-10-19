@@ -44,10 +44,10 @@ export function load() {
   return cache
 }
 
-export function append(line: string, privateChecked = false) {
+export function append(line: string) {
   const trimmed = line.trim()
 
-  if (!trimmed || (trimmed.startsWith('/') && !privateChecked)) {
+  if (!trimmed) {
     return
   }
 

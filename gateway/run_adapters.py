@@ -1801,9 +1801,7 @@ class GatewayAdapterLifecycleMixin:
         # Observer failures must never break the adapter's update loop.
         with _log_suppressed(logging.DEBUG, "gateway_platform_event hook dispatch failed", exc_info=True):
             from hermes_cli.lifecycle import has_hook, invoke_hook
-            from gateway.private_commands import private_platform_event
-            if (has_hook("gateway_platform_event") and self._is_user_authorized_for_source(source)
-                    and not private_platform_event(self, event, source)):
+            if has_hook("gateway_platform_event") and self._is_user_authorized_for_source(source):
                 invoke_hook("gateway_platform_event", **event)
 
     def _make_profile_platform_event_handler(self, profile_name: str):

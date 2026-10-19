@@ -2740,8 +2740,6 @@ export interface PromptSubmitParams {
 export interface PromptSubmitResult {
   status?: PromptSubmitStatus | null
   voice_stopped?: boolean | null
-  private_command?: boolean | null
-  output?: string | null
   user_row_id?: number | null
   survivor_user_row_ids?: (number | null)[] | null
   survivor_row_id_map?: Record<string, number | null> | null
@@ -3981,16 +3979,6 @@ export interface BrowserManageResult {
   messages?: string[] | null
   browser_use?: boolean | null
 }
-export interface CommandPrivateParams {
-  command: string
-  session_id?: string | null
-  profile?: string | null
-  attachments?: boolean
-}
-export interface CommandPrivateResult {
-  handled: boolean
-  output?: string | null
-}
 /** Handlers that look a live session up with ``_sessions.get(params.get("session_id"))``: an absent / unknown id falls back to the launch profile's config, so it is never required. */
 export interface _SessionScoped {
   session_id?: string | null
@@ -5177,8 +5165,6 @@ export interface RpcMethods {
   'clipboard.paste': { params: ClipboardPasteParams; result: AttachedImageResult }
   /** Run a quick/plugin/bundle/skill/built-in slash command and answer a structured directive. */
   'command.dispatch': { params: CommandDispatchParams; result: CommandDispatchResult }
-  /** Dispatch explicitly private plugin input before history, observers or model turns. */
-  'command.private': { params: CommandPrivateParams; result: CommandPrivateResult }
   /** Canonical registry command for a name or alias. */
   'command.resolve': { params: CommandResolveParams; result: CommandResolveResult }
   /** Categorized slash metadata (registry, quick, plugin, skill) for completion menus. */
@@ -5673,7 +5659,6 @@ export const RPC_METHODS = [
   'client.capabilities',
   'clipboard.paste',
   'command.dispatch',
-  'command.private',
   'command.resolve',
   'commands.catalog',
   'complete.path',

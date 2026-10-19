@@ -1174,9 +1174,6 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
     def process_command(self, command: str, *, redispatch: bool = False) -> bool:
         """Dispatch a slash command; returns False to exit the REPL. ``redispatch`` marks an internal
         re-entry (quick-command alias, prefix expansion) so the user's command is counted once."""
-        from hermes_cli.private_commands import dispatch_cli_private
-        if dispatch_cli_private(command) is not None:
-            return True
         cmd_lower = command.lower().strip()  # lowercase only for matching; args keep their case
         cmd_original = command.strip()
 

@@ -19,7 +19,7 @@ from agent.interrupt_compat import request_hard_interrupt
 from hermes_cli.commands_completion import SlashCommandAutoSuggest, SlashCommandCompleter
 from pathlib import Path
 from prompt_toolkit.filters import Condition
-from hermes_cli.private_commands import PrivateFileHistory as FileHistory
+from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (
     ConditionalContainer,
@@ -1416,7 +1416,13 @@ class CLITuiMixin:
         loop.default_exception_handler(context)
 
     def _tui_handle_enter(self, event):
-        """Answer overlays, then dispatch local commands or queue/steer ordinary model input."""
+        """Enter: submit input.
+
+        Modal overlays (sudo/secret/approval/slash-confirm/picker/clarify) are answered first via
+        ``_tui_enter_overlay``. Otherwise: agent running → busy_input_mode routing (steer /
+        redirect / interrupt queue / next-turn queue); idle → ``_pending_input``. Slash and bang
+        commands always take the local-dispatch path (never steer/interrupt text to the model).
+        """
         from cli import (
             _apply_backslash_line_continuation,
             _is_backslash_line_continuation,
@@ -1442,9 +1448,6 @@ class CLITuiMixin:
         # Enter is a line break inside one message, not a submit (#10994).
         if time.monotonic() - getattr(self, "_tui_last_text_change", 0.0) < _RAPID_INPUT_ENTER_WINDOW_S:
             buf.insert_text("\n")
-            return
-        from hermes_cli.private_commands import dispatch_cli_editor_private
-        if dispatch_cli_editor_private(self, event):
             return
         text = raw_text.strip()
         has_images = bool(self._attached_images)
@@ -1721,7 +1724,7 @@ class CLITuiMixin:
             buf = event.current_buffer
             if (
                 self._tui_paste_over_threshold(pasted_text, line_count, "paste_collapse_threshold")
-                and not (buf.text + pasted_text).lstrip().startswith('/')):
+                and not buf.text.strip().startswith('/')):
                 placeholder = self._tui_collapse_paste(pasted_text, line_count, fallback=False)
                 prefix = "\n" if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n' else ""
                 buf.insert_text(prefix + placeholder)
@@ -1773,7 +1776,7 @@ class CLITuiMixin:
         if (
             self._tui_paste_over_threshold(text, line_count, "paste_collapse_threshold_fallback")
             and is_paste
-            and not text.lstrip().startswith('/')):
+            and not text.startswith('/')):
             buf.text = self._tui_collapse_paste(text, line_count, fallback=True)
             buf.cursor_position = len(buf.text)
 

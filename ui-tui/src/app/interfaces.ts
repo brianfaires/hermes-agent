@@ -401,7 +401,7 @@ export interface ComposerActions {
   handleTextPaste: (event: PasteEvent) => MaybePromise<ComposerPasteResult | null>
   openEditor: () => Promise<void>
   prependQueue: (item: QueueItem) => void
-  pushHistory: (text: string, privateChecked?: boolean) => void
+  pushHistory: (text: string) => void
   removeQueue: (index: number) => void
   setCompIdx: StateSetter<number>
   setComposerTokens: StateSetter<ComposerToken[]>

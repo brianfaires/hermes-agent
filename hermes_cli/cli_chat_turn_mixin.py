@@ -58,9 +58,6 @@ class CLIChatTurnMixin:
         objects for attached images voice_input: True when the message came from voice transcription (gates
         the concise voice-response prefix, #65827)
         """
-        from hermes_cli.private_commands import dispatch_cli_private
-        if (private_output := dispatch_cli_private(message, attachments=bool(images) or voice_input)) is not None:
-            return private_output
         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
         from tools.process_registry_notifications import TimelineNotification
         # Single-query and direct chat callers do not go through run().

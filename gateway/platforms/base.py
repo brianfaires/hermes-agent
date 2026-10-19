@@ -1906,10 +1906,7 @@ def _lazy_attr(obj: Any, name: str, factory: Callable[[], Any]) -> Any:
 _strip_media_directives = _strip_media_tag_directives
 
 
-from gateway.platforms.base_private_ingress import BasePrivateIngressMixin
-
-
-class BasePlatformAdapter(BasePrivateIngressMixin, ABC):
+class BasePlatformAdapter(ABC):
     """Base class for platform adapters: connect/auth, receive, send, handle media."""
 
     # ``format_message`` renders ``` fences as real code blocks (tool-progress then sends a bare
@@ -2470,6 +2467,19 @@ class BasePlatformAdapter(BasePrivateIngressMixin, ABC):
             logger.debug("[%s] identity resolution failed; using legacy key readers", self.name, exc_info=True)
             return None
 
+    def _drop_unresolved(self, event: MessageEvent) -> bool:
+        """True when *event* must be dropped: its identity could not be resolved because the route
+        targets an unserved profile. Same disposition as the runner's ingress gate — one WARNING,
+        never a fall-through to ``agent:main``."""
+        source = getattr(event, "source", None)
+        if self._canonicalize(source) is not None:
+            return False
+        if getattr(source, "profile_route_rejected", False) is not True:
+            return False
+        logger.warning(
+            "[%s] Dropping inbound event for %s: explicit profile route targets an unserved profile",
+            self.name, getattr(source, "chat_id", "?"))
+        return True
 
     def _session_key_profile(self, source: Optional[Any] = None) -> Optional[str]:
         """Profile namespace for an adapter-derived session key. Ingress runs BEFORE the runner
@@ -2536,7 +2546,17 @@ class BasePlatformAdapter(BasePrivateIngressMixin, ABC):
             "text_batch_split_delay_seconds", self._TEXT_BATCH_DEFAULT_SPLIT_DELAY_S,
             min_value=self._text_batch_delay_seconds, max_value=self._TEXT_BATCH_MAX_SPLIT_DELAY_S)
 
+    def _event_session_key(self, event: MessageEvent) -> str:
+        """Adapter-level session key for ``event``, profile-namespaced like the agent run."""
+        return self._source_session_key(event.source)
 
+    def _source_session_key(self, source: SessionSource) -> str:
+        self._canonicalize(source)  # identity FIRST; no key derivation before it
+        extra = self.config.extra
+        return build_session_key(
+            source, group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
+            profile=self._session_key_profile(source))
 
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text batching (subclasses may override)."""
@@ -4011,8 +4031,6 @@ class BasePlatformAdapter(BasePrivateIngressMixin, ABC):
         if expected_session_key and session_key != expected_session_key:
             logger.warning("Dropping internally routed event: expected session=%s derived=%s",
                            expected_session_key, session_key)
-            return
-        if await self._dispatch_private_event(event):
             return
         # On-entry self-heal: clear a guard whose owner task already exited.
         if session_key in self._active_sessions:
