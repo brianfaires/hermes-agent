@@ -16,6 +16,7 @@ from typing import Any, Union
 from urllib.parse import urlparse
 
 import hermes_yaml as yaml
+from hermes_cli.config_transactions import config_path_mutation
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +459,7 @@ def _roundtrip_dump(path: Path, yaml_rt, config, *, extra_content: str | None = 
     _atomic_write(path, _write, prefix=f".{path.stem}_", mode=_preserve_file_mode(path))
 
 
+@config_path_mutation
 def atomic_roundtrip_yaml_update(path: str | Path, key_path: str, value: Any) -> None:
     """Update one dotted YAML key while preserving comments, ordering, quoting and Unicode.
 

@@ -208,3 +208,25 @@ also cover offline setup. Scalar replacements, individual environment variables
 and resettable command lists override old base values. Dependency additions keep
 base dependencies live. A difference that survives these overrides still needs
 repair; an overridden base value does not trigger a unit rewrite.
+
+## Configuration transactions and stale edits
+
+Configuration mutations share `hermes_cli.config_transactions.config_mutation_lock(path)`:
+read, edit, validate and atomically save while holding this reentrant, cross-process lock.
+`mutate_config(path, callback)` supplies that boundary for external commands. Native set/unset,
+dotted YAML updates and plugin settings use the same protocol; plugin JSON state has its separate lock.
+Acquire the native in-process config lock before the file lock. Do not wrap config writes in an
+independent lock implementation on `.config.yaml.lock`.
+
+Mutable native config loaders return dict-compatible snapshots with source revision metadata.
+`save_config` and the atomic config writers refuse a stale or wrong-profile snapshot with a
+reload-and-retry error rather than losing a concurrent edit. Metadata survives `copy()` and
+`deepcopy()` and is never serialized; a successful save advances the caller's revision.
+Read-only cached loaders retain their lock-free behavior. Deliberately constructing an unversioned
+mapping (for example `dict(snapshot)` or dict unpacking) discards conflict detection and expresses
+full-state write semantics; use `mutate_config` for read-modify-write consumers instead.
+Uncooperative direct file writes remain outside this protocol.
+
+The external OS-owner structural config command uses this transaction boundary to apply one
+JSON-Pointer add/replace/remove batch to raw YAML, validate once and commit once without dumping
+defaults. It is not a chat/model tool and does not reload an active conversation's prompt state.
