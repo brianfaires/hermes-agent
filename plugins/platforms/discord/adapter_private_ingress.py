@@ -81,7 +81,7 @@ class DiscordPrivateIngressMixin:
         return event is not None and match_private_command(
             event.text, home=private_home_for_source(event.source)) is not None
 
-    async def _handle_message(self, message, role_authorized=False, *, recovered=False):
+    async def _handle_private_discord_message(self, message, role_authorized=False, *, recovered=False):
         if self._is_private_discord_message(message):
             # Recovery must not duplicate private captures after a restart.
             if recovered:
@@ -93,4 +93,4 @@ class DiscordPrivateIngressMixin:
             event = self._private_discord_event(message, role_authorized)
             await self._dispatch_private_event(event)
             return True
-        return await self._handle_conversational_message(message, role_authorized, recovered=recovered)
+        return None

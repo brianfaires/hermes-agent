@@ -6117,10 +6117,13 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 return _Snowflake(int(_ref_mid))
         return None
 
-    async def _handle_conversational_message(
+    async def _handle_message(
         self, message: DiscordMessage, role_authorized: bool = False, *, recovered: bool = False,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
+        private = await self._handle_private_discord_message(message, role_authorized, recovered=recovered)
+        if private is not None:
+            return private
         # Server channels (not DMs) require @mention unless free-response or an already-joined thread.
         #
         # Config (discord.* in config.yaml or DISCORD_* env vars):

@@ -115,7 +115,8 @@ async def test_private_discord_live_dispatch_preserves_admission(
         adapter._discord_free_response_channels = lambda: free
         adapter._message_handler = runner._handle_message
         adapter._send_with_retry = AsyncMock()
-        adapter._handle_conversational_message = AsyncMock(side_effect=AssertionError('conversation'))
+        adapter._auto_create_thread = AsyncMock(side_effect=AssertionError('conversation'))
+        adapter._fetch_channel_context = AsyncMock(side_effect=AssertionError('history backfill'))
         message = SimpleNamespace(
             id=7, content='/private-example synthetic capture', mentions=[],
             channel=SimpleNamespace(id=100, name='fixture'),
@@ -126,5 +127,6 @@ async def test_private_discord_live_dispatch_preserves_admission(
         assert await adapter._dispatch_discord_message(message) is expected
         assert (home / 'captured.txt').exists() is expected
         assert not await adapter._dispatch_discord_message(message)
-        adapter._handle_conversational_message.assert_not_called()
+        adapter._auto_create_thread.assert_not_called()
+        adapter._fetch_channel_context.assert_not_called()
         assert adapter._send_with_retry.await_count == int(expected)
