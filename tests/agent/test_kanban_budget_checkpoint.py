@@ -1,4 +1,7 @@
 """Checkpoint eligibility follows explicit opt-in or dispatcher ownership."""
+
+# Settle the agent dependency before per-test protected-home guards install.
+import run_agent
 from contextlib import nullcontext
 from copy import deepcopy
 

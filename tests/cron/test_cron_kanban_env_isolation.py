@@ -28,6 +28,10 @@ is left completely untouched.
 
 from __future__ import annotations
 
+# Settle the agent dependency before per-test protected-home guards install.
+import run_agent
+
+
 import os
 import threading
 

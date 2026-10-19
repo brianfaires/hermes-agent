@@ -1,6 +1,10 @@
 """Regression tests for delegate_task isolation from parent Kanban workers."""
 from __future__ import annotations
 
+# Settle the agent dependency before per-test protected-home guards install.
+import run_agent
+
+
 import json
 import logging
 import os
@@ -99,7 +103,6 @@ def test_build_child_agent_strips_kanban_toolset_even_when_parent_is_worker(monk
             self.valid_tool_names = {"terminal"}
             self.session_id = "child-session"
 
-    import run_agent
     from tools import delegate_tool
     from tools import delegate_tool_config
 
