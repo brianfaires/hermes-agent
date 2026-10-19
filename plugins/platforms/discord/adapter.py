@@ -6163,34 +6163,11 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
             channel_keys = self._discord_channel_keys(message, parent_channel_id)
-            allowed_channels = self._get_allowed_channels()
-            if allowed_channels:
-                if "*" not in allowed_channels and not (channel_keys & allowed_channels):
-                    logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_keys)
-                    return False
-            ignored_channels = self._get_ignored_channels()
-            if "*" in ignored_channels or (channel_keys & ignored_channels):
-                logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_keys)
+            admitted, is_free_channel, is_voice_linked_channel = self._discord_channel_policy(
+                message, channel_keys, mention_prefix=mention_prefix)
+            if not admitted:
+                logger.debug("[%s] Ignoring message outside channel or mention policy: %s", self.name, channel_keys)
                 return False
-            free_channels = self._discord_free_response_channels()
-            require_mention = self._discord_require_mention()
-            # Voice-linked text channel is free-response while voice is active (exact channel only).
-            voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
-            current_channel_id = str(message.channel.id)
-            is_voice_linked_channel = current_channel_id in voice_linked_ids
-            is_free_channel = (
-                "*" in free_channels
-                or bool(channel_keys & free_channels)
-                or is_voice_linked_channel
-            )
-            in_bot_thread = self._in_bot_thread(message)
-            if require_mention and not is_free_channel and not in_bot_thread:
-                if (
-                    not self._self_is_explicitly_mentioned(message)
-                    and not mention_prefix
-                    and not self._is_bot_tag_debounce_continuation(message)
-                ):
-                    return False
         # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
