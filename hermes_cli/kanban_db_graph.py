@@ -189,18 +189,22 @@ def _insert_decomposed_child(
     )
 
     from hermes_cli.kanban_workspace_claims import child_workspace
+    from hermes_cli.kanban_metadata import normalize_workspace_metadata
 
     child_ws_kind, child_ws_path = child_workspace(root_row, child)
+    child_ws_kind, child_ws_path, branch_name = normalize_workspace_metadata(
+        child_ws_kind, child_ws_path, child.get('branch_name'), require_dir_path=True,
+    )
     new_id = _new_task_id()
     body = child.get("body")
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, branch_name, tenant, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
-            _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
+            _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path, branch_name,
             root_row["tenant"], now, (author or "decomposer"),
         ),
     )

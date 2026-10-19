@@ -1213,6 +1213,7 @@ def create_task(
     """
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
+    from hermes_cli.kanban_metadata import normalize_workspace_metadata
 
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
@@ -1233,16 +1234,6 @@ def create_task(
             pass
     if workspace_kind is None:
         workspace_kind = "scratch"
-    if workspace_kind not in VALID_WORKSPACE_KINDS:
-        raise ValueError(
-            f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
-            f"got {workspace_kind!r}"
-        )
-    if branch_name is not None:
-        branch_name = str(branch_name).strip() or None
-    if branch_name and workspace_kind != "worktree":
-        raise ValueError("branch_name is only valid for worktree workspaces")
-
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
@@ -1285,6 +1276,9 @@ def create_task(
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
 
+                workspace_kind, workspace_path, branch_name = normalize_workspace_metadata(
+                    workspace_kind, workspace_path, branch_name, require_dir_path=True,
+                )
                 conn.execute(
                     """
                     INSERT INTO tasks (
