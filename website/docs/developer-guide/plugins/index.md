@@ -1517,7 +1517,7 @@ def register(ctx):
 
 After registration, users can type `/mystatus` in any session. The command appears in autocomplete, `/help` output, and the Telegram bot menu.
 
-**Signature:** `ctx.register_command(name: str, handler: Callable, description: str = "", args_hint: str = "")`
+**Signature:** `ctx.register_command(name: str, handler: Callable, description: str = "", args_hint: str = "", argument_mode: str | None = None, private: bool = False, private_platforms: tuple[str, ...] | None = None)`
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1546,6 +1546,33 @@ async def _handle_check(raw_args: str) -> str:
 def register(ctx):
     ctx.register_command("check", handler=_handle_check, description="Run async check")
 ```
+
+### Direct capture commands
+
+A concrete local-capture consumer can register `private=True` and restrict its supported
+surfaces with `private_platforms=("cli", "tui", "telegram", "discord")`. Its handler receives
+`handler(raw_args, *, home: Path)` under the owning profile's full runtime scope. The direct
+path authorizes gateway senders and slash access before invoking it, accepts text only, and
+handles busy sessions without starting a model turn. Built-in command conflicts remain refused.
+An acknowledgement should identify a durable capture without echoing its body; handler errors
+produce a content-free failure. No model tool or system-prompt reload is added.
+
+The CLI/editor/history and TUI preflight paths preferentially avoid conversational history;
+Telegram and Discord capture before ordinary observation, batching and backfill. This flag is
+not a guarantee that raw text never enters Hermes history during every lifecycle or frontend
+configuration. Consumers whose requirements permit incidental history retention can use it
+without claiming strict privacy isolation. Local storage permissions and profile authorization
+remain the consumer's responsibility.
+
+The messaging adapter pins a process-local command registration before asynchronous profile
+setup. If that registration disappears, changes owner or resolves to another profile before
+admission, the runner returns a content-free retry notice without claiming capture success or
+invoking the replacement. Normal commands retain their existing dispatch behavior.
+
+The TUI RPC `command.private` checks/executes direct capture without creating a conversation;
+ordinary input returns `handled: false`. Direct dispatch also covers `prompt.submit`,
+`slash.exec` and `command.dispatch`. The TUI frontend checks before transcript/history insertion.
+Ship the matching backend, shared generated contracts and frontend together.
 
 ### Dispatch tools from slash commands
 

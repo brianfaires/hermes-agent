@@ -131,6 +131,11 @@ class CLIModalMixin:
         the `enter` keybinding: empty save ignored, bang/slash dispatched, else queued. Runs on the
         prompt_toolkit loop, so it must stay cheap/non-blocking."""
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
+        from hermes_cli.private_commands import dispatch_cli_private
+        if dispatch_cli_private(getattr(buffer, 'text', ''),
+                                attachments=bool(getattr(self, '_attached_images', []))) is not None:
+            buffer.reset(append_to_history=False)
+            return
         try:
             text = (getattr(buffer, "text", "") or "").strip()
         except Exception:
