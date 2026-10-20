@@ -15,6 +15,38 @@ class DiscordChannelPolicy:
 
 
 class DiscordPrivateIngressMixin:
+    async def _handle_private_discord_slash(self, interaction, text):
+        import aiohttp
+        from gateway.private_commands import private_home_for_source, pin_private_command
+        from hermes_cli.private_commands import match_private_command
+        from plugins.platforms.discord.adapter import discord, logger
+
+        event = self._build_slash_event(interaction, text)
+        home = private_home_for_source(event.source, self.gateway_runner)
+        match = match_private_command(text, home=home)
+        if match is None:
+            command = '/' + event.get_command()
+            if await self._check_slash_authorization(interaction, command):
+                await interaction.response.send_message(
+                    'Command became unavailable; nothing was captured. Please retry.', ephemeral=True)
+            return True
+        # Pin before authorization/defer awaits: unloading must not turn private input into chat.
+        pin_private_command(event, home, match)
+        command = '/' + match[0]
+        if not await self._check_slash_authorization(interaction, command):
+            return True
+        if self._dedup.is_duplicate(str(interaction.id)):
+            return True
+        deferred = await self._defer_unless_expired(interaction,
+            '[Discord] private slash %s: interaction expired before defer.', command)
+        await self._dispatch_private_event(event)
+        if deferred:
+            try:
+                await interaction.delete_original_response()
+            except (discord.HTTPException, aiohttp.ClientError, OSError):
+                logger.debug('Private slash interaction cleanup failed')
+        return True
+
     def _thread_id_and_chat_for_channel(self, channel) -> tuple[Optional[str], Optional[str]]:
         """Return ``(thread_id, chat_id)``; for a thread chat_id is the thread id (dispatch session key)."""
         from plugins.platforms.discord.adapter import discord

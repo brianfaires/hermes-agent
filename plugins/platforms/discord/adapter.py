@@ -4573,13 +4573,14 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
             logger.debug("Discord interaction cleanup failed: %s", e)
 
     def _slash_proxy(self, name: str, args: tuple, template: str, followup: Optional[str], *,
-                     strip: bool = True, prefix: str = "slash_"):
+                     strip: bool = True, prefix: str = "slash_", private: bool = False):
         """Build a slash callback rendering ``template`` from its args via ``_run_simple_slash``;
         the introspected signature is synthesised from ``args`` (see ``_NATIVE_SLASH_COMMAND_SPECS``)."""
         async def _handler(interaction: discord.Interaction, **kwargs):
             text = template.format(**kwargs)
             call_args = (text.strip() if strip else text,) + (() if followup is None else (followup,))
-            await self._run_simple_slash(interaction, *call_args)
+            dispatch = self._handle_private_discord_slash if private else self._run_simple_slash
+            await dispatch(interaction, *call_args)
         _handler.__name__ = prefix + {"bg": "background"}.get(name, name).replace("-", "_")
         params = [inspect.Parameter("interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=discord.Interaction)]
         for arg_name, arg_type, default, _desc, _choices in args:
@@ -4629,7 +4630,8 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
 
         def _auto_register(name: str, description: str, args_hint: str) -> None:
             nonlocal dropped_over_cap
-            # Discord command names: lowercase, hyphens OK, max 32 chars.
+            from hermes_cli.private_commands import match_private_command
+            private = match_private_command('/' + name) is not None
             discord_name = name.lower()[:32]
             if discord_name in already_registered:
                 return
@@ -4645,7 +4647,8 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 description=_truncate_discord_component_text(
                     description or t("platform.discord.command.auto_description_fallback", name=name),
                     _DISCORD_APP_COMMAND_TEXT_LIMIT),
-                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint), prefix="auto_slash_"),
+                callback=self._slash_proxy(name, args, template, None,
+                    strip=bool(args_hint) and not private, prefix="auto_slash_", private=private),
             )
             try:
                 tree.add_command(auto_cmd)
@@ -4851,7 +4854,6 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
             thread_id = str(interaction.channel_id)
         else:
             chat_type = "group"
-        # Named as a message here is: the pinned session-context prompt renders and keys on it.
         chat_name = ""
         if is_dm:
             chat_name = interaction.user.name
@@ -4863,10 +4865,7 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 chat_name = f"{interaction.channel.guild.name} / #{chat_name}"
         # Forum threads inherit the parent forum's topic.
         chat_topic = self._get_effective_topic(interaction.channel, is_thread=is_thread)
-        # guild_id/parent_chat_id feed profile_routes matching, as on_message does.
-        # guild_id/parent_chat_id feed profile_routes matching in build_source, exactly as on_message passes
-        # them — without them a guild- or channel-routed profile never matches a native slash command
-        # (#69178).
+        # Keep guild/parent routing identical to on_message (#69178).
         parent_id = (self._get_parent_channel_id(interaction.channel) if is_thread else None) or ""
         # Without the role grant the gateway refuses a role-only member the slash gate admitted.
         source = self.build_source(
