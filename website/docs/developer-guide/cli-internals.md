@@ -230,3 +230,5 @@ Uncooperative direct file writes remain outside this protocol.
 The external OS-owner structural config command uses this transaction boundary to apply one
 JSON-Pointer add/replace/remove batch to raw YAML, validate once and commit once without dumping
 defaults. It is not a chat/model tool and does not reload an active conversation's prompt state.
+
+Collapsed paste storage and editor inlining are owned by `hermes_cli/cli_modal_mixin.py`; paste input detection remains in `hermes_cli/cli_tui_mixin.py`. Chat query-file/stdin parsing lives in `hermes_cli/cli_query_files.py` and runs before one-shot private dispatch or provider initialization.

@@ -3837,7 +3837,7 @@ class DiscordAdapter(DiscordPrivateIngressMixin, DiscordTransportMixin, DiscordM
                 self._reset_voice_timeout(guild_id)
                 self._bind_voice_text_channel(guild_id, text_channel_id, source)
                 return True
-            vc = await channel.connect()
+            vc = await self._connect_voice_channel(channel)
             self._voice_clients[guild_id] = vc
             self._reset_voice_timeout(guild_id)
             self._bind_voice_text_channel(guild_id, text_channel_id, source)

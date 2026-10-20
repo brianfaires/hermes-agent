@@ -13,6 +13,10 @@ class DiscordVoiceInfoMixin:
     _client: Any
     discard_pending_voice_input: Any
 
+    async def _connect_voice_channel(self, channel):
+        """Voice transport factory; extensions can guard non-HTTP delivery."""
+        return await channel.connect()
+
     def _bind_voice_text_channel(self, guild_id: int, text_channel_id: Any, source: Optional[dict]) -> None:
         """A programmatic join's transcription binding, on every path: cold join, same voice channel and
         move. The already-connected paths returned before writing it, so a successful join to another

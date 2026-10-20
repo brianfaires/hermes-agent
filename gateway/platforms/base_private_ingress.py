@@ -40,11 +40,18 @@ class BasePrivateIngressMixin:
         from hermes_cli.private_commands import match_private_command
         if not event.get_command():
             return False
-        home = private_home_for_source(event.source)
+        if self._drop_unresolved(event):
+            return True
+        home = private_home_for_source(event.source, self.gateway_runner)
         match = match_private_command(event._command_text(), home=home)
+        if getattr(event, '_private_command_admission', None) is not None:
+            return await self._deliver_private_event(event)
         if match is None:
             return False
         pin_private_command(event, home, match)
+        return await self._deliver_private_event(event)
+
+    async def _deliver_private_event(self, event):
         try:
             response = await self._message_handler(event)
             if response:
@@ -56,3 +63,14 @@ class BasePrivateIngressMixin:
             from gateway.platforms.base import logger
             logger.warning('Private command delivery failed')
         return True
+
+    def _merge_text_chunk(self, existing, event):
+        from dataclasses import replace
+        from gateway.private_commands import PrivateAdmission
+        from gateway.platforms.base import _append_text
+        admission = getattr(existing, '_private_command_admission', None)
+        if isinstance(admission, PrivateAdmission):
+            text = (existing.text or '') + event.text
+            existing._private_command_admission = replace(admission, text=text.lstrip())
+            return text
+        return _append_text(existing.text, event.text)

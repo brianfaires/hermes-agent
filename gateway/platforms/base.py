@@ -2552,7 +2552,7 @@ class BasePlatformAdapter(BasePrivateIngressMixin, ABC):
             existing = self._pending_text_batches[key] = event
         else:
             if event.text:
-                existing.text = _append_text(existing.text, event.text)
+                existing.text = self._merge_text_chunk(existing, event)
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)

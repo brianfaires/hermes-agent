@@ -1,6 +1,7 @@
 """Shared config read-modify-write exclusion for native and external mutations."""
 from __future__ import annotations
 
+import copy
 import threading
 from contextlib import contextmanager
 from functools import wraps
@@ -15,9 +16,9 @@ _HOLDERS_GUARD = threading.Lock()
 def config_mutation_lock(config_path: str | Path):
     """Lock a directory entry across atomic replacements, reentrantly per thread.
 
-    All nesting takes the native in-process config lock before the file lock, including callers
-    already inside save_config/load-time migration. A full-state replacement remains explicit;
-    callers needing read-modify-write must keep the read inside this context.
+    Writers take the file lock before the reader/cache lock, so a competing
+    process cannot stall local readers while this writer waits. Callers must
+    keep the complete read-modify-write inside this context.
     """
     from hermes_cli import auth, config
     from hermes_constants import mkdir_under_hermes_home
@@ -26,12 +27,12 @@ def config_mutation_lock(config_path: str | Path):
     path = path.parent.resolve() / path.name
     if auth.fcntl is None and auth.msvcrt is None:
         raise RuntimeError("Cross-process config locking is unavailable on this host")
-    with config._CONFIG_LOCK:
-        mkdir_under_hermes_home(path.parent)
-        with _HOLDERS_GUARD:
-            holder = _HOLDERS.setdefault(str(path), threading.local())
-        with auth._file_lock(path.with_name('.' + path.name + '.lock'), holder, 15.0,
-                             f"Timed out waiting for configuration lock ({path})"):
+    mkdir_under_hermes_home(path.parent)
+    with _HOLDERS_GUARD:
+        holder = _HOLDERS.setdefault(str(path), threading.local())
+    with auth._file_lock(path.with_name('.' + path.name + '.lock'), holder, 15.0,
+                         f"Timed out waiting for configuration lock ({path})"):
+        with config._CONFIG_LOCK:
             yield
 
 
@@ -50,8 +51,11 @@ def mutate_config(config_path: str | Path, mutation):
     path = Path(config_path)
     with config_mutation_lock(path):
         state = config.require_readable_config_before_write(path)
+        before = copy.deepcopy(state)
         result = mutation(state)
         config.atomic_config_replace(path, state)
+        from hermes_cli.config_side_effects import sync_config_changes
+        sync_config_changes(path, before, state)
         return result
 
 

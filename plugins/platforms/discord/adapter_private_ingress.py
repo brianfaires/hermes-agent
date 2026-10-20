@@ -75,22 +75,23 @@ class DiscordPrivateIngressMixin:
                             source=source, raw_message=message, message_id=str(message.id))
 
     def _is_private_discord_message(self, message):
+        return self._private_discord_event_matches(self._private_discord_event(message))
+
+    def _private_discord_event_matches(self, event):
         from gateway.private_commands import private_home_for_source
         from hermes_cli.private_commands import match_private_command
-        event = self._private_discord_event(message)
         return event is not None and match_private_command(
-            event.text, home=private_home_for_source(event.source)) is not None
+            event.text, home=private_home_for_source(event.source, self.gateway_runner)) is not None
 
     async def _handle_private_discord_message(self, message, role_authorized=False, *, recovered=False):
-        if self._is_private_discord_message(message):
-            # Recovery must not duplicate private captures after a restart.
-            if recovered:
-                return False
+        event = self._private_discord_event(message, role_authorized)
+        if self._private_discord_event_matches(event):
             # Live ingress already authorizes the user and claims dedup. Rechecking
             # that claim here would reject every message that reached this handler.
             if not self._private_discord_channel_allowed(message):
                 return False
-            event = self._private_discord_event(message, role_authorized)
+            if recovered and self._dedup.is_duplicate(str(message.id)):
+                return False
             await self._dispatch_private_event(event)
             return True
         return None

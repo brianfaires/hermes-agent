@@ -16,10 +16,16 @@ def pin_private_command(event, home, match):
     event._private_command_admission = PrivateAdmission(Path(home).resolve(), event._command_text(), match)
 
 
-def private_home_for_source(source):
+def private_home_for_source(source, runner=None):
     from hermes_constants import get_hermes_home
     from hermes_cli.profiles import get_profile_dir
 
+    if runner is not None:
+        return runner._resolve_profile_home_for_source(source)
+    from gateway.session_identity import identity_of
+    identity = identity_of(source)
+    if identity is not None:
+        return identity.runtime_home
     return get_profile_dir(source.profile) if source.profile else get_hermes_home()
 
 
@@ -54,8 +60,12 @@ def admit_private_command(runner, event):
     from gateway.platforms.event import MessageType
     attachments = bool(event.media_urls or event.media_types or
                        event.message_type not in (MessageType.TEXT, MessageType.COMMAND))
+    from gateway.session_identity import identity_of
+    identity = identity_of(source)
     event._private_command_reply = invoke_private_command(
-        match, home=home, platform=source.platform.value, attachments=attachments)
+        match, home=home, platform=source.platform.value, attachments=attachments,
+        source={"chat_type": source.chat_type,
+                "profile": identity.runtime_profile if identity else source.profile})
     return True
 
 

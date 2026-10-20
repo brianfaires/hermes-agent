@@ -13,8 +13,8 @@ import type { Msg } from '../types.js'
 
 import { reportSlashCommand } from './createSlashHandler.js'
 import type { ComposerActions, ComposerRefs, ComposerState, ComposerToken } from './interfaces.js'
+import { beginPrivateSubmission, isLocalSlashCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { findSlashCommand } from './slash/registry.js'
-import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
 import { submitPrompt } from './submissionCore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -69,6 +69,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
     opts
 
   const lastEmptyAt = useRef(0)
+  const privatePending = useRef(false)
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -260,16 +261,28 @@ export function useSubmission(opts: UseSubmissionOptions) {
       }
 
       const submittedTokens = frozenTokens ?? [...composerRefs.tokensRef.current]
-      if (looksLikeSlashCommand(full) && !privateChecked) {
-        void checkPrivateCommand(
-          prepareSubmission(full, submittedTokens).text,
-          command => gw.request<PrivateCommandResult>('command.private', {
-            command, session_id: getUiState().sid,
-            attachments: submittedTokens.some(token => token.kind === 'image')
-          }).then(raw => asRpcResult<PrivateCommandResult>(raw)),
-          output => { composerActions.clearIn(); sys(output) }
-        ).then(handled => { if (!handled) dispatchSubmission(full, true, submittedTokens) })
+      const localCommand = isLocalSlashCommand(full)
 
+      if (
+        !privateChecked &&
+        beginPrivateSubmission({
+          display: full,
+          command: prepareSubmission(full, submittedTokens).text,
+          local: localCommand,
+          pending: privatePending,
+          clear: () => composerActions.clearIn(),
+          request: command =>
+            gw
+              .request<PrivateCommandResult>('command.private', {
+                command,
+                session_id: getUiState().sid,
+                attachments: submittedTokens.some(token => token.kind === 'image')
+              })
+              .then(raw => asRpcResult<PrivateCommandResult>(raw)),
+          acknowledge: output => sys(output),
+          resume: () => dispatchSubmission(full, true, submittedTokens)
+        })
+      ) {
         return
       }
 
@@ -286,7 +299,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
         const slash = prepareSlashSubmission(full, submissionTokens)
 
         appendMessage({ kind: 'slash', role: 'system', text: slash.display })
-        composerActions.pushHistory(toHistory, privateChecked)
+        // Local dispatch or explicit ordinary admission is established above.
+        composerActions.pushHistory(toHistory, true)
 
         const parsed = parseSlashCommand(full)
 
@@ -302,7 +316,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
           slashRef.current(slash.command)
         }
 
-        composerActions.clearIn()
+        if (!privateChecked) {
+          composerActions.clearIn()
+        }
 
         return
       }

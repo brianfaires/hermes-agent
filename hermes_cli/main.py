@@ -1687,36 +1687,6 @@ def _first_run_setup_guard(args) -> None:
     sys.exit(1)
 
 
-def _read_query_file(args) -> None:
-    """--query-file: read the single query from a file (or stdin via '-').
-
-    Callers never have to shell-quote message bodies — this is the transport
-    the Bot Mode DM protocol uses; interpolating arbitrary text into a
-    double-quoted shell argument truncates on quotes and executes $(...)
-    (see tools/bot_mode_probe.py).
-    """
-    _qfile = getattr(args, "query_file", None)
-    if not _qfile:
-        return
-    if args.query:
-        # argparse's mutually-exclusive group catches the normal CLI path;
-        # this guards programmatic callers that fill the namespace directly.
-        print("Error: -q/--query and --query-file are mutually exclusive", file=sys.stderr)
-        sys.exit(2)
-    try:
-        if _qfile == "-":
-            args.query = sys.stdin.read()
-        else:
-            with open(_qfile, "r", encoding="utf-8-sig", errors="replace") as _fh:
-                args.query = _fh.read()
-    except OSError as _e:
-        print(f"Error: cannot read --query-file {_qfile}: {_e}", file=sys.stderr)
-        sys.exit(2)
-    if not (args.query or "").strip():
-        print(f"Error: --query-file {_qfile} is empty", file=sys.stderr)
-        sys.exit(2)
-
-
 # args attr -> (kwarg, default) passed through to _launch_tui / cli.main.
 _CHAT_PASSTHROUGH = (
     ("provider", None), ("toolsets", None), ("skills", None), ("verbose", None),
@@ -1737,6 +1707,13 @@ def cmd_chat(args):
 
     _resolve_chat_session_args(args, use_tui)
 
+    from hermes_cli.cli_query_files import read_query_file
+    read_query_file(args)
+    from hermes_cli.private_commands import dispatch_cli_startup_private
+    if dispatch_cli_startup_private(getattr(args, 'query', None), image=getattr(args, 'image', None),
+        output_format=getattr(args, 'output_format', 'text'), quiet=getattr(args, 'quiet', False),
+        oneshot=getattr(args, 'oneshot_exit', False), use_tui=use_tui):
+        return
     _warn_retired_xai_models()
 
     # The TUI owns its first-run state: it renders "Setup Required" with in-place /setup.
@@ -1784,8 +1761,6 @@ def cmd_chat(args):
             accept_hooks=getattr(args, "accept_hooks", False),
             **passthrough,
         )
-
-    _read_query_file(args)
 
     safe_mode = getattr(args, "safe_mode", False)
     kwargs = {

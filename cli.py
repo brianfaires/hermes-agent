@@ -1738,8 +1738,12 @@ def main(
         if warning:
             print(_t("cli.startup.warning", warning=warning), file=sys.stderr)
 
-    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     query = query or q
+    from hermes_cli.private_commands import dispatch_cli_startup_private
+    if dispatch_cli_startup_private(query, image=image, output_format=output_format, quiet=quiet,
+                                    oneshot=oneshot, list_tools=list_tools, list_toolsets=list_toolsets):
+        return
+    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     # ``hermes chat`` already validated this; the direct Fire entry point gets the same contract.
     if output_format == "stream-json":
         if not query:

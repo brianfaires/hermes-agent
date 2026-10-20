@@ -3643,16 +3643,8 @@ def set_config_value(key: str, value: str, force: bool = False):
             key = "model.base_url"
             print("  (note: 'api_base' is an alias — saved as model.base_url)")
         _write_user_config(config_path, user_config)
-
-    # Keep .env in sync: terminal_tool reads TERMINAL_ENV etc. directly from env vars.
-    env_var = terminal_config_env_var_for_key(key)
-    if env_var and key != "terminal.cwd":
-        save_env_value(env_var, _terminal_env_value(value))
-
-    _touch_skin_file(key, value)
-    if key == "display.language":
-        from agent.i18n import reset_language_cache
-        reset_language_cache()
+        from hermes_cli.config_side_effects import sync_config_value
+        sync_config_value(key, value)
 
     # Mask the echoed value when the (possibly nested) key is credential-shaped, e.g.
     # ``model.api_key`` (lowercase, so it misses the .env routing above).

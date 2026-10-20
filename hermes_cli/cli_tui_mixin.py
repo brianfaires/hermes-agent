@@ -1671,19 +1671,9 @@ class CLITuiMixin:
             self._clarify_prefill = ""
         event.app.invalidate()
 
-    def _tui_collapse_paste(self, text: str, line_count: int, *, fallback: bool) -> str:
-        """Save a large paste under ~/.hermes/pastes and return the placeholder for the buffer."""
-        from cli import _hermes_home, datetime, logger
-        self._tui_paste_counter += 1
-        paste_dir = _hermes_home / "pastes"
-        paste_dir.mkdir(parents=True, exist_ok=True)
-        paste_file = paste_dir / f"paste_{self._tui_paste_counter}_{datetime.now().strftime('%H%M%S')}.txt"
-        paste_file.write_text(text, encoding="utf-8")
-        logger.info(
-            "Collapsed paste #%d: %d lines, %d chars -> %s" + (" (fallback)" if fallback else ""),
-            self._tui_paste_counter, line_count + 1, len(text), paste_file)
-        self._tui_paste_just_collapsed = True
-        return f"[Pasted text #{self._tui_paste_counter}: {line_count + 1} lines \u2192 {paste_file}]"
+    def _tui_is_private_paste(self, text):
+        from hermes_cli.private_commands import match_private_command
+        return match_private_command(text) is not None
 
     def _tui_paste_over_threshold(self, text: str, line_count: int, threshold_key: str) -> bool:
         threshold = self.config.get(threshold_key, 5)
@@ -1721,7 +1711,7 @@ class CLITuiMixin:
             buf = event.current_buffer
             if (
                 self._tui_paste_over_threshold(pasted_text, line_count, "paste_collapse_threshold")
-                and not (buf.text + pasted_text).lstrip().startswith('/')):
+                and not self._tui_is_private_paste(buf.text + pasted_text)):
                 placeholder = self._tui_collapse_paste(pasted_text, line_count, fallback=False)
                 prefix = "\n" if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n' else ""
                 buf.insert_text(prefix + placeholder)
@@ -1773,7 +1763,7 @@ class CLITuiMixin:
         if (
             self._tui_paste_over_threshold(text, line_count, "paste_collapse_threshold_fallback")
             and is_paste
-            and not text.lstrip().startswith('/')):
+            and not self._tui_is_private_paste(text)):
             buf.text = self._tui_collapse_paste(text, line_count, fallback=True)
             buf.cursor_position = len(buf.text)
 

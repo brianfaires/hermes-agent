@@ -1551,14 +1551,18 @@ def register(ctx):
 
 A concrete local-capture consumer can register `private=True` and restrict its supported
 surfaces with `private_platforms=("cli", "tui", "telegram", "discord")`. Its handler receives
-`handler(raw_args, *, home: Path)` under the owning profile's full runtime scope. The direct
+`handler(raw_args, *, home: Path)` under the owning profile's full runtime scope.
+A handler declaring the optional `source` keyword also receives platform, chat type and
+profile provenance; no user/chat identifiers or note body are added to this metadata. The direct
 path authorizes gateway senders and slash access before invoking it, accepts text only, and
 handles busy sessions without starting a model turn. Built-in command conflicts remain refused.
 An acknowledgement should identify a durable capture without echoing its body; handler errors
 produce a content-free failure. No model tool or system-prompt reload is added.
 
 The CLI/editor/history and TUI preflight paths preferentially avoid conversational history;
-Telegram and Discord capture before ordinary observation, batching and backfill. This flag is
+Telegram assembles client-split private commands before capture, preserving exact chunk bytes
+and private classification. Discord recovery captures admitted missed commands through native
+deduplication. Both avoid ordinary message observers. This flag is
 not a guarantee that raw text never enters Hermes history during every lifecycle or frontend
 configuration. Consumers whose requirements permit incidental history retention can use it
 without claiming strict privacy isolation. Local storage permissions and profile authorization
@@ -1571,7 +1575,11 @@ invoking the replacement. Normal commands retain their existing dispatch behavio
 
 The TUI RPC `command.private` checks/executes direct capture without creating a conversation;
 ordinary input returns `handled: false`. Direct dispatch also covers `prompt.submit`,
-`slash.exec` and `command.dispatch`. The TUI frontend checks before transcript/history insertion.
+`slash.exec` and `command.dispatch`. The TUI frontend checks remote commands before transcript/history insertion, consumes an
+in-flight submission once, and executes its local commands without a preflight RPC. One-shot CLI
+capture precedes credentials and agent initialization; literal interactive startup queries retain
+their ordinary behavior. Collapsed CLI pastes resolve before capture and their temporary files
+are removed after success.
 Ship the matching backend, shared generated contracts and frontend together.
 
 ### Dispatch tools from slash commands

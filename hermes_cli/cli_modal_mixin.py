@@ -8,6 +8,7 @@ imported LAZILY inside each method — the mixin never imports ``cli`` at module
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -131,10 +132,12 @@ class CLIModalMixin:
         the `enter` keybinding: empty save ignored, bang/slash dispatched, else queued. Runs on the
         prompt_toolkit loop, so it must stay cheap/non-blocking."""
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
-        from hermes_cli.private_commands import dispatch_cli_private
-        if dispatch_cli_private(getattr(buffer, 'text', ''),
-                                attachments=bool(getattr(self, '_attached_images', []))) is not None:
-            buffer.reset(append_to_history=False)
+        from hermes_cli.private_commands import dispatch_cli_editor_private
+        from types import SimpleNamespace
+        app = getattr(self, '_app', None)
+        private_event = SimpleNamespace(app=SimpleNamespace(current_buffer=buffer,
+            invalidate=app.invalidate if app is not None else lambda: None))
+        if dispatch_cli_editor_private(self, private_event):
             return
         try:
             text = (getattr(buffer, "text", "") or "").strip()
@@ -184,6 +187,30 @@ class CLIModalMixin:
         else:
             self._pending_input.put(text)
         _done()
+
+    def _tui_collapse_paste(self, text: str, line_count: int, *, fallback: bool) -> str:
+        """Save a large paste in the owning profile and return its buffer placeholder."""
+        from cli import logger
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+        self._tui_paste_counter += 1
+        paste_dir = get_hermes_home() / "pastes"
+        paste_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        paste_dir.chmod(0o700)
+        from tempfile import mkstemp
+        fd, name = mkstemp(prefix=f"paste_{self._tui_paste_counter}_", suffix='.txt', dir=paste_dir)
+        paste_file = Path(name)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+        logger.info(
+            "Collapsed paste #%d: %d lines, %d chars -> %s" + (" (fallback)" if fallback else ""),
+            self._tui_paste_counter, line_count + 1, len(text), paste_file)
+        self._tui_paste_just_collapsed = True
+        placeholder = f"[Pasted text #{self._tui_paste_counter}: {line_count + 1} lines \u2192 {paste_file}]"
+        if not hasattr(self, '_collapsed_paste_files'):
+            self._collapsed_paste_files = {}
+        self._collapsed_paste_files[placeholder] = paste_file
+        return placeholder
 
     def _inline_pastes(self, buffer) -> None:
         """Replace collapsed ``[Pasted text #N -> file]`` placeholders in ``buffer`` with real text.

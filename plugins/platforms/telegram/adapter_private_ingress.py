@@ -20,10 +20,11 @@ class TelegramTextIngressMixin:
         source = self.build_source(chat_id=str(chat.id), user_id=str(user.id) if user else None,
             chat_type='dm' if self._chat_type_str(chat) == 'private' else 'group',
             thread_id=self._effective_message_thread_id(message))
-        return match_private_command(text, home=private_home_for_source(source)) is not None
+        return match_private_command(text, home=private_home_for_source(source, self.gateway_runner))
 
     async def _private_text_ingress(self, msg, update, *, admitted=False):
-        if not self._private_telegram_match(msg):
+        match = self._private_telegram_match(msg)
+        if not match:
             return False
         # Command ingress already passed the native policy. Text/media ingress
         # must apply it before capture or a private rejection response, without
@@ -35,7 +36,26 @@ class TelegramTextIngressMixin:
         event.text = msg.text or msg.caption or ''
         if msg.caption:
             event.message_type = MessageType.DOCUMENT
+        if not msg.caption and len(event.text) >= self._SPLIT_THRESHOLD:
+            from gateway.private_commands import private_home_for_source, pin_private_command
+            home = private_home_for_source(event.source, self.gateway_runner)
+            pin_private_command(event, home, match)
+            self._enqueue_text_event(event)
+            return True
         return await self._dispatch_private_event(event)
+
+    def _private_text_continuation(self, msg, update):
+        from plugins.platforms.telegram.adapter import MessageType
+        event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
+        key = self._text_batch_key(event)
+        pending = self._pending_text_batches.get(key)
+        if getattr(pending, '_private_command_admission', None) is None:
+            return False
+        # Native batching owns cadence and routing; raw chunks must stay verbatim
+        # and retain the first command's classification through assembly/unload.
+        event.text = msg.text
+        self._enqueue_text_event(event)
+        return True
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text; buffers client-split chunks into one MessageEvent."""
@@ -46,6 +66,8 @@ class TelegramTextIngressMixin:
         # Auth check first: blocked users must not reach batching, the observed transcript, or the agent.
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
+            return
+        if self._private_text_continuation(msg, update):
             return
         if await self._private_text_ingress(msg, update):
             return

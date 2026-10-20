@@ -14,6 +14,15 @@ class ConfigConflictError(RuntimeError):
 class ConfigSnapshot(dict):
     """A normal mapping with non-serialized source identity for write-back checks."""
 
+    def update(self, other=(), **kwargs):
+        # Setup refreshes its shared mapping in place after nested writers save.
+        # Only a complete replacement can adopt the incoming source revision.
+        replace = not self and isinstance(other, ConfigSnapshot) and not kwargs
+        super().update(other, **kwargs)
+        if replace:
+            self.source_path = other.source_path
+            self.source_revision = other.source_revision
+
     def copy(self):
         result = type(self)(self)
         result.source_path = self.source_path
@@ -52,11 +61,13 @@ def read_config_snapshot(path, reader):
         if isinstance(state, config.FailedConfigRead):
             return state
         if before == after:
-            snapshot = ConfigSnapshot(state)
-            snapshot.source_path = path
-            snapshot.source_revision = after
-            return snapshot
-    raise ConfigConflictError(f'Configuration changed while reading {path}; reload and retry')
+            break
+    snapshot = ConfigSnapshot(state)
+    snapshot.source_path = path
+    # Runtime readers must stay available under churn; an uncertain mutable
+    # snapshot can be read, but cannot overwrite a newer configuration.
+    snapshot.source_revision = after if before == after else ("unstable",)
+    return snapshot
 
 
 def config_snapshot_reader(function):

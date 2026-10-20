@@ -80,6 +80,8 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
             try:
                 with open(config_path, encoding="utf-8-sig") as f:
                     loaded = fast_safe_load(f)
+                if loaded is not None and not isinstance(loaded, dict):
+                    raise ValueError('top-level YAML must be a mapping')
             except Exception as exc:
                 if fail_closed:
                     raise
