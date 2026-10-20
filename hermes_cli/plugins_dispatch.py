@@ -68,10 +68,10 @@ def _policy_error_block_directive(hook_name: str, cb: Callable, exc: BaseExcepti
 
 # System-prompt sections are tightly bounded: they become high-trust prompt bytes charged every turn.
 SYSTEM_PROMPT_SECTION_POSITIONS = frozenset({"after_memory"})
-DEFAULT_SYSTEM_PROMPT_SECTION_MAX_CHARS = 4_000
-MAX_SYSTEM_PROMPT_SECTION_CHARS = 4_000
+DEFAULT_SYSTEM_PROMPT_SECTION_MAX_CHARS = 10_000
+MAX_SYSTEM_PROMPT_SECTION_CHARS = 10_000
 MAX_SYSTEM_PROMPT_SECTIONS = 32
-MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS = 8_000
+MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS = 20_000
 _SYSTEM_PROMPT_SECTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SYSTEM_PROMPT_SECTION_HEADING_PREFIX = "## Plugin Context: "
 PLUGIN_SECTIONS_START = "<!-- hermes-plugin-sections:start -->"

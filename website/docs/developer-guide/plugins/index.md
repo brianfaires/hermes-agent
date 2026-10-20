@@ -773,14 +773,14 @@ The dispatched tool goes through the normal approval, redaction, and budget pipe
 
 ### Session prompt sections
 
-`ctx.register_system_prompt_section(id, content, position="after_memory", max_chars=4000)`
+`ctx.register_system_prompt_section(id, content, position="after_memory", max_chars=10000)`
 adds bounded policy text when the session prompt is built. A callable receives read-only
 session metadata, including `session_id`, `model`, `provider`, `platform`, `profile_name`,
 `cwd`, and `skip_context_files`. The last field is a boolean: when true, native project
 context is disabled, so a plugin must not deduplicate required policy against those files.
 The host freezes section bytes within the session and restores them from the persisted
-prompt on resume; compression is the supported rebuild boundary. Limits are 4,000 characters
-per section and 8,000 in total. Oversized text is skipped with a warning; plugins supplying
+prompt on resume; compression is the supported rebuild boundary. Limits are 10,000 characters
+per section and 20,000 in total, including audit headings. Oversized text is skipped with a warning; plugins supplying
 mandatory policy should diagnose excess explicitly instead of silently truncating it.
 
 ### Store settings and runtime state

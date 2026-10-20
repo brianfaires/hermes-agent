@@ -413,7 +413,7 @@ def register(ctx):
         "kanban-advanced.worker-rules",
         board_rules,                       # a string is also accepted
         position="after_memory",
-        max_chars=4000,
+        max_chars=10000,
     )
 ```
 
@@ -429,8 +429,8 @@ The contract is deliberately narrow:
   session**. Its rendered bytes are frozen on compression and recovered from
   the already-persisted full system prompt after a process restart/resume;
   plugin state is not re-read for an existing session.
-- `max_chars` is capped at 4,000 characters. All plugin sections together,
-  including their audit headings, are capped at 8,000 characters and 32
+- `max_chars` defaults to and is capped at 10,000 characters. All plugin sections together,
+  including their audit headings, are capped at 20,000 characters and 32
   sections. Empty, non-string, oversized, aggregate-over-budget, or raising
   sections are skipped with a warning; prompt construction continues.
 - Every accepted section is named in the prompt and logged at session start
