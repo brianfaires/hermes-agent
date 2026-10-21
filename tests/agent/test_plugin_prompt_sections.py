@@ -44,8 +44,8 @@ def _install_test_section(manager: PluginManager, content) -> None:
 def test_real_aiagent_freezes_section_within_life_and_rerenders_on_invalidate(monkeypatch):
     # Pin the workspace snapshot: build_coding_workspace_block shells out to
     # live `git status`/`git log` on every build, and a git call failing or
-    # timing out under xdist contention makes the two builds differ in the
-    # Branch/Recent-commits lines — a flake unrelated to what this test
+    # timing out under test-suite contention makes the two builds differ in
+    # the Branch/Recent-commits lines — a flake unrelated to what this test
     # asserts (plugin sections). Byte-stability of the REAL workspace block
     # is coding_context's contract, covered by its own tests.
     monkeypatch.setattr(
@@ -81,6 +81,7 @@ def test_real_aiagent_freezes_section_within_life_and_rerenders_on_invalidate(mo
     assert "rules render 2" in rebuilt
     assert "rules render 1" not in rebuilt
     assert calls[0]["session_id"] == agent.session_id
+    assert calls[0]["skip_context_files"] is True
     assert calls[1]["session_id"] == agent.session_id
     assert "## Plugin Context: example.rules" in rebuilt
     assert rebuilt.index("## Plugin Context: example.rules") < rebuilt.index("Conversation started:")

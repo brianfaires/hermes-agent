@@ -36,10 +36,11 @@ def _reason_label(reason: Any) -> str:
 
 def active_profile_name() -> str:
     try:
-        from hermes_cli.profiles import get_active_profile_name
+        from hermes_constants import get_hermes_home, profile_name_for_home
 
-        return _clean(get_active_profile_name()) or "default"
+        return _clean(profile_name_for_home(get_hermes_home())) or "default"
     except Exception:
+        logger.debug("Fallback observer profile lookup failed", exc_info=True)
         return "default"
 
 
@@ -61,7 +62,7 @@ def emit_fallback_activated(
     raw exceptions, API keys, base URLs, request payloads, and response bodies.
     """
     try:
-        from hermes_cli.plugins import invoke_hook
+        from hermes_cli.lifecycle import invoke_hook
 
         invoke_hook(
             "fallback_activated",
@@ -80,3 +81,22 @@ def emit_fallback_activated(
         )
     except Exception:
         logger.debug("fallback_activated hook emission failed", exc_info=True)
+
+
+def log_fallback_activated(agent, reason, old_model, old_provider, fb_model, fb_provider) -> None:
+    """A billing switch is a WARNING naming the profile, both models and the remedy: the gateway
+    persists the turn as a transient failure otherwise, and nothing in the log says the paid
+    model was refused for credits or how to fix it (#115702). Other reasons stay INFO."""
+    from agent.error_classifier import FailoverReason
+    logger = logging.getLogger("agent.chat_completion_helpers")
+    if reason != FailoverReason.billing:
+        logger.info("Fallback activated: %s → %s (%s)", old_model, fb_model, fb_provider)
+        return
+    from hermes_constants import get_hermes_home, profile_name_for_home
+    profile = profile_name_for_home(get_hermes_home()) or "default"
+    remedy = "hermes model" if profile == "default" else f"hermes -p {profile} model"
+    logger.warning(
+        "Profile %s: %s via %s refused for billing/credits — using fallback %s via %s. "
+        "Top up credits, or run `%s` to pick a model this account can use.",
+        profile, old_model, old_provider, fb_model, fb_provider, remedy,
+    )

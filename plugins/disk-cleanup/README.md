@@ -2,6 +2,7 @@
 
 Auto-tracks and cleans up ephemeral files created during Hermes Agent
 sessions — test scripts, temp outputs, cron logs, stale chrome profiles.
+<!-- no-tmp: ok — documents the legacy scratch scope this plugin cleans up -->
 Scoped strictly to `$HERMES_HOME` and `/tmp/hermes-*`.
 
 Originally contributed by [@LVT382009](https://github.com/LVT382009) as a
@@ -13,7 +14,8 @@ never needs to remember to call a tool.
 
 | Hook | Behaviour |
 |---|---|
-| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a disposable file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME`, track it silently as `test` / `temp` / `cron-output`. Durable script trees are excluded. |
+| `pre_tool_call` | Snapshot which paths named in the call's arguments do not exist yet, keyed by the owning task/session plus `tool_call_id` (the id alone is not unique: llama.cpp reuses one constant id). |
+| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME` — a path named in the call that did not exist before it — track it silently as `test` / `temp` / `cron-output`. Existing files the call edits, runs or lists are never tracked, and neither is any path the call's own snapshot did not cover (e.g. one another plugin's `modify` hook swapped in). Calls without a `tool_call_id` (execute_code RPC) are not tracked. |
 | `on_session_end` | If any test files were auto-tracked during this turn, run `quick` cleanup (no prompts). |
 
 Deletion rules (same as the original PR):
@@ -39,133 +41,21 @@ Deletion rules (same as the original PR):
 /disk-cleanup forget <path>              # stop tracking
 ```
 
-## Wildcard policies
-
-A tracked path may end in `/*` to create a persistent cleanup policy over a
-safe directory's descendants. The wildcard must be exactly an absolute parent
-path followed by `/*`, for example:
-
-```
-$HERMES_HOME/audio_cache/*
-$HERMES_HOME/cron/output/*
-```
-
-For wildcard policies, cleanup evaluates each descendant regular file by that
-file's own mtime and the stored category: `test` files are eligible
-immediately, `temp` files after 7 days, and `cron-output` files after 14 days.
-`dry-run` lists the eligible descendant files, not the wildcard policy record.
-`quick` deletes eligible files, leaves young files in place, removes descendant
-directories only after they become empty, keeps the wildcard parent directory,
-and retains the wildcard policy for future runs.
-
-Malformed wildcard strings, unsupported wildcard shapes, unsafe parents,
-symlink escapes, `$HERMES_HOME/*`, protected top-level trees such as
-`logs/*`, `memories/*`, `sessions/*`, `skills/*`, `plugins/*`, `profiles/*`,
-cron control-plane trees other than exact `cron/output/*`, and durable script
-trees are ignored or rejected.
-
 ## Safety
 
-- Files beneath an exact directory component named `.worktrees` or `worktrees`
-  are excluded at any depth, including resolved symlink targets. This applies
-  to automatic/manual tracking, stale entries, dry-run, quick/deep deletion,
-  and wildcard files. Recursive deletion of an ancestor containing a worktree
-  is skipped. Empty-directory pruning and the session-end hook remain enabled.
-
+<!-- no-tmp: ok — documents the legacy scratch scope this plugin cleans up -->
 - `is_safe_path()` rejects anything outside `HERMES_HOME` or `/tmp/hermes-*`
 - Windows mounts (`/mnt/c` etc.) are rejected
 - The state directory `$HERMES_HOME/disk-cleanup/` is itself excluded
 - `$HERMES_HOME/logs/`, `memories/`, `sessions/`, `skills/`, `plugins/`,
   and config files are never tracked
-- Wildcard policies rooted at `$HERMES_HOME` or durable top-level trees are
-  rejected by `track` and ignored/dropped when found in stale manual state
-- Durable script trees at `$HERMES_HOME/scripts` and
-  `$HERMES_HOME/profiles/<name>/scripts` are never auto-tracked, shown as
-  dry-run deletion candidates, or deleted from stale/manual tracked state,
-  regardless of their stored category
-- Wildcard cleanup never follows symlinked files or directories and never
-  deletes the wildcard parent directory itself
+- User project trees (`workspace/`, `projects/`, `plans/`, `home/`, `patches/`,
+  `skins/`, `themes/`, `contributors/`, `profiles/`, `backups/`) and `kanban/`
+  (task attachments/workspaces) are never tracked or swept, even for files
+  named `test_*`/`tmp_*`
+- A tracked *directory* under a protected top level (e.g. `cache/`, which holds
+  terminal snapshots) is never removed; only its files age out. Stale entries
+  are logged as `SKIPPED` and dropped
 - Backup/restore is scoped to `tracked.json` — the plugin never touches
   agent logs
 - Atomic writes: `.tmp` → backup → rename
-
-## Configured path exemptions
-
-Set `plugins.entries.disk-cleanup.settings` in the owning profile's
-`config.yaml` with exact roots, literal path fragments, or both:
-
-```yaml
-plugins:
-  entries:
-    disk-cleanup:
-      settings:
-        exempt_paths:
-          - /absolute/profile/tests
-        exempt_path_contains:
-          - worktrees
-```
-
-No glob, tilde or environment expansion is supported. The exact root and its
-canonical and lexical descendants are excluded from auto/manual tracking,
-previews, quick cleanup, wildcard retention, deep cleanup, and empty-directory
-pruning. Recursive deletion of an ancestor containing an exemption is also
-blocked, even when the exempt root does not exist yet. Sibling names such as
-`tests-old` are not matches. Existing hard-coded protections still apply.
-
-`exempt_path_contains` adds case-sensitive literal substring matching against
-both the full normalized absolute lexical path and the resolved path. It does
-not interpret regex or glob syntax, expand variables or tilde, or require Git
-metadata. For example, `worktrees` matches `.worktrees/plain`, non-Git
-`worktrees` directories, `worktrees-cache`, and filenames containing that text.
-Direct symlink candidates also match through their resolved targets.
-
-Before recursive removal, a candidate that does not already match an exact
-root or fragment is scanned with `os.walk(followlinks=False)`. Any matching
-descendant file or directory path protects the ancestor. Symlink entries are
-checked but symlink subtrees are never traversed. Filesystem scan/stat errors
-block cleanup; a missing scan root may return no match. No scan is performed
-when fragments are empty or the candidate already matches.
-
-The fragment setting must be a list of nonempty strings without NUL characters.
-An invalid list type or any empty, nonstring, or NUL-containing entry blocks
-cleanup. Both settings are additive; `exempt_paths` retains its exact-root
-containment behavior.
-
-The library reads the active profile's raw configuration on every policy check;
-registered hooks and commands are bound to the profile that loaded them. No
-process-global policy cache or configuration writes are involved. Malformed
-YAML, invalid mapping/list/path types, resolution errors and unreadable config
-block deletion, rather than degrading to default permissions. A missing config
-file or absent setting means no configured exemptions. The legacy `config`
-subtree, managed overlays and environment-expanded paths are not accepted for
-this new safety setting; configure the canonical local `settings` key.
-
-## Adoption and in-flight work
-
-A YAML edit does not update already loaded old plugin code. Deploy and drain
-old cleanup-capable sessions/processes before restoring durable files. At
-registration the plugin logs `disk-cleanup registered protection:` with its PID,
-profile home, library file, policy version, validity, roots, root checks, and
-`exempt_path_contains`.
-Correlate the gateway's own startup record with the new PID, exact deployed
-source, and absence of old cleanup-capable processes. A fresh standalone Python
-import is not evidence that the gateway adopted the feature.
-
-`/disk-cleanup protection [absolute-path]` returns a JSON diagnostic from the
-registered profile-bound handler. Unlike status/dry-run it never loads tracking
-state, creates a directory, or invokes cleanup. A successful protected-path
-check has `policy_valid: true`, `exempt: true`, and `recursive_exempt: true`.
-An invalid policy returns `policy_valid: false`, not a protection success claim.
-The diagnostic includes `exempt_path_contains`; path probes use both settings
-and the recursive ancestor scan. Errors also leave state and configuration untouched.
-
-Checks are repeated at destructive boundaries (including after deep confirmation
-and wildcard candidate discovery). They do not revoke a syscall or recursive
-delete already in flight, nor are they a kernel-enforced defense against hostile
-concurrent filesystem renames/symlink swaps. Keep policy and filesystem topology
-stable during cleanup. Safe restoration requires quiescence plus adoption,
-not merely the time a configuration write returned.
-
-These exemptions protect exact roots and literal path substrings.
-It does not repair cross-session bucket draining or change which other profile
-assets are disposable. No global cleanup disable is needed.

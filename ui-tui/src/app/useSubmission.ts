@@ -1,8 +1,9 @@
+import { looksLikeSlashCommand, parseSlashCommand } from '@hermes/shared/slash'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
 import { TYPING_IDLE_MS } from '../config/timing.js'
 import { expandTokens } from '../domain/attachments.js'
-import { completionToApplyOnSubmit, looksLikeSlashCommand, parseSlashCommand } from '../domain/slash.js'
+import { completionToApplyOnSubmit } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { SessionSteerResponse, ShellExecResponse } from '../gatewayTypes.js'
 import { queueItem, type QueueItem } from '../hooks/useQueue.js'
@@ -10,8 +11,10 @@ import { asRpcResult } from '../lib/rpc.js'
 import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js'
 import type { Msg } from '../types.js'
 
+import { reportSlashCommand } from './createSlashHandler.js'
 import type { ComposerActions, ComposerRefs, ComposerState, ComposerToken } from './interfaces.js'
-import { checkPrivateCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
+import { beginPrivateSubmission, isLocalSlashCommand, type PrivateCommandResult } from './privateCommands/dispatch.js'
+import { findSlashCommand } from './slash/registry.js'
 import { submitPrompt } from './submissionCore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -41,6 +44,24 @@ export const prepareSubmission = (display: string, tokens: ComposerToken[]) => (
   text: expandTokens(tokens)(display)
 })
 
+/**
+ * Split a slash submission into the two things it has to be at once.
+ *
+ * A slash command's argument is ordinary user text, so a collapsed paste in it
+ * must resolve BEFORE the command runs — otherwise `/pr-triage [[ … [412 lines]
+ * … ]]` hands the skill the label and the agent faithfully reports that the
+ * paste is truncated. The transcript still shows the compact form, because a
+ * 412-line paste inlined into the scrollback is exactly what collapsing it was
+ * for.
+ *
+ * Image tokens stay as labels: the gateway already holds those files in
+ * `attached_images` and splices them in at submit.
+ */
+export const prepareSlashSubmission = (display: string, tokens: ComposerToken[]) => ({
+  command: expandPasteTokens(tokens)(display),
+  display
+})
+
 export const shouldInterpolateSubmission = (display: string) => hasInterpolation(display)
 
 export function useSubmission(opts: UseSubmissionOptions) {
@@ -48,6 +69,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
     opts
 
   const lastEmptyAt = useRef(0)
+  const privatePending = useRef(false)
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -233,29 +255,34 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const dispatchSubmission = useCallback(
-    (full: string, privateChecked = false) => {
+    (full: string, privateChecked = false, frozenTokens?: ComposerToken[]) => {
       if (!full.trim()) {
         return
       }
 
-      // Ask the plugin dispatcher before transcript/history or busy queues.
-      // A failed privacy preflight must never fall through with the raw input.
-      if (looksLikeSlashCommand(full) && !privateChecked) {
-        void checkPrivateCommand(
-          prepareSubmission(full, [...composerRefs.tokensRef.current]).text,
-          command => gw.request<PrivateCommandResult>('command.private', {
-            command, session_id: getUiState().sid
-          }).then(raw => asRpcResult<PrivateCommandResult>(raw)),
-          output => {
-            composerActions.clearIn()
-            sys(output)
-          }
-        ).then(handled => {
-          if (!handled) {
-            dispatchSubmission(full, true)
-          }
-        })
+      const submittedTokens = frozenTokens ?? [...composerRefs.tokensRef.current]
+      const localCommand = isLocalSlashCommand(full)
 
+      if (
+        !privateChecked &&
+        beginPrivateSubmission({
+          display: full,
+          command: prepareSubmission(full, submittedTokens).text,
+          local: localCommand,
+          pending: privatePending,
+          clear: () => composerActions.clearIn(),
+          request: command =>
+            gw
+              .request<PrivateCommandResult>('command.private', {
+                command,
+                session_id: getUiState().sid,
+                attachments: submittedTokens.some(token => token.kind === 'image')
+              })
+              .then(raw => asRpcResult<PrivateCommandResult>(raw)),
+          acknowledge: output => sys(output),
+          resume: () => dispatchSubmission(full, true, submittedTokens)
+        })
+      ) {
         return
       }
 
@@ -264,28 +291,34 @@ export function useSubmission(opts: UseSubmissionOptions) {
       // nothing — a detached image can't be re-attached by recalling the text.
       // Idempotent on token-free text, so re-submitting a recalled entry is
       // stable.
-      const submissionTokens = [...composerRefs.tokensRef.current]
+      const submissionTokens = submittedTokens
       const submission = prepareSubmission(full, submissionTokens)
       const toHistory = submission.text
-      const queuePayload = expandPasteTokens(submissionTokens)(full)
 
       if (looksLikeSlashCommand(full)) {
-        appendMessage({ kind: 'slash', role: 'system', text: full })
-        composerActions.pushHistory(toHistory)
+        const slash = prepareSlashSubmission(full, submissionTokens)
+
+        appendMessage({ kind: 'slash', role: 'system', text: slash.display })
+        // Local dispatch or explicit ordinary admission is established above.
+        composerActions.pushHistory(toHistory, true)
 
         const parsed = parseSlashCommand(full)
 
         const queued =
-          parsed.name === 'queue' || parsed.name === 'q' ? queueItemFromSlash(full, queuePayload) : undefined
+          parsed.name === 'queue' || parsed.name === 'q' ? queueItemFromSlash(slash.display, slash.command) : undefined
 
         if (queued) {
+          // Handled here, before the slash handler, so it is counted here.
+          reportSlashCommand(gw, parsed.name, getUiState().sid)
           composerActions.enqueue(queued.text, queued.display)
           sys(`queued: "${queued.display.slice(0, 50)}${queued.display.length > 50 ? '…' : ''}"`)
         } else {
-          slashRef.current(full)
+          slashRef.current(slash.command)
         }
 
-        composerActions.clearIn()
+        if (!privateChecked) {
+          composerActions.clearIn()
+        }
 
         return
       }
@@ -299,7 +332,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const live = getUiState()
 
       if (!live.sid) {
-        composerActions.pushHistory(toHistory)
+        composerActions.pushHistory(toHistory, privateChecked)
         composerActions.enqueue(full)
         composerActions.clearIn()
 
@@ -331,7 +364,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sendQueued(picked.text)
       }
 
-      composerActions.pushHistory(toHistory)
+      composerActions.pushHistory(toHistory, privateChecked)
 
       if (getUiState().busy) {
         return handleBusyInput(queueItem(full))
@@ -351,6 +384,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       appendMessage,
       composerActions,
       composerRefs,
+      gw,
       handleBusyInput,
       interpolate,
       send,
@@ -365,7 +399,10 @@ export function useSubmission(opts: UseSubmissionOptions) {
     (value: string) => {
       if (composerState.completions.length) {
         const row = composerState.completions[composerState.compIdx]
-        const next = completionToApplyOnSubmit(value, row?.text, composerState.compReplace)
+
+        const next = completionToApplyOnSubmit(value, row?.text, composerState.compReplace, name =>
+          Boolean(findSlashCommand(name))
+        )
 
         if (next !== null) {
           return composerActions.setInput(next)
@@ -438,7 +475,7 @@ export interface UseSubmissionOptions {
   composerState: ComposerState
   gw: GatewayClient
   setLastUserMsg: (value: string) => void
-  slashRef: MutableRefObject<(cmd: string) => boolean>
+  slashRef: MutableRefObject<(cmd: string, typed?: boolean) => boolean>
   submitRef: MutableRefObject<(value: string) => void>
   sys: (text: string) => void
 }

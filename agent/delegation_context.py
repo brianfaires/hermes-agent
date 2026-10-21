@@ -1,63 +1,38 @@
 """Context-local state for delegate_task child execution.
 
-The parent Hermes process may itself be a Kanban dispatcher worker with
-HERMES_KANBAN_* variables in process env. delegate_task children run inside the
-same Python process, but they are not dispatcher-owned Kanban workers. This
-module lets code paths that resolve tool schemas or spawn subprocesses fail
-closed for delegated children without mutating global os.environ for the parent.
-
-Cron jobs need the same treatment for the same reason: ``cronjob(action="run")``
-executes ``run_job()`` in-process, so a cron agent fired from inside a Kanban
-worker would otherwise inherit that worker's dispatcher identity.
-``non_dispatcher_owned_context()`` covers both cases.
+A Hermes process may itself be a Kanban dispatcher worker with HERMES_KANBAN_* in
+os.environ. In-process delegate_task children and cron jobs fired via
+``cronjob(action="run")`` are NOT dispatcher-owned, so identity gates must fail
+closed for them without mutating the process-global environment.
 """
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Iterator, Mapping, MutableMapping
+from typing import Iterator, Mapping, MutableMapping, overload
 
-_DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar(
-    "hermes_delegated_child_context",
-    default=False,
-)
-
-# Set for any in-process execution that is NOT the dispatcher-owned worker even
-# though the worker's HERMES_KANBAN_* vars are legitimately in os.environ (cron
-# jobs fired via the `cronjob` tool).  Kept separate from
-# _DELEGATED_CHILD_CONTEXT so the delegate_task-specific behaviour attached to
-# that flag (subprocess env scrubbing, its own error strings) is unchanged.
-_NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool] = ContextVar(
-    "hermes_non_dispatcher_owned_context",
-    default=False,
-)
+_DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
+# Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
+# so delegate_task-specific behaviour remains unchanged; a worker-launched cron captures its lineage root.
+_NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool | str] = ContextVar("hermes_non_dispatcher_owned_context", default=False)
 
 DELEGATED_CHILD_ENV_MARKER = "HERMES_DELEGATED_CHILD_CONTEXT"
 
 KANBAN_ENV_KEYS: tuple[str, ...] = (
-    "HERMES_KANBAN_TASK",
-    "HERMES_KANBAN_RUN_ID",
-    "HERMES_KANBAN_WORKSPACE",
-    "HERMES_KANBAN_WORKSPACES_ROOT",
-    "HERMES_KANBAN_CLAIM_LOCK",
-    "HERMES_KANBAN_BOARD",
-    "HERMES_KANBAN_DB",
+    "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK",
+    "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
 )
 
 
 @contextmanager
 def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
-    """Mark child execution and isolate its task-local session identity.
-
-    Child construction calls ``set_current_session_id`` internally, so even a
-    context entered without an id must restore the parent's ContextVar.  Child
-    execution passes its explicit id and receives it only for this scope.
-    """
+    """Mark child execution and isolate its task-local session identity. Even a context
+    entered without an id must restore the parent's session ContextVar (child
+    construction calls ``set_current_session_id``)."""
     token = _DELEGATED_CHILD_CONTEXT.set(True)
     try:
-        # Import lazily: session_context calls is_delegated_child_context() when
-        # deciding whether the compatibility os.environ mirror is safe.
-        from gateway.session_context import scoped_current_session_id
+        from gateway.session_context import scoped_current_session_id  # lazy: it calls is_delegated_child_context()
 
         with scoped_current_session_id(session_id):
             yield
@@ -66,105 +41,154 @@ def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
 
 
 def is_delegated_child_context() -> bool:
-    """Identify child execution that must not inherit a Kanban worker's rights.
-
-    Worker-fired cron runs share the parent's environment just like delegated
-    agents. Suppressing implicit task defaults is insufficient: an explicit
-    task ID must hit the same tool and DB mutation guards. Standalone cron
-    orchestration (no inherited worker task) retains its configured access.
-    The subprocess marker preserves this boundary after ContextVars are lost.
-    """
-    import os
-
-    return bool(
-        _DELEGATED_CHILD_CONTEXT.get()
-        or os.environ.get(DELEGATED_CHILD_ENV_MARKER)
-        or (_NON_DISPATCHER_OWNED_CONTEXT.get()
-            and os.environ.get("HERMES_KANBAN_TASK"))
-    )
+    """Return True while code is running for a delegate_task child."""
+    return bool(_DELEGATED_CHILD_CONTEXT.get())
 
 
-@contextmanager
-def non_dispatcher_owned_context() -> Iterator[None]:
-    """Mark in-process execution that does NOT own the dispatcher's Kanban task.
-
-    A Kanban worker is a normal CLI agent whose default toolset includes
-    ``cronjob``; ``cronjob(action="run")`` runs ``run_job()`` inside the worker's
-    own process, where ``HERMES_KANBAN_TASK`` is legitimately set.  Without this
-    marker the cron agent is misread as that worker: the kanban toolset is
-    force-added, the worker protocol is injected into its system prompt, and
-    ``kanban_complete`` defaults ``task_id`` to ``$HERMES_KANBAN_TASK`` — letting
-    an unrelated cron job close the worker's task and overwrite real results.
-
-    Scoped via ContextVar rather than by clearing ``os.environ``: the env is
-    process-global and shared with the worker's own claim heartbeat, the
-    gateway's Kanban watchers, and concurrent cron jobs on the parallel pool, so
-    mutating it would starve the worker's claim and race those readers.
-    """
-    token = _NON_DISPATCHER_OWNED_CONTEXT.set(True)
-    try:
-        yield
-    finally:
-        _NON_DISPATCHER_OWNED_CONTEXT.reset(token)
+def enter_non_dispatcher_owned_context() -> Token[bool | str]:
+    """Token form of :func:`non_dispatcher_owned_context` for long try/finally scopes."""
+    inherited = _NON_DISPATCHER_OWNED_CONTEXT.get()
+    fence = (inherited if isinstance(inherited, str) else
+             _fenced_kanban_root() if os.environ.get("HERMES_KANBAN_TASK") else True)
+    return _NON_DISPATCHER_OWNED_CONTEXT.set(fence)
 
 
-def is_dispatcher_owned_worker_context() -> bool:
-    """Return True only when this execution owns the dispatcher's Kanban task.
-
-    The single predicate every ``HERMES_KANBAN_*`` identity gate should use
-    before trusting those vars.  False for delegate_task children and for cron
-    jobs fired in-process from a worker.
-    """
-    if is_delegated_child_context():
-        return False
-    return not _NON_DISPATCHER_OWNED_CONTEXT.get()
-
-
-def enter_non_dispatcher_owned_context() -> Token[bool]:
-    """Token-based form of :func:`non_dispatcher_owned_context`.
-
-    For callers whose scope is a long ``try`` with a matching ``finally`` rather
-    than a ``with`` block (``cron.scheduler.run_job``).  Pair with
-    :func:`exit_non_dispatcher_owned_context`.
-    """
-    return _NON_DISPATCHER_OWNED_CONTEXT.set(True)
-
-
-def exit_non_dispatcher_owned_context(token: Token[bool]) -> None:
+def exit_non_dispatcher_owned_context(token: Token[bool | str]) -> None:
     """Restore the flag saved by :func:`enter_non_dispatcher_owned_context`."""
     _NON_DISPATCHER_OWNED_CONTEXT.reset(token)
 
 
+@contextmanager
+def non_dispatcher_owned_context() -> Iterator[None]:
+    """Mark in-process execution that does NOT own the dispatcher's Kanban task; without it
+    a cron agent run inside a worker is misread as that worker (kanban toolset force-added,
+    ``kanban_complete`` defaulting to its task). ContextVar-scoped rather than clearing
+    os.environ, which the worker's claim heartbeat and concurrent readers share."""
+    token = enter_non_dispatcher_owned_context()
+    try:
+        yield
+    finally:
+        exit_non_dispatcher_owned_context(token)
+
+
+def is_dispatcher_owned_worker_context() -> bool:
+    """The single predicate every ``HERMES_KANBAN_*`` identity gate should use."""
+    return not (is_delegated_child_process_context() or _NON_DISPATCHER_OWNED_CONTEXT.get())
+
+
+def explicit_board_intent_is_pinned() -> bool:
+    """Whether an explicit kanban ``board=`` argument must still resolve through
+    the dispatcher-injected env pins (``HERMES_KANBAN_DB`` & friends) rather than
+    its own board directory.
+
+    True for in-process delegate children, descendants carrying
+    :data:`DELEGATED_CHILD_ENV_MARKER`, and dispatched workers
+    (``HERMES_KANBAN_TASK`` set). The pins are the "workers physically cannot
+    see other boards" isolation, and :func:`kanban_path_is_fenced` checks the
+    pinned path / fenced root — an explicit board that resolved elsewhere would
+    also escape that fence. Outside these fences an explicit board is the
+    caller's own intent and wins.
+    """
+    if _DELEGATED_CHILD_CONTEXT.get():
+        return True
+    if os.environ.get(DELEGATED_CHILD_ENV_MARKER):
+        return True
+    return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
+
+
+def owned_kanban_task() -> str:
+    """The board task this execution OWNS: ``HERMES_KANBAN_TASK`` for the dispatcher-owned
+    worker, ``""`` otherwise. Tool access is not worker identity — a profile can expose the
+    kanban toolset interactively, and children/cron runs inherit the env var — so every
+    reader that turns the task id into worker behaviour (guidance, stop nudge, terminal
+    outcomes) goes through this one helper."""
+    if not is_dispatcher_owned_worker_context():
+        return ""
+    return (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+
+
 def is_delegated_child_process_context() -> bool:
     """Return True in this process or a subprocess spawned by a child."""
-    return is_delegated_child_context()
+    return bool(_DELEGATED_CHILD_CONTEXT.get()) or bool(os.environ.get(DELEGATED_CHILD_ENV_MARKER))
+
+
+def _fenced_kanban_root() -> str:
+    """The board root this process's Kanban lineage lives under (``kanban_home()``); ``"1"`` when it
+    cannot be resolved, which readers treat as "fence every board" (the pre-path marker)."""
+    try:
+        from hermes_cli.kanban_db import kanban_home
+        return str(kanban_home())
+    except Exception:
+        return "1"
 
 
 def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
-    """Return *env* with dispatcher-only Kanban variables removed."""
-    cleaned = {key: value for key, value in env.items()
-               if not key.startswith("HERMES_KANBAN_")}
-    cleaned[DELEGATED_CHILD_ENV_MARKER] = "1"
+    """Remove worker identity, retaining board/location and an inherited write fence.
+
+    TASK absence alone would promote a descendant to an orchestrator. The marker
+    survives later execs, including scripts that remove TASK themselves. This is
+    cooperative runtime scoping, not confinement of code with direct SQLite access.
+
+    The marker's value is the fenced board ROOT, so the fence applies to the lineage's
+    board and not to every Kanban DB the descendant touches: a child running a repro
+    against a temp ``HERMES_HOME`` got a silently read-only board there. An inherited
+    path-valued marker is kept (a grandchild that moved HERMES_HOME must not re-fence
+    onto its scratch root and unfence the real one).
+    """
+    cleaned = {k: v for k, v in env.items() if k not in KANBAN_ENV_KEYS}
+    context_fence = _NON_DISPATCHER_OWNED_CONTEXT.get()
+    inherited = str(env.get(DELEGATED_CHILD_ENV_MARKER) or
+                    (context_fence if isinstance(context_fence, str) else ""))
+    cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited if inherited and inherited != "1" else _fenced_kanban_root()
     return cleaned
+
+
+def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
+    """Whether Kanban mutations at *path* (a board DB or board-metadata root) are denied for this
+    process: always for an in-process delegate child (the parent's own board); for a spawned
+    descendant only when *path* is the dispatcher-pinned ``HERMES_KANBAN_DB`` or lies under the
+    fenced root the marker carries. A legacy ``"1"`` marker fences everything."""
+    if _DELEGATED_CHILD_CONTEXT.get():
+        return True
+    context_fence = _NON_DISPATCHER_OWNED_CONTEXT.get()
+    marker = os.environ.get(DELEGATED_CHILD_ENV_MARKER, "")
+    if not marker and isinstance(context_fence, str):
+        marker = context_fence
+    if not marker:
+        return False
+    if marker == "1":
+        return True
+    from pathlib import Path
+    target = Path(path).expanduser().resolve()
+    pinned = os.environ.get("HERMES_KANBAN_DB", "").strip()
+    if pinned and target == Path(pinned).expanduser().resolve():
+        return True
+    try:
+        target.relative_to(Path(marker).expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+@overload
+def delegated_child_subprocess_env(env: Mapping[str, str]) -> dict[str, str]: ...
+
+
+@overload
+def delegated_child_subprocess_env(env: None = None) -> dict[str, str] | None: ...
 
 
 def delegated_child_subprocess_env(
     env: Mapping[str, str] | MutableMapping[str, str] | None = None,
 ) -> dict[str, str] | None:
-    """Return an env override only when delegated-child lineage must cross fork.
+    """Carry worker/delegate descendant denial across a real process spawn.
 
-    Most subprocess call sites historically used ``env=None`` to inherit the
-    process environment.  In a ``delegate_task`` child, inheriting as-is leaks
-    parent dispatcher ``HERMES_KANBAN_*`` vars while losing the ContextVar in
-    the new process.  This helper preserves normal ``env=None`` semantics for
-    non-delegated calls, and only materializes a scrubbed env when the lineage
-    marker must be propagated across a child-process boundary.
+    Location and credentials are untouched; callers retain their existing secret policy.
+    Dispatcher workers and supervised tool transports grant their own explicit scope.
     """
-    if not is_delegated_child_process_context():
+    if not (is_delegated_child_process_context()
+            or isinstance(_NON_DISPATCHER_OWNED_CONTEXT.get(), str)
+            or os.environ.get("HERMES_KANBAN_TASK")
+            or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)
-
-    if env is None:
-        import os
-
-        env = os.environ
-    return scrub_kanban_env(env)
+    return scrub_kanban_env(os.environ if env is None else env)

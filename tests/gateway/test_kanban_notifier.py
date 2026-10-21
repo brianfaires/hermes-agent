@@ -1,16 +1,15 @@
 import asyncio
-import json
-import sqlite3
-from pathlib import Path
 
 
 from gateway.config import Platform
-from gateway.kanban_watchers import (
+from gateway.kanban_watchers_common import (
     _acquire_singleton_lock,
     _release_singleton_lock,
 )
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 
 
 class RecordingAdapter:
@@ -23,6 +22,7 @@ class RecordingAdapter:
 
     async def handle_message(self, event):
         self.handled.append(event)
+        event._gateway_accepted = True
 
 
 class DisconnectedAdapters(dict):
@@ -37,7 +37,7 @@ async def _run_one_notifier_tick(monkeypatch, runner):
 
     async def fake_sleep(delay):
         if delay == 5:
-            return None
+            return
         runner._running = False
         await real_sleep(0)
 
@@ -56,24 +56,11 @@ def _make_runner(adapter):
     return runner
 
 
-def _pin_notification_owner(runner, tmp_path, name):
-    """Model the immutable home captured by a real named gateway."""
-    home = tmp_path / "profiles" / name
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(json.dumps({"kanban": {
-        "notification_policy": {"mode": "deny", "allowed_platforms": ["telegram"],
-                                "preserve_tui": False},
-    }}))
-    runner._launch_profile_home = home
-    runner._launch_profile_name = name
-    runner._active_profile_name = lambda: name
-
-
 def _create_completed_subscription(summary="done once"):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="notify once", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
         kb.complete_task(conn, tid, summary=summary)
         return tid
     finally:
@@ -81,9 +68,9 @@ def _create_completed_subscription(summary="done once"):
 
 
 def _unseen_terminal_events(tid):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        _, events = kb.unseen_events_for_sub(
+        _, events = kbn.unseen_events_for_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -100,7 +87,7 @@ def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, m
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -108,7 +95,7 @@ def test_kanban_notifier_replays_telegram_dm_topic_delivery_metadata(tmp_path, m
             assignee="worker",
             session_id="agent:main:telegram:dm:chat-1",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -156,10 +143,10 @@ def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
     reason = "AGE-39 — https://linear.example/AGE-39 — publishing verified."
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="approval", assignee="publisher")
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -172,7 +159,7 @@ def test_active_named_profile_subscription_is_delivered(tmp_path, monkeypatch):
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "main")
+    runner._active_profile_name = lambda: "main"
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
@@ -189,12 +176,12 @@ def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
     db_path = tmp_path / "cross-profile-notifier.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         foreign_tid = kb.create_task(
             conn, title="default-owned", assignee="worker",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=foreign_tid,
             platform="telegram",
@@ -206,7 +193,7 @@ def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
         owned_tid = kb.create_task(
             conn, title="writer-owned", assignee="worker",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=owned_tid,
             platform="telegram",
@@ -219,7 +206,7 @@ def test_non_dispatch_gateway_claims_only_its_profile_subscriptions(
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "writer")
+    runner._active_profile_name = lambda: "writer"
     runner._kanban_dispatcher_lock_handle = None
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
@@ -236,10 +223,10 @@ def test_legacy_subscription_requires_confirmed_dispatcher_lock_owner(
     db_path = tmp_path / "legacy-lock-owner.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task_id = kb.create_task(conn, title="legacy", assignee="worker")
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=task_id,
             platform="telegram",
@@ -322,10 +309,10 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="cycle test", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
         # First crash — fired by the dispatcher when the worker PID dies.
         kb._append_event(conn, tid, kind="crashed")
     finally:
@@ -337,13 +324,13 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
 
     # First crash delivered.
     assert len(adapter.sent) == 1
-    assert "crashed" in adapter.sent[0]["text"].lower()
+    assert "stopped unexpectedly" in adapter.sent[0]["text"].lower()
 
     # Subscription survives — the cursor advanced past event #1, but the
     # row is still there.
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, tid)
+        subs = kbn.list_notify_subs(conn, tid)
         assert len(subs) == 1, (
             "Subscription must survive a crashed event so a respawn-cycle "
             "second crash also notifies the user (issue #21398)."
@@ -365,7 +352,7 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
         f"Second crashed event should also notify; got {len(adapter.sent)} "
         f"deliveries (texts: {[d['text'] for d in adapter.sent]})"
     )
-    assert "crashed" in adapter.sent[1]["text"].lower()
+    assert "stopped unexpectedly" in adapter.sent[1]["text"].lower()
 
 
 def test_notifier_subscription_survives_done_reopen_until_archive(
@@ -376,7 +363,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -384,7 +371,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
             assignee="worker",
             session_id="origin-session",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -401,7 +388,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "reviewer")
+    runner._active_profile_name = lambda: "reviewer"
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1
@@ -411,9 +398,9 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     assert adapter.handled[0].source.thread_id == "origin-thread"
     assert adapter.handled[0].source.profile == "reviewer"
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, tid)
+        subs = kbn.list_notify_subs(conn, tid)
         assert len(subs) == 1, "completion must retain the origin subscription"
         first_cursor = subs[0]["last_event_id"]
     finally:
@@ -422,12 +409,12 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     # A quiet tick proves the completed event cannot replay after its cursor
     # was advanced, even though the subscription now remains present.
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "reviewer")
+    runner._active_profile_name = lambda: "reviewer"
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
     assert len(adapter.sent) == 1
     assert len(adapter.handled) == 1
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
@@ -437,7 +424,7 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
         conn.close()
 
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "reviewer")
+    runner._active_profile_name = lambda: "reviewer"
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     # The reopen status and second completion each deliver once, while only
@@ -448,9 +435,9 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
     assert adapter.handled[-1].source.thread_id == "origin-thread"
     assert adapter.handled[-1].source.profile == "reviewer"
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        subs = kb.list_notify_subs(conn, tid)
+        subs = kbn.list_notify_subs(conn, tid)
         assert len(subs) == 1
         assert subs[0]["last_event_id"] > first_cursor
         assert kb.archive_task(conn, tid)
@@ -458,16 +445,16 @@ def test_notifier_subscription_survives_done_reopen_until_archive(
         conn.close()
 
     runner = _make_runner(adapter)
-    _pin_notification_owner(runner, tmp_path, "reviewer")
+    runner._active_profile_name = lambda: "reviewer"
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     # Archive itself is intentionally silent, but consumes its event and
     # removes the subscription so no later historical event can replay.
     assert len(adapter.sent) == 3
     assert len(adapter.handled) == 2
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        assert kb.list_notify_subs(conn, tid) == []
+        assert kbn.list_notify_subs(conn, tid) == []
     finally:
         conn.close()
 
@@ -477,7 +464,7 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -485,7 +472,7 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
             assignee="worker",
             session_id="origin-session",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -516,9 +503,9 @@ def test_notifier_wakeup_uses_subscription_chat_type(tmp_path, monkeypatch):
 
 
 def _unseen_terminal_events_for(tid, chat_id):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        _, events = kb.unseen_events_for_sub(
+        _, events = kbn.unseen_events_for_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -548,36 +535,36 @@ def test_kanban_notifier_isolates_per_subscription_failure(tmp_path, monkeypatch
     # per-subscription isolation (the good delivery happens before the tick
     # aborts). A deterministic-order shim below removes the reliance on the
     # scan order entirely.
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid_bad = kb.create_task(conn, title="bad task", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid_bad, platform="telegram", chat_id="chat-bad")
+        kbn.add_notify_sub(conn, task_id=tid_bad, platform="telegram", chat_id="chat-bad")
         kb.complete_task(conn, tid_bad, summary="done")
 
         tid_good = kb.create_task(conn, title="good task", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid_good, platform="telegram", chat_id="chat-good")
+        kbn.add_notify_sub(conn, task_id=tid_good, platform="telegram", chat_id="chat-good")
         kb.complete_task(conn, tid_good, summary="done")
     finally:
         conn.close()
 
-    original_claim = kb.claim_unseen_events_for_sub
+    original_claim = kbn.claim_unseen_events_for_sub
 
     def selective_claim(conn, task_id, **kwargs):
         if task_id == tid_bad:
             raise RuntimeError("simulated DB corruption for bad task")
         return original_claim(conn, task_id=task_id, **kwargs)
 
-    monkeypatch.setattr(kb, "claim_unseen_events_for_sub", selective_claim)
+    monkeypatch.setattr(kbn, "claim_unseen_events_for_sub", selective_claim)
 
     # Force the failing subscription to be iterated FIRST regardless of the
     # unordered SELECT's scan order.
-    original_list = kb.list_notify_subs
+    original_list = kbn.list_notify_subs
 
     def bad_first(conn, task_id=None, **kwargs):
         subs = original_list(conn, task_id, **kwargs)
         return sorted(subs, key=lambda s: 0 if s["task_id"] == tid_bad else 1)
 
-    monkeypatch.setattr(kb, "list_notify_subs", bad_first)
+    monkeypatch.setattr(kbn, "list_notify_subs", bad_first)
 
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
@@ -604,10 +591,10 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(conn, title="loops forever", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kbn.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
         kb._append_event(
             conn, tid, "block_loop_detected",
             {"reason": "needs credentials", "kind": "needs_input",
@@ -623,19 +610,70 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
 
     assert len(adapter.sent) == 1, "block_loop_detected must produce a notification"
     text = adapter.sent[0]["text"]
-    assert "TRIAGE" in text
     assert tid in text
     assert "needs credentials" in text
     # Cursor advanced: the event is claimed and not re-delivered.
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
-        _, remaining = kb.unseen_events_for_sub(
+        _, remaining = kbn.unseen_events_for_sub(
             conn, task_id=tid, platform="telegram", chat_id="chat-1",
             kinds=["block_loop_detected"],
         )
     finally:
         conn.close()
     assert remaining == []
+
+
+# ---------------------------------------------------------------------------
+# #111125 — a repeated-block circuit breaker establishes that orchestration
+# attention is needed, NOT that a human decision exists. The formatter must
+# use neutral wording unless the block was typed as a genuine owner-input
+# request (`needs_input`, the only kind that carries a concrete question).
+# ---------------------------------------------------------------------------
+
+
+class _StubEvent:
+    def __init__(self, payload):
+        self.payload = payload
+
+
+class _StubNotif:
+    head = "H123"
+
+
+def _fmt_block_loop(payload):
+    from gateway.kanban_watchers_notifier import _EVENT_FORMATTERS
+
+    msg, _, _ = _EVENT_FORMATTERS["block_loop_detected"](_StubEvent(payload), _StubNotif())
+    return msg
+
+
+def test_block_loop_technical_kind_uses_neutral_orchestration_wording():
+    """A repeated technical block (transient/capability/untyped) routed to
+    triage is an orchestration handoff with no question for the owner, so the
+    ping must not claim a human decision (#111125)."""
+    payload = {"reason": "waiting on upstream", "kind": "transient", "recurrences": 2}
+    msg = _fmt_block_loop(payload)
+    assert "for orchestration attention" in msg
+    assert "human decision" not in msg
+    # Circuit-breaker visibility is preserved.
+    assert "TRIAGE" in msg
+    assert "waiting on upstream" in msg
+
+
+def test_block_loop_owner_input_keeps_decision_wording():
+    """A `needs_input` block carries a concrete question for the owner, so the
+    owner-decision wording is correct and must be retained (#111125)."""
+    payload = {
+        "reason": "Which API key should this use?",
+        "kind": "needs_input",
+        "recurrences": 2,
+        "limit": kb.BLOCK_RECURRENCE_LIMIT,
+    }
+    msg = _fmt_block_loop(payload)
+    assert "needs a human decision" in msg
+    assert "for orchestration attention" not in msg
+    assert "Which API key should this use?" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -654,118 +692,12 @@ def _wake_text(adapter):
     return getattr(adapter.handled[0], "text", "") or ""
 
 
-def _assert_retry_notification(
-    tmp_path, monkeypatch, *, status, terminal_kind=None, retry_expected=False,
-    retry_status="ready",
-):
-    """Exercise ordinary pings and coalesced wakes against the same DB claim."""
-    for kind in ("crashed", "timed_out"):
-        for mode in ("wake", "notify", "notify+wake"):
-            with monkeypatch.context() as patch:
-                patch.setenv("HERMES_KANBAN_DB", str(tmp_path / f"{kind}-{mode}.db"))
-                kb.init_db()
-                conn = kb.connect()
-                try:
-                    tid = kb.create_task(
-                        conn, title="retry outcome", assignee="worker",
-                        session_id="agent:main:telegram:dm:chat-1",
-                    )
-                    kb.add_notify_sub(
-                        conn, task_id=tid, platform="telegram", chat_id="chat-1",
-                        delivery_mode=mode,
-                    )
-                    # The breaker can leave ready in BOTH event payloads even
-                    # though the task has since become blocked.
-                    payload = {"retry_status": retry_status} if retry_status else {}
-                    kb._append_event(conn, tid, kind, payload)
-                    if terminal_kind:
-                        kb._append_event(conn, tid, terminal_kind, {
-                            "retry_status": "ready", "summary": "finished work",
-                        })
-                    with kb.write_txn(conn):
-                        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
-                finally:
-                    conn.close()
-
-                adapter = RecordingAdapter()
-                asyncio.run(_run_one_notifier_tick(patch, _make_runner(adapter)))
-                texts = [item["text"] for item in adapter.sent]
-                if mode != "notify":
-                    wake = _wake_text(adapter)
-                    texts.append(wake)
-                    if terminal_kind == "completed":
-                        assert "completed" in wake and "finished work" in wake
-                        assert "crashed" not in wake and "timed out" not in wake, wake
-                    elif terminal_kind == "gave_up":
-                        assert "gave up (retries exhausted)" in wake, wake
-                if mode != "wake":
-                    assert adapter.sent, "ordinary notification must still be delivered"
-                    assert kind.replace("_", " ") in adapter.sent[0]["text"]
-                assert texts
-                for text in texts:
-                    assert ("will retry" in text) is retry_expected, text
-                    if terminal_kind == "gave_up":
-                        assert "spawn failures" not in text, text
-
-
-def test_retry_notification_gave_up_overrides_stale_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="blocked", terminal_kind="gave_up")
-
-
-def test_retry_notification_gave_up_batch_overrides_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="gave_up")
-
-
-def test_retry_notification_blocked_batch_overrides_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="blocked")
-
-
-def test_retry_notification_triage_batch_overrides_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="ready", terminal_kind="block_loop_detected")
-
-
-def test_retry_notification_current_blocked_overrides_stale_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="blocked")
-
-
-def test_retry_notification_current_triage_overrides_stale_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="triage")
-
-
-def test_retry_notification_current_done_overrides_stale_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="done")
-
-
-def test_retry_notification_current_archived_overrides_stale_ready(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="archived")
-
-
-def test_retry_notification_completed_takes_precedence(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="done", terminal_kind="completed")
-
-
-def test_retry_notification_ready_preserves_retry_wording(tmp_path, monkeypatch):
-    _assert_retry_notification(tmp_path, monkeypatch, status="ready", retry_expected=True)
-
-
-def test_retry_notification_legacy_ready_preserves_retry_wording(tmp_path, monkeypatch):
-    _assert_retry_notification(
-        tmp_path, monkeypatch, status="ready", retry_expected=True, retry_status=None,
-    )
-
-
-def test_retry_notification_review_preserves_retry_wording(tmp_path, monkeypatch):
-    _assert_retry_notification(
-        tmp_path, monkeypatch, status="review", retry_expected=True, retry_status="review",
-    )
-
-
 def _review_handoff_task(
     *,
     delivery_mode="notify+wake",
     summary="PR ready: https://example.invalid/pr/7\nfull details below",
 ):
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -773,7 +705,7 @@ def _review_handoff_task(
             assignee="worker",
             session_id="agent:main:telegram:dm:chat-1",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",
@@ -802,7 +734,6 @@ def test_review_requested_wakes_the_origin_session(tmp_path, monkeypatch):
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     assert len(adapter.sent) == 1, "the passive review ping is unchanged"
-    assert "ready for review" in adapter.sent[0]["text"]
 
     wake = _wake_text(adapter)
     assert tid in wake
@@ -817,7 +748,7 @@ def test_block_loop_detected_wakes_the_origin_session(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "triage-wake.db"))
     kb.init_db()
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn,
@@ -825,7 +756,7 @@ def test_block_loop_detected_wakes_the_origin_session(tmp_path, monkeypatch):
             assignee="worker",
             session_id="agent:main:telegram:dm:chat-1",
         )
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn,
             task_id=tid,
             platform="telegram",

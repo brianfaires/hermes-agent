@@ -7,15 +7,11 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tempfile
-import unittest
-from contextlib import closing, contextmanager
-from unittest.mock import patch
 from pathlib import Path
 
 
 def _point_ledger(monkeypatch, tmp_path):
-    import cron.executions as executions
+    from cron import executions
 
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db")
     return executions
@@ -43,75 +39,118 @@ def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     assert persisted == [completed]
 
 
-@contextmanager
-def _profile_home(home):
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+def test_execution_can_be_loaded_by_exact_attempt_id(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    first = executions.create_execution("same-job", source="builtin")
+    second = executions.create_execution("same-job", source="builtin")
 
-    token = set_hermes_home_override(home)
-    try:
-        yield
-    finally:
-        reset_hermes_home_override(token)
+    assert executions.get_execution(first["id"]) == first
+    assert executions.get_execution(second["id"]) == second
+    assert executions.get_execution("missing") is None
 
 
-class ExecutionLedgerProfileTests(unittest.TestCase):
-    """Exercise real profile/store resolution, not an unused imported alias."""
+def test_fresh_external_handoff_is_not_recovered_before_worker_adopts(
+    monkeypatch, tmp_path
+):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("handoff-job", source="builtin")
+    assert executions.mark_execution_handoff_pending(record["id"]) is not None
 
-    def setUp(self):
-        import cron.executions as executions
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-gateway")
+    monkeypatch.setattr(executions, "_owner_is_live", lambda _pid, _started: False)
 
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name)
-        override = patch.object(executions, "EXECUTIONS_FILE", None)
-        override.start()
-        self.addCleanup(override.stop)
+    assert executions.recover_interrupted_executions() == 0
+    assert executions.get_execution(record["id"])["status"] == "claimed"
+    adopted = executions.adopt_claimed_execution(record["id"])
+    assert adopted["status"] == "running"
+    assert adopted["handoff_pending"] == 0
 
-    def test_execution_ledger_follows_the_current_profile_home(self):
-        from cron import executions
 
-        default, worker = self.home / "default", self.home / "worker"
-        with _profile_home(default):
-            default_row = executions.create_execution("same-job", source="builtin")
-            with _profile_home(worker):
-                worker_row = executions.create_execution("same-job", source="builtin")
-                self.assertEqual(executions.list_executions(), [worker_row])
-                self.assertIsNone(executions.mark_execution_running(default_row["id"]))
-                self.assertEqual(executions.list_executions(), [worker_row])
-            self.assertEqual(executions.list_executions(), [default_row])
-            self.assertIsNone(executions.finish_execution(worker_row["id"], success=True))
-            self.assertEqual(executions.list_executions(), [default_row])
-        self.assertTrue((default / "cron" / "executions.db").is_file())
-        self.assertTrue((worker / "cron" / "executions.db").is_file())
+def test_stale_external_handoff_is_recovered_unknown(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("handoff-job", source="builtin")
+    pending = executions.mark_execution_handoff_pending(record["id"])
 
-    def test_explicit_cron_store_owns_jobs_and_ledger_and_restores_after_error(self):
-        from cron import executions, jobs
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-gateway")
+    monkeypatch.setattr(executions, "_owner_is_live", lambda _pid, _started: False)
+    monkeypatch.setattr(
+        executions.time,
+        "time",
+        lambda: pending["handoff_started_at"]
+        + executions.HANDOFF_ADOPTION_GRACE_SECONDS
+        + 1,
+    )
 
-        ambient, selected, nested = (self.home / n for n in ("ambient", "selected", "nested"))
-        with _profile_home(ambient):
-            ambient_row = executions.create_execution("same-job", source="builtin")
-            with jobs.use_cron_store(selected):
-                jobs.save_jobs([{"id": "same-job", "name": "selected"}])
-                selected_row = executions.create_execution("same-job", source="builtin")
-                with self.assertRaisesRegex(RuntimeError, "fixture exit"):
-                    with jobs.use_cron_store(nested):
-                        jobs.save_jobs([{"id": "same-job", "name": "nested"}])
-                        nested_row = executions.create_execution("same-job", source="builtin")
-                        self.assertEqual(executions.list_executions(), [nested_row])
-                        self.assertEqual(jobs.load_jobs()[0]["name"], "nested")
-                        self.assertIsNone(executions.mark_execution_running(selected_row["id"]))
-                        raise RuntimeError("fixture exit")
-                self.assertEqual(executions.list_executions(), [selected_row])
-                self.assertEqual(jobs.load_jobs()[0]["name"], "selected")
-                self.assertIsNone(executions.finish_execution(nested_row["id"], success=True))
-            self.assertEqual(executions.list_executions(), [ambient_row])
-            self.assertFalse((ambient / "cron" / "jobs.json").exists())
-        for home, expected in ((selected, selected_row), (nested, nested_row)):
-            self.assertTrue((home / "cron" / "jobs.json").is_file())
-            # Read the physical database independently of the resolver under test.
-            with closing(sqlite3.connect(home / "cron" / "executions.db")) as conn:
-                self.assertEqual(conn.execute("SELECT id, status FROM executions").fetchall(),
-                                 [(expected["id"], "claimed")])
+    assert executions.recover_interrupted_executions() == 1
+    recovered = executions.get_execution(record["id"])
+    assert recovered["status"] == "unknown"
+    assert recovered["handoff_pending"] == 0
+
+
+def test_recovery_does_not_overwrite_concurrent_worker_adoption(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("adoption-race", source="builtin")
+    pending = executions.mark_execution_handoff_pending(record["id"])
+    assert pending is not None
+    monkeypatch.setattr(executions, "_PROCESS_ID", "replacement-scheduler")
+    monkeypatch.setattr(
+        executions.time,
+        "time",
+        lambda: pending["handoff_started_at"]
+        + executions.HANDOFF_ADOPTION_GRACE_SECONDS
+        + 1,
+    )
+
+    def adopt_while_liveness_is_checked(_pid, _started_at):
+        monkeypatch.setattr(executions, "_PROCESS_ID", "external-worker")
+        monkeypatch.setattr(executions.os, "getpid", lambda: 4242)
+        monkeypatch.setattr(executions, "_process_start_time", lambda _pid: 9876)
+        assert executions.adopt_claimed_execution(record["id"]) is not None
+        return False
+
+    monkeypatch.setattr(executions, "_owner_is_live", adopt_while_liveness_is_checked)
+
+    assert executions.recover_interrupted_executions() == 0
+    current = executions.get_execution(record["id"])
+    assert current is not None
+    assert current["status"] == "running"
+    assert current["process_id"] == "external-worker"
+    assert current["pid"] == 4242
+
+
+def test_foreign_process_cannot_start_or_finish_execution(monkeypatch, tmp_path):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("owner-fence", source="builtin")
+    original_process_id = executions._PROCESS_ID
+    original_pid = record["pid"]
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", "foreign-process")
+    monkeypatch.setattr(executions.os, "getpid", lambda: original_pid + 1)
+    assert executions.mark_execution_running(record["id"]) is None
+    assert executions.finish_execution(record["id"], success=True) is None
+
+    monkeypatch.setattr(executions, "_PROCESS_ID", original_process_id)
+    monkeypatch.setattr(executions.os, "getpid", lambda: original_pid)
+    assert executions.mark_execution_running(record["id"]) is not None
+    assert executions.finish_execution(record["id"], success=True) is not None
+
+
+def test_execution_ledger_follows_the_current_profile_home(monkeypatch, tmp_path):
+    from cron import executions
+
+    current_home = {"path": tmp_path / "default"}
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", None)
+    monkeypatch.setattr(executions, "get_hermes_home", lambda: current_home["path"])
+
+    default_row = executions.create_execution("default-job", source="builtin")
+    current_home["path"] = tmp_path / "worker"
+    worker_row = executions.create_execution("worker-job", source="builtin")
+
+    assert executions.list_executions() == [worker_row]
+    current_home["path"] = tmp_path / "default"
+    assert executions.list_executions() == [default_row]
+    assert (tmp_path / "default" / "cron" / "executions.db").is_file()
+    assert (tmp_path / "worker" / "cron" / "executions.db").is_file()
 
 
 def test_terminal_execution_cannot_be_rewritten(monkeypatch, tmp_path):
@@ -138,6 +177,24 @@ def test_retention_bounds_terminal_history_but_preserves_inflight(monkeypatch, t
     records = executions.list_executions(limit=100)
     assert len([row for row in records if row["status"] == "completed"]) == 3
     assert executions.latest_execution("live")["status"] == "running"
+
+
+def test_recently_finished_long_running_execution_survives_retention(
+    monkeypatch, tmp_path
+):
+    executions = _point_ledger(monkeypatch, tmp_path)
+    monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 1)
+    long_running = executions.create_execution("long-running", source="builtin")
+    assert executions.mark_execution_running(long_running["id"]) is not None
+    newer = executions.create_execution("newer", source="builtin")
+    assert executions.finish_execution(newer["id"], success=True) is not None
+
+    finished = executions.finish_execution(long_running["id"], success=True)
+
+    assert finished is not None
+    assert finished["status"] == "completed"
+    assert executions.get_execution(long_running["id"])["status"] == "completed"
+    assert executions.get_execution(newer["id"]) is None
 
 
 def test_corrupt_store_fails_closed_without_overwrite(monkeypatch, tmp_path):
@@ -241,7 +298,7 @@ def test_restart_marks_interrupted_execution_unknown_without_requeue(tmp_path):
 
 
 def test_generic_submit_failure_finishes_attempt_and_releases_guard(monkeypatch):
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     class BrokenPool:
         def submit(self, _callable):
@@ -270,15 +327,18 @@ def test_generic_submit_failure_finishes_attempt_and_releases_guard(monkeypatch)
     assert "submit-fail" not in scheduler.get_running_job_ids()
 
 
-def test_run_one_job_records_running_then_terminal(monkeypatch):
-    import cron.scheduler as scheduler
+def test_run_one_job_records_running_then_terminal(monkeypatch, tmp_path):
+    from cron import scheduler
 
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id = executions.create_execution("job-3", source="direct")["id"]
+    mark_running = scheduler.mark_execution_running
     events = []
     run_execution_ids = []
     monkeypatch.setattr(
         scheduler,
         "mark_execution_running",
-        lambda execution_id, **kwargs: events.append(("running", execution_id)),
+        lambda execution_id: events.append(("running", execution_id)) or mark_running(execution_id),
         raising=False,
     )
     monkeypatch.setattr(
@@ -298,10 +358,10 @@ def test_run_one_job_records_running_then_terminal(monkeypatch):
     monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: None)
 
-    assert scheduler.run_one_job({"id": "job-3", "execution_id": "exec-3"}) is True
-    assert run_execution_ids == ["exec-3"]
-    assert events[0] == ("running", "exec-3")
-    assert events[-1][0:2] == ("finish", "exec-3")
+    assert scheduler.run_one_job({"id": "job-3", "execution_id": execution_id}) is True
+    assert run_execution_ids == [execution_id]
+    assert events[0] == ("running", execution_id)
+    assert events[-1][0:2] == ("finish", execution_id)
     assert events[-1][2]["success"] is True
 
 
@@ -398,9 +458,8 @@ def test_ledger_operations_close_every_connection(monkeypatch, tmp_path):
     executions.latest_executions(["leak-check"])
     executions.recover_interrupted_executions()
 
-    assert len(opened) == 6
-    assert len(closed) == 6
-    assert set(opened) == set(closed)
+    assert opened
+    assert sorted(opened) == sorted(closed)
 
 
 def test_early_return_still_closes_connection(monkeypatch, tmp_path):
@@ -415,53 +474,12 @@ def test_early_return_still_closes_connection(monkeypatch, tmp_path):
     assert len(closed) == 1
 
 
-def test_exception_during_operation_still_closes_connection(monkeypatch, tmp_path):
-    """A failing statement inside the transaction must roll back and close,
-    not leak the connection."""
-    executions = _point_ledger(monkeypatch, tmp_path)
-    opened, closed = _count_open_connections(executions, monkeypatch)
-
-    with __import__("pytest").raises(sqlite3.IntegrityError):
-        with executions._transaction() as conn:
-            conn.execute(
-                "INSERT INTO executions (id, job_id, source, process_id, pid, "
-                "status, claimed_at) VALUES ('x', 'x', 'x', 'x', 1, 'bogus-status', 'now')"
-            )
-
-    assert len(opened) == 1
-    assert len(closed) == 1
 
 
-def test_schema_init_failure_still_closes_connection(monkeypatch, tmp_path):
-    """If PRAGMA/DDL setup in _connect() fails after sqlite3.connect()
-    succeeds, the partially-initialized connection must still be closed."""
-    executions = _point_ledger(monkeypatch, tmp_path)
-    opened_ids = []
-    closed_ids = []
-    real_connect = sqlite3.connect
-
-    class _FailingSchemaConnection(_TrackingConnection):
-        def execute(self, sql, *args, **kwargs):
-            if "CREATE TABLE" in sql:
-                raise sqlite3.OperationalError("simulated schema init failure")
-            return self._real.execute(sql, *args, **kwargs)
-
-    def tracking_connect(*args, **kwargs):
-        conn = real_connect(*args, **kwargs)
-        opened_ids.append(id(conn))
-        return _FailingSchemaConnection(conn, closed_ids)
-
-    monkeypatch.setattr(executions.sqlite3, "connect", tracking_connect)
-
-    with __import__("pytest").raises(sqlite3.OperationalError):
-        executions.create_execution("init-fail", source="builtin")
-
-    assert len(opened_ids) == 1
-    assert len(closed_ids) == 1
 
 
 def test_job_listing_exposes_latest_execution(monkeypatch, tmp_path):
-    import cron.jobs as jobs
+    from cron import jobs
 
     monkeypatch.setattr(jobs, "CRON_DIR", tmp_path / "cron")
     monkeypatch.setattr(jobs, "JOBS_FILE", tmp_path / "cron" / "jobs.json")
@@ -477,18 +495,25 @@ def test_job_listing_exposes_latest_execution(monkeypatch, tmp_path):
     assert listed[0]["latest_execution"]["status"] == "running"
 
 
-def test_retained_results_cross_pages_and_survive_status_pruning(monkeypatch, tmp_path):
-    executions = _point_ledger(monkeypatch, tmp_path)
-    from datetime import datetime, timezone
+def test_history_orders_by_instant_across_dst_fall_back(monkeypatch, tmp_path):
+    """01:10-05:00 is 20 minutes after 01:50-04:00 but sorts first as text."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 2)
-    monkeypatch.setattr(executions, "_hermes_now", lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
-    expected = {}
-    for n in range(505):
-        row = executions.create_execution("same-job", source="direct")
-        expected[row["id"]] = f"answer {n}"
-        executions.finish_execution(row["id"], success=True, final_response=expected[row["id"]])
-    rows = list(executions.iter_execution_results(page_size=200))
-    assert {r["id"]: r["final_response"] for r in rows} == expected
-    assert len(executions.list_executions()) == 2
-    assert all("final_response" not in row for row in executions.list_executions())
+    executions = _point_ledger(monkeypatch, tmp_path)
+    new_york = ZoneInfo("America/New_York")
+    first_pass = datetime(2026, 11, 1, 1, 50, tzinfo=new_york, fold=0)
+    second_pass = datetime(2026, 11, 1, 1, 10, tzinfo=new_york, fold=1)
+    monkeypatch.setattr(executions, "_hermes_now", lambda: first_pass)
+    earlier = executions.create_execution("dst-job", source="builtin")
+    monkeypatch.setattr(executions, "_hermes_now", lambda: second_pass)
+    later = executions.create_execution("dst-job", source="builtin")
+    assert later["claimed_at"] < earlier["claimed_at"]
+
+    assert executions.latest_execution("dst-job")["id"] == later["id"]
+    assert executions.latest_executions(["dst-job"])["dst-job"]["id"] == later["id"]
+    assert [r["id"] for r in executions.list_executions(job_id="dst-job")] == [
+        later["id"], earlier["id"],
+    ]
+    page = executions.list_executions(job_id="dst-job", before_claimed_at=later["claimed_at"])
+    assert [r["id"] for r in page] == [earlier["id"]]

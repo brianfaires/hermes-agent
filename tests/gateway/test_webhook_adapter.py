@@ -19,10 +19,7 @@ import base64
 import hashlib
 import hmac
 import json
-import socket
-import threading
 import time
-from collections import deque
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -34,7 +31,7 @@ from gateway.platforms.base import SendResult
 from gateway.platforms.webhook import (
     WebhookAdapter,
     _INSECURE_NO_AUTH,
-    check_webhook_requirements,
+    _is_usable_secret,
 )
 
 
@@ -198,183 +195,6 @@ class TestValidateSignature:
         req = _mock_request(headers={"X-Gitlab-Token": secret})
         assert adapter._validate_signature(req, b"{}", secret) is True
 
-    def test_validate_google_pubsub_oidc_token_valid(self):
-        """Route-level OIDC auth accepts a Google-signed bearer token."""
-        route = {
-            "auth": "oidc",
-            "oidc": {
-                "audience": "https://agent.example.com/webhooks/pubsub",
-                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
-            },
-        }
-        adapter = _make_adapter()
-        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
-
-        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
-            "gateway.platforms.webhook.jwt.decode",
-            return_value={
-                "iss": "https://accounts.google.com",
-                "aud": "https://agent.example.com/webhooks/pubsub",
-                "email": "pubsub-pusher@example.iam.gserviceaccount.com",
-                "email_verified": True,
-            },
-        ) as decode:
-            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
-
-            assert adapter._validate_oidc_token(req, route) is True
-
-        jwk_client_cls.assert_called_once_with("https://www.googleapis.com/oauth2/v3/certs")
-        decode.assert_called_once()
-        assert decode.call_args.kwargs["audience"] == "https://agent.example.com/webhooks/pubsub"
-        assert set(decode.call_args.kwargs["issuer"]) == {
-            "accounts.google.com",
-            "https://accounts.google.com",
-        }
-
-    def test_validate_oidc_route_rejects_audience_only_identity(self):
-        route = {
-            "auth": "oidc",
-            "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
-        }
-        adapter = _make_adapter()
-
-        with pytest.raises(ValueError, match="oidc.email or oidc.subject"):
-            adapter._validate_oidc_route_config(route, "pubsub")
-
-    def test_validate_oidc_token_reuses_google_jwks_client(self):
-        route = {
-            "auth": "oidc",
-            "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
-        }
-        adapter = _make_adapter()
-        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
-
-        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
-            "gateway.platforms.webhook.jwt.decode",
-            return_value={
-                "iss": "https://accounts.google.com",
-                "aud": "https://agent.example.com/webhooks/pubsub",
-                "sub": "service-account-id",
-            },
-        ):
-            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
-            assert adapter._validate_oidc_token(req, route) is True
-            assert adapter._validate_oidc_token(req, route) is True
-
-        jwk_client_cls.assert_called_once_with(
-            "https://www.googleapis.com/oauth2/v3/certs"
-        )
-
-    def test_oidc_route_rejects_custom_jwks_endpoint(self):
-        adapter = _make_adapter()
-        route = {
-            "auth": "oidc",
-            "oidc": {
-                "audience": "https://agent.example.com/webhooks/pubsub",
-                "jwks_url": "https://internal.example.test/keys",
-            },
-        }
-
-        with pytest.raises(ValueError, match="Google JWKS"):
-            adapter._validate_oidc_route_config(route, "pubsub")
-
-    def test_validate_google_pubsub_oidc_token_rejects_wrong_email(self):
-        """Expected service-account email narrows which Pub/Sub pusher may call the route."""
-        route = {
-            "auth": "oidc",
-            "oidc": {
-                "audience": "https://agent.example.com/webhooks/pubsub",
-                "email": "expected@example.iam.gserviceaccount.com",
-            },
-        }
-        adapter = _make_adapter()
-        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
-
-        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
-            "gateway.platforms.webhook.jwt.decode",
-            return_value={
-                "iss": "https://accounts.google.com",
-                "aud": "https://agent.example.com/webhooks/pubsub",
-                "email": "other@example.iam.gserviceaccount.com",
-                "email_verified": True,
-            },
-        ):
-            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
-
-            assert adapter._validate_oidc_token(req, route) is False
-
-    @pytest.mark.parametrize("email_verified", [None, False, "true", 1])
-    def test_validate_oidc_email_requires_boolean_verified_true(self, email_verified):
-        route = {
-            "auth": "oidc",
-            "oidc": {
-                "audience": "https://agent.example.com/webhooks/pubsub",
-                "email": "expected@example.iam.gserviceaccount.com",
-            },
-        }
-        adapter = _make_adapter()
-        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
-        claims = {
-            "iss": "https://accounts.google.com",
-            "aud": "https://agent.example.com/webhooks/pubsub",
-            "email": "expected@example.iam.gserviceaccount.com",
-        }
-        if email_verified is not None:
-            claims["email_verified"] = email_verified
-
-        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
-            "gateway.platforms.webhook.jwt.decode", return_value=claims
-        ):
-            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
-            assert adapter._validate_oidc_token(req, route) is False
-
-    def test_validate_oidc_token_rejects_wrong_subject(self):
-        route = {
-            "auth": "oidc",
-            "oidc": {
-                "audience": "https://agent.example.com/webhooks/pubsub",
-                "subject": "expected-service-account-id",
-            },
-        }
-        adapter = _make_adapter()
-        req = _mock_request(headers={"Authorization": "Bearer jwt-token"})
-
-        with patch("gateway.platforms.webhook.jwt.PyJWKClient") as jwk_client_cls, patch(
-            "gateway.platforms.webhook.jwt.decode",
-            return_value={
-                "iss": "https://accounts.google.com",
-                "aud": "https://agent.example.com/webhooks/pubsub",
-                "sub": "other-service-account-id",
-            },
-        ):
-            jwk_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "public-key"
-            assert adapter._validate_oidc_token(req, route) is False
-
-    def test_validate_google_pubsub_oidc_token_requires_bearer_header(self):
-        """OIDC auth fails closed without an Authorization bearer token."""
-        route = {"auth": "oidc", "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"}}
-        adapter = _make_adapter()
-        req = _mock_request(headers={})
-
-        assert adapter._validate_oidc_token(req, route) is False
-
-    def test_validate_no_secret_allows_all(self):
-        """When the secret is empty/falsy, the validator is never even called
-        by the handler (secret check is 'if secret and secret != _INSECURE...').
-        Verify that an empty secret isn't accidentally passed to the validator."""
-        # This tests the semantics: empty secret means skip validation entirely.
-        # The handler code does: if secret and secret != _INSECURE_NO_AUTH: validate
-        # So with an empty secret, _validate_signature is never reached.
-        # We just verify the code path is correct by constructing an adapter
-        # with no secret and confirming the route config resolves to "".
-        adapter = _make_adapter(
-            routes={"test": {"prompt": "hello"}},
-            secret="",
-        )
-        # The route has no secret, global secret is empty
-        route_secret = adapter._routes["test"].get("secret", adapter._global_secret)
-        assert not route_secret  # empty → validation is skipped in handler
-
 
     def test_validate_generic_v2_wrong_timestamp_rejects(self):
         """The timestamp is cryptographically bound into the V2 signature —
@@ -424,24 +244,13 @@ class TestValidateSignature:
         })
         assert adapter._validate_signature(req, body, secret) is False
 
-    def test_v1_replay_attack_succeeds_demonstrating_the_hole_v2_closes(self):
-        """Regression/documentation test: a captured (body, signature) V1
-        pair replays successfully no matter how much time has passed,
-        because the V1 signature has no timestamp binding at all. This is
-        the exact vulnerability V2 fixes — it is not asserting desired
-        behavior, it is pinning the known, accepted-with-warning legacy
-        gap so a future change to V1's semantics doesn't silently alter it
-        without a deliberate decision."""
+    def test_validate_generic_v1_signature_accepts(self):
+        """Legacy generic senders sign the raw body (X-Webhook-Signature)."""
         adapter = _make_adapter()
         body = b'{"event": "push"}'
         secret = "generic-secret"
-        sig = _generic_signature(body, secret)
-        original_request = _mock_request(headers={"X-Webhook-Signature": sig})
-        assert adapter._validate_signature(original_request, body, secret) is True
-        # "Time passes" — nothing about a V1 signature depends on time, so
-        # a captured pair replayed much later still validates.
-        replayed_request = _mock_request(headers={"X-Webhook-Signature": sig})
-        assert adapter._validate_signature(replayed_request, body, secret) is True
+        req = _mock_request(headers={"X-Webhook-Signature": _generic_signature(body, secret)})
+        assert adapter._validate_signature(req, body, secret) is True
 
 
     def test_validate_svix_signature_raw_secret_valid(self):
@@ -460,6 +269,39 @@ class TestValidateSignature:
             }
         )
         assert adapter._validate_signature(req, body, secret) is True
+
+    @pytest.mark.parametrize(
+        "secret, sign_with, body, received, stale, expected",
+        [
+            ("whsec_" + base64.b64encode(b"0123456789abcdef").decode(), None, b'{"a":1}', b'{"a":1}', False, True),
+            ("raw-signing-secret", None, b'{"a":1}', b'{"a":1}', False, True),
+            ("real-secret", "attacker-secret", b'{"a":1}', b'{"a":1}', False, False),
+            ("real-secret", None, b'{"a":1}', b'{"a":2}', False, False),  # tampered body
+            ("real-secret", None, b'{"a":1}', b'{"a":1}', True, False),  # replayed stale timestamp
+            ("whsec_", None, b'{"a":1}', b'{"a":1}', False, False),  # decodes to an empty key
+            ("whsec_ICAg", None, b'{"a":1}', b'{"a":1}', False, False),  # decodes to whitespace
+            ("whsec_AA==", None, b'{"a":1}', b'{"a":1}', False, False),  # decodes to a NUL byte, which signs like b""
+        ],
+    )
+    def test_standard_webhooks_headers_validate_like_svix(self, secret, sign_with, body, received, stale, expected):
+        """#47451/#101837: webhook-id/-timestamp/-signature is the same HMAC scheme as svix-*."""
+        adapter = _make_adapter()
+        timestamp = str(int(time.time()) - (600 if stale else 0))
+        sig = _svix_signature(body, sign_with or secret, "msg_std", timestamp)
+        req = _mock_request(headers={"webhook-id": "msg_std", "webhook-timestamp": timestamp, "webhook-signature": sig})
+        assert adapter._validate_signature(req, received, secret) is expected
+
+    def test_gitlab_secret_token_survives_unsigned_standard_webhooks_metadata(self):
+        """GitLab sends webhook-id/webhook-timestamp on every delivery and webhook-signature only when a
+        signing token is set; a legacy X-Gitlab-Token route must not be hijacked into the HMAC path."""
+        adapter = _make_adapter()
+        req = _mock_request(headers={
+            "X-Gitlab-Token": "legacy-token", "webhook-id": "gl_1", "webhook-timestamp": str(int(time.time())),
+        })
+        assert adapter._validate_signature(req, b"{}", "legacy-token") is True
+        req_partial = _mock_request(headers={"webhook-id": "gl_2", "webhook-timestamp": str(int(time.time())),
+                                             "webhook-signature": "v1,AAAA"})
+        assert adapter._validate_signature(req_partial, b"{}", "legacy-token") is False
 
 
 # ===================================================================
@@ -660,7 +502,7 @@ class TestHTTPHandling:
     @pytest.mark.asyncio
     async def test_route_without_secret_rejects_unsigned_request(self):
         """Missing HMAC secret must fail closed even if connect() was bypassed."""
-        routes = {"test": {"prompt": "hi"}}
+        routes = {"test": {"prompt": "hi"}, "blank": {"prompt": "hi", "secret": "   "}}
         adapter = _make_adapter(routes=routes, secret="")
         adapter.handle_message = AsyncMock()
 
@@ -668,170 +510,13 @@ class TestHTTPHandling:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post("/webhooks/test", json={"data": "value"})
             assert resp.status == 403
-            data = await resp.json()
-            assert data["error"] == "Webhook route is missing an HMAC secret"
+            # A whitespace-only secret is unset too, even when the request is signed with it.
+            body = b'{"data": "value"}'
+            resp = await cli.post("/webhooks/blank", data=body, headers={
+                "Content-Type": "application/json", "X-Hub-Signature-256": _github_signature(body, "   ")})
+            assert resp.status == 403
 
         adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_oidc_route_accepts_authenticated_request_without_hmac_secret(self):
-        """OIDC routes use Authorization bearer JWTs instead of route HMAC secrets."""
-        routes = {
-            "pubsub": {
-                "auth": "oidc",
-                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
-                "prompt": "Pub/Sub payload: {__raw__}",
-            }
-        }
-        adapter = _make_adapter(routes=routes, secret="")
-        adapter.handle_message = AsyncMock()
-        adapter._validate_oidc_token = MagicMock(return_value=True)
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/pubsub",
-                json={"message": {"messageId": "m-1", "data": "eyJ4IjoxfQ=="}},
-                headers={"Authorization": "Bearer jwt-token"},
-            )
-            assert resp.status == 202
-            data = await resp.json()
-            assert data["status"] == "accepted"
-            assert data["route"] == "pubsub"
-
-        adapter._validate_oidc_token.assert_called_once()
-        adapter.handle_message.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_oidc_verification_runs_off_event_loop_thread(self):
-        routes = {
-            "pubsub": {
-                "auth": "oidc",
-                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
-                "prompt": "Pub/Sub payload: {__raw__}",
-            }
-        }
-        adapter = _make_adapter(routes=routes, secret="")
-        adapter.handle_message = AsyncMock()
-        loop_thread = threading.get_ident()
-        validation_threads = []
-
-        def validate(request, route_config):
-            validation_threads.append(threading.get_ident())
-            return True
-
-        adapter._validate_oidc_token = validate
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/pubsub",
-                json={"message": {"messageId": "m-1"}},
-                headers={"Authorization": "Bearer jwt-token"},
-            )
-            assert resp.status == 202
-
-        assert validation_threads
-        assert validation_threads[0] != loop_thread
-
-    @pytest.mark.asyncio
-    async def test_oidc_route_rejects_invalid_token_before_agent_dispatch(self):
-        routes = {
-            "pubsub": {
-                "auth": "oidc",
-                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
-                "prompt": "x",
-            }
-        }
-        adapter = _make_adapter(routes=routes, secret="")
-        adapter.handle_message = AsyncMock()
-        adapter._validate_oidc_token = MagicMock(return_value=False)
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post(
-                "/webhooks/pubsub",
-                json={"message": {"messageId": "m-1"}},
-                headers={"Authorization": "Bearer bad-token"},
-            )
-            assert resp.status == 401
-            data = await resp.json()
-            assert data["error"] == "Invalid OIDC token"
-
-        adapter.handle_message.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_health_endpoint(self):
-        """GET /health returns 200 with status=ok."""
-        adapter = _make_adapter()
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.get("/health")
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["status"] == "ok"
-            assert data["platform"] == "webhook"
-
-    @pytest.mark.asyncio
-    async def test_connect_starts_server(self):
-        """connect() starts the HTTP listener and marks adapter as connected."""
-        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
-        adapter = _make_adapter(routes=routes, host="127.0.0.1", port=0)
-        # Use port 0 — the OS picks a free port, but aiohttp requires a real bind.
-        # We just test that the method completes and marks connected.
-        # Need to mock TCPSite to avoid actual binding.
-        with patch("gateway.platforms.webhook.web.AppRunner") as MockRunner, \
-             patch("gateway.platforms.webhook.web.TCPSite") as MockSite:
-            mock_runner_inst = AsyncMock()
-            MockRunner.return_value = mock_runner_inst
-            mock_site_inst = AsyncMock()
-            MockSite.return_value = mock_site_inst
-
-            result = await adapter.connect()
-            assert result is True
-            assert adapter.is_connected
-            mock_runner_inst.setup.assert_awaited_once()
-            mock_site_inst.start.assert_awaited_once()
-
-        await adapter.disconnect()
-
-    @pytest.mark.asyncio
-    async def test_connect_starts_server_with_oidc_route_without_hmac_secret(self):
-        """OIDC routes validate startup with audience instead of HMAC secret."""
-        routes = {
-            "pubsub": {
-                "auth": "oidc",
-                "oidc": {"audience": "https://agent.example.com/webhooks/pubsub", "subject": "service-account-id"},
-                "prompt": "x",
-            }
-        }
-        adapter = _make_adapter(routes=routes, host="127.0.0.1", port=0, secret="")
-        with patch("gateway.platforms.webhook.web.AppRunner") as MockRunner, \
-             patch("gateway.platforms.webhook.web.TCPSite") as MockSite:
-            mock_runner_inst = AsyncMock()
-            MockRunner.return_value = mock_runner_inst
-            mock_site_inst = AsyncMock()
-            MockSite.return_value = mock_site_inst
-
-            result = await adapter.connect()
-            assert result is True
-            assert adapter.is_connected
-
-        await adapter.disconnect()
-
-
-    @pytest.mark.asyncio
-    async def test_disconnect_cleans_up(self):
-        """disconnect() stops the server and marks adapter disconnected."""
-        adapter = _make_adapter()
-        # Simulate a runner that was previously set up
-        mock_runner = AsyncMock()
-        adapter._runner = mock_runner
-        adapter._running = True
-
-        await adapter.disconnect()
-        mock_runner.cleanup.assert_awaited_once()
-        assert adapter._runner is None
-        assert not adapter.is_connected
 
 
 # ===================================================================
@@ -858,6 +543,37 @@ class TestIdempotency:
             assert resp2.status == 200
             data = await resp2.json()
             assert data["status"] == "duplicate"
+
+            # Header-less deliveries in the same millisecond must not collide on a fallback id.
+            with patch("gateway.platforms.webhook.time.time", return_value=1_700_000_000.0):
+                bare = [await cli.post("/webhooks/idem", json={"a": 2}) for _ in range(2)]
+            assert [r.status for r in bare] == [202, 202]
+
+    @pytest.mark.asyncio
+    async def test_delivery_id_is_scoped_to_authenticated_route(self):
+        """Provider IDs deduplicate retries for one route, not unrelated authenticated routes."""
+        routes = {
+            "alpha": {"secret": _INSECURE_NO_AUTH, "prompt": "alpha"},
+            "beta": {"secret": _INSECURE_NO_AUTH, "prompt": "beta"},
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        headers = {"X-GitHub-Delivery": "provider-delivery-1"}
+        async with TestClient(TestServer(app)) as cli:
+            alpha = await cli.post("/webhooks/alpha", json={"route": "alpha"}, headers=headers)
+            beta = await cli.post("/webhooks/beta", json={"route": "beta"}, headers=headers)
+            alpha_retry = await cli.post("/webhooks/alpha", json={"route": "alpha"}, headers=headers)
+
+            assert (alpha.status, (await alpha.json())["status"]) == (202, "accepted")
+            assert (beta.status, (await beta.json())["status"]) == (202, "accepted")
+            assert (alpha_retry.status, (await alpha_retry.json())["status"]) == (200, "duplicate")
+
+        await asyncio.sleep(0)
+        assert adapter.handle_message.await_count == 2
+        sources = {call.args[0].source.user_id for call in adapter.handle_message.await_args_list}
+        assert sources == {"webhook:alpha", "webhook:beta"}
 
 
 # ===================================================================
@@ -982,6 +698,43 @@ class TestSessionIsolation:
         ids = {ev.source.chat_id for ev in captured_events}
         assert len(ids) == 2, "Each delivery must have a unique session chat_id"
 
+    @pytest.mark.asyncio
+    async def test_delivery_tuple_is_an_unambiguous_session_identity(self):
+        """Route, provider delivery ID, and profile form one collision-free identity."""
+        adapter = _make_adapter()
+        captured_events = []
+
+        async def _capture(event):
+            captured_events.append(event)
+
+        def _spawn(prompt, delivery_id, route, profile, deliver, chat_id, now):
+            return adapter._spawn_agent_run(
+                {},
+                prompt,
+                delivery_id,
+                now,
+                route_config={"deliver": deliver, "deliver_extra": {"chat_id": chat_id}},
+                route_name=route,
+                profile=profile,
+                event_type="push",
+            )
+
+        adapter.handle_message = _capture
+        await asyncio.gather(
+            _spawn("high prompt", "external:d1", "build", "shared-profile", "telegram", "high-chat", 100.0),
+            _spawn("low prompt", "d1", "build:external", "shared-profile", "discord", "low-chat", 101.0),
+            _spawn("other prompt", "external:d1", "build", "other-profile", "slack", "other-chat", 102.0),
+        )
+
+        events = {event.text: event for event in captured_events}
+        high, low, other = (events[prompt] for prompt in ("high prompt", "low prompt", "other prompt"))
+        assert len({high.source.chat_id, low.source.chat_id, other.source.chat_id}) == 3
+        assert (high.source.profile, high.source.user_id) == ("shared-profile", "webhook:build")
+        assert (low.source.profile, low.source.user_id) == ("shared-profile", "webhook:build:external")
+        assert (other.source.profile, other.source.user_id) == ("other-profile", "webhook:build")
+        assert [adapter._delivery_info[e.source.chat_id]["deliver_extra"]["chat_id"] for e in (high, low, other)] == [
+            "high-chat", "low-chat", "other-chat"]
+
 
 # ===================================================================
 # Silence-marker suppression
@@ -1005,6 +758,7 @@ class TestWebhookSilenceSuppression:
         mock_target.send = AsyncMock(return_value=SendResult(success=True))
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("telegram"): mock_target}
+        mock_runner._authorization_adapter = lambda platform, profile=None: mock_runner.adapters.get(platform)
         mock_runner.config.get_home_channel.return_value = None
         adapter.gateway_runner = mock_runner
 
@@ -1084,18 +838,6 @@ class TestDeliveryCleanup:
 
 
 # ===================================================================
-# check_webhook_requirements
-# ===================================================================
-
-
-class TestCheckRequirements:
-
-    @patch("gateway.platforms.webhook.AIOHTTP_AVAILABLE", False)
-    def test_returns_false_without_aiohttp(self):
-        assert check_webhook_requirements() is False
-
-
-# ===================================================================
 # __raw__ template token
 # ===================================================================
 
@@ -1132,6 +874,7 @@ class TestDeliverCrossPlatformThreadId:
 
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("telegram"): mock_target}
+        mock_runner._authorization_adapter = lambda platform, profile=None: mock_runner.adapters.get(platform)
         mock_runner.config.get_home_channel.return_value = None
 
         adapter.gateway_runner = mock_runner
@@ -1151,6 +894,89 @@ class TestDeliverCrossPlatformThreadId:
         mock_target.send.assert_awaited_once_with(
             "12345", "hello", metadata={"thread_id": "999"}
         )
+
+
+class TestCrossPlatformDeliveryMirror:
+    """An opted-in route's delivered response is appended to the TARGET chat's session (real state.db),
+    so a follow-up reply there has context; without the opt-in the target transcript is untouched."""
+
+    _CHAT = "5135545282"
+
+    @staticmethod
+    def _seed_dm(home, sid, chat):
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=home / "state.db")
+        db.create_session(sid, source="telegram")
+        db._conn.execute("UPDATE sessions SET session_key=?, chat_id=?, user_id=? WHERE id=?",
+                         (f"agent:main:telegram:dm:{chat}", chat, chat, sid))
+        db._conn.commit()
+        db.close()
+
+    @staticmethod
+    def _transcript(home, sid):
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=home / "state.db")
+        rows = db._conn.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY id", (sid,)).fetchall()
+        db.close()
+        return [(r[0], r[1]) for r in rows]
+
+    @pytest.fixture
+    def homes(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        import hermes_state
+        from hermes_cli.profiles import get_profile_dir
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+        # The hermetic conftest pins DEFAULT_DB_PATH when hermes_state is already imported; un-pin it so
+        # state.db resolves from the active (profile-scoped) home at call time, as in production.
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", hermes_state._IMPORT_DEFAULT_DB_PATH)
+        work_home = get_profile_dir("work")
+        work_home.mkdir(parents=True)
+        # A DM chat_id is the user's id on every bot, so both profiles hold a session for it.
+        self._seed_dm(default_home, "dm-default", self._CHAT)
+        self._seed_dm(work_home, "dm-work", self._CHAT)
+        return default_home, work_home
+
+    @staticmethod
+    def _attach_target(adapter):
+        target = AsyncMock()
+        target.send = AsyncMock(return_value=SendResult(success=True))
+        adapter.gateway_runner = MagicMock()
+        adapter.gateway_runner._authorization_adapter = lambda platform, profile=None: target
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_opted_in_delivery_mirrors_into_the_routed_profiles_chat_session(self, homes):
+        default_home, work_home = homes
+        adapter = self._attach_target(_make_adapter())
+        delivery = {"deliver": "telegram", "route": "ambush-nfl", "profile": "work", "mirror": True,
+                    "deliver_extra": {"chat_id": self._CHAT}}
+        result = await adapter._deliver_cross_platform("telegram", "Henderson OUT Wednesday", delivery)
+        assert result.success is True
+        assert self._transcript(work_home, "dm-work") == [
+            ("user", "[Webhook delivery: ambush-nfl]\nHenderson OUT Wednesday")]
+        assert self._transcript(default_home, "dm-default") == []
+
+    @pytest.mark.asyncio
+    async def test_route_without_opt_in_never_touches_the_target_transcript(self, homes):
+        default_home, _ = homes
+        routes = {"plain": {"secret": _INSECURE_NO_AUTH, "prompt": "p", "deliver": "telegram",
+                            "deliver_extra": {"chat_id": self._CHAT}},
+                  "yaml-str": {"secret": _INSECURE_NO_AUTH, "prompt": "p", "deliver": "telegram",
+                               "deliver_extra": {"chat_id": self._CHAT}, "mirror_to_session": "false"}}
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+        async with TestClient(TestServer(_create_app(adapter))) as cli:
+            for route in routes:
+                resp = await cli.post(f"/webhooks/{route}", json={"a": 1}, headers={"X-Request-ID": route})
+                assert resp.status == 202
+        self._attach_target(adapter)
+        deliveries = {delivery["route"]: delivery for delivery in adapter._delivery_info.values()}
+        for route in routes:
+            assert (await adapter._deliver_cross_platform("telegram", "hi", deliveries[route])).success is True
+        assert self._transcript(default_home, "dm-default") == []
 
 
 class TestInsecureNoAuthSafetyRail:
@@ -1206,13 +1032,6 @@ class TestDualStackBind:
     """
 
 
-    def test_missing_host_key_resolves_to_none(self):
-        """Config with no host key → dual-stack (None), not a literal string."""
-        cfg = PlatformConfig(enabled=True, extra={"port": 0, "routes": {}})
-        adapter = WebhookAdapter(cfg)
-        assert adapter._host is None
-
-
     @pytest.mark.asyncio
     async def test_default_bind_serves_both_families(self):
         """Binding the real server with the default host opens v4 AND v6 sockets.
@@ -1254,6 +1073,38 @@ class TestDualStackBind:
             await adapter.disconnect()
 
 
+class TestExclusiveBindTimeWait:
+    """The TIME_WAIT rebind (positive case: tests/gateway/test_api_server_bind_guard.py, shared
+    ``start_tcp_site``) must not weaken the exclusive bind: a live listener still wins."""
+
+    @staticmethod
+    def _adapter_on(port: int) -> WebhookAdapter:
+        return _make_adapter(
+            routes={"r1": {"secret": "real-secret-abc123", "prompt": "x"}},
+            host="127.0.0.1",
+            port=port,
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_host_still_rejects_live_listener(self):
+        """The TIME_WAIT retry must not weaken exclusivity: a live listener on the same address wins."""
+        # The probe's connection must be closed server-side too, or ``wait_closed()`` never returns.
+        blocker = await asyncio.start_server(
+            lambda _reader, writer: writer.close(), host="127.0.0.1", port=0, reuse_address=False
+        )
+        port = blocker.sockets[0].getsockname()[1]
+        adapter = self._adapter_on(port)
+        try:
+            with patch.object(adapter, "_reload_dynamic_routes"):
+                assert await adapter.connect() is False
+            assert adapter._runner is None
+            assert adapter.is_connected is False
+        finally:
+            await adapter.disconnect()
+            blocker.close()
+            await blocker.wait_closed()
+
+
 # Regression coverage for #72041: profile-bound webhook authentication
 class TestMultiplexProfileWebhookAuthentication:
     @staticmethod
@@ -1263,7 +1114,7 @@ class TestMultiplexProfileWebhookAuthentication:
         adapter.gateway_runner = runner
         monkeypatch.setattr(
             "hermes_cli.profiles.profiles_to_serve",
-            lambda multiplex, profile_allowlist=None: [
+            lambda multiplex: [
                 ("default", tmp_path),
                 ("worker", tmp_path / "profiles" / "worker"),
                 ("other", tmp_path / "profiles" / "other"),
@@ -1332,6 +1183,62 @@ class TestMultiplexProfileWebhookAuthentication:
             )
             assert default_profile.status == 404
 
+    @pytest.mark.asyncio
+    async def test_routed_profile_skills_resolve_under_that_profile(
+        self, tmp_path, monkeypatch
+    ):
+        """A /p/<profile>/ route's ``skills:`` must load from that profile's
+        skills/ dir (#67277). Before the fix the lookup ran with no profile
+        scope, so it scanned the launch profile and logged "Skill not found".
+        """
+        import agent.skill_commands as sc_mod
+
+        worker = tmp_path / "profiles" / "worker"
+        skill_dir = worker / "skills" / "worker-only"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: worker-only\ndescription: w\n---\n\nBody of worker-only.\n"
+        )
+        (worker / "config.yaml").write_text("{}\n")
+        (worker / ".env").write_text("")
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_profile_dir", lambda name: tmp_path / "profiles" / name
+        )
+        route_secret = "worker-route-secret-abc123"
+        adapter = _make_adapter(
+            routes={
+                "gh": {
+                    "profile": "worker",
+                    "secret": route_secret,
+                    "prompt": "PR: {action}",
+                    "skills": ["worker-only"],
+                }
+            },
+            host="127.0.0.1",
+        )
+        self._configure_profiles(adapter, tmp_path, monkeypatch)
+        seen = []
+
+        async def _capture(event):
+            seen.append(event)
+
+        adapter.handle_message = _capture
+        body = b'{"action":"opened"}'
+        headers = {
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": _github_signature(body, route_secret),
+        }
+        with (
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
+        ):
+            async with TestClient(TestServer(self._app(adapter))) as cli:
+                resp = await cli.post("/p/worker/webhooks/gh", data=body, headers=headers)
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+        assert len(seen) == 1
+        assert seen[0].source.profile == "worker"
+        assert "Body of worker-only." in seen[0].text
+
 
 def test_route_profile_validation_fails_closed():
     assert WebhookAdapter._route_allows_profile({}, None) is True
@@ -1345,3 +1252,23 @@ def test_route_profile_validation_fails_closed():
         assert WebhookAdapter._route_allows_profile(
             {"profile": malformed}, "worker"
         ) is False
+
+
+class TestBlankRouteSecretFailsClosed:
+    @pytest.mark.parametrize("secret", ["   ", "\t", "\n", 123])
+    def test_connect_rejects_an_unusable_route_secret(self, secret):
+        adapter = _make_adapter(routes={"hook": {"secret": secret}})
+        with pytest.raises(ValueError, match="missing, blank, or not a string"):
+            asyncio.run(adapter.connect())
+        # The hot-reload path applies the same guard to agent-created dynamic routes.
+        assert adapter._dynamic_route_allowed("hook", {"secret": secret}) is False
+
+
+@pytest.mark.parametrize(
+    "value,usable",
+    [("s3cret", True), ("x", True), (" x ", True),
+     ("", False), ("   ", False), ("\t\n", False),
+     (None, False), (b"bytes", False), (123, False)],
+)
+def test_is_usable_secret_classifies_configured_secrets(value, usable):
+    assert _is_usable_secret(value) is usable

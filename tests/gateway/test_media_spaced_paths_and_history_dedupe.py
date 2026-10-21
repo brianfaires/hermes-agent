@@ -5,7 +5,7 @@ Covers the follow-up wave after PR #72170:
 
 * #24032 — GIS extensions (.kmz/.kml/.geojson/.gpx) are deliverable, and
   unknown-extension paths containing spaces extract via the
-  validation-gated progressive right-trim (``_spaced_path_candidates``).
+  validation of the complete standalone path, without shortening prose.
 * #16434 half — ``strip_media_directives_for_display`` (streaming path) no
   longer strips MEDIA tags out of fenced code blocks / inline-code examples;
   protected spans are a mask-locator, matching ``extract_media``.
@@ -15,19 +15,13 @@ Covers the follow-up wave after PR #72170:
 
 import os
 
-import pytest
 
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    MEDIA_DELIVERY_EXTS,
 )
 from gateway.run import _collect_history_media_paths
 
 
-class TestGisExtensions:
-    def test_gis_extensions_in_delivery_set(self):
-        for ext in (".kmz", ".kml", ".geojson", ".gpx"):
-            assert ext in MEDIA_DELIVERY_EXTS
 
 
 class TestSpacedPaths:
@@ -36,11 +30,8 @@ class TestSpacedPaths:
     def test_spaced_path_followed_by_prose_keeps_prose(self, tmp_path):
         p = tmp_path / "my server.log"
         p.write_text("log line\n")
-        media, cleaned = BasePlatformAdapter.extract_media(
-            f"MEDIA:{p} is the log you asked for"
-        )
-        assert media == []
-        assert cleaned == f"MEDIA:{p} is the log you asked for"
+        text = f"MEDIA:{p} is the log you asked for"
+        assert BasePlatformAdapter.extract_media(text) == ([], text)
 
 
     def test_forward_extension_stops_at_next_media_tag(self, tmp_path):
@@ -87,6 +78,8 @@ class TestHistoryMediaDedupe:
         monkeypatch,
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
+        # On Windows os.path.expanduser("~") reads USERPROFILE, not HOME.
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         history = [
             {
                 "role": "assistant",
@@ -96,7 +89,7 @@ class TestHistoryMediaDedupe:
 
         paths = _collect_history_media_paths(history)
 
-        assert str(tmp_path / "audio cache" / "old.ogg") in paths
+        assert os.path.expanduser("~/audio cache/old.ogg") in paths
 
     def test_empty_history_empty_set(self):
         assert _collect_history_media_paths([]) == set()

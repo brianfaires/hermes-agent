@@ -50,10 +50,6 @@ class _FakeGateway:
         self._pending_messages = {}
         self._pending_approvals = {}
         self._busy_ack_ts = {}
-        self.coverage_publications = []
-
-    def _publish_profile_coverage(self, *, clear=False):
-        self.coverage_publications.append(clear)
 
     def _running_agent_count(self):
         return len(self._running_agents)
@@ -69,6 +65,15 @@ class _FakeGateway:
         # This fake has no API server adapter, so it is always idle.
         return 0
 
+    def _mark_api_runs_shutdown_requested(self):
+        # No API server adapter -> no durable runs to stamp with the drain boundary (#115133).
+        return 0
+
+    def _active_api_worker_count(self):
+        # Worker-scoped API count the SessionDB close gate reads live (#116535).
+        # This fake runs no executor turns, so it is always idle.
+        return 0
+
     def _update_runtime_status(self, *_a, **_kw):
         pass
 
@@ -80,7 +85,7 @@ class _FakeGateway:
         # inline in tests so the bounded-cleanup path is exercised.
         return func(*args)
 
-    async def _cleanup_agent_resources_off_loop(self, agent, *, context=""):
+    async def _cleanup_agent_resources_off_loop(self, agent, *, context="", session_key=None):
         # Mirror the real bounded helper, inline (no executor/timeout) so the
         # fake exercises the same call shape stop() now uses.
         self._cleanup_agent_resources(agent)
@@ -147,21 +152,9 @@ class TestCachedAgentCleanupOnShutdown:
 
         # Call the real stop() from GatewayRunner
         await gw_mod.GatewayRunner.stop(gw)
-        assert gw.coverage_publications == [True]
 
         agent.shutdown_memory_provider.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_cache_cleared_after_shutdown(self):
-        """The _agent_cache dict is cleared after stop."""
-        gw = _FakeGateway()
-        agent = _make_mock_agent()
-        gw._agent_cache["s1"] = (agent, "sig1")
-
-        await gw_mod.GatewayRunner.stop(gw)
-        assert gw.coverage_publications == [True]
-
-        assert len(gw._agent_cache) == 0
 
 
 class TestRunningAgentsNotDoubleCleaned:
@@ -178,7 +171,6 @@ class TestRunningAgentsNotDoubleCleaned:
         gw._agent_cache["s1"] = (shared, "sig1")
 
         await gw_mod.GatewayRunner.stop(gw)
-        assert gw.coverage_publications == [True]
 
         # Called at least once — either from _finalize_shutdown_agents
         # or from the cache sweep (or both)

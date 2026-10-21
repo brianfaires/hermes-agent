@@ -6,7 +6,9 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 ``block_recurrences`` counter:
 
 * ``dependency`` blocks route to ``todo`` (parent-gated, auto-resumed) and
-  never enter the human ``blocked`` bucket a cron would keep unblocking.
+  never enter the human ``blocked`` bucket a cron would keep unblocking —
+  unless no parent is open, in which case the wait can never be satisfied
+  and the block is recorded as ``needs_input`` (sticky, loop-counted).
 * ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
   each same-cause re-block after an unblock increments ``block_recurrences``,
   and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
@@ -17,14 +19,15 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 from __future__ import annotations
 
-import json
+import argparse
 from pathlib import Path
 
 import pytest
 
+from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_db as kb
-from hermes_cli import kanban_decompose as decomp
-from hermes_cli import kanban_specify as spec
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 @pytest.fixture
@@ -37,9 +40,11 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _running_task(conn, title="t"):
-    """Create a task and drive it to ``running`` so block_task can act."""
+def _running_task(conn, title="t", parents=()):
+    """Create a task (linked under ``parents`` first) and drive it to ``running`` so block_task can act."""
     tid = kb.create_task(conn, title=title, assignee="worker")
+    for parent in parents:
+        kb.link_tasks(conn, parent_id=parent, child_id=tid)
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     claimed = kb.claim_task(conn, tid, claimer="worker")
@@ -51,18 +56,6 @@ def _make_running_again(conn, tid):
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
     assert kb.claim_task(conn, tid, claimer="worker") is not None
-
-
-def _append_raw_event(conn, task_id: str, kind: str, payload: object) -> None:
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, 1)",
-        (
-            task_id,
-            kind,
-            json.dumps(payload) if isinstance(payload, (dict, list)) else payload,
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +72,7 @@ def _append_raw_event(conn, task_id: str, kind: str, payload: object) -> None:
 
 
 def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="capability")
         kb.unblock_task(conn, tid)
@@ -93,216 +86,6 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
         assert payload.get("kind") == "capability"
 
 
-def test_needs_input_loop_hold_is_not_auto_specified_decomposed_or_claimed(
-    kanban_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="needs consent")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.unblock_task(conn, tid)
-        _make_running_again(conn, tid)
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.get_task(conn, tid).status == "triage"
-
-    assert tid not in spec.list_triage_ids()
-    assert tid not in decomp.list_triage_ids()
-
-    specify_outcome = spec.specify_task(tid, author="auto-specifier")
-    decompose_outcome = decomp.decompose_task(tid, author="auto-decomposer")
-    assert specify_outcome.ok is False
-    assert "explicit unblock" in specify_outcome.reason
-    assert decompose_outcome.ok is False
-    assert "explicit unblock" in decompose_outcome.reason
-
-    with kb.connect_closing() as conn:
-        assert kb.specify_triage_task(
-            conn,
-            tid,
-            title="Proceed without consent",
-            body="This must not apply.",
-            author="test",
-        ) is False
-        assert kb.decompose_triage_task(
-            conn,
-            tid,
-            root_assignee="worker",
-            children=[{"title": "child", "assignee": "worker"}],
-            author="test",
-        ) is None
-
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
-        monkeypatch.setattr(
-            "hermes_cli.profiles.profile_exists", lambda _profile: True
-        )
-        result = kb.dispatch_once(
-            conn,
-            spawn_fn=lambda *_args, **_kwargs: pytest.fail(
-                "dispatcher must not spawn a held task"
-            ),
-            max_in_progress=None,
-        )
-        assert result.spawned == []
-        task = kb.get_task(conn, tid)
-        assert task is not None
-        assert task.status == "triage"
-
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
-        assert kb.claim_task(conn, tid, claimer="bypass") is None
-        task = kb.get_task(conn, tid)
-        assert task is not None
-        assert task.status == "triage"
-
-
-def test_first_needs_input_hold_survives_drag_to_triage(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="needs first answer")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
-            _append_raw_event(conn, tid, "status", {"status": "triage"})
-
-        assert kb.has_active_control_hold(conn, tid) is True
-        assert kb.specify_triage_task(
-            conn,
-            tid,
-            title="Automated spec must not proceed",
-            body="No human release happened.",
-            author="test",
-        ) is False
-        assert kb.decompose_triage_task(
-            conn,
-            tid,
-            root_assignee="worker",
-            children=[{"title": "child", "assignee": "worker"}],
-            author="test",
-        ) is None
-
-
-def test_specified_and_decomposed_events_do_not_release_control_hold(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="automation is not consent")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.unblock_task(conn, tid)
-        _make_running_again(conn, tid)
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.get_task(conn, tid).status == "triage"
-        with kb.write_txn(conn):
-            _append_raw_event(conn, tid, "specified", {"changed_fields": ["body"]})
-            _append_raw_event(conn, tid, "decomposed", {"child_ids": ["t_fake"]})
-
-        assert kb.has_active_control_hold(conn, tid) is True
-
-
-def test_status_noise_and_event_volume_do_not_release_control_hold(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="status noise")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
-            for _ in range(25):
-                _append_raw_event(conn, tid, "status", {"status": "triage"})
-            _append_raw_event(conn, tid, "status", "{malformed")
-            _append_raw_event(conn, tid, "status", {"status": "todo"})
-
-        assert kb.has_active_control_hold(conn, tid) is True
-
-
-def test_older_release_event_does_not_bypass_newer_typed_hold(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="newer hold")
-        assert kb.block_task(conn, tid, reason="first question", kind="needs_input")
-        assert kb.unblock_task(conn, tid)
-        _make_running_again(conn, tid)
-        assert kb.block_task(conn, tid, reason="new capability wall", kind="capability")
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
-            _append_raw_event(conn, tid, "status", {"status": "triage"})
-
-        assert kb.has_active_control_hold(conn, tid) is True
-
-
-def test_explicit_unblock_releases_needs_input_triage_hold(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="release consent hold")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.unblock_task(conn, tid)
-        _make_running_again(conn, tid)
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        assert kb.get_task(conn, tid).status == "triage"
-
-        assert kb.unblock_task(conn, tid)
-        released = kb.get_task(conn, tid)
-        assert released is not None
-        assert released.status == "ready"
-        assert kb.claim_task(conn, tid, claimer="released") is not None
-
-
-def test_explicit_promote_releases_stale_block_kind_hold(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        tid = _running_task(conn, title="manual promote release")
-        assert kb.block_task(conn, tid, reason="ask the human", kind="needs_input")
-        promoted, error = kb.promote_task(
-            conn, tid, actor="test-operator", force=True,
-        )
-        assert promoted and error is None
-
-        with kb.write_txn(conn):
-            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
-
-        assert kb.has_active_control_hold(conn, tid) is False
-        assert kb.specify_triage_task(
-            conn,
-            tid,
-            title="Released stale hold",
-            body="Manual promote released the prior hold.",
-            author="test",
-        ) is True
-
-
-def test_legacy_triage_hold_uses_release_event_not_stale_block_kind(
-    kanban_home: Path,
-) -> None:
-    with kb.connect_closing() as conn:
-        held = kb.create_task(conn, title="legacy held", assignee="worker", triage=True)
-        released = kb.create_task(
-            conn, title="legacy released", assignee="worker", triage=True
-        )
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET block_kind = 'needs_input', block_recurrences = ? "
-                "WHERE id IN (?, ?)",
-                (kb.BLOCK_RECURRENCE_LIMIT, held, released),
-            )
-            conn.execute(
-                "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                "VALUES (?, 'unblocked', ?, ?)",
-                (released, '{"status": "ready"}', 1),
-            )
-
-        assert kb.specify_triage_task(
-            conn, held, title="Held", body="must stay held", author="test"
-        ) is False
-        assert kb.specify_triage_task(
-            conn, released, title="Released", body="explicitly released", author="test"
-        ) is True
-        assert kb.get_task(conn, released).status == "ready"
-
-
 # ---------------------------------------------------------------------------
 # Dependency routing
 # ---------------------------------------------------------------------------
@@ -310,10 +93,15 @@ def test_legacy_triage_hold_uses_release_event_not_stale_block_kind(
 
 def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
     """A dependency-parked child becomes ready once its parent completes."""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="worker")
         child = _running_task(conn, title="child")
-        kb.link_tasks(conn, parent_id=parent, child_id=child)
+        kb.link_tasks(
+            conn,
+            parent_id=parent,
+            child_id=child,
+            expected_child_run_id=kb.get_task(conn, child).current_run_id,
+        )
         kb.block_task(conn, child, reason="wait", kind="dependency")
         assert kb.get_task(conn, child).status == "todo"
         # Finish the parent, then let recompute_ready run.
@@ -325,6 +113,81 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
         assert kb.get_task(conn, child).status == "ready"
 
 
+def test_dependency_block_with_terminal_parents_parks_then_escalates(
+    kanban_home: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``dependency`` block whose parents are all terminal can never be
+    satisfied by ``recompute_ready``: it must park in ``blocked`` as
+    ``needs_input`` (no ``dependency_wait``, no re-promotion), say so on the
+    CLI, and count toward the loop breaker so a re-block after an unblock
+    reaches ``triage``."""
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="already-done-parent", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+        # The edge exists before the run: link_tasks refuses to gate a running child retroactively.
+        child = _running_task(conn, title="child-of-done", parents=(parent,))
+
+        # `hermes kanban block <child> --kind dependency waiting on upstream`
+        args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency")
+        assert kanban_cli._cmd_block(args) == 0
+        assert "needs_input" in capsys.readouterr().out
+        parked = kb.get_task(conn, child)
+        assert (parked.status, parked.block_kind, parked.block_recurrences) == ("blocked", "needs_input", 1)
+        events = kb.list_events(conn, child)
+        assert not [e for e in events if e.kind == "dependency_wait"]
+        blocked = [e for e in events if e.kind == "blocked"][-1].payload
+        assert (blocked["requested_kind"], blocked["rekind_reason"]) == ("dependency", "no_open_parent")
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, child).status == "blocked"
+
+        # A cron/human unblocks; the worker re-declares the same impossible wait.
+        assert kb.unblock_task(conn, child)
+        assert kb.claim_task(conn, child, claimer="worker") is not None
+        assert kb.block_task(conn, child, reason="still waiting", kind="dependency")
+        assert kb.get_task(conn, child).status == "triage"
+        loop = [e for e in kb.list_events(conn, child) if e.kind == "block_loop_detected"][-1].payload
+        assert loop["recurrences"] == kb.BLOCK_RECURRENCE_LIMIT
+
+
+def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
+    kanban_home: Path, all_assignees_spawnable,
+) -> None:
+    """Control: a genuine wait on an incomplete parent parks in ``todo``
+    without counting a recurrence, survives a dispatch tick unspawned, and
+    resumes once the parent finishes."""
+    spawns: list[str] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append(task.id)
+        return 4242
+
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="open-parent", assignee="alice")
+        # Linked while todo (a running child cannot be gated retroactively); the parent then stays
+        # open while the child runs — the reopened-parent shape, forced the same way the loop below does.
+        child = kb.create_task(conn, title="waiter", assignee="worker")
+        kb.link_tasks(conn, parent_id=parent, child_id=child)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child,))
+        for _ in range(kb.BLOCK_RECURRENCE_LIMIT + 1):
+            assert kb.block_task(conn, child, reason="wait", kind="dependency")
+            parked = kb.get_task(conn, child)
+            assert (parked.status, parked.block_kind, parked.block_recurrences) == ("todo", "dependency", 0)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child,))
+        assert kb.block_task(conn, child, reason="wait", kind="dependency")
+        kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.get_task(conn, child).status == "todo"
+        assert child not in spawns
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
+        kb.claim_task(conn, parent, claimer="alice")
+        kb.complete_task(conn, parent, result="done")
+        res2 = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert child in [row[0] for row in res2.spawned]
+
+
 # ---------------------------------------------------------------------------
 # Completion resets loop memory
 # ---------------------------------------------------------------------------
@@ -333,3 +196,5 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
+
+

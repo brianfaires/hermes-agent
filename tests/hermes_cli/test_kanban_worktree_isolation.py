@@ -7,8 +7,8 @@ on whatever branch was there, letting sibling workers run concurrently in
 one directory on one branch (cross-task provenance corruption, no lock).
 
 Two-part fix under test:
-- ``decompose_triage_task`` gives worktree children a repository anchor
-  so each child materializes its own ``<repo>/.worktrees/<child-id>``.
+- ``decompose_triage_task`` leaves worktree children's ``workspace_path``
+  unset so each child materializes its own ``<repo>/.worktrees/<child-id>``.
 - ``_resolve_worktree_workspace`` falls back to a fresh per-task worktree
   when the requested path is occupied by another task's branch (heals
   pre-existing rows that still carry a shared path).
@@ -22,6 +22,9 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_db_graph import decompose_triage_task
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_workspace as kbw
 
 
 @pytest.fixture
@@ -66,21 +69,17 @@ def _add_worktree(repo: Path, target: Path, branch: str) -> Path:
     return target
 
 
-def test_decompose_worktree_children_get_own_workspace(kanban_home, tmp_path):
-    repo = _make_repo(tmp_path)
-    with kb.connect() as conn:
+def test_decompose_worktree_children_get_own_workspace(kanban_home):
+    with kbc.connect() as conn:
         root = kb.create_task(conn, title="build the feature", triage=True)
-        root_workspace = _add_worktree(
-            repo, repo / ".worktrees" / root, f"wt/{root}"
-        )
         conn.execute(
             "UPDATE tasks SET workspace_kind='worktree', "
-            "workspace_path=? WHERE id = ?",
-            (str(root_workspace), root),
+            "workspace_path='/repo/.worktrees/root' WHERE id = ?",
+            (root,),
         )
         conn.commit()
 
-        child_ids = kb.decompose_triage_task(
+        child_ids = decompose_triage_task(
             conn,
             root,
             root_assignee="orchestrator",
@@ -92,27 +91,15 @@ def test_decompose_worktree_children_get_own_workspace(kanban_home, tmp_path):
         )
         assert child_ids is not None and len(child_ids) == 2
 
-        workspaces = {root_workspace.resolve()}
         for cid in child_ids:
             row = conn.execute(
                 "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
                 (cid,),
             ).fetchone()
             assert row["workspace_kind"] == "worktree"
-            # Exercise dispatch's resolver: stored metadata must produce a
-            # distinct real checkout, never the root's or a sibling's path.
-            workspace, branch = kb._resolve_worktree_workspace(kb.get_task(conn, cid))
-            assert workspace == (repo / ".worktrees" / cid).resolve()
-            assert workspace not in workspaces
-            assert branch == f"wt/{cid}"
-            assert (workspace / "README.md").read_text(encoding="utf-8") == "base\n"
-            workspaces.add(workspace)
-
-        root_branch = subprocess.run(
-            ["git", "-C", str(root_workspace), "branch", "--show-current"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert root_branch == f"wt/{root}"
+            # Each child resolves its own <repo>/.worktrees/<child-id> at
+            # dispatch; the root's literal path must never be shared.
+            assert row["workspace_path"] is None
 
 
 
@@ -121,7 +108,7 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
     repo = _make_repo(tmp_path)
     occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tid = kb.create_task(
             conn,
             title="second sibling",
@@ -130,7 +117,7 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         )
         task = kb.get_task(conn, tid)
 
-    workspace, branch = kb._resolve_worktree_workspace(task)
+    workspace, branch = kbw._resolve_worktree_workspace(task)
     assert workspace == (repo / ".worktrees" / tid).resolve()
     assert branch == f"wt/{tid}"
     # The sibling's checkout is untouched, still on its own branch.
@@ -140,6 +127,7 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert head == "wt/sibling"
+
 
 
 

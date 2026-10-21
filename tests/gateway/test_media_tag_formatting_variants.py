@@ -43,12 +43,14 @@ class TestTrailingPunctuation:
 
 
 class TestInlineCodeWrappedTags:
-    def test_real_path_in_inline_code_delivers(self, real_file):
-        media, cleaned = BasePlatformAdapter.extract_media(
-            f"Here is your file\n`MEDIA:{real_file}`"
-        )
+    def test_standalone_inline_code_tag_delivers(self, real_file):
+        media, cleaned = BasePlatformAdapter.extract_media(f"`MEDIA:{real_file}`")
         assert [p for p, _ in media] == [real_file]
         assert "MEDIA:" not in cleaned
+
+    def test_inline_prose_code_example_stays_literal(self, real_file):
+        text = f"Here is the example `MEDIA:{real_file}`"
+        assert BasePlatformAdapter.extract_media(text) == ([], text)
 
 
 class TestEmphasisAndDedupeIntegration:
@@ -59,7 +61,7 @@ class TestEmphasisAndDedupeIntegration:
         assert [p for p, _ in media] == [real_file]
         assert "MEDIA:" not in cleaned
 
-    def test_two_tags_separate_lines_both_deliver(self, tmp_path):
+    def test_two_standalone_tags_both_deliver(self, tmp_path):
         a = tmp_path / "a.csv"
         b = tmp_path / "b.csv"
         a.write_text("1")

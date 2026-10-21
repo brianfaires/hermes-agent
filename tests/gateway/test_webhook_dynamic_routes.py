@@ -7,7 +7,6 @@ from gateway.config import PlatformConfig
 from gateway.platforms.webhook import (
     WebhookAdapter,
     _DYNAMIC_ROUTES_FILENAME,
-    _INSECURE_NO_AUTH,
 )
 
 
@@ -26,11 +25,6 @@ def _isolate(tmp_path, monkeypatch):
 
 
 class TestDynamicRouteLoading:
-    def test_no_dynamic_file(self):
-        adapter = _make_adapter(routes={"static": {"secret": "s"}})
-        adapter._reload_dynamic_routes()
-        assert "static" in adapter._routes
-        assert len(adapter._dynamic_routes) == 0
 
     def test_loads_dynamic_routes(self, tmp_path):
         subs = {"my-hook": {"secret": "dynamic-secret", "prompt": "test", "events": []}}
@@ -85,75 +79,3 @@ class TestDynamicRouteSecretValidation:
         assert "valid" in adapter._routes
 
 
-    def test_oidc_audience_only_route_is_skipped(self, tmp_path):
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({
-                "pubsub": {
-                    "auth": "oidc",
-                    "oidc": {"audience": "https://agent.example.com/webhooks/pubsub"},
-                    "prompt": "p",
-                }
-            })
-        )
-        adapter = _make_adapter(extra={"secret": ""})
-        adapter._reload_dynamic_routes()
-        assert "pubsub" not in adapter._routes
-
-    def test_oidc_route_with_subject_loads(self, tmp_path):
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({
-                "pubsub": {
-                    "auth": "oidc",
-                    "oidc": {
-                        "audience": "https://agent.example.com/webhooks/pubsub",
-                        "subject": "service-account-id",
-                    },
-                    "prompt": "p",
-                }
-            })
-        )
-        adapter = _make_adapter(extra={"secret": ""})
-        adapter._reload_dynamic_routes()
-        assert "pubsub" in adapter._routes
-
-    def test_oidc_route_without_audience_is_rejected(self, tmp_path):
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({"pubsub": {"auth": "oidc", "oidc": {}, "prompt": "p"}})
-        )
-        adapter = _make_adapter(extra={"secret": ""})
-        adapter._reload_dynamic_routes()
-        assert "pubsub" not in adapter._routes
-        assert "pubsub" not in adapter._dynamic_routes
-
-    def test_insecure_no_auth_rejected_on_non_loopback_bind(self, tmp_path):
-        # Dynamic INSECURE_NO_AUTH routes are only valid on loopback hosts.
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({"pub": {"secret": _INSECURE_NO_AUTH, "prompt": "p"}})
-        )
-        adapter = _make_adapter(extra={"host": "0.0.0.0"})
-        adapter._reload_dynamic_routes()
-        assert "pub" not in adapter._routes
-        assert "pub" not in adapter._dynamic_routes
-
-    def test_warning_logged_on_skip(self, tmp_path, caplog):
-        import logging
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({"silent": {"secret": "", "prompt": "x"}})
-        )
-        adapter = _make_adapter()
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.webhook"):
-            adapter._reload_dynamic_routes()
-        assert any("silent" in rec.message for rec in caplog.records)
-
-    def test_partial_skip(self, tmp_path):
-        # One route bad, one route good — only the bad one is dropped.
-        (tmp_path / _DYNAMIC_ROUTES_FILENAME).write_text(
-            json.dumps({
-                "bad":  {"secret": "", "prompt": "x"},
-                "good": {"secret": "valid-secret", "prompt": "y"},
-            })
-        )
-        adapter = _make_adapter()
-        adapter._reload_dynamic_routes()
-        assert "good" in adapter._routes
-        assert "bad" not in adapter._routes

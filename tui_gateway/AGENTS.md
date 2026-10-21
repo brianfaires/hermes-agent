@@ -30,7 +30,8 @@ reconnecting client re-renders the still-open questions). A client says once per
 answers them (`client.capabilities {server_requests: true}`, sent by the shared channel on `gateway.ready`);
 a WebSocket client that never did is an app build older than server→client requests, and `send()` fails
 fast for it instead of stalling the agent for the deadline. Desktop reaches the same server over WebSocket
-via `apps/shared` (`JsonRpcGatewayClient`, `onRequest`). New RPC = a new `methods_<topic>.py` or an entry
+via `apps/shared` (`JsonRpcGatewayClient`, `onRequest`). Provider fallback resolution lives in `runtime_fallback.py`; it records a fact only after selecting a complete provider/model pair.
+New RPC = a new `methods_<topic>.py` or an entry
 in an existing topical sibling, registered in the table — no `if method == ...` chain (root shape rules).
 
 **The wire is declared in Python and generated for TypeScript** (`tui_gateway/contracts/`). Every method
@@ -44,13 +45,6 @@ shape) and `gateway-contract.openrpc.json` are rendered by `scripts/gen_gateway_
 `tests/tui_gateway/contracts/test_generated.py` fails when they are stale, so the loop is: change the model →
 regenerate → `tsc` shows every consumer the field moved. `apps/shared/src/gateway-events.ts` only adds
 the client-local synthetic events and the `GatewayEvent` envelope on top.
-The native `hermes-gateway-v1` transport has a separate `CANONICAL_METHODS` catalog in
-`contracts/canonical*.py`, declared with `canonical_method(...)`. `gateway/session_controls.py::
-AuthorityConnection` validates parameters and successful results against it; unknown/missing
-parameter keys return `4001 invalid_params`. Reuse a standalone model only when its wire is
-identical: shared method names can carry different snapshots, admission receipts and producer
-results. The same generator emits `CanonicalRpcMethods` and OpenRPC `x-canonical-methods` without
-widening `RpcMethods`. `tests/gateway/test_canonical_wire_contract.py` checks handler coverage.
 New question for the user = `_ask("<method>", sid, params, timeout)` in the emitter, a handler in
 `apps/desktop/.../gateway-event/server-requests.ts` and `ui-tui/src/app/createServerRequestHandler.ts`,
 and a `server_request(...)` in `contracts/server_requests.py`.
@@ -132,58 +126,10 @@ retains its legacy unscoped contract.
    `command.dispatch` fallback, which the gateway resolves into a skill / alias / exec directive
    (a skill command resolves to `{type: "skill", message}` and is submitted as a normal prompt).
 
-`commands.catalog` (empty-query list) includes built-ins, user `quick_commands`, plugin commands,
-and skill-derived commands. `complete.slash` uses the existing CLI completer (registry, plugins,
-skills/bundles, argument completions); quick commands remain catalog-only. Shared data builders
-live in `tui_gateway/command_discovery.py`, without importing the legacy server. Definitions
-come from `hermes_cli/commands.py` (`hermes_cli/AGENTS.md`).
-
-The canonical gateway exposes the same two discovery RPCs through `gateway/session_discovery.py`.
-It requires authenticated `session:read` capability and the authority's exact profile before any
-discovery. An optional named `profile` must resolve to that same home; a foreign selector returns
-`profile_mismatch`. Discovery runs off-loop in the authority's profile scope, without creating a
-legacy session or execution runtime. Catalog warnings, categories, aliases, desktop metadata,
-skill usage/origin, and completion replacement offsets retain their legacy shapes. Discovery is
-not an assertion that every listed slash execution command is implemented by the canonical RPCs.
-
-## Canonical local slash execution
-
-`gateway/session_commands.py` adapts both `slash.exec({session_id, command})` and
-`command.dispatch({session_id, name, arg})` without loading the legacy server or
-slash worker. Optional `profile` must name the authority's exact profile. Only
-server-registered local sources belonging to the authenticated actor may dispatch;
-caller-supplied source, routing, credentials, or platform fields are rejected.
-
-Reviewed gateway handlers: `help`, `commands`, `status`, `context`, `version`,
-`whoami` require `session:read`; `title` requires `session:control` (including its
-query form). Registry aliases are accepted. Existing registry busy rejection and
-mid-turn dispatch policies apply. Results are `{type: "exec", output}`.
-
-Profile skills and configured quick-command aliases to these commands/skills are
-supported. Skill resolution requires `session:submit` and returns the existing
-`{type: "skill", name, message, display}` directive. Desktop and Ink already submit
-that message through `prompt.submit`, retaining their own durable input identity.
-Resolution itself does not start a turn or change the cached system prompt; the
-normal durable admission path owns FIFO, retries, approvals, and execution.
-
-`type: exec` quick commands and plugin slash commands require `session:control` and
-run through the messaging gateway's own dispatch (`gateway/run_inbound_hooks.py`: slash
-access policy, 30 s sanitized-env exec with redacted output, plugin session env).
-All other commands return `unsupported_command`, including bundles, runtime/config
-mutation, approval/secret slash shortcuts, and lifecycle commands. Use the existing generation-bound control RPCs where
-available. Catalog presence alone does not imply execution support. No legacy
-fallback is installed on the canonical transport.
-
-## Canonical native projections
-
-`gateway/session_config.py` exposes profile-authorized `config.get` presentation
-reads and `model.options` through the shared provider inventory. `full` contains
-display, approval and paste preferences plus voice record/submit settings, not
-provider/MCP/plugin credentials. Session reasoning/model selection comes from the
-retained agent or frozen launch policy. `mtime.mcp_rev` is pinned to that policy;
-cosmetic edits do not request a cache-breaking live MCP reload. Busy overrides
-remain session-scoped; composer model changes use `session.mutate`, never global
-`config.set`. Discovery can refresh provider metadata, but never starts inference.
+`commands.catalog` (empty-query list) and `complete.slash` (typed-query completions) already include
+built-ins, user `quick_commands`, AND skill-derived commands (`scan_skill_commands()` /
+`get_skill_commands()`) — clients do not need a new RPC to see skills. The command definitions
+themselves come from `hermes_cli/commands.py` (`hermes_cli/AGENTS.md`).
 
 ## Dev commands
 
