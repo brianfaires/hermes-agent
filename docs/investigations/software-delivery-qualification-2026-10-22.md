@@ -60,6 +60,27 @@ stop, before start. All disposable units and runtime unit files are removed or
 reset after qualification. This establishes independent recovery on this host;
 it does not establish production activation or a live feature verdict.
 
+### Required CI follow-up, 2026-10-23
+
+Hosted macOS CI on `f8321292a9` exposed an existing timeout-cleanup defect:
+a reaped launcher no longer resolves through `getpgid(pid)`, leaving its owned
+process group alive with captured pipes. The existing webhook transform test
+reproduces this on Linux by explicitly reaping its real launcher. Retaining the
+private group identity established by `process_group=0` lets cleanup signal that
+owned group after the launcher exits. The new case fails before the repair;
+20 neighboring subprocess/deadline/webhook tests pass afterward, while an
+unrelated real process survives. Native macOS CI still qualifies the correction.
+
+Required Linux and Windows jobs also remained queued on organization-specific
+32-core runner labels with no assigned runner. This personal public fork uses
+standard available hosted runners by default; repository variables
+`CI_LINUX_RUNNER`, `CI_WINDOWS_RUNNER` and `CI_WINDOWS_ARM_RUNNER` can opt into
+other capacity. OS and architecture coverage remain unchanged. Worker pools
+follow the host CPU count, with conservative configurable concurrency for nested
+process suites, and the existing heavy Python jobs have enough wall time for
+smaller hosts. This repairs the execution route; no test lane is waived.
+See [GitHub's standard runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
 The real-agent exercise uses Ang's existing configured model/provider, without
 substituting inference. It is a bounded behavior check, not a prompt snapshot or
 keyword proxy. It cannot prove the entire installed Sunny/Rook/Ang relay.
