@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -28,30 +28,49 @@ def validate_worker_skills(task: Task, profile_home: str) -> None:
 
 
 def validate_worker_launch(task: Task, workspace: str) -> None:
-    """Validate required skills and an enabled command route for a persistent workspace."""
-    from hermes_cli.kanban_db_dispatch import _resolve_worker_cli_toolsets, _worker_profile_scope
+    """Validate required skills and the selected workspace's enabled command route."""
+    from hermes_cli.kanban_db_dispatch import _resolve_worker_cli_toolsets
     from hermes_cli.profiles import resolve_profile_env
 
     profile_home = resolve_profile_env(task.assignee or "default")
     validate_worker_skills(task, profile_home)
     toolsets = _resolve_worker_cli_toolsets(profile_home)
-    if task.workspace_kind not in {"dir", "worktree"} or (toolsets and "terminal" not in toolsets):
+    if toolsets and "terminal" not in toolsets:
         return
-    from tools.terminal_tool import check_terminal_requirements, terminal_tool
+    _probe_workspace(task, profile_home, workspace)
+
+
+def _probe_workspace(task: Task, profile_home: str, workspace: str) -> None:
+    from hermes_cli.kanban_db_dispatch import _worker_profile_scope
+    from tools.terminal_scope import (
+        enforce_no_refusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope, terminal_env,
+    )
+    from tools.terminal_tool import (
+        check_terminal_requirements, clear_task_env_overrides, register_task_env_overrides, terminal_tool,
+    )
     from tools.terminal_tool_backends import terminal_backend_unavailable_reason
     from tools.terminal_tool_lifecycle import cleanup_vm
 
     probe_id = f"kanban-preflight-{uuid.uuid4().hex}"
     with _worker_profile_scope(profile_home):
+        enforce_no_refusal()
         if not check_terminal_requirements():
             raise WorkerCapabilityError(
                 f"Profile {task.assignee} execution route unavailable: {terminal_backend_unavailable_reason()}. "
                 "The assigning owner must repair the prerequisite or select a capable profile, then unblock.")
+        scope = cast(dict[str, str], get_terminal_scope())  # Bound by _worker_profile_scope.
+        token = set_terminal_scope({**scope, "TERMINAL_CWD": workspace})
+        # A unique sandbox avoids changing or tearing down a live owner's environment.
         try:
-            result = json.loads(terminal_tool("echo hermes-launch-probe", task_id=probe_id,
-                                               timeout=15, workdir=workspace))
+            register_task_env_overrides(probe_id, {"env_type": terminal_env("TERMINAL_ENV", "local"),
+                                                  "cwd": workspace, "cwd_source": "session"})
+            result = json.loads(terminal_tool("echo hermes-launch-probe", task_id=probe_id, timeout=15))
         finally:
-            cleanup_vm(probe_id)
+            try:
+                cleanup_vm(probe_id, force_remove=True)
+            finally:
+                clear_task_env_overrides(probe_id)
+                reset_terminal_scope(token)
     if result.get("error") or result.get("exit_code") != 0:
         reason = result.get("error") or result.get("output") or "command did not exit successfully"
         if (result.get("status") not in {"blocked", "disabled", "pending_approval"}

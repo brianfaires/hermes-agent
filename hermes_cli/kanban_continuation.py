@@ -24,6 +24,8 @@ EVENT_KINDS = ("created", "promoted", "unblocked", "status", "completed",
                "crashed", "stale", "timed_out", "reclaimed", "changes_requested",
                "review_requested", "gave_up", "blocked", "spawn_failed", "external_wait_due")
 PROCEDURE = "autonomous-work-continuation"
+_EFFECT_STATUSES = {"blocked": "blocked", "completed": "done", "review_requested": "review",
+                    "unblocked": "ready", "changes_requested": "ready"}
 
 
 def _goal_admission_only(conn, card, event, reason, profile, job_id, *, before=None):
@@ -80,9 +82,7 @@ def _verified_closure(conn, sub, reason, *, current=False, legacy_blocked_decisi
         task = kb.get_task(conn, sub["task_id"])
         native = conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND id = ?",
                               (sub["task_id"], effect)).fetchone()
-        statuses = {"blocked": "blocked", "completed": "done", "review_requested": "review",
-                    "unblocked": "ready", "changes_requested": "ready"}
-        if (task is None or native is None or statuses.get(native["kind"]) != task.status
+        if (task is None or native is None or _EFFECT_STATUSES.get(native["kind"]) != task.status
                 or conn.execute(
                     "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? "
                     "AND kind NOT IN ('commented', 'heartbeat') LIMIT 1",
@@ -592,9 +592,7 @@ def acknowledge_wakeup(conn, *, job_id: str, profile: str, card: str, event: int
             (effect_event, card),
         ).fetchone()
         task = kb.get_task(conn, card)
-        statuses = {"blocked": "blocked", "completed": "done", "review_requested": "review",
-                    "unblocked": "ready", "changes_requested": "ready"}
-        if effect is None or task is None or statuses.get(effect["kind"]) != task.status:
+        if effect is None or task is None or _EFFECT_STATUSES.get(effect["kind"]) != task.status:
             return False
         if reason == "decision_required" and effect["kind"] == "blocked":
             return False  # A new unresolved hold is not decision follow-through.

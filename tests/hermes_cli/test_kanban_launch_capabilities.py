@@ -1,5 +1,6 @@
 """Deterministic selected-context failures park once and preserve candidate work (#32)."""
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -56,12 +57,14 @@ def test_missing_required_review_skill_parks_once_before_executor_launch(workflo
                             expected_run_id=kb.get_task(conn, card).current_run_id)
 
 
-def test_unusable_selected_workspace_route_parks_once_without_losing_candidate(workflow):
+@pytest.mark.parametrize('workspace_kind', ['dir', 'scratch'])
+def test_unusable_selected_workspace_route_parks_once_without_losing_candidate(workflow, workspace_kind):
     conn, profile, workspace, marker = workflow
     # This profile's configured route is unavailable, even though the host can execute.
     (profile / 'config.yaml').write_text('terminal: {backend: nonexistent-test-backend}\n')
     card = kb.create_task(conn, title='Execute approved candidate', assignee='reviewer',
-                          workspace_kind='dir', workspace_path=str(workspace))
+                          workspace_kind=workspace_kind,
+                          workspace_path=str(workspace) if workspace_kind == 'dir' else None)
     assert dispatch.dispatch_once(conn).spawned == []
     task = kb.get_task(conn, card)
     assert task.status == 'blocked' and task.block_kind == 'capability'
@@ -90,3 +93,44 @@ def test_executor_type_error_after_effect_does_not_repeat_launch(workflow):
     assert dispatch.dispatch_once(conn, spawn_fn=spawn).spawned == []
     assert marker.read_text() == 'launch\n'
     assert kb.get_task(conn, card).consecutive_failures == 1
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_probe_binds_selected_workspace_before_container_execution(workflow, monkeypatch, persistent):
+    conn, profile, workspace, marker = workflow
+    import tools.terminal_tool as terminal
+    from tools import terminal_tool_backends
+
+    (profile / 'config.yaml').write_text(
+        f'terminal:\n  backend: docker\n  cwd: {profile}\n'
+        f'  docker_mount_cwd_to_workspace: true\n  container_persistent: {str(persistent).lower()}\n')
+
+    class MountedContainer:
+        """External engine boundary: execute a real command only in the declared mount."""
+        env_type = 'docker'
+
+        def __init__(self, *, cwd, host_cwd, **kwargs):
+            self.cwd, self.host_cwd = cwd, host_cwd
+
+        def execute(self, command, cwd='', **kwargs):
+            if self.host_cwd != str(workspace) or cwd != '/workspace':
+                return {'returncode': 126, 'output': 'Selected workspace is not mounted'}
+            result = subprocess.run(command, shell=True, cwd=self.host_cwd,
+                                    capture_output=True, text=True, timeout=10, check=False)
+            (workspace / 'probe-output.txt').write_text(result.stdout)
+            return {'returncode': result.returncode, 'output': result.stdout}
+
+        def cleanup(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(terminal, 'check_terminal_requirements', lambda: True)
+    monkeypatch.setattr(terminal_tool_backends, '_create_environment',
+                        lambda **kwargs: MountedContainer(**kwargs))
+    card = kb.create_task(conn, title='Execute in the assigned mounted workspace', assignee='reviewer',
+                          workspace_kind='dir', workspace_path=str(workspace))
+    assert [row[0] for row in dispatch.dispatch_once(conn).spawned] == [card]
+    assert wait_until(marker.exists, timeout=10)
+    assert marker.read_text() == 'accepted'
+    assert (workspace / 'probe-output.txt').read_text().strip() == 'hermes-launch-probe'
+    assert kb.complete_task(conn, card, summary='Selected mounted workspace accepted.',
+                            expected_run_id=kb.get_task(conn, card).current_run_id)

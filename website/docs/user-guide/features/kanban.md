@@ -344,9 +344,11 @@ time.
 #### Workers and systemd cgroups
 
 Before launching a native worker, dispatch resolves every requested skill in
-the assigned profile, including `sdlc-review` for review. For a persistent
-`dir` or `worktree` workspace with terminal tools enabled, it also runs a
-bounded harmless command through that profile's configured terminal backend.
+the assigned profile, including `sdlc-review` for review. When terminal tools
+are enabled, it also runs a bounded harmless command through that profile's
+configured terminal backend for the assigned workspace, including scratch.
+The probe binds the same workspace mount context as the worker and cleans up
+its own temporary sandbox.
 An available model does not establish that the workspace route works.
 An unavailable required skill or command route parks the task as a
 `capability` block with its underlying reason. The assigning owner repairs
