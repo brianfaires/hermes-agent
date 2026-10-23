@@ -230,3 +230,14 @@ now belongs to the existing shared update-dependency list, so changes to it
 select the upgrade and desktop-update consumers. The existing import-ownership
 regression reproduces the omission before the fix; no assertion or lane is
 removed to make the gate green.
+
+A later release-N-1 handoff exposed a preexisting mixed-module import failure:
+the new retry sibling imported `is_recurring` from a timing-only constants
+module cached by the old process. The provider was called once, but failed
+bookkeeping left an additional run record. The predicate now lives in a new
+import-free leaf shared by both retry and tick siblings; timing constants and
+recurrence semantics are unchanged. Two real subprocess/bookkeeping cases
+reproduce the cached-module failure before the move, for one-shot and recurring
+jobs. The new leaf selects the existing upgrade consumer, also reproduced red
+through the real classifier. No legacy exception or gate is widened; the real
+release-N-1 handoff remains required on the final hosted candidate.

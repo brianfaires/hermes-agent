@@ -399,6 +399,7 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "tests/e2e/core/upgrade/",
         "tests/e2e/core/windows_update/",
         "tests/compat/",
+        "cron/schedule_kind.py",  # recurrence loaded across the old/new gateway handoff
         "pm/",
         "scripts/install.",
         "setup-hermes.sh",
