@@ -2099,7 +2099,9 @@ def _dispatch_lane_task(
     try:
         from hermes_cli.kanban_launch import spawn_worker
 
-        pid = spawn_worker(spawn_fn, claimed, str(workspace), board)
+        # Ordinary pins remain best-effort; the review role requires its procedure.
+        pid = spawn_worker(spawn_fn, claimed, str(workspace), board,
+                           required_skills=["sdlc-review"] if lane == "review" else [])
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid))
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.

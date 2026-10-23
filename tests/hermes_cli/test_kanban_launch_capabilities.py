@@ -59,6 +59,20 @@ def test_missing_required_review_skill_parks_once_before_executor_launch(workflo
                             expected_run_id=kb.get_task(conn, card).current_run_id)
 
 
+def test_missing_optional_pin_does_not_prevent_worker_execution(workflow):
+    conn, _profile, workspace, marker = workflow
+    card = kb.create_task(conn, title='Execute with an archived guidance pin', assignee='reviewer',
+                          workspace_kind='dir', workspace_path=str(workspace),
+                          skills=['archived-guidance'])
+    assert [row[0] for row in dispatch.dispatch_once(conn).spawned] == [card]
+    assert wait_until(marker.exists, timeout=10)
+    assert marker.read_text() == 'accepted'
+    task = kb.get_task(conn, card)
+    assert task.skills == ['archived-guidance']
+    assert kb.complete_task(conn, card, summary='Worker executed; original guidance pin retained.',
+                            expected_run_id=task.current_run_id)
+
+
 @pytest.mark.parametrize('workspace_kind', ['dir', 'scratch'])
 def test_unusable_selected_workspace_route_parks_once_without_losing_candidate(workflow, workspace_kind):
     conn, profile, workspace, marker = workflow

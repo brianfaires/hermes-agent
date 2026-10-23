@@ -2,38 +2,51 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Optional, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
+_log = logging.getLogger(__name__)
+
 
 class WorkerCapabilityError(RuntimeError):
     """A selected launch prerequisite requires an owner action before retry."""
 
 
-def validate_worker_skills(task: Task, profile_home: str) -> None:
+def validate_worker_skills(task: Task, profile_home: str, required_skills: list[str]) -> None:
+    """Resolve current pins while retaining hard requirements of the assigned role."""
     from agent.skill_commands import build_preloaded_skills_prompt
     from hermes_cli.kanban_db_dispatch import _worker_profile_scope
 
-    if not task.skills:
-        return
+    available, missing_required = [], []
     with _worker_profile_scope(profile_home):
-        _prompt, _loaded, missing = build_preloaded_skills_prompt(task.skills, task_id=task.id)
-    if missing:
+        for identifier in dict.fromkeys([*required_skills, *(task.skills or [])]):
+            _prompt, _loaded, missing = build_preloaded_skills_prompt([identifier], task_id=task.id)
+            if not missing:
+                available.append(identifier)
+            elif identifier in required_skills:
+                missing_required.extend(missing)
+            else:
+                _log.info("Task %s: optional pinned skill unavailable in profile %s: %s",
+                          task.id, task.assignee, identifier)
+    if missing_required:
         raise WorkerCapabilityError(
-            f"Profile {task.assignee}: required skill(s) unavailable: {', '.join(missing)}. "
+            f"Profile {task.assignee}: required skill(s) unavailable: {', '.join(missing_required)}. "
             "The assigning owner must select a capable profile or repair the required skill, then unblock.")
+    # Only the launch copy changes; the card retains its owner's original pins.
+    task.skills = available
 
 
-def validate_worker_launch(task: Task, workspace: str) -> None:
+def validate_worker_launch(task: Task, workspace: str, required_skills: list[str]) -> None:
     """Validate required skills and the selected workspace's enabled command route."""
     from hermes_cli.kanban_db_dispatch import _resolve_worker_cli_toolsets
     from hermes_cli.profiles import resolve_profile_env
 
     profile_home = resolve_profile_env(task.assignee or "default")
-    validate_worker_skills(task, profile_home)
+    validate_worker_skills(task, profile_home, required_skills)
     toolsets = _resolve_worker_cli_toolsets(profile_home)
     if toolsets and "terminal" not in toolsets:
         return
@@ -97,10 +110,11 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
     return spawn_fn(task, workspace)
 
 
-def spawn_worker(spawn_fn, task: Task, workspace: str, board: str | None) -> int | None:
+def spawn_worker(spawn_fn, task: Task, workspace: str, board: str | None,
+                 *, required_skills: list[str]) -> int | None:
     from hermes_cli.kanban_db_dispatch import _default_spawn
 
     if spawn_fn is None:
-        validate_worker_launch(task, workspace)
+        validate_worker_launch(task, workspace, required_skills)
         spawn_fn = _default_spawn
     return _call_spawn_fn(spawn_fn, task, workspace, board)
