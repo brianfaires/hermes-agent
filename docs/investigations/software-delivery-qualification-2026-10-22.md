@@ -194,3 +194,15 @@ wait, and releases after crossing the receipt timestamp's whole-second boundary.
 The assertion compares the final receipt against the observed release time.
 This strengthens the same native contract; it remains unqualified until the
 Windows jobs execute it.
+
+Archived Windows installer diagnostics identify disk exhaustion in five machines,
+including failures after successful dependency-sync receipts. The lane ran six
+complete machine journeys concurrently and retained their installed profiles.
+Its standard-runner default is now one file at a time, with a repository runner
+capacity override. After exporting diagnostics outside its uniquely created
+profile, the fixture removes that profile through the existing PM filesystem
+helper. Preexisting profiles are refused before staging; local inspection and
+in-profile evidence remain available. Both ownership/cleanup regressions were
+red before the fix; four filesystem cases pass, including evidence and unrelated
+profile preservation. The production installer and upgrade assertions are
+unchanged. A fresh native run remains required to establish capacity and behavior.

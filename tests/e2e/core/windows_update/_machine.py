@@ -539,6 +539,9 @@ class Machine:
                                     ignore=shutil.ignore_patterns("*.db", "*.db-*"))
             (dest / "evidence.txt").write_text(self.evidence(), encoding="utf-8", errors="replace")
             (dest / "timings.json").write_text(json.dumps(self.timings, indent=1), encoding="utf-8")
+            if not dest.resolve().is_relative_to(self.profile.resolve()):
+                from pm.filesystem import remove_tree
+                remove_tree(self.profile)
 
 
 def new_machine(tmp_root: Path, base_url: str, *, label: str, person: str = "",
@@ -552,6 +555,8 @@ def new_machine(tmp_root: Path, base_url: str, *, label: str, person: str = "",
     name = f"{person} hermes-e2e-{sfx}" if person else f"hermes-e2e-{sfx}"
     machine = Machine(root=base / f"{label}-{sfx}", profile_name=name, base_url=base_url,
                       profiles_root=Path(profiles) if profiles else None, system_git=system_git)
+    # Claim a fresh directory before staging; teardown must never delete a preexisting profile.
+    machine.profile.mkdir(parents=True)
     machine.stage()
     return machine
 
