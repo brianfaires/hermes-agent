@@ -175,3 +175,22 @@ no CalVer tags. Upgrade fixture setup now fetches genuine published upstream
 release refs into the disposable CI checkout without forced rewrites. This is
 fixture metadata preparation, not a source-history or published-tag change.
 Hosted required CI on the new exact head and installed acceptance remain gates.
+
+The native Windows Git self-heal failures also exposed a concrete lookup gap:
+legacy Program Files and profile/shared-home locations omitted the selected
+PM tool store. Recovery now asks `hermes_platform` for the selected Git location
+and probes its existing architecture-specific `git-core` layout before the
+legacy fallbacks. The resolver performs no execution; the updater still requires
+an existing candidate and an explicitly successful non-trampoline probe. Both
+x64 and ARM metadata cases failed before this repair and pass afterward. The
+focused updater/resolution files pass 12 cases with three Windows-only skips on
+Linux. The new resolver typechecks; the legacy updater has the same seven type
+diagnostics on baseline and candidate. Native execution remains a hosted gate.
+
+The native release-timestamp fixture also no longer bets that a cold handoff
+reaches its release wait within a 25-second lock lifetime. The lock holder
+acknowledges acquisition, stays held until the handoff reports entering that
+wait, and releases after crossing the receipt timestamp's whole-second boundary.
+The assertion compares the final receipt against the observed release time.
+This strengthens the same native contract; it remains unqualified until the
+Windows jobs execute it.
