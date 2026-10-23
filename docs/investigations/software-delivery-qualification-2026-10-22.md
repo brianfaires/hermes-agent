@@ -215,3 +215,11 @@ Only this fixture receives a bounded 30-second deadline; its real subprocesses,
 staged target, isolated Git configuration, foreign-root refusal and unrelated
 invocation assertions are retained. This is qualification infrastructure, not
 a product timeout or a waiver of required hosted CI.
+
+That hosted Windows x64 run reports 695 passed and zero assertion failures, but
+its commit-outcome file reaches the unchanged 300-second subprocess limit during
+the final CPU-busy watchdog case. The earlier R6 synchronization regression now
+passes natively. Keep every existing native case and deadline, and group
+post-commit results, R6 release waiting, and delegate/watchdog supervision into
+separate files so cold launch costs do not accumulate into one file timeout.
+Linux collection does not establish native execution of the new grouping.
