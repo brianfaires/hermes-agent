@@ -206,3 +206,12 @@ in-profile evidence remain available. Both ownership/cleanup regressions were
 red before the fix; four filesystem cases pass, including evidence and unrelated
 profile preservation. The production installer and upgrade assertions are
 unchanged. A fresh native run remains required to establish capacity and behavior.
+
+The next exact-head hosted JS run passed all desktop, TUI and web suites but
+failed the staged-source Git integration fixture on Vitest's default five-second
+deadline. The unchanged fixture reproduces locally: 10.6 seconds for real Git
+setup and cold Python source-check processes, with no failed behavior assertion.
+Only this fixture receives a bounded 30-second deadline; its real subprocesses,
+staged target, isolated Git configuration, foreign-root refusal and unrelated
+invocation assertions are retained. This is qualification infrastructure, not
+a product timeout or a waiver of required hosted CI.
