@@ -241,3 +241,16 @@ reproduce the cached-module failure before the move, for one-shot and recurring
 jobs. The new leaf selects the existing upgrade consumer, also reproduced red
 through the real classifier. No legacy exception or gate is widened; the real
 release-N-1 handoff remains required on the final hosted candidate.
+
+The cached-module regressions pass both cases, connected cron verification
+passes 108 cases in an isolated checkout, and the three affected CI-routing
+cases pass. The new leaf, regression file and CLI diagnostic driver typecheck.
+The full local blocking gate passes all 12 checks with 62 files and zero health
+findings.
+
+The preceding integration run passed 812 cases and failed the one-shot plugin
+hook parity row. All eight surfaces pass locally with the same product code;
+the hosted failure's cause remains unestablished. CLI parity drivers now retain
+bounded stderr and exit status in their existing result diagnostics. Assertions
+and plugin behavior are unchanged, and fresh final hosted coverage remains
+required.
