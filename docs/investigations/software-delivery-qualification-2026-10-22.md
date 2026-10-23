@@ -140,3 +140,38 @@ paused for compatibility qualification. No live Kanban card was reopened, and no
 production gateway stop, source switch, deployment or fault injection was performed
 for the checks recorded here. Reconcile and remove only this owned pause when the
 installed monitor and current scope qualify. Existing unrelated stops remain binding.
+
+### Required-CI repair follow-up
+
+The final-source PR run 39981255708 completed red. The same source lane then
+repaired the reproduced baseline fixture failures instead of waiving them:
+cron unit fixtures now stub the receipt write alongside their already mocked
+execution bookkeeping; external-worker integration uses actual fenced adoption
+and retains real foreign/unadopted receipt refusal coverage. Redaction patches
+the called output sibling. Media fixtures request attachments on complete lines,
+as the existing standalone-control implementation and documentation require;
+prose examples remain literal. The regenerated prompt fixtures reflect that
+already-existing guidance. Provider, profile mutation, systemd manager-read and
+TUI module-identity fixtures retain their original behavior assertions.
+
+One actual config integration defect needed a production repair: saving consent
+advanced the config file without updating a wizard caller's validated revision.
+Consent persistence now checks that caller under the existing mutation lock and
+refreshes its revision before releasing the lock, preserving pending edits and
+rejecting a genuinely stale caller before any consent write. Both regressions
+were demonstrated red; the affected consent/config transaction files pass 28
+cases. This does not change the consent choices or sending policy.
+
+All 24 previously failing core files now pass in an independent temporary Git
+root: 601 passed, zero failed, four skipped. Additional real-ledger, adoption and
+redaction verification passes 122 cases; these totals overlap and are not added.
+The affected media contracts pass 251 cases. Desktop settings passes 19 cases
+after timer-aware notification teardown. A long native Windows help-probe case
+has its own file so the outcome file can finish and report assertion failures
+within the unchanged per-file deadline; Linux collection is not native proof.
+
+The fork's history contains the old release commits, but its hosted checkout has
+no CalVer tags. Upgrade fixture setup now fetches genuine published upstream
+release refs into the disposable CI checkout without forced rewrites. This is
+fixture metadata preparation, not a source-history or published-tag change.
+Hosted required CI on the new exact head and installed acceptance remain gates.

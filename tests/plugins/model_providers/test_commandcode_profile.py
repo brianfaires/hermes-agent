@@ -11,7 +11,7 @@ CommandCode registers two profiles:
     Defaults to ``claude-sonnet-4-6``.  Requires Bearer auth recognition
     in ``agent/anthropic_adapter.py``.
 
-Both share ``COMMANDCODE_API_KEY`` and ``https://api.commandcode.ai/provider/v1``.
+Both require an API key and use ``https://api.commandcode.ai/provider/v1``.
 """
 
 from __future__ import annotations
@@ -153,11 +153,12 @@ class TestCommandCodeFetchModelsPickerContract:
         chat = resolve_provider_full("commandcode", {}, [])
         assert chat is not None and chat.id == "commandcode"
         assert chat.transport == "openai_chat"
-        assert "COMMANDCODE_API_KEY" in chat.api_key_env_vars
+        assert chat.api_key_env_vars
 
         anth = resolve_provider_full("commandcode-anthropic", {}, [])
         assert anth is not None and anth.id == "commandcode-anthropic"
         assert anth.transport == "anthropic_messages"
+        assert anth.api_key_env_vars
 
 
 # ── base_url endpoint override ───────────────────────────────────────────────

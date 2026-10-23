@@ -1,8 +1,25 @@
 """Terminal facts survive operational-history pruning without retaining transcripts."""
 import json
 
+import pytest
+
 from cron import executions, scheduler
 from gateway.run import _profile_runtime_scope
+
+
+@pytest.mark.parametrize("foreign_owner", [False, True], ids=["unadopted", "foreign"])
+def test_receipt_capture_refuses_unowned_execution(tmp_path, monkeypatch, foreign_owner):
+    from cron.execution_results import capture_execution_job, iter_execution_results
+
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
+    row = executions.create_execution("owner-fence", source="fixture")
+    if foreign_owner:
+        assert executions.mark_execution_running(row["id"])
+        monkeypatch.setattr(executions, "_PROCESS_ID", "another-worker")
+    with pytest.raises(RuntimeError, match="no longer owned"):
+        capture_execution_job(row["id"], {"name": "Unowned result"})
+    assert list(iter_execution_results()) == []
+    assert executions.get_execution(row["id"])["status"] == ("running" if foreign_owner else "claimed")
 
 
 def test_receipts_are_atomic_immutable_and_profile_local(tmp_path, monkeypatch):

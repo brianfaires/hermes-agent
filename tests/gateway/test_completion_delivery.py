@@ -276,7 +276,7 @@ def test_process_tool_redacts_explicit_kill_output(monkeypatch):
         result["output"] = "PRIVATE_TOKEN=<redacted>\n"
         return result
 
-    monkeypatch.setattr(pr_module, "_redact_process_result", _redact)
+    monkeypatch.setattr("tools.process_registry_output.redact_process_result", _redact)
 
     result = json.loads(pr_module._handle_process({
         "action": "kill",

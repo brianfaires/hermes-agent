@@ -304,7 +304,7 @@
   "discord.claude": {
     "prompt_tokens": {
       "context": 0,
-      "stable": 1349,
+      "stable": 1357,
       "volatile": 1814
     },
     "tool_tokens": 13277,
@@ -347,7 +347,7 @@
   "telegram.claude": {
     "prompt_tokens": {
       "context": 0,
-      "stable": 1382,
+      "stable": 1389,
       "volatile": 1814
     },
     "tool_tokens": 13277,
