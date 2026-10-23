@@ -1,7 +1,9 @@
 """Deterministic selected-context failures park once and preserve candidate work (#32)."""
 from pathlib import Path
+import hashlib
 import subprocess
 import sys
+import uuid
 
 import pytest
 
@@ -109,28 +111,44 @@ def test_probe_binds_selected_workspace_before_container_execution(workflow, mon
         """External engine boundary: execute a real command only in the declared mount."""
         env_type = 'docker'
 
-        def __init__(self, *, cwd, host_cwd, **kwargs):
+        def __init__(self, *, cwd, host_cwd, task_id, **kwargs):
             self.cwd, self.host_cwd = cwd, host_cwd
+            identity = hashlib.sha256(task_id.encode()).hexdigest()[:16]
+            self.marker = workspace / f'sandbox-{identity}.txt'
+            self.marker.write_text(uuid.uuid4().hex)
 
         def execute(self, command, cwd='', **kwargs):
-            if self.host_cwd != str(workspace) or cwd != '/workspace':
+            if self.host_cwd not in {str(workspace), str(profile)} or cwd != '/workspace':
                 return {'returncode': 126, 'output': 'Selected workspace is not mounted'}
             result = subprocess.run(command, shell=True, cwd=self.host_cwd,
                                     capture_output=True, text=True, timeout=10, check=False)
-            (workspace / 'probe-output.txt').write_text(result.stdout)
+            (Path(self.host_cwd) / 'probe-output.txt').write_text(result.stdout)
             return {'returncode': result.returncode, 'output': result.stdout}
 
         def cleanup(self, **kwargs):
-            pass
+            self.marker.unlink()
 
     monkeypatch.setattr(terminal, 'check_terminal_requirements', lambda: True)
     monkeypatch.setattr(terminal_tool_backends, '_create_environment',
                         lambda **kwargs: MountedContainer(**kwargs))
+    from tools.terminal_tool_lifecycle import cleanup_vm
+    with dispatch._worker_profile_scope(str(profile)):
+        terminal.register_task_env_overrides('existing-owner', {'cwd': str(profile), 'cwd_source': 'session'})
+        import json
+        initial = json.loads(terminal.terminal_tool('echo existing-owner', task_id='existing-owner', timeout=15))
+        assert initial['exit_code'] == 0
+        owner_key = terminal._resolve_container_task_id('existing-owner')
+    owner_sandboxes = {path.name: path.read_text() for path in workspace.glob('sandbox-*.txt')}
     card = kb.create_task(conn, title='Execute in the assigned mounted workspace', assignee='reviewer',
                           workspace_kind='dir', workspace_path=str(workspace))
     assert [row[0] for row in dispatch.dispatch_once(conn).spawned] == [card]
     assert wait_until(marker.exists, timeout=10)
     assert marker.read_text() == 'accepted'
     assert (workspace / 'probe-output.txt').read_text().strip() == 'hermes-launch-probe'
+    remaining = {path.name: path.read_text() for path in workspace.glob('sandbox-*.txt')}
+    assert remaining == owner_sandboxes, 'Probe must remove its sandbox and preserve the live owner environment'
     assert kb.complete_task(conn, card, summary='Selected mounted workspace accepted.',
                             expected_run_id=kb.get_task(conn, card).current_run_id)
+    with dispatch._worker_profile_scope(str(profile)):
+        cleanup_vm(owner_key, force_remove=True)
+        terminal.clear_task_env_overrides('existing-owner')

@@ -46,7 +46,8 @@ def _probe_workspace(task: Task, profile_home: str, workspace: str) -> None:
         enforce_no_refusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope, terminal_env,
     )
     from tools.terminal_tool import (
-        check_terminal_requirements, clear_task_env_overrides, register_task_env_overrides, terminal_tool,
+        _resolve_container_task_id, check_terminal_requirements, clear_task_env_overrides,
+        register_task_env_overrides, terminal_tool,
     )
     from tools.terminal_tool_backends import terminal_backend_unavailable_reason
     from tools.terminal_tool_lifecycle import cleanup_vm
@@ -61,13 +62,15 @@ def _probe_workspace(task: Task, profile_home: str, workspace: str) -> None:
         scope = cast(dict[str, str], get_terminal_scope())  # Bound by _worker_profile_scope.
         token = set_terminal_scope({**scope, "TERMINAL_CWD": workspace})
         # A unique sandbox avoids changing or tearing down a live owner's environment.
+        effective_id = probe_id
         try:
             register_task_env_overrides(probe_id, {"env_type": terminal_env("TERMINAL_ENV", "local"),
                                                   "cwd": workspace, "cwd_source": "session"})
+            effective_id = _resolve_container_task_id(probe_id)
             result = json.loads(terminal_tool("echo hermes-launch-probe", task_id=probe_id, timeout=15))
         finally:
             try:
-                cleanup_vm(probe_id, force_remove=True)
+                cleanup_vm(effective_id, force_remove=True)
             finally:
                 clear_task_env_overrides(probe_id)
                 reset_terminal_scope(token)
