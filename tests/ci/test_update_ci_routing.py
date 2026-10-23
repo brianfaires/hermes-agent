@@ -19,6 +19,7 @@ Two failure modes this file pins (independent review R15):
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import importlib.util
 import itertools
 import json
@@ -518,6 +519,9 @@ def test_replay_rejects_ineffective_required_step(monkeypatch, lane, rel, job, n
     elif job == "update":
         for cell in workflow["jobs"][job]["strategy"]["matrix"]["include"]:
             cell["specs"] = "e2e/update/absent.spec.ts"
+    elif job == "install-update":
+        for cell in workflow["jobs"][job]["strategy"]["matrix"]["include"]:
+            cell["path"] = "tests/absent-e2e/"
     else:
         step["run"] = step["run"].replace("tests/e2e", "tests/absent-e2e")
     with pytest.raises(AssertionError):
@@ -845,3 +849,32 @@ def test_run_tests_forwards_the_strict_switch():
     text = (_REPO / "scripts/run_tests.sh").read_text(encoding="utf-8-sig")
     allow = re.search(r"for _test_var in (.*?); do", text, re.DOTALL)
     assert allow and "HERMES_E2E_STRICT_ACCEPTANCE" in allow.group(1).split()
+
+
+@_NATIVE_WINDOWS_TOO
+def test_windows_install_slices_cover_journeys_and_isolate_crash_cells():
+    rel = ".github/workflows/windows-install-update-e2e.yml"
+    node = _run_workflow(rel, inputs=_inputs_for(rel, {}))["install-update"]
+    body = node["body"]
+    step = next(s for s in body["steps"] if s.get("name") == "Run Windows install + update E2E")
+    crash_gate = next(s for s in body["steps"] if s.get("name") == "Every crash cell ran")
+    upload = next(s for s in body["steps"] if s.get("name") == "Upload transcripts, logs and receipts")
+    cells = body.get("strategy", {}).get("matrix", {}).get("include", [{}])
+    crash = "tests/e2e/core/windows_update/test_crash_cells.py"
+    covered = Counter()
+    artifacts = []
+    for cell in cells:
+        ctx = {**node["ctx"], "matrix": cell, "runner": {"os": "Windows", "arch": "X64"},
+               "github": {**node["ctx"]["github"], "run_attempt": 1}}
+        selected = workflow_steps.selected_files(step, ctx, _REPO)
+        covered.update(selected)
+        if crash in selected:
+            assert selected == {crash}, "the long crash journey must have its own runner budget"
+            workflow_steps.required(crash_gate, ctx)
+        else:
+            assert not gha.condition(crash_gate.get("if"), ctx), "this slice owns no crash manifest"
+        artifacts.append(gha.render(upload["with"]["name"], ctx))
+    expected = {p.relative_to(_REPO).as_posix()
+                for p in (_REPO / "tests/e2e/core/windows_update").rglob("test_*.py")}
+    assert covered == Counter({path: 1 for path in expected}), covered
+    assert len(set(artifacts)) == len(artifacts), "matrix jobs must preserve separate diagnostics"

@@ -254,3 +254,15 @@ the hosted failure's cause remains unestablished. CLI parity drivers now retain
 bounded stderr and exit status in their existing result diagnostics. Assertions
 and plugin behavior are unchanged, and fresh final hosted coverage remains
 required.
+
+The serial Windows installer run completed five of ten journey files (20 passed,
+one existing expected failure, zero failures) before the 75-minute job deadline.
+Profile cleanup avoided the earlier disk exhaustion, but serializing the entire
+suite no longer fits that budget. The existing workflow now gives crash cells
+their own host and splits the other journeys across two hosts using the runner's
+existing deterministic slicing. Each host retains one install at a time, the
+75-minute job limit, the 3,600-second file limit, and all behavior assertions.
+The crash manifest remains mandatory on its owning host; every host exports
+uniquely named diagnostics and checks for leftover processes. A replay regression
+was red with the single job and now verifies that all journey files run exactly
+once with crash cells isolated. Fresh hosted completion remains required.
