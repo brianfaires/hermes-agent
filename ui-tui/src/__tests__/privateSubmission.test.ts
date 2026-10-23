@@ -9,8 +9,12 @@ import { checkPrivateCommand } from '../app/privateCommands/dispatch.js'
 const previousHome = process.env.HERMES_HOME
 
 afterEach(() => {
-  if (previousHome === undefined) delete process.env.HERMES_HOME
-  else process.env.HERMES_HOME = previousHome
+  if (previousHome === undefined) {
+    delete process.env.HERMES_HOME
+  } else {
+    process.env.HERMES_HOME = previousHome
+  }
+
   vi.resetModules()
 })
 
@@ -20,7 +24,11 @@ describe('private submission boundary', () => {
     const continuation = vi.fn()
     const request = vi.fn(async () => ({ handled: true, output: 'Logged receipt' }))
     const handled = await checkPrivateCommand('/log FICTIONAL_PRIVATE', request, acknowledge)
-    if (!handled) continuation()
+
+    if (!handled) {
+      continuation()
+    }
+
     expect(request).toHaveBeenCalledWith('/log FICTIONAL_PRIVATE')
     expect(continuation).not.toHaveBeenCalled()
     expect(acknowledge).toHaveBeenCalledWith('Logged receipt')
