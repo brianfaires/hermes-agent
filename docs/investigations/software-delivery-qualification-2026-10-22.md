@@ -223,3 +223,10 @@ passes natively. Keep every existing native case and deadline, and group
 post-commit results, R6 release waiting, and delegate/watchdog supervision into
 separate files so cold launch costs do not accumulate into one file timeout.
 Linux collection does not establish native execution of the new grouping.
+
+The hosted Python shard then passed 30,289 cases but correctly rejected an
+omitted selector for the newly introduced managed-Git resolver. That module
+now belongs to the existing shared update-dependency list, so changes to it
+select the upgrade and desktop-update consumers. The existing import-ownership
+regression reproduces the omission before the fix; no assertion or lane is
+removed to make the gate green.
