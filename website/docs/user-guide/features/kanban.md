@@ -343,6 +343,18 @@ time.
 
 #### Workers and systemd cgroups
 
+Before launching a native worker, dispatch resolves every requested skill in
+the assigned profile, including `sdlc-review` for review. When terminal tools
+are enabled, it also runs a bounded harmless command through that profile's
+configured terminal backend for the assigned workspace, including scratch.
+The probe binds the same workspace mount context as the worker and cleans up
+its own temporary sandbox.
+An available model does not establish that the workspace route works.
+An unavailable required skill or command route parks the task as a
+`capability` block with its underlying reason. The assigning owner repairs
+that prerequisite or selects a capable profile, then explicitly unblocks it;
+unchanged idle checks do not repeat the launch. Candidate files remain intact.
+
 Workers are fire-and-forget processes that outlive the dispatcher tick, so
 wherever the dispatcher runs inside a systemd unit the worker is launched in
 its own transient scope (`systemd-run --user --scope --unit hermes-worker-kanban-<task>-run-<run>`)
