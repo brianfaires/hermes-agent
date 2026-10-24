@@ -66,6 +66,67 @@ def _executor(result: Path, counter: Path, exitcode: int):
     return process
 
 
+def test_missing_declared_evidence_prevents_acceptance_and_preserves_workspace(home):
+    with kbc.connect_closing() as conn:
+        card = kb.create_task(conn, title='Bounded result with one required artifact')
+        claimed = kb.claim_task(conn, card)
+        scratch = workspace.resolve_workspace(claimed)
+        workspace.set_workspace_path(conn, card, scratch)
+        required = scratch / 'required.txt'
+        with pytest.raises(kb.ArtifactPreservationError, match='unavailable'):
+            kb.complete_task(conn, card, expected_run_id=claimed.current_run_id,
+                             summary='Required result claimed.', metadata={'artifacts': [str(required)]})
+        assert kb.get_task(conn, card).status == 'running'
+        assert scratch.is_dir()
+        required.write_text('actual required result')
+        assert kb.complete_task(conn, card, expected_run_id=claimed.current_run_id,
+                                summary='Required result verified.', metadata={'artifacts': [str(required)]})
+        assert not scratch.exists()
+        preserved = next(item for item in kb.list_attachments(conn, card) if item.filename == 'required.txt')
+        assert Path(preserved.stored_path).read_text() == 'actual required result'
+
+
+@pytest.mark.parametrize('lose_durable', [False, True])
+def test_external_file_and_existing_handoff_survive_review_without_duplicate_copy(home, lose_durable):
+    outside = home.parent / 'external-result.txt'
+    outside.write_text('actual external result')
+    reference = 'https://example.invalid/related-evidence'
+    with kbc.connect_closing() as conn:
+        card = kb.create_task(conn, title='Review an external file and a later scratch result')
+        claimed = kb.claim_task(conn, card)
+        scratch = workspace.resolve_workspace(claimed)
+        workspace.set_workspace_path(conn, card, scratch)
+        assert kb.request_review(conn, card, reviewer='default', summary='External result ready.',
+                                 metadata={'artifacts': [str(outside), reference]},
+                                 expected_run_id=claimed.current_run_id)
+        metadata = dict(kb.latest_run(conn, card).metadata)
+        second = scratch / 'review-result.txt'
+        second.write_text('actual review result')
+        metadata['artifacts'] = [str(second), *metadata['artifacts']]
+        review = kb.claim_review_task(conn, card)
+        if lose_durable:
+            original = Path(kb.list_attachments(conn, card)[0].stored_path)
+            original.unlink()
+            with pytest.raises(kb.ArtifactPreservationError, match='unavailable'):
+                kb.complete_task(conn, card, summary='Required evidence was lost.', metadata=metadata,
+                                 expected_run_id=review.current_run_id)
+            assert kb.get_task(conn, card).status == 'running'
+            assert scratch.is_dir()
+            assert len(kb.list_attachments(conn, card)) == 1
+            assert not (original.parent / second.name).exists()
+            original.parent.mkdir(parents=True, exist_ok=True)
+            original.write_text('actual external result')
+        assert kb.complete_task(conn, card, summary='Both results verified.', metadata=metadata,
+                                expected_run_id=review.current_run_id)
+        attachments = kb.list_attachments(conn, card)
+        assert {item.filename: Path(item.stored_path).read_text() for item in attachments} == {
+            'external-result.txt': 'actual external result', 'review-result.txt': 'actual review result'}
+        assert len(attachments) == 2
+        assert reference in kb.latest_run(conn, card).metadata['artifacts']
+        assert not scratch.exists()
+        assert outside.read_text() == 'actual external result'
+
+
 @pytest.mark.parametrize('exitcode', [0, 3])
 def test_exact_board_card_run_and_real_executor_receipts_survive_recheck(home, tmp_path, exitcode):
     kb.create_board('ops')
@@ -120,6 +181,9 @@ def test_exact_board_card_run_and_real_executor_receipts_survive_recheck(home, t
                 stored = next(item for item in artifacts if item.filename == 'external-result.json')
                 assert json.loads(Path(stored.stored_path).read_text()) == receipt
                 assert all(Path(item.stored_path).is_file() for item in artifacts)
+                if exitcode == 0:
+                    declared = next(item for item in artifacts if item.filename == 'executor-result.txt')
+                    assert Path(declared.stored_path).read_text() == 'actual executor result: 0'
                 assert notify.list_notify_subs(conn, target)[0]['notifier_profile'] == 'operator'
                 assert kb.get_task(conn, target).status == ('done' if exitcode == 0 else 'blocked')
             with kb.scoped_current_board('ops'), kbc.connect_closing(board='ops') as conn:
