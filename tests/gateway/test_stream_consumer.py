@@ -24,13 +24,14 @@ class TestCleanForDisplay:
         assert GatewayStreamConsumer._clean_for_display(text) == text
 
 
-    def test_media_tag_single_quoted_stripped(self):
-        """A single-quote-wrapped tag matches the known-ext cleanup pattern
-        and is removed (delivery attempts it too — consistent)."""
+    def test_only_standalone_single_quoted_media_tag_is_stripped(self):
+        """Standalone quoted controls are executable; prose examples stay literal."""
         result = GatewayStreamConsumer._clean_for_display(
-            "Result: 'MEDIA:/path/file.png'"
+            "Result:\n'MEDIA:/path/file.png'"
         )
         assert "MEDIA:" not in result
+        prose = "Result: 'MEDIA:/path/file.png'"
+        assert GatewayStreamConsumer._clean_for_display(prose) == prose
 
     def test_media_tag_double_quoted_json_context_stays_visible(self):
         """A double-quoted tag preceded by a colon sits in a JSON value

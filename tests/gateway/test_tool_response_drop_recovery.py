@@ -137,18 +137,19 @@ class TestRecoveryDoesNotLeakMediaFragments:
     """
 
     @pytest.mark.asyncio
-    async def test_spaced_media_path_does_not_leak_fragment(self, monkeypatch, caplog):
+    async def test_spaced_media_path_does_not_leak_fragment(self, tmp_path, monkeypatch, caplog):
         adapter = _DummyAdapter(Platform.DISCORD)
         adapter._keep_typing = _hold_typing
+        media = tmp_path / "my vacation photo.png"
+        media.write_bytes(b"synthetic media")
 
         async def handler(_event):
-            # Spaced path with a valid extension — matched in full by the real
-            # extract_media regex, then removed from the body.
-            return "MEDIA: /tmp/nope_dir_zzz/my vacation photo.png"
+            # An existing complete spaced path is executable before the delivery filter rejects it.
+            return f"MEDIA: {media}"
 
         adapter.set_message_handler(handler)
         # Use the REAL extract_media (so the strong regex cleans `response`),
-        # but force the path to be filtered out (unsafe/nonexistent) so we hit
+        # but force the path to be filtered out so we hit
         # the empty-text + no-attachment recovery branch deterministically.
         monkeypatch.setattr(
             type(adapter),
