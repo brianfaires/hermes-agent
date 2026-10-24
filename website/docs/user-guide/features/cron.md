@@ -1264,6 +1264,15 @@ print(json.dumps({"wakeAgent": True, "context": {"new_issues": latest - prev}}))
 
 When `wakeAgent` is omitted, the default is `true` (wake the agent as usual).
 
+If `script` and `monitor_script` name the same script and its final JSON line
+contains a boolean `wakeAgent`, cron runs that script once per check and uses the
+boolean instead of hash-based change detection. Keep returning `true` while an
+action is pending, then return `false` after verifying the recipient's effect.
+An interrupted agent can therefore retry the same pending action without a new
+source event. A failed script reports an error and does not start the agent.
+Monitor sources without this explicit shared-script gate keep their normal
+hash-based behavior.
+
 #### Recipes: cheap pre-run gates
 
 The `wakeAgent` gate gives you a $0 way to decide whether a scheduled job should spend any LLM tokens at all. Three patterns cover most use cases.
