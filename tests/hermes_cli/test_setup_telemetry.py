@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from hermes_cli.config import DEFAULT_CONFIG
 from hermes_cli.setup import setup_telemetry
 from hermes_cli.subcommands.setup import build_setup_parser
@@ -89,10 +91,28 @@ def test_no_answer_survives_the_callers_later_config_save(monkeypatch):
 
     monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda _question, default: False)
     config = load_config()
+    config["agent"]["max_turns"] = 37
     setup_telemetry(config)
     save_config(config)  # what the wizard and `hermes tools` do afterwards
 
     assert read_raw_config()["telemetry"]["shared_metrics"] == {"enabled": False, "send": False, "offer_version": 2}
+    assert read_raw_config()["agent"]["max_turns"] == 37
+
+
+def test_consent_refuses_a_stale_callers_config_before_writing():
+    from hermes_cli.config import load_config, read_raw_config, save_config
+    from hermes_cli.config_snapshots import ConfigConflictError
+    from hermes_cli.observability.shared_metrics_consent import consent_state, save_consent
+
+    stale = load_config()
+    current = load_config()
+    current["agent"]["max_turns"] = 41
+    save_config(current)
+    with pytest.raises(ConfigConflictError):
+        save_consent(False, False, stale)
+    raw = read_raw_config()
+    assert raw["agent"]["max_turns"] == 41
+    assert consent_state(raw)["decided"] is False
 
 
 def test_chat_offer_asks_an_undecided_profile_once(monkeypatch):
