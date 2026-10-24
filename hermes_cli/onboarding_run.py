@@ -58,7 +58,7 @@ def set_run(value: bool, *, mark_profile_offered: bool = False) -> None:
     from hermes_cli import config as config_mod
 
     path = _root_config()
-    with config_mod._CONFIG_LOCK:
+    with config_mod.config_mutation_lock(path):
         config = config_mod.read_user_config_raw(path)
         section = config_mod._ensure_dict(config, "onboarding")
         section["run"] = value
