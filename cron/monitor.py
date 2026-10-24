@@ -1,4 +1,4 @@
-"""Monitor-mode cron support — hash-suppressed change detection.
+"""Monitor-mode cron support — change detection and explicit shared-script gates.
 
 A monitor job attaches a cheap source (``monitor_script`` / ``monitor_url``) to an LLM cron job.
 Each tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/whitespace
@@ -8,12 +8,17 @@ CHANGE DETECTED" block (capped unified diff + new output) is injected into the p
 failure → an ERROR, never a change, and the stored hash is left untouched. State:
 ``job["monitor_state"]`` in jobs.json (hash + last_changed_at) and
 ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
+
+When script and monitor_script name the same source, a final JSON wakeAgent boolean
+owns admission instead of the hash. Its native obligation remains retryable until
+the recipient acts; the source output is reused without executing the script twice.
 """
 
 from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -39,6 +44,22 @@ class MonitorOutcome:
     first_run: bool = False
     context_block: Optional[str] = None
     error: Optional[str] = None
+    source_output: Optional[str] = None
+
+
+def _shared_script_wake(job: dict, output: str) -> bool | None:
+    """A shared script's explicit gate owns admission until its native obligation closes."""
+    if not job.get("script") or job.get("script") != job.get("monitor_script"):
+        return None
+    lines = output.strip().splitlines()
+    if not lines:
+        return None
+    try:
+        value = json.loads(lines[-1])
+    except ValueError:
+        return None
+    flag = value.get("wakeAgent") if isinstance(value, dict) else None
+    return flag if isinstance(flag, bool) else None
 
 
 def hash_monitor_output(output: str) -> str:
@@ -128,12 +149,19 @@ def check_monitor(job: dict) -> MonitorOutcome:
 
     On change (or first run) the new hash + snapshot are persisted BEFORE the agent runs — detection
     time is the state boundary, so a failed agent run doesn't re-alert on the same content forever.
+    An explicit shared-script gate is evaluated each time without consuming a hash.
     On failure nothing is persisted.
     """
     job_id = str(job.get("id") or "")
     ok, output = _run_monitor_source(job)
     if not ok:
         return MonitorOutcome(ok=False, error=output)
+
+    gate = _shared_script_wake(job, output)
+    if gate is not None:
+        # A detected event is still owed after an interrupted recipient. Hashing that event
+        # before its owner acts would consume the wake; the script's native receipt closes it.
+        return MonitorOutcome(ok=True, changed=gate, source_output=output)
 
     new_hash = hash_monitor_output(output)
     raw_state = job.get("monitor_state")

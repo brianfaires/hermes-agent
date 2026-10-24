@@ -1570,44 +1570,6 @@ def _run_no_agent_job(
     return True, f"{header}\n---\n\n{output}\n", output, None
 
 
-def _apply_monitor_gate(
-    job: dict, job_id: str, job_name: str, extra_prompt: Optional[str],
-) -> tuple[Optional[tuple], Optional[str], Optional[str]]:
-    """Monitor gate (hash-suppressed change detection). Must run BEFORE any agent machinery so an
-    unchanged tick costs no LLM/delivery. Returns ``(early_result | None, extra_prompt,
-    monitor_context)``. Monitor context is runtime data and must remain distinct from a
-    user-authored ``extra_prompt`` so the prompt scanner keeps its strict user-input boundary.
-    """
-    from cron.monitor import check_monitor, job_has_monitor
-
-    if not job_has_monitor(job):
-        return None, extra_prompt, None
-    _mon = check_monitor(job)
-    _mon_now = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
-    header = _job_doc_header(job_name, job_id, _mon_now, "monitor")
-    if not _mon.ok:
-        # Source failure is an ERROR, never a change: alert so a broken monitor can't silently
-        # stop watching. Stored hash untouched.
-        logger.error("Job '%s': monitor source failed: %s", job_id, _mon.error)
-        _mon_alert = (
-            f"⚠ Cron monitor '{job_name}' source failed\n\n"
-            f"{_mon.error}\n\n"
-            f"Time: {_mon_now}"
-        )
-        return (
-            False, f"{header}**Status:** monitor source failed\n\n{_mon.error}\n", _mon_alert, _mon.error,
-        ), extra_prompt, None
-    if not _mon.changed:
-        # Unchanged: silent no_change tick (ledger doc kept; SILENT_MARKER blocks delivery).
-        logger.info("Job '%s': monitor output unchanged — suppressing agent run", job_id)
-        return (
-            True, f"{header}**Status:** no_change (agent run suppressed)\n", SILENT_MARKER, None,
-        ), extra_prompt, None
-    # Changed (or first run): pass monitor output through the runtime-data seam. Keep any manual
-    # per-run prompt separate: it remains user input and is therefore still strict-scanned.
-    return None, extra_prompt, _mon.context_block
-
-
 @dataclass
 class _CronJobConfig:
     """Config-derived inputs for one agent-backed cron run."""
@@ -2249,7 +2211,10 @@ def _prepare_job_prompt(
     if job_payload_is_empty(job):
         return _block_and_pause_job(job_id, job_name, EMPTY_PAYLOAD_ERROR), None
 
-    _early, extra_prompt, monitor_context = _apply_monitor_gate(job, job_id, job_name, extra_prompt)
+    from cron.scheduler_monitor import apply_monitor_gate
+
+    _early, extra_prompt, monitor_context, prerun_script = apply_monitor_gate(
+        job, job_id, job_name, extra_prompt)
     if _early is not None:
         return _early, None
 
@@ -2260,15 +2225,15 @@ def _prepare_job_prompt(
     # returned without reaching the finally that closes it, relying on GC to release the handle. Init now
     # happens inside the main try, right before the agent is constructed — after every early-return path
     # (#96290).
-    prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script_with_claim_heartbeat(
-            job,
-            script_path,
-            workdir=_resolve_job_workdir(job, job_id),
-            cancel_event=cancel_event,
-        )
+        if prerun_script is None:
+            prerun_script = _run_job_script_with_claim_heartbeat(
+                job,
+                script_path,
+                workdir=_resolve_job_workdir(job, job_id),
+                cancel_event=cancel_event,
+            )
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info("Job '%s' (ID: %s): wakeAgent=false, skipping agent run", job_name, job_id)
