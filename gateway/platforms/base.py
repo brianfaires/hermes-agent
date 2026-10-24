@@ -1264,6 +1264,7 @@ _MEDIA_EXT_ALTERNATION = "|".join(sorted((e.lstrip(".") for e in MEDIA_DELIVERY_
 # attachment is silently dropped (#88038).
 _MEDIA_CJK_TERMINATORS = "（）〈〉《》：，。；！？、\u201c\u201d\u2018\u2019【】"
 
+# Token lexer for historical dedup hints; outbound controls use media_directives.tag_matches.
 MEDIA_TAG_CLEANUP_RE = re.compile(
     r'''[`"'*_]{0,3}MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+?`|"[^"\n]+?"|'[^'\n]+?'|'''
@@ -1302,7 +1303,8 @@ MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
 
 
 def _match_extensionless_path(scan_text: str, match: re.Match) -> Optional[tuple[str, int]]:
-    """Extensionless MEDIA tag match -> validated on-disk ``(safe_path, end_offset)`` or None: the
+    """Historical hint recovery only; outbound controls validate complete lines.
+    Extensionless MEDIA tag match -> validated on-disk ``(safe_path, end_offset)`` or None: the
     captured path first, then extended across single spaces (max 8 tokens, never past a newline
     or the next ``MEDIA:``).
 
@@ -1356,7 +1358,7 @@ def _path_lacks_deliverable_extension(path: str) -> bool:
 
 
 def _has_media_directives(text: str) -> bool:
-    return "MEDIA:" in text or "[[audio_as_voice]]" in text or "[[as_document]]" in text
+    return "media:" in text.lower() or "[[audio_as_voice]]" in text or "[[as_document]]" in text
 
 
 # A provider can leak its exact end-of-sequence control token glued to the last MEDIA path
@@ -1377,15 +1379,10 @@ def _terminal_sentinel_start(text: str) -> int:
 
 
 def _mask_media_scan_text(text: str) -> str:
-    """Offset-preserving mask of protected spans (code, quotes, JSON string values) and of a
-    terminal ``<|eos|>`` sentinel, so a tag glued to it ends on whitespace like any other.
-    BasePlatformAdapter is defined later in this module; resolved at call time."""
-    A = BasePlatformAdapter
-    masked = A._mask_json_string_media(A._mask_protected_spans(text))
-    start = _terminal_sentinel_start(text)
-    if start >= 0:
-        masked = _blank_spans(masked, [(start, len(text.rstrip()))])
-    return masked
+    """Offset-preserving standalone scan with protected spans and terminal control tokens masked.
+    Eligibility uses original lines so masked prose cannot promote a tag into a directive."""
+    from gateway.media_directives import masked_scan
+    return masked_scan(text)
 
 
 def _deliverable_tag_spans(text: str) -> list:
@@ -1410,20 +1407,18 @@ def _extensionless_media_matches(masked: str):
 
 
 def _real_media_tag_spans(masked: str) -> list:
-    """(start, end) spans of deliverable MEDIA tags on a masked copy: known-extension tags
-    unconditionally, extension-less / unknown ones only if validate_media_delivery_path accepts."""
-    spans: list = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
-    spans.extend((match.start(), end) for match, _, end in _extensionless_media_matches(masked))
-    return spans
+    """Spans of complete executable directives on the shared masked scan."""
+    from gateway.media_directives import tag_matches
+    return [(start, end) for start, end, _path in tag_matches(masked)]
 
 
-_FENCED_CODE_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
 _INLINE_CODE_RE = re.compile(r'`[^`\n]+`')
 
 
 def _code_spans(content: str) -> list:
     """(start, end) spans of fenced code blocks and inline code in ``content``."""
-    return [m.span() for rx in (_FENCED_CODE_RE, _INLINE_CODE_RE) for m in rx.finditer(content)]
+    from gateway.media_directives import fenced_spans
+    return fenced_spans(content) + [match.span() for match in _INLINE_CODE_RE.finditer(content)]
 
 
 def _blank_spans(text: str, spans: list) -> str:
@@ -3226,7 +3221,8 @@ class BasePlatformAdapter(ABC):
         """Blank fenced code, inline code and blockquotes (length-preserving so regex offsets stay
         valid) against MEDIA: false positives; backtick-quoted paths inside MEDIA: tags stay
         scannable."""
-        spans: list = [m.span() for m in _FENCED_CODE_RE.finditer(content)]
+        from gateway.media_directives import fenced_spans
+        spans = fenced_spans(content)
         for m in _INLINE_CODE_RE.finditer(content):
             start = m.start()
             if re.search(r'MEDIA:\s*$', content[max(0, start - 20):start]):
@@ -3266,7 +3262,7 @@ class BasePlatformAdapter(ABC):
 
     @staticmethod
     def extract_media(content: str) -> tuple[list[tuple[str, bool]], str]:
-        """Extract ``MEDIA:<path>`` tags and strip ``[[audio_as_voice]]`` / ``[[as_document]]`` ->
+        """Extract standalone ``MEDIA:<path>`` tags and strip ``[[audio_as_voice]]`` / ``[[as_document]]`` ->
         ``([(path, is_voice), ...], cleaned)``. Both directives are message-global;
         ``[[as_document]]`` (unmodified sendDocument for large images) is detected by dispatch sites
         on the ORIGINAL response and only stripped here."""
@@ -3288,15 +3284,12 @@ class BasePlatformAdapter(ABC):
             if path not in seen_paths:
                 seen_paths.add(path)
                 media.append((path, has_voice_tag and os.path.splitext(path)[1].lower() in _AUDIO_EXTS))
-        for match in MEDIA_TAG_CLEANUP_RE.finditer(scan_content):
-            path = _normalize_media_tag_path(match.group("path"))
-            if path:
-                try:
-                    _add(os.path.expanduser(path))
-                except (OSError, RuntimeError, ValueError):
-                    continue  # crafted ~\x00 path: skip it, keep the rest
-        for _, safe_path, _ in _extensionless_media_matches(scan_content):
-            _add(safe_path)
+        from gateway.media_directives import tag_matches
+        for _start, _end, path in tag_matches(scan_content):
+            try:
+                _add(os.path.expanduser(path))
+            except (OSError, RuntimeError, ValueError):
+                continue
         # Locate tag spans on a masked copy, delete them from the unmasked text (protected spans
         # survive).
         if media:
@@ -3307,45 +3300,19 @@ class BasePlatformAdapter(ABC):
 
     @staticmethod
     def strip_media_directives_for_display(text: str) -> str:
-        """Strip MEDIA: directives from streamed/display text. Known-extension tags are
-        removed unconditionally (as ``MEDIA_TAG_CLEANUP_RE``); extension-less tags only when
-        ``validate_media_delivery_path`` accepts the path, so undeliverable paths stay visible."""
+        """Strip executable standalone controls from display; literal examples and ambiguous
+        invalid spaced paths remain visible, matching attachment extraction."""
         if not _has_media_directives(text):
             return text
         return re.sub(r'\n{3,}', '\n\n', _strip_media_tag_directives(text)).rstrip()
 
     @staticmethod
     def extract_local_files(content: str) -> tuple[list[str], str]:
-        """Bare local file paths (absolute, ``~/`` or drive-letter) with deliverable extensions ->
-        ``(expanded_paths, cleaned_text)``. Candidates must exist on disk (URLs / hallucinated paths
-        ignored); paths inside fenced or inline code are skipped so code samples are never
-        mutilated. Dispatch by type lives in ``gateway/run.py``."""
-        ext_part = '|'.join(e.lstrip('.') for e in MEDIA_DELIVERY_EXTS)
-        # Lookbehind rejects URL/relative matches (https://…/img.png, ./foo.png).
-        # (?<![/:\w.]) prevents matching inside URLs (e.g. https://…/img.png) and relative paths (./foo.png)
-        # (?:~/|/)    anchors to absolute or home-relative Unix paths (?:[A-Za-z]:[/\\]) anchors to Windows
-        # drive-letter paths (#34632)
-        path_re = re.compile(
-            r'(?<![/:\w.])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.(?:' + ext_part + r')\b',
-            re.IGNORECASE)
-        code_spans = _code_spans(content)
-        unique: dict = {}  # expanded_path -> raw_match_text, deduped in discovery order
-        for match in path_re.finditer(content):
-            if any(s <= match.start() < e for s, e in code_spans):
-                continue
-            raw = match.group(0)
-            expanded = os.path.expanduser(raw)
-            if os.path.isfile(expanded):
-                unique.setdefault(expanded, raw)
-            else:
-                # Most common reason a promised file never arrives — log the gap.
-                logger.info("Skipping bare file path in reply (no file on disk): %s", _log_safe_path(raw))
-        if not unique:
-            return [], content
-        cleaned = content
-        for raw in unique.values():
-            cleaned = cleaned.replace(raw, '')
-        return list(unique), re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        """Complete standalone bare paths -> ``(expanded_paths, cleaned_text)``.
+        Files must exist and paths inside prose/code remain literal. Dispatch still validates
+        delivery policy; the shared helper also accepts real paths containing spaces."""
+        from gateway.media_directives import extract_local_files
+        return extract_local_files(content)
 
     async def _keep_typing(self, chat_id: str, interval: float = 2.0, metadata=None,
                            stop_event: asyncio.Event | None = None) -> None:
