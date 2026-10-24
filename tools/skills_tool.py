@@ -82,7 +82,7 @@ def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
     sig: list = []
     for d in dirs_to_scan:
         _dir_tree_signature(str(d), sig)
-    return (tuple(sig), frozenset(disabled), platform)
+    return (tuple(sig), frozenset(disabled), platform, _skill_utils.active_environments())
 
 
 HERMES_HOME = get_hermes_home()  # all skills live in ~/.hermes/skills/ (seeded from bundled)

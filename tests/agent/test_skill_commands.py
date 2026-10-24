@@ -456,11 +456,7 @@ class TestScanSkillCommands:
 
         def observing_parse(content):
             # Cache is now _skill_commands_by_key; count skill commands in the cached map (for this identity)
-            key = (
-                skill_commands_module._resolve_skill_commands_platform(),
-                skill_commands_module._resolve_skill_commands_home(),
-                skill_commands_module._resolve_skill_commands_project(),
-            )
+            key = skill_commands_module._skill_command_cache_key()
             cached_map = skill_commands_module._skill_commands_by_key.get(key, {})
             observed_sizes.append(len(cached_map))
             return real_parse(content)
