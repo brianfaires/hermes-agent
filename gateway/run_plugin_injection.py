@@ -40,6 +40,7 @@ class GatewayPluginInjectionMixin:
         self, *, content: str, plugin_id: str, session_key: Optional[str] = None,
         origin: Optional[Mapping[str, Any]] = None, plugin_home: Optional[Path] = None,
         keyless: bool = False, calling_session_key: str = "",
+        expected_session_id: Optional[str] = None,
     ) -> bool:
         """Schedule a plugin-triggered turn on the live gateway loop (thread-safe).
 
@@ -70,8 +71,10 @@ class GatewayPluginInjectionMixin:
             if not self._plugin_session_key_admissible(session_key, plugin_home=plugin_home, plugin_id=plugin_id):
                 return False
             target = f"session={session_key}"
+            pinned = {"expected_session_id": expected_session_id} if expected_session_id is not None else {}
             coro = self._dispatch_plugin_message_injection(
                 session_key=session_key, content=content, plugin_id=plugin_id, plugin_home=plugin_home,
+                **pinned,
             )
         try:
             current_loop = asyncio.get_running_loop()
@@ -187,12 +190,15 @@ class GatewayPluginInjectionMixin:
 
     async def _dispatch_plugin_message_injection(
         self, *, session_key: str, content: str, plugin_id: str, plugin_home: Optional[Path] = None,
+        expected_session_id: Optional[str] = None,
     ) -> bool:
         """Route a plugin-triggered turn through the session's live adapter."""
         if not self._plugin_injection_accepting():
             return False
         entry = await self.async_session_store.lookup_by_session_key(session_key)
         if entry is None or entry.origin is None or not self._plugin_injection_accepting():
+            return False
+        if expected_session_id is not None and entry.session_id != expected_session_id:
             return False
 
         from gateway.session_identity import replace_source
@@ -202,19 +208,31 @@ class GatewayPluginInjectionMixin:
                                                                plugin_home=plugin_home)
         if not self._plugin_messaging_session_owned(session_key, plugin_home=plugin_home, plugin_id=plugin_id):
             return False
-        if not self._plugin_injection_authorized(source, plugin_id=plugin_id, target=f"session={session_key}"):
-            return False
-
-        adapter = self._delivery_adapter_for(source)
-        if adapter is None:
-            return False
-
         async with self._plugin_injection_scope(source):
-            admitted = await self._admit_plugin_injection(
-                adapter, source, session_key=session_key, session_id=entry.session_id,
-                content=content, plugin_id=plugin_id)
-            if admitted is not None:
-                return admitted
+            from gateway.session_authorities import active_authority
+            from gateway.session_reset_followup import validate_reset_followup
+            from hermes_state_runtime import RuntimeStoreError
+            try:
+                async with validate_reset_followup(active_authority(self), session_key, entry.session_id) as confirmed_source:
+                    if confirmed_source is not None:
+                        source = confirmed_source
+                    elif not self._plugin_injection_authorized(
+                            source, plugin_id=plugin_id, target=f"session={session_key}"):
+                        return False
+                    adapter = self._delivery_adapter_for(source)
+                    if adapter is None:
+                        return False
+                    admitted = await self._admit_plugin_injection(
+                        adapter, source, session_key=session_key, session_id=entry.session_id,
+                        content=content, plugin_id=plugin_id)
+                    if admitted is not None:
+                        return admitted
+                    if confirmed_source is not None:
+                        return False
+            except RuntimeStoreError as exc:
+                logger.warning("Plugin reset follow-up refused: plugin=%s session=%s (%s)",
+                               plugin_id, session_key, exc.reason)
+                return False
             await adapter.handle_message(MessageEvent(
                 text=content, message_type=MessageType.TEXT, source=source, internal=True,
                 allow_gateway_control=False,
