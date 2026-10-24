@@ -109,12 +109,38 @@ def outputs(step: dict, ctx: dict, cwd: Path | None = None) -> dict:
     return _run(step, ctx, cwd)[0]
 
 
+def _python_selection_args(args: list[str]) -> tuple[list[str], list[str], str | None]:
+    # Fail closed when an unsupported filter could change selected files.
+    paths, ignores = [], []
+    slice_spec = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--files":
+            i += 1
+            paths.extend(args[i].split(os.pathsep))
+        elif arg == "--slice":
+            i += 1
+            slice_spec = args[i]
+        elif arg == "-m":
+            i += 1  # native marker evaluation belongs to the native runner
+            assert args[i] in ("platforms and integration", "platforms and not integration"), args
+        elif arg.startswith("--ignore-glob="):
+            ignores.append(arg.split("=", 1)[1])
+        elif arg not in ("--", "--include-integration", "-v", "--tb=short", "-rA"):
+            assert arg.startswith("tests/"), f"unsupported runner argument: {arg}"
+            paths.append(arg)
+        i += 1
+    return paths, ignores, slice_spec
+
+
 def selected_files(step: dict, ctx: dict, repo: Path) -> set[str]:
     """Receipt the real command and nonempty selected files, not native execution."""
     cwd = repo / step.get("working-directory", ".")
     _, calls = _run(step, ctx, cwd, receipt=True)
     assert len(calls) == 1, f"expected one test invocation, got {calls}"
     command, *args = calls[0]
+    slice_spec = None
     if command == "npx":
         assert args[:3] == ["playwright", "test", "-c"], args
         assert (cwd / args[3]).is_file(), args
@@ -123,26 +149,7 @@ def selected_files(step: dict, ctx: dict, repo: Path) -> set[str]:
         ignores = []
     else:
         assert command == "pytest", calls
-        # Only the runner options used by these steps are supported; fail closed
-        # when a new filter could change the selected files.
-        paths, ignores = [], []
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            if arg == "--files":
-                i += 1
-                paths.extend(args[i].split(os.pathsep))
-            elif arg == "-m":
-                i += 1  # native marker evaluation belongs to the native runner
-                assert args[i] in ("platforms and integration", "platforms and not integration"), args
-            elif arg.startswith("--ignore-glob="):
-                ignores.append(arg.split("=", 1)[1])
-            elif arg in ("--", "--include-integration", "-v", "--tb=short", "-rA"):
-                pass
-            else:
-                assert arg.startswith("tests/"), f"unsupported runner argument: {arg}"
-                paths.append(arg)
-            i += 1
+        paths, ignores, slice_spec = _python_selection_args(args)
     assert paths, "test command selected no paths"
     files = set()
     for rel in paths:
@@ -154,5 +161,11 @@ def selected_files(step: dict, ctx: dict, repo: Path) -> set[str]:
             if not any(fnmatch.fnmatch(name, pattern) for pattern in ignores):
                 assert candidate.stat().st_size > 0, f"empty test file: {name}"
                 files.add(name)
+    if slice_spec is not None:
+        from scripts.run_tests_parallel import _slice_files
+
+        index, count = map(int, slice_spec.split("/"))
+        selected = _slice_files(sorted(repo / name for name in files), index, count, {}, repo)
+        files = {path.relative_to(repo).as_posix() for path in selected}
     assert files, "test command selected no files"
     return files
