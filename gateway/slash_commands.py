@@ -405,6 +405,9 @@ class GatewaySlashCommandsMixin(
             return False
 
         def _sub():
+            from gateway.run import _load_gateway_config
+            if not cfg_get(_load_gateway_config(), "kanban", "auto_subscribe_on_create", default=True):
+                return False
             from hermes_cli import kanban_db as _kb
             from hermes_cli import kanban_db_connect as _kbc
             from hermes_cli import kanban_db_notify as _kbn
@@ -422,8 +425,8 @@ class GatewaySlashCommandsMixin(
                     delivery_mode="notify+wake", delivery_metadata=delivery_metadata)
             finally:
                 conn.close()
-        await asyncio.to_thread(_sub)
-        return True
+            return True
+        return await asyncio.to_thread(_sub)
 
     async def _handle_stop_command(self, event: MessageEvent) -> str | EphemeralReply:
         """Handle /stop command - interrupt a running agent.  A truly hung agent (blocked thread
