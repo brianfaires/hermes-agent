@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -188,16 +187,16 @@ class WebhookRouteProcessor:
                 logger.warning("[webhook] script ignored webhook: %s", exc)
                 return False, None
         try:
+            from hermes_cli._subprocess_compat import bounded_probe_run
             from tools.environments.local import build_subprocess_env
-            popen_kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
-            result = subprocess.run(
-                [interpreter, str(path)], input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=self.script_timeout_seconds, cwd=str(path.parent), env=build_subprocess_env(), **popen_kwargs,
-                check=False,
+            result = bounded_probe_run(
+                [interpreter, str(path)], input=json.dumps(payload),
+                timeout=self.script_timeout_seconds, cwd=str(path.parent), env=build_subprocess_env(),
+                raise_on_spawn_failure=True,
             )
-        except subprocess.TimeoutExpired:
-            logger.warning("[webhook] script timed out: %s", path)
-            return False, None
+            if result is None:
+                logger.warning("[webhook] script timed out or capture failed: %s", path)
+                return False, None
         except Exception as exc:
             logger.warning("[webhook] script execution failed: %s", exc)
             return False, None
