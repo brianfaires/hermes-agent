@@ -1194,5 +1194,10 @@ def resolve_runtime_with_fallback(config: Optional[dict[str, Any]], *, requested
             # mislabel it as an auth failure (#32790).
             logger.warning("Primary provider %s (%s). Falling back to %s/%s",
                            primary_failure_wording(primary_exc)[0], primary_exc, provider, model)
+            from agent.fallback_events import emit_fallback_activated
+            emit_fallback_activated(old_provider=requested or primary_exc.provider,
+                                    old_model=target_model, new_provider=runtime['provider'], new_model=model,
+                                    stage='runtime_resolution', reason='auth_resolution',
+                                    api_mode=runtime.get('api_mode', ''))
             return runtime, entry
         raise primary_exc
