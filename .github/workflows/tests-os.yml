@@ -95,6 +95,7 @@ jobs:
           - name: Windows-only tests
             runner: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
             marker: windows
+            timeout: 60
           - name: Windows-only tests (arm64)
             runner: ${{ vars.CI_WINDOWS_ARM_RUNNER || 'windows-11-arm' }}
             marker: windows
