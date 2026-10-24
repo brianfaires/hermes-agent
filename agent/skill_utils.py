@@ -160,6 +160,11 @@ def _detect_environment(env: str) -> bool:
     return result
 
 
+def active_environments() -> tuple[str, ...]:
+    """Known runtime environments in the current execution's ownership context."""
+    return tuple(sorted(name for name in _ENV_DETECTORS if _detect_environment(name)))
+
+
 def skill_matches_environment(frontmatter: dict[str, Any]) -> bool:
     """True when ANY declared ``environments:`` tag is active (absent = all;
     unknown tags fail open). Offer-time filter only."""

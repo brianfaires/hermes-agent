@@ -438,3 +438,11 @@ Hermes can now consume third-party skills from multiple external discovery model
 - well-known endpoints served from `/.well-known/skills/index.json`
 
 If you want your skills to be discoverable without a GitHub-specific installer, consider serving them from a well-known endpoint in addition to publishing them in a repo or marketplace.
+
+Skill `environments:` tags are runtime relevance gates. Prompt snapshots preserve
+the tags and recheck them when a new prompt is built; in-memory prompt, discovery,
+and interactive command caches include the active environment identity. A worker
+can warm the disk snapshot without offering its Kanban-only playbooks to a later
+CLI or an in-process execution that does not own that worker's task. Older
+snapshots missing the metadata rebuild. Explicit `skill_view` loading remains
+available, and this does not reload a running conversation's frozen system prompt.
