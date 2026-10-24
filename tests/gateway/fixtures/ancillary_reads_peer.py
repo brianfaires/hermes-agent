@@ -109,7 +109,7 @@ async def probe(mode):
                                         owner_transport=None, owner_session_record=None)
                         children.append(child)
                     command = (shlex.quote(sys.executable) + ' -c ' + shlex.quote(
-                        "import pathlib,time;print('PROCESS_OWNED',flush=True);p=pathlib.Path(" + repr(str(gate)) + ");\nwhile not p.exists(): time.sleep(.02)"))
+                        "import pathlib,time;print(\"RuntimeError: {'API_KEY': '\" + 'opaque-dock-secret-' * 2400 + \"'}\");print('PROCESS_OWNED',flush=True);p=pathlib.Path(" + repr(str(gate)) + ");\nwhile not p.exists(): time.sleep(.02)"))
                     for task, route in [(sid, live.route), ('foreign', live.route), (sid, 'wrong-route')]:
                         processes.append(process_registry.spawn_local(command, cwd=str(home), task_id=task,
                                                                       owner_task_id=task, session_key=route))
@@ -120,6 +120,7 @@ async def probe(mode):
                     rows = process_result.get('result', {}).get('processes')
                     assert rows and [p['session_id'] for p in rows] == [processes[0].id], process_result
                     assert rows[0]['status'] == 'running' and 'PROCESS_OWNED' in rows[0]['output_tail']
+                    assert 'opaque-dock-secret' not in rows[0]['output_tail']
                     # Real process handoff stores the parent physical ID as its routing key.
                     transferred = process_registry.transfer_ownership(
                         processes[1].id, from_owner='foreign', to_owner=sid, to_task_id=sid, to_session_key=sid)

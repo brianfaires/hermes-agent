@@ -2060,12 +2060,14 @@ def _session_processes(session: dict) -> list:
     # The registry requeues every addressed event this session cannot positively claim; the poller then
     # delivers it to a live owner or drops an orphan.
     from tools.process_registry import process_registry
+    from tools.process_registry_output import redact_output_tail, redact_process_result
     key = str(session.get("session_key") or "")
     owned = []
     for entry in process_registry.list_sessions():
         proc = process_registry.get(entry["session_id"])
         if proc is not None and str(getattr(proc, "session_key", "") or "") == key:
-            entry["output_tail"] = (proc.output_buffer or "")[-4000:]  # the 200-char list preview is too thin for the viewer
+            redact_process_result(entry)
+            entry["output_tail"] = redact_output_tail(proc, 4000)
             owned.append(entry)
     return owned
 
