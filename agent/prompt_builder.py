@@ -23,7 +23,7 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
+    TIER_LOCAL, active_environments, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
     iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
@@ -1089,8 +1089,8 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 4
+# duplicate-name resolution; v5 preserves runtime environment gates. Older snapshots rebuild.
+_SKILLS_SNAPSHOT_VERSION = 5
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1152,14 +1152,24 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
+    environments = frontmatter.get("environments") or []
+    environments = environments if isinstance(environments, list) else [environments]
     entry = {
         "skill_name": skill_name, "category": category, "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "rel": skill_file.relative_to(skills_dir).as_posix(),
         "description": description, "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
         "requires_apps": _requires_apps_list(frontmatter),
+        "environments": [str(env).strip() for env in environments if str(env).strip()],
     }
     return entry
+
+
+def _snapshot_skill_matches(entry: dict) -> bool:
+    """Re-evaluate host/app/runtime offer gates against cached metadata."""
+    return (skill_matches_platform_list(entry.get("platforms") or [])
+            and skill_matches_apps({"requires_apps": entry.get("requires_apps") or []})
+            and skill_matches_environment({"environments": entry.get("environments") or []}))
 
 
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
@@ -1408,7 +1418,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
-        _oneshot_prompt_variant(), tuple(plugin_rows),
+        _oneshot_prompt_variant(), tuple(plugin_rows), active_environments(),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1429,9 +1439,8 @@ def _build_skills_system_prompt_inner(
     category_descriptions: dict[str, str] = {}
     # Disk snapshot (fast path) vs. full scan: both yield (entry, is_compatible) pairs so labeling runs identically.
     if snapshot is not None:
-        # Platforms and app presence are host facts that change without SKILL.md changing: re-evaluate both.
-        candidates = [(entry, skill_matches_platform_list(entry.get("platforms") or [])
-                       and skill_matches_apps({"requires_apps": entry.get("requires_apps") or []}))
+        # Offer-time host/app/runtime facts can change without SKILL.md changing.
+        candidates = [(entry, _snapshot_skill_matches(entry))
                       for entry in snapshot.get("skills", []) if isinstance(entry, dict)]
         category_descriptions = {str(k): str(v) for k, v in (snapshot.get("category_descriptions") or {}).items()}
     else:

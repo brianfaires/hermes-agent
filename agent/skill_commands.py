@@ -11,13 +11,13 @@ from typing import Any, Dict, Mapping, Optional
 from hermes_constants import display_hermes_home
 from agent.prompt_cache_boundary import register_stable_prefix
 from agent.skill_preprocessing import load_skills_config as _load_skills_config, preprocess_skill_content
-from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX
+from agent.skill_utils import AMBIGUOUS_SKILL_PREFIX, active_environments
 
 logger = logging.getLogger(__name__)
 
 # Multi-slot skill-command cache keyed by the full resolved identity
 # (_resolve_skill_commands_platform(), _resolve_skill_commands_home(),
-# _resolve_skill_commands_project()). The previous single-slot memo held ONE
+# _resolve_skill_commands_project(), active_environments()). The previous single-slot memo held ONE
 # (platform, home, project) triple; a Desktop serve process whose identity
 # flaps across requests (profile-home overrides, per-session project roots)
 # missed on every poll and rescanned the whole skills dir ~3x/5s, re-logging
@@ -248,6 +248,11 @@ def _resolve_skill_commands_project() -> Optional[str]:
     from agent.skill_utils import find_project_root
     root = find_project_root()
     return str(root) if root is not None else None
+
+
+def _skill_command_cache_key() -> tuple[str | None, str, str | None, tuple[str, ...]]:
+    return (_resolve_skill_commands_platform(), _resolve_skill_commands_home(),
+            _resolve_skill_commands_project(), active_environments())
 
 
 def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
@@ -522,7 +527,7 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
 
     if safe_worker_enabled():
         return {}
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
     # partial results visible to everything else in the process: a second, overlapping scan deduped against
     # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
@@ -566,7 +571,7 @@ def published_scopes_signature() -> tuple:
     """Signature of every skill scope a session has resolved commands for, plus the ambient one.
 
     One gateway serves sessions in several profiles and repos; each published ``(platform, home,
-    project)`` key names a scope whose roots (that profile's skills/external dirs, that repo's trusted
+    project, environments)`` key names a scope whose roots (that profile's skills/external dirs, that repo's trusted
     project skills) a viewer is looking at. The change watcher (``skills.changed``) compares this, so
     an install in a session's repo B notifies viewers even when the gateway was launched in repo A.
     Only command maps/catalogs refetch; a conversation's stored system prompt is never rebuilt.
@@ -575,7 +580,7 @@ def published_scopes_signature() -> tuple:
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     with _publish_lock:
         keys = list(_skill_commands_by_key)
-    scopes = sorted({(home, project) for _platform, home, project in keys if home})[:_MAX_WATCHED_SCOPES]
+    scopes = sorted({(home, project) for _platform, home, project, _environments in keys if home})[:_MAX_WATCHED_SCOPES]
     rows = [("", None, _skill_dirs_signature())]
     for home, project in scopes:
         home_token = set_hermes_home_override(home)
@@ -616,7 +621,7 @@ def get_skill_commands() -> dict[str, dict[str, Any]]:
 
     if safe_worker_enabled():
         return {}
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     with _publish_lock:
         cached = _skill_commands_by_key.get(key)
         scanned_at = _skill_commands_sig_by_key.get(key)
@@ -662,7 +667,7 @@ def get_plugin_skill_commands() -> dict[str, dict[str, Any]]:
     discover_plugins()  # no-op once this home is discovered
     manager = get_plugin_manager()
     metadata = manager.list_plugin_skill_metadata()
-    tag = (str(get_hermes_home()), tuple(str(m.get("name") or "") for m in metadata))
+    tag = (str(get_hermes_home()), tuple(str(m.get("name") or "") for m in metadata), active_environments())
     with _publish_lock:
         cached, is_fresh = _plugin_skill_commands, _plugin_skill_commands_tag == tag
     if not is_fresh:
@@ -732,7 +737,7 @@ def _merge_interactive_skill_commands(
 def get_interactive_skill_commands() -> dict[str, dict[str, Any]]:
     """Filesystem skills plus profile-scoped plugin skills; never use for
     messaging/native command menus (plugin skills are CLI/TUI/desktop only)."""
-    identity = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    identity = _skill_command_cache_key()
     commands = _merge_interactive_skill_commands(get_skill_commands(), get_plugin_skill_commands())
     with _publish_lock:
         _last_interactive_skill_commands_by_key[identity] = dict(commands)
@@ -762,7 +767,7 @@ def reload_skills() -> dict[str, Any]:
     skills are called by name, so ``/reload-skills`` costs no cache reset. The
     plugin projection is rebuilt too, so a plugin enabled/disabled/installed
     since the last scan shows up without a restart."""
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_command_cache_key()
     with _publish_lock:
         before_commands = _last_interactive_skill_commands_by_key.get(key)
     if before_commands is None:
