@@ -16,11 +16,14 @@ import logging
 import os
 import signal
 import sys
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple, cast
 
 from agent.i18n import t
 from gateway.platforms.event import MessageEvent
 from gateway.session import SessionSource, build_session_context
+
+if TYPE_CHECKING:
+    from gateway.run import GatewayRunner
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -79,11 +82,14 @@ class GatewayInboundHooksMixin:
             return event
         try:
             from hermes_cli.lifecycle import ainvoke_hook as _ainvoke_hook
-            _hook_results = await _ainvoke_hook(
-                "pre_gateway_dispatch", event=event, gateway=self,
-                # getattr: bare-runner tests build GatewayRunner via object.__new__ without __init__.
-                session_store=getattr(self, "session_store", None),
-            )
+            from gateway.session_reset_followup import capture_reset_proof
+            capture_reset_proof(self, event)
+            async with cast("GatewayRunner", self)._async_profile_scope_for_source(source):
+                _hook_results = await _ainvoke_hook(
+                    "pre_gateway_dispatch", event=event, gateway=self,
+                    # Bare-runner tests may omit the session store.
+                    session_store=getattr(self, "session_store", None),
+                )
         except Exception as _hook_exc:  # health: allow BLE001 -- moved unchanged from run_inbound.py (main has the same handler): a plugin hook must never stop dispatch
             logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)
             _hook_results = []
@@ -103,8 +109,10 @@ class GatewayInboundHooksMixin:
                 _new_text = _result.get("text")
                 if isinstance(_new_text, str):
                     from gateway.session_ingress_context import carry_callback
+                    from gateway.session_reset_followup import carry_reset_proof
                     rewritten = dataclasses.replace(event, text=_new_text)
                     carry_callback(event, rewritten)
+                    carry_reset_proof(event, rewritten)
                     event = rewritten
                 break
             if _action == "allow":

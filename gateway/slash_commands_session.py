@@ -12,7 +12,7 @@ import dataclasses
 import logging
 import os
 import shlex
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 from agent.i18n import t
 from agent.turn_context import extract_api_content_sidecar
@@ -25,6 +25,9 @@ from gateway.slash_commands_branch_thread import (
     BRANCH_THREAD_PLATFORMS, branch_dest_source, branch_thread_parent, format_thread_ref, parse_branch_args,
 )
 from gateway.slash_commands_status import history_unreadable
+
+if TYPE_CHECKING:
+    from gateway.run import GatewayRunner
 
 logger = logging.getLogger("gateway.run")  # log-record parity with gateway/run.py
 
@@ -254,9 +257,14 @@ class GatewaySessionCommandsMixin:
         # Plugin on_session_reset hook (new session guaranteed to exist); best-effort.
         try:
             from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-            _invoke_hook("on_session_reset", session_id=_new_sid, reason="new_session",
-                         platform=source.platform.value if source.platform else "",
-                         old_session_id=_old_sid, new_session_id=_new_sid)
+            from gateway.session_reset_followup import reset_followup_scope
+            with (cast("GatewayRunner", self)._profile_scope_for_source(source),
+                  reset_followup_scope(self, event, session_key, _new_sid)):
+                _invoke_hook("on_session_reset", session_id=_new_sid, reason="new_session",
+                             platform=source.platform.value if source.platform else "",
+                             old_session_id=_old_sid, new_session_id=_new_sid,
+                             session_key=session_key, message_id=event.message_id,
+                             command_metadata=dict(event.metadata), source=source.to_dict())
         except Exception:
             pass
         try:

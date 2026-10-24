@@ -1520,7 +1520,7 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | [`on_session_start`](../../user-guide/features/hooks.md#on_session_start) | New session created (first turn only) | `session_id: str, model: str, platform: str` | ignored |
 | [`on_session_end`](../../user-guide/features/hooks.md#on_session_end) | End of every `run_conversation` call + CLI exit | `session_id: str, completed: bool, interrupted: bool, model: str, platform: str` | ignored |
 | [`on_session_finalize`](../../user-guide/features/hooks.md#on_session_finalize) | CLI/gateway tears down an active session | `session_id: str \| None, platform: str` | ignored |
-| [`on_session_reset`](../../user-guide/features/hooks.md#on_session_reset) | Gateway swaps in a new session key (`/new`, `/reset`) | `session_id: str, platform: str` | ignored |
+| [`on_session_reset`](../../user-guide/features/hooks.md#on_session_reset) | Gateway swaps in a new session key (`/new`, `/reset`) | `session_id: str, platform: str` (gateway command resets also supply `session_key`, `message_id`, `command_metadata`, `source`, `old_session_id`, `new_session_id`) | ignored |
 | [`on_session_delete`](../../user-guide/features/hooks.md#on_session_delete) | A session delete or deliberate archive commits (every surface, sweeps, prune) | `session_id: str, reason: str, profile: str \| None`, optional `deleted_ids: list[str]`, `sessions_dir: str` | ignored |
 | [`post_compaction`](../../user-guide/features/hooks.md#post_compaction) | A compaction committed (any path: auto, `/compress`, gateway, Codex, micro, prune) | `session_id: str, old_session_id: str, kind: str, reason: str, before_tokens: int \| None, after_tokens: int \| None, messages_removed: int \| None` | ignored |
 | [`gateway_platform_event`](../../user-guide/features/hooks.md#gateway_platform_event) | An authorized platform-native event is normalized at the gateway boundary (Telegram reactions currently) | `platform: str, event_type: str, payload: dict` | ignored |
@@ -1535,6 +1535,42 @@ All callbacks should accept `**kwargs` for forward compatibility. If a hook call
 The kanban lifecycle hooks fire **after** the board DB change commits, so a callback always sees durable state and can never hold the SQLite write lock. Because kanban workers run as separate `hermes -p <profile> chat -q` subprocesses, `kanban_task_claimed` fires in the **dispatcher** process while `kanban_task_completed` / `kanban_task_blocked` fire in the **worker** process — hook in the dispatcher to observe every transition centrally, or in the worker for per-task in-session context.
 
 The **API request hooks** are observers for the raw provider request, one level below the per-turn `pre_llm_call` / `post_llm_call` pair: a single turn that calls tools makes several API requests, and these hooks fire around each one. They exist for observability plugins (tracing, cost accounting, latency dashboards). The `request` and `response` kwargs are sanitized, size-capped JSON views of the provider payload (sensitive keys redacted, long strings truncated, SDK objects normalized), and `usage` is a plain token-summary dict. Every payload carries the correlation fields `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count`, so a plugin can stitch requests, tool calls, and turns together. `api_request_error` fires when a provider call raises and adds `status_code`, `retry_count` / `max_retries`, `retryable`, `reason`, and an `error` dict with `type` and `message`.
+
+### Follow-up messages after a gateway reset
+
+With the external newprompt plugin enabled, `/new hello` starts a fresh session
+with `hello` as its first prompt. Parentheses remain optional compatibility
+syntax. Bare `/new` resets only; `/reset title` preserves native title handling.
+Its Discord SDK handler exposes an optional `prompt` field on native `/new`, using
+`register_platform_handler` and native authorization/confirmation. The retained
+consumer fixture is version 1.0.2, including plain-input, interaction-identity and
+reload/reconciliation repairs.
+
+The plugin uses the existing `pre_gateway_dispatch` and
+`on_session_reset` hooks in the routed profile. A command reset supplies
+`session_key`, `message_id`, a `command_metadata` snapshot, and `source`, alongside
+`old_session_id` and `new_session_id`. Plugins can correlate a confirmed reset with
+its original command without keeping a separate pending prompt.
+
+`ctx.inject_message(text, session_key=key, expected_session_id=new_id)` schedules
+only for that existing gateway session. If its ID changed before dispatch, the
+message is dropped; the native strict-session admission guard still handles later
+resets. The expected ID requires a session key, rejects `origin`, and never falls
+back to the CLI or TUI input queue. Gateway injection still requires
+`plugins.entries.<plugin_id>.allow_gateway_injection: true`. A `True` result means
+scheduling was accepted, not that a turn ran. Calls without the expected ID retain
+their native routing.
+
+On an authority-backed gateway, native connector proof travels privately with the
+command held by confirmation. A follow-up queued inside that reset callback can
+borrow this proof only for the exact replacement session. The host rechecks live
+connector ownership and authorization, then commits a nonhuman automation input to
+the native FIFO. Role grants require a fresh connector membership check; a stored
+role flag alone still cannot authorize an ordinary plugin injection. Ordinary
+plugin injections into empty sessions remain refused.
+The follow-up uses the validated resetting sender and connector, including in a
+shared thread whose stored origin names another participant. The proof is never
+part of `command_metadata` or another plugin-facing snapshot.
 
 ### `pre_llm_call` context injection
 
