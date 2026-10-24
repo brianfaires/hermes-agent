@@ -119,6 +119,8 @@ def test_run_one_job_exception_delivers_failure_alert(monkeypatch):
     )
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s,
         "run_job",
@@ -177,6 +179,8 @@ def test_run_one_job_exception_records_failure_alert_delivery_error(monkeypatch)
     )
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s,
         "run_job",
@@ -201,6 +205,8 @@ def _patch_escaped_failure(monkeypatch, delivered, *, exec_id, err):
     monkeypatch.setattr(s, "create_execution", lambda *_a, **_kw: {"id": exec_id})
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s,
         "run_job",
@@ -283,6 +289,8 @@ def test_run_one_job_exception_after_delivery_does_not_redeliver(monkeypatch):
     )
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s,
         "run_job",
@@ -325,6 +333,8 @@ def test_run_one_job_keyboard_interrupt_skips_delivery_and_reraises(monkeypatch)
     )
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s,
         "run_job",
