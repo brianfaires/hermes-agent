@@ -346,6 +346,8 @@ def test_lost_fire_claim_stops_stale_delivery(monkeypatch):
     monkeypatch.setattr(scheduler, "run_job", _run_job)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda job_id: True)
     monkeypatch.setattr(scheduler, "mark_execution_running", lambda execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(scheduler, "finish_execution", lambda *args, **kwargs: None)
     save_output = MagicMock()
     deliver_result = MagicMock()
@@ -387,6 +389,8 @@ def _run_claimed_job_with_mid_run_action(
     monkeypatch.setattr(scheduler, "run_job", _run_job)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda *_args: True)
     monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(scheduler, "finish_execution", finished)
     if stub_output:
         monkeypatch.setattr(scheduler, "save_job_output", lambda *_args: "output.md")
@@ -419,7 +423,7 @@ def test_self_removed_job_still_delivers_after_post_removal_heartbeat(tmp_path, 
     delivered.assert_called_once()
     finished.assert_called_once_with(
         "self-removal-heartbeat-execution",
-        success=True, error=None, delivery_outcome="delivered")
+        success=True, error=None, delivery_outcome="delivered", final_response="D1 is promoting")
     with jobs.use_cron_store(tmp_path):
         assert jobs.load_jobs() == []
 
@@ -655,6 +659,8 @@ def test_terminal_owner_cas_failure_marks_ledger_ownership_lost(monkeypatch):
     monkeypatch.setattr(scheduler, "heartbeat_fire_claim", lambda *args, **kwargs: True)
     monkeypatch.setattr(scheduler, "claim_dispatch", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(scheduler, "mark_execution_running", lambda *_args: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         scheduler,
         "run_job",
