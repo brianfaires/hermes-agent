@@ -1545,6 +1545,7 @@ class TestSystemUnitRefreshSyncsHermesHome:
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: None)
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "_run_systemctl", lambda *a, **k: None)
+        monkeypatch.setattr(gateway_cli, "_systemctl_show", lambda *_a, **_k: {})
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
 
         # Correct installed unit (operator's HERMES_HOME + drain timeout).
@@ -1559,8 +1560,6 @@ class TestSystemUnitRefreshSyncsHermesHome:
         assert unit_path.read_text(encoding="utf-8") == good_unit
         assert os.environ["HERMES_HOME"] == str(alice_hermes)
         assert gateway_cli.systemd_unit_is_current(system=True) is True
-
-
 
 
 class TestHermesHomeForTargetUser:
