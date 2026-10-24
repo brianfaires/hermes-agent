@@ -5,7 +5,7 @@ Covers the follow-up wave after PR #72170:
 
 * #24032 — GIS extensions (.kmz/.kml/.geojson/.gpx) are deliverable, and
   unknown-extension paths containing spaces extract via the
-  validation-gated progressive right-trim (``_spaced_path_candidates``).
+  validation of the complete standalone path, without shortening prose.
 * #16434 half — ``strip_media_directives_for_display`` (streaming path) no
   longer strips MEDIA tags out of fenced code blocks / inline-code examples;
   protected spans are a mask-locator, matching ``extract_media``.
@@ -30,11 +30,8 @@ class TestSpacedPaths:
     def test_spaced_path_followed_by_prose_keeps_prose(self, tmp_path):
         p = tmp_path / "my server.log"
         p.write_text("log line\n")
-        media, cleaned = BasePlatformAdapter.extract_media(
-            f"MEDIA:{p} is the log you asked for"
-        )
-        assert [os.path.realpath(x) for x, _ in media] == [os.path.realpath(str(p))]
-        assert "is the log you asked for" in cleaned
+        text = f"MEDIA:{p} is the log you asked for"
+        assert BasePlatformAdapter.extract_media(text) == ([], text)
 
 
     def test_forward_extension_stops_at_next_media_tag(self, tmp_path):
@@ -43,7 +40,7 @@ class TestSpacedPaths:
         a.write_text("localhost\n")
         b.write_text("FROM alpine\n")
         media, cleaned = BasePlatformAdapter.extract_media(
-            f"MEDIA:{a} MEDIA:{b}"
+            f"MEDIA:{a}\nMEDIA:{b}"
         )
         got = sorted(os.path.realpath(x) for x, _ in media)
         assert got == sorted(
@@ -56,7 +53,7 @@ class TestStreamingDisplayStripCodeBlocks:
     def test_fenced_code_example_preserved(self, tmp_path):
         p = tmp_path / "real.pdf"
         p.write_text("x")
-        text = f"Example:\n```\nMEDIA:{p}\n```\ndone MEDIA:{p}"
+        text = f"Example:\n```\nMEDIA:{p}\n```\ndone\nMEDIA:{p}"
         out = BasePlatformAdapter.strip_media_directives_for_display(text)
         # The example inside the fence survives verbatim; the real tag outside
         # is stripped.

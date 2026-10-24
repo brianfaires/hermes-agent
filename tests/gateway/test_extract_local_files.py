@@ -49,26 +49,26 @@ def _extract(content: str, existing_files: set[str] | None = None):
 class TestBasicDetection:
 
     def test_absolute_path_image(self):
-        paths, cleaned = _extract("Here is the screenshot /root/screenshots/game.png enjoy")
+        paths, cleaned = _extract("Here is the screenshot\n/root/screenshots/game.png\nenjoy")
         assert paths == ["/root/screenshots/game.png"]
         assert "/root/screenshots/game.png" not in cleaned
         assert "Here is the screenshot" in cleaned
 
     def test_tilde_path_image(self):
-        paths, cleaned = _extract("Check out ~/photos/cat.jpg for the cat")
+        paths, cleaned = _extract("Check out\n~/photos/cat.jpg\nfor the cat")
         assert paths == ["/home/user/photos/cat.jpg"]
         assert "~/photos/cat.jpg" not in cleaned
 
     def test_video_extensions(self):
         for ext in (".mp4", ".mov", ".avi", ".mkv", ".webm"):
-            text = f"Video at /tmp/clip{ext} here"
+            text = f"Video:\n/tmp/clip{ext}\nhere"
             paths, _ = _extract(text)
             assert len(paths) == 1, f"Failed for {ext}"
             assert paths[0] == f"/tmp/clip{ext}"
 
     def test_image_extensions(self):
         for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-            text = f"Image at /tmp/pic{ext} here"
+            text = f"Image:\n/tmp/pic{ext}\nhere"
             paths, _ = _extract(text)
             assert len(paths) == 1, f"Failed for {ext}"
             assert paths[0] == f"/tmp/pic{ext}"
@@ -76,7 +76,7 @@ class TestBasicDetection:
     def test_document_extensions(self):
         """Documents (PDF, Word, plain text, etc.) ship as file uploads."""
         for ext in (".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md"):
-            text = f"Report at /tmp/report{ext} attached"
+            text = f"Report:\n/tmp/report{ext}\nattached"
             paths, _ = _extract(text)
             assert len(paths) == 1, f"Failed for {ext}"
             assert paths[0] == f"/tmp/report{ext}"
@@ -145,7 +145,7 @@ class TestCodeBlockExclusion:
 class TestDeduplication:
 
     def test_duplicate_paths_deduplicated(self):
-        text = "See /tmp/img.png and also /tmp/img.png again"
+        text = "See\n/tmp/img.png\nand also\n/tmp/img.png\nagain"
         paths, _ = _extract(text)
         assert paths == ["/tmp/img.png"]
 
@@ -157,7 +157,7 @@ class TestDeduplication:
 class TestTextCleanup:
 
     def test_path_removed_from_text(self):
-        _paths, cleaned = _extract("Before /tmp/x.png after")
+        _paths, cleaned = _extract("Before\n/tmp/x.png\nafter")
         assert "Before" in cleaned
         assert "after" in cleaned
         assert "/tmp/x.png" not in cleaned
@@ -184,13 +184,13 @@ class TestEdgeCases:
         "content,expected",
         [
             # Backslash separators (native Windows style)
-            ("See C:\\Users\\test\\image.png here", "C:\\Users\\test\\image.png"),
+            ("See\nC:\\Users\\test\\image.png\nhere", "C:\\Users\\test\\image.png"),
             # Forward slashes with drive letter (common in cross-platform code)
-            ("See C:/Users/test/image.png here", "C:/Users/test/image.png"),
+            ("See\nC:/Users/test/image.png\nhere", "C:/Users/test/image.png"),
             # Non-C: drive
-            ("Video at D:/data/clip.mp4 ready", "D:/data/clip.mp4"),
+            ("Video:\nD:/data/clip.mp4\nready", "D:/data/clip.mp4"),
             # Lowercase drive letter
-            ("Path e:/audio/track.mp3 done", "e:/audio/track.mp3"),
+            ("Path:\ne:/audio/track.mp3\ndone", "e:/audio/track.mp3"),
         ],
     )
     def test_windows_drive_letter_paths_matched(self, content, expected):
@@ -212,12 +212,13 @@ class TestEdgeCases:
         assert paths == []
 
 
-    def test_path_followed_by_punctuation(self):
-        """Path followed by comma, period, paren should still match."""
+    def test_prose_path_followed_by_punctuation_stays_literal(self):
+        """A prose reference never requests delivery, including adjacent punctuation."""
         for suffix in [",", ".", ")", ":", ";"]:
             text = f"See /tmp/img.png{suffix} details"
-            paths, _ = _extract(text)
-            assert len(paths) == 1, f"Failed with suffix '{suffix}'"
+            paths, cleaned = _extract(text)
+            assert paths == [], f"Prose became an attachment with suffix '{suffix}'"
+            assert cleaned == text
 
 
 if __name__ == "__main__":
