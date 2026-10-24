@@ -156,6 +156,7 @@ class _FakeSource:
 class _FakeEvent:
     internal = False
     text = "hello"
+    reply_to_text = None
 
     def __init__(self):
         self.source = _FakeSource()
