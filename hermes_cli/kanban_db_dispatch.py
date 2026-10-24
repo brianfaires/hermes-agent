@@ -1997,18 +1997,6 @@ def dispatch_once(
     return result
 
 
-def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
-    """Back-compat: older spawn_fn signatures (and test stubs) accept only
-    ``(task, workspace)``; pass ``board`` only when the callable supports it."""
-    import inspect
-    try:
-        sig = inspect.signature(spawn_fn)
-        if "board" in sig.parameters:
-            return spawn_fn(task, workspace, board=board)
-        return spawn_fn(task, workspace)
-    except (TypeError, ValueError):
-        return spawn_fn(task, workspace)
-
 
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
@@ -2109,7 +2097,11 @@ def _dispatch_lane_task(
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
-        pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
+        from hermes_cli.kanban_launch import spawn_worker
+
+        # Ordinary pins remain best-effort; the review role requires its procedure.
+        pid = spawn_worker(spawn_fn, claimed, str(workspace), board,
+                           required_skills=["sdlc-review"] if lane == "review" else [])
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid))
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
@@ -2121,8 +2113,14 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
+        from hermes_cli.kanban_launch import WorkerCapabilityError
         from tools.process_registry import RestartSafeScopeUnavailable
 
+        if isinstance(exc, WorkerCapabilityError):
+            _kb.block_task(conn, claimed.id, kind="capability", reason=str(exc),
+                           expected_run_id=claimed.current_run_id)
+            result.auto_blocked.append(claimed.id)
+            return False
         # The host refused the spawn (no restart-safe scope): nothing about the
         # card ran, so it must not spend the card's retry budget (#114720).
         infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
