@@ -36,8 +36,8 @@ def _clean_owned(receipt):
 # signal it only while its recorded PID AND creation time still match.
 @pytest.mark.live_system_guard_bypass
 @pytest.mark.platforms('posix')
-@pytest.mark.parametrize('parent_exits', [False, True])
-def test_timeout_stops_descendants_even_after_parent_exits(tmp_path, parent_exits):
+@pytest.mark.parametrize('parent_exits', [False, True, 'reaped'])
+def test_timeout_stops_descendants_even_after_parent_exits(tmp_path, monkeypatch, parent_exits):
     scripts = get_hermes_home() / 'scripts'
     scripts.mkdir(parents=True, exist_ok=True)
     receipt = tmp_path / 'owned.json'
@@ -51,10 +51,20 @@ def test_timeout_stops_descendants_even_after_parent_exits(tmp_path, parent_exit
             'processes': [{{'pid': p.pid, 'created': p.create_time()}}
                           for p in (psutil.Process(), psutil.Process(child.pid))]
         }}))
-        if {parent_exits!r}:
+        if {bool(parent_exits)!r}:
             sys.exit(0)
         threading.Event().wait(60)
     '''), encoding='utf-8')
+    if parent_exits == 'reaped':
+        from hermes_cli.local_runtime import processes
+        original_spawn = processes.spawn_server
+
+        def reap_launcher(*args, **kwargs):
+            process, job = original_spawn(*args, **kwargs)
+            process.wait(timeout=5)
+            return process, job
+
+        monkeypatch.setattr(processes, 'spawn_server', reap_launcher)
     unrelated = subprocess.Popen([sys.executable, '-c', 'import threading; threading.Event().wait(60)'])
     try:
         accepted, transformed = WebhookRouteProcessor(script_timeout_seconds=2).run_route_script(str(script), {})
