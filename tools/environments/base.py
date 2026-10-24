@@ -704,7 +704,7 @@ class BaseEnvironment(ABC):
             proc_holder.append(spawned)
             if fenced:  # the hard-exit kill may have stopped waiting for us before we registered
                 self._force_kill_process(spawned)
-            output = _new_output_collector(spawned, bounded_capture)
+            output = _new_output_collector(spawned, bounded_capture, command)
             output_holder.append(output)
             try:
                 return self._wait_for_process(
