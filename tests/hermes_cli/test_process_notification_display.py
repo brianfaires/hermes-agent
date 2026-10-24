@@ -20,7 +20,7 @@ def _event(sid, exit_code, command="cd /tmp && bash long-build.sh"):
     return {"type": "completion", "session_id": sid, "session_key": "display-session", "command": command,
             "exit_code": exit_code, "completion_reason": "exited", "output": "web tsc=0\nSECRET_OUTPUT_LINE"}
 
-@pytest.mark.parametrize("mode,expect_injected", [("off", False), ("concise", True), ("all", True)])
+@pytest.mark.parametrize("mode,expect_injected", [("off", False), (False, False), (None, True), ("concise", True), ("all", True)])
 def test_drain_honors_background_process_notifications_off(monkeypatch, mode, expect_injected):
     """``off`` consumes completion events without injecting a REPL input (no spurious post-Ctrl+C
     turn, #123114); every other documented mode keeps injecting, and the durable claim/ack chain
@@ -41,7 +41,8 @@ def test_drain_honors_background_process_notifications_off(monkeypatch, mode, ex
         assert cli._pending_input.get_nowait() is not None
 
 
-def test_off_mutes_process_wakes_but_subagent_results_still_land(monkeypatch):
+@pytest.mark.parametrize("mode", ["off", False])
+def test_off_mutes_process_wakes_but_subagent_results_still_land(monkeypatch, mode):
     """``off`` is about background PROCESSES: a finished ``delegate_task(background=true)`` is a
     result the user asked for, never a notification to opt out of."""
     delegation = {"type": "async_delegation", "delegation_id": "d1", "session_key": "display-session",
@@ -53,7 +54,7 @@ def test_off_mutes_process_wakes_but_subagent_results_still_land(monkeypatch):
     monkeypatch.setattr("tools.process_registry.process_registry", _registry(events))
     monkeypatch.setattr("tools.async_delegation.claim_event_delivery", lambda *a: "claimed")
     monkeypatch.setattr("tools.async_delegation.complete_event_delivery", lambda *a: None)
-    monkeypatch.setattr("cli.CLI_CONFIG", {"display": {"background_process_notifications": "off"}})
+    monkeypatch.setattr("cli.CLI_CONFIG", {"display": {"background_process_notifications": mode}})
     cli._drain_process_notifications("cli-post-turn")
     queued = cli._pending_input.get_nowait()
     assert cli._pending_input.empty()
