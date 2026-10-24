@@ -3336,9 +3336,8 @@ def systemd_unit_is_current(system: bool = False) -> bool:
     installed = unit_path.read_text(encoding="utf-8-sig")
     expected_user = _read_systemd_user_from_unit(unit_path) if system else None
     expected = generate_systemd_unit(system=system, run_as_user=expected_user)
-    # Ignore directives older systemd drops (RestartMaxDelaySec, RestartSteps) to avoid a perpetual "outdated" flag.
-    norm = lambda text: _normalize_service_definition(_strip_optional_systemd_directives(text))
-    return norm(installed) == norm(expected)
+    from hermes_cli.gateway_unit_compare import live_unit_is_current
+    return live_unit_is_current(installed, expected, unit_path, system)
 
 
 def _retire_hermes_replace_dropin(system: bool = False) -> bool:
