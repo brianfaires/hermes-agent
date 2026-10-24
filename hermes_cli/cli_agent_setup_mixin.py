@@ -406,8 +406,15 @@ class CLIAgentSetupMixin:
                 render_notification(
                     lambda: _cprint(t("cli.startup.switching_to_fallback", reason=_why, provider=_fb_provider, model=_fb_model)),
                     platform="cli")
+                old_provider, old_model = self.requested_provider, self.model
                 self.requested_provider = _fb_provider
                 self.model = _fb_model
+                from agent.fallback_events import emit_fallback_activated
+                emit_fallback_activated(old_provider=old_provider, old_model=old_model,
+                                        new_provider=_fb_provider, new_model=_fb_model,
+                                        stage='cli_runtime', reason='auth_resolution', platform='cli',
+                                        session_id=getattr(self, 'session_id', ''),
+                                        api_mode=runtime.get('api_mode', ''))
                 # reasoning_config follows the swap in _ensure_runtime_credentials (the only caller).
                 return runtime
             except Exception:
