@@ -95,6 +95,7 @@ jobs:
           - name: Windows-only tests
             runner: windows-latest-32-core
             marker: windows
+            timeout: 60
           - name: Windows-only tests (arm64)
             runner: windows-latest-32-arm-core
             marker: windows
