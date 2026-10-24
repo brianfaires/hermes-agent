@@ -340,6 +340,8 @@ def test_fallback_runtime_resolves_the_fallback_entry_model(monkeypatch, tmp_pat
     monkeypatch.setattr("cli._cprint", lambda *a, **k: None, raising=False)
 
     shell = CLIAgentSetupMixin.__new__(CLIAgentSetupMixin)
+    shell.requested_provider = "opencode"
+    shell.model = "mimo-v2.5-free"
     shell._fallback_model = [{"provider": "opencode-go", "model": "mimo-v2.5"}]
     runtime = shell._resolve_fallback_runtime(AuthError("no key", provider="opencode-zen", code="missing_api_key"))
 
@@ -380,6 +382,8 @@ def test_fallback_runtime_labels_quota_outage_and_bad_credentials_distinctly(mon
     monkeypatch.setattr("hermes_cli.fallback_config.resolve_entry_api_key", lambda entry: "k")
 
     shell = CLIAgentSetupMixin.__new__(CLIAgentSetupMixin)
+    shell.requested_provider = "openai-codex"
+    shell.model = "primary-model"
     shell._fallback_model = [{"provider": "custom", "model": "local-model"}]
     runtime = shell._resolve_fallback_runtime(exc_factory())
 
