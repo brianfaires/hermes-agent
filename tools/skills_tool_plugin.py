@@ -122,7 +122,7 @@ def _preprocess_skill(content: str, skill_dir, session_id, debug_msg: str, *args
 
 def _serve_plugin_skill(
     skill_md: Path, namespace: str, bare: str, file_path: str | None = None, *,
-    preprocess: bool = True, session_id: str | None = None) -> str:
+    preprocess: bool = True, session_id: str | None = None, inspect_only: bool = False) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from tools import skills_tool as _st
@@ -139,6 +139,8 @@ def _serve_plugin_skill(
     if not _st.skill_matches_platform(parsed_frontmatter):
         return _fail(f"Skill '{qualified_name}' is not supported on this platform.",
                      readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
+    if inspect_only:
+        return _json({"success": True, "name": qualified_name})
     if file_path:
         return _serve_skill_file(skill_md.parent, file_path, qualified_name, read_error_prefix=True)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):

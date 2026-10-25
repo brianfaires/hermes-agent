@@ -149,3 +149,30 @@ def _build_setup_note(
         return None
     note = f"Setup needed before using this skill: missing {', '.join(missing) if missing else 'required prerequisites'}."
     return f"{note} {setup_help}" if setup_help else note
+
+
+def activate_skill_dependencies(frontmatter: dict) -> str | None:
+    """Activate a loaded skill's declared tools; inspection never reaches this step."""
+    deps_note = None
+    declared_deps = frontmatter.get("deps") or []
+    if isinstance(declared_deps, str):
+        declared_deps = [declared_deps]
+    if isinstance(declared_deps, list) and declared_deps:
+        failed_deps = []
+        for dep in [str(d).strip() for d in declared_deps if str(d).strip()]:
+            try:
+                import pm
+
+                pm.ensure(dep)
+            except Exception as exc:
+                logger.debug('Skill dependency activation failed for %s', dep, exc_info=True)
+                failed_deps.append(f"{dep}: {exc}")
+        if failed_deps:
+            deps_note = (
+                "Tool dependencies could not be installed — "
+                + "; ".join(failed_deps)
+                + ". Run `hermes pm install "
+                + " ".join(str(d) for d in declared_deps)
+                + "` and reload."
+            )
+    return deps_note

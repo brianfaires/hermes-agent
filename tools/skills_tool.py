@@ -317,7 +317,7 @@ def skills_list(category: str | None = None, task_id: str | None = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def _resolve_plugin_skill(name, file_path, task_id, preprocess):
+def _resolve_plugin_skill(name, file_path, task_id, preprocess, *, inspect_only=False):
     """``plugin:skill`` dispatch: ``(result_json, None)`` when answered, else ``(None,
     local_category_name)`` to fall through to the flat-tree scan — categorized local skills also use
     ``category:skill`` in config/gateway prompts, so the on-disk ``category/skill`` form returns."""
@@ -352,7 +352,8 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
             f"has been cleaned up — try again after the plugin is reloaded."), None
     if plugin_skill_md is not None:
         return _serve_plugin_skill(
-            plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id), None
+            plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id,
+            inspect_only=inspect_only), None
     if available := pm.list_plugin_skills(namespace):  # plugin exists but this specific skill is missing
         return _fail(
             f"Skill '{bare}' not found in plugin '{namespace}'.",
@@ -590,11 +591,13 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 
 
 def skill_view(
-    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
+    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True,
+    *, inspect_only: bool = False) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
-    slash/preload callers render the message themselves."""
+    slash/preload callers render the message themselves. Internal ``inspect_only`` checks
+    availability through the same guards without activating or rendering the skill."""
     try:
         # Validate before the ':' dispatch so a Windows drive path (C:\skills\foo) can't be
         # reinterpreted as a plugin namespace.
@@ -602,7 +605,7 @@ def skill_view(
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         local_category_name: str | None = None
         if ":" in name:  # plugin registry; bare names use the flat-tree scan below
-            served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess)
+            served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess, inspect_only=inspect_only)
             if served is not None:
                 return served
         # The fall-through form (namespace/bare) joins onto each search dir too; re-validate it
@@ -629,6 +632,9 @@ def skill_view(
         if _is_skill_disabled(resolved_name, rel) and (_is_skill_disabled(resolved_name) or any(
                 e["path"] == skill_md and e["load_name"] == rel for e in _skill_catalog(skip_disabled=True, include_hidden=True))):
             return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
+        if inspect_only:
+            return _json({"success": True,
+                          "name": frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)})
         if file_path and skill_dir:
             return _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
@@ -647,32 +653,8 @@ def skill_view(
         readiness, readiness_extras = _skill_readiness(frontmatter, skill_name)
         rendered_content = content if not preprocess else _preprocess_skill(
             content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
-        # ── pm tool deps (`deps: [ffmpeg]` frontmatter) ──────────────
-        # Loading the skill IS the activation moment: ensure each declared
-        # pm package now so the skill's commands work when the model runs
-        # them. Failure never blocks the skill content — the note carries
-        # the remedy.
-        deps_note = None
-        declared_deps = frontmatter.get("deps") or []
-        if isinstance(declared_deps, str):
-            declared_deps = [declared_deps]
-        if isinstance(declared_deps, list) and declared_deps:
-            failed_deps = []
-            for dep in [str(d).strip() for d in declared_deps if str(d).strip()]:
-                try:
-                    import pm
-
-                    pm.ensure(dep)
-                except Exception as exc:
-                    failed_deps.append(f"{dep}: {exc}")
-            if failed_deps:
-                deps_note = (
-                    "Tool dependencies could not be installed — "
-                    + "; ".join(failed_deps)
-                    + ". Run `hermes pm install "
-                    + " ".join(str(d) for d in declared_deps)
-                    + "` and reload."
-                )
+        from tools.skills_tool_setup import activate_skill_dependencies
+        deps_note = activate_skill_dependencies(frontmatter)
 
         result = {
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
