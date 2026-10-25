@@ -96,6 +96,8 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(s, "create_execution", lambda *_a, **_kw: {"id": "exec-t"})
     monkeypatch.setattr(s, "claim_dispatch", lambda _job_id: True)
     monkeypatch.setattr(s, "mark_execution_running", lambda _execution_id: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(
         s, "save_job_output",
         lambda jid, out: state["saved"].append(jid) or f"/tmp/{jid}.txt",

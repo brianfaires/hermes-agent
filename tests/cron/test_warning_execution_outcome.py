@@ -45,6 +45,9 @@ def test_real_run_ledger_and_incident_match_actual_presentation(tmp_path, monkey
         from cron import delivery_queue
         execution = executions.create_execution(job["id"], source="fixture")
         job["execution_id"] = execution["id"]
+        # Detached workers adopt the execution before entering run_one_job.
+        assert executions.mark_execution_handoff_pending(execution["id"]) is not None
+        assert executions.adopt_claimed_execution(execution["id"])["status"] == "running"
         monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", execution["id"])
         original_wait = delivery_queue.enqueue_and_wait
 
