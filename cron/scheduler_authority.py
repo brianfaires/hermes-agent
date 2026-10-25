@@ -217,7 +217,7 @@ def reconcile_pending(*, allow_connect=True):
             # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a
             # blank answer are failures, whichever process books them.
             success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
-            delivery = _RunDelivery(job, success, error, agent_declared=declared)
+            delivery = _RunDelivery(job, success, error, agent_declared=declared, final_response=answer)
             # The canonical receipt supplies the result; a dead scheduler's fire claim does not
             # authorize replay and must not prevent finishing its durable bookkeeping.
             fence = _FireOwnership(dict(job, fire_claim=None))
