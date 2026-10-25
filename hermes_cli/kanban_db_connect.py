@@ -890,6 +890,11 @@ _LATER_TASK_COLUMNS = (
 )
 
 _NOTIFY_SUB_COLUMNS = (
+    ("last_wake_event_id", "last_wake_event_id INTEGER NOT NULL DEFAULT 0"),
+    ("last_diagnostic_wake_event_id", "last_diagnostic_wake_event_id INTEGER NOT NULL DEFAULT 0"),
+    ("notify_claim_token", "notify_claim_token TEXT"),
+    ("notify_claim_from_event_id", "notify_claim_from_event_id INTEGER"),
+    ("notify_claim_expires", "notify_claim_expires INTEGER"),
     ("last_ping_event_id", "last_ping_event_id INTEGER NOT NULL DEFAULT 0"),
     ("notifier_profile", "notifier_profile TEXT"),
     ("delivery_mode", "delivery_mode TEXT NOT NULL DEFAULT 'notify'"),
@@ -1100,6 +1105,8 @@ _REBUILD_SPECS = {
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
+        " last_wake_event_id INTEGER NOT NULL DEFAULT 0, last_diagnostic_wake_event_id INTEGER NOT NULL DEFAULT 0,"
+        " notify_claim_token TEXT, notify_claim_from_event_id INTEGER, notify_claim_expires INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),
