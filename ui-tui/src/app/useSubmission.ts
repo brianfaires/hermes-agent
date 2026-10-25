@@ -61,7 +61,7 @@ export const prepareSubmission = (display: string, tokens: ComposerToken[]) => (
  * `attached_images` and splices them in at submit.
  */
 export const prepareSlashSubmission = (display: string, tokens: ComposerToken[]) => ({
-  command: expandPasteTokens(tokens)(display),
+  command: expandPasteTokens(tokens)(display).trimStart(),
   display
 })
 
@@ -367,13 +367,13 @@ export function useSubmission(opts: UseSubmissionOptions) {
         }
       }
 
-      if (looksLikeSlashCommand(full)) {
+      if (looksLikeSlashCommand(submission.text.trimStart())) {
         const slash = prepareSlashSubmission(full, submissionTokens)
 
         appendMessage({ kind: 'slash', role: 'system', text: slash.display })
         composerActions.pushHistory(toHistory)
 
-        const parsed = parseSlashCommand(full)
+        const parsed = parseSlashCommand(slash.command)
 
         const queued =
           parsed.name === 'queue' || parsed.name === 'q' ? queueItemFromSlash(slash.display, slash.command) : undefined
