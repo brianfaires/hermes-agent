@@ -53,6 +53,8 @@ class ToolSearchConfig:
     # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
 
+    pinned_tools: frozenset[str] = frozenset()
+
     @property
     def effective_defer_tools(self) -> frozenset:
         return _DEFAULT_DEFERRED_TOOLS if self.defer_tools is None else self.defer_tools
@@ -175,14 +177,15 @@ def session_tool_names(tool_defs: Iterable[dict[str, Any]]) -> frozenset[str]:
 
 
 def classify_tools(tool_defs: list[dict[str, Any]], defer_tools: Optional[frozenset] = None,
+                   pinned_tools: frozenset[str] = frozenset(),
                    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
-    after classification)."""
+    """Split authorized schemas into visible/deferrable; pins override deferral.
+    Bridge tools are dropped and re-added after classification."""
     visible: list[dict[str, Any]] = []
     deferrable: list[dict[str, Any]] = []
     for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
         if name not in BRIDGE_TOOL_NAMES:
-            (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
+            (deferrable if name not in pinned_tools and is_deferrable_tool_name(name, defer_tools) else visible).append(td)
     return visible, deferrable
 
 
@@ -347,7 +350,7 @@ def assemble_tool_defs(tool_defs: list[dict[str, Any]], *, context_length: Optio
     config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
-    visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
+    visible, deferrable = classify_tools(incoming, config.effective_defer_tools, config.pinned_tools)
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):
