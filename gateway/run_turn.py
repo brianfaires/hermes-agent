@@ -249,8 +249,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
 
             # Capture the launch session id so post-run compression publication is identity-guarded
             # (a /new may move session_entry.session_id while the old run is still unwinding).
-            from gateway.run_heartbeat_acceptance import heartbeat_owner_is_current
-            if not heartbeat_owner_is_current(self, event, session_key):
+            from gateway.run_heartbeat_acceptance import automation_owner_is_current
+            if not await automation_owner_is_current(self, event, session_key):
                 return
             _run_start_session_id = session_entry.session_id
             _turn_started_monotonic = time.monotonic()
