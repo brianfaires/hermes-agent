@@ -1061,12 +1061,15 @@ def _(rid, params: dict) -> dict:
         # run it. Anything else might be the skill the scan failed to see.
         if (dispatched.get("result") or {}).get("type") or not _is_registry_command(base):
             return dispatched
-    if plugin_handler := _plugin_command_handler(base) if base else None:
-        try:
-            return _ok(rid, {"output": _run_plugin_command(plugin_handler, arg, session, params.get("session_id", ""))
-                             or "(no output)"})
-        except Exception as e:
-            return _ok(rid, {"output": f"Plugin command error: {e}"})
+    with _session_profile_runtime_scope(session), _session_home_scope(session):
+        if plugin_handler := _plugin_command_handler(base) if base else None:
+            try:
+                from hermes_cli.plugin_command_dispatch import plugin_command_args
+                arg = plugin_command_args(base, params.get('command', ''), arg)
+                return _ok(rid, {"output": _run_plugin_command(plugin_handler, arg, session, params.get("session_id", ""))
+                                 or "(no output)"})
+            except Exception as e:
+                return _ok(rid, {"output": f"Plugin command error: {e}"})
     worker = session.get("slash_worker")
     if not worker:
         # slash.exec runs on the RPC pool: two concurrent commands could both see slash_worker=None
