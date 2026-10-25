@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
+from copy import copy
 from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -504,6 +505,14 @@ class GoalState:
 
 # ── Persistence (SessionDB state_meta) ────────────────────────────────
 
+class _GoalChangedDuringEvaluation(RuntimeError):
+    pass
+
+
+class _GoalStateUnavailable(RuntimeError):
+    pass
+
+
 def _meta_key(session_id: str) -> str:
     return f"goal:{session_id}"
 
@@ -660,18 +669,34 @@ def load_goal(session_id: str) -> Optional[GoalState]:
         return None
 
 
-def save_goal(session_id: str, state: GoalState) -> None:
-    """Persist a goal to SessionDB. No-op if DB unavailable."""
+def save_goal(session_id: str, state: GoalState, *, expected_state: Optional[str] = None) -> None:
+    """Persist a goal; an evaluation must still own the snapshot it read."""
     if not session_id:
         return
     db = _get_session_db()
     if db is None:
         _warn_dropped_write("GoalManager", "goal", session_id)
+        if expected_state is not None:
+            raise _GoalStateUnavailable
         return
     try:
-        db.set_meta(_meta_key(session_id), state.to_json())
+        if expected_state is None:
+            db.set_meta(_meta_key(session_id), state.to_json())
+        else:
+            def update(conn):
+                row = conn.execute('SELECT value FROM state_meta WHERE key = ?', (_meta_key(session_id),)).fetchone()
+                if row is None or GoalState.from_json(row[0]).to_json() != expected_state:
+                    return False
+                db.set_meta(_meta_key(session_id), state.to_json(), cursor=conn)
+                return True
+            if not db._execute_write(update):
+                raise _GoalChangedDuringEvaluation
+    except _GoalChangedDuringEvaluation:
+        raise
     except Exception as exc:
         logger.debug("GoalManager: set_meta failed: %s", exc)
+        if expected_state is not None:
+            raise _GoalStateUnavailable from exc
 
 
 def clear_goal(session_id: str) -> None:
@@ -1092,6 +1117,11 @@ _JUDGE_CONFIG_HINT = (
 )
 
 
+def _goal_criteria(state):
+    return (state.goal, state.subgoals, state.contract, state.max_turns,
+            [(gate.command, gate.timeout_seconds, gate.max_retries) for gate in state.gates])
+
+
 class GoalManager:
     """Per-session goal state + continuation decisions.
 
@@ -1104,6 +1134,7 @@ class GoalManager:
         self.session_id = session_id
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS)
         self._state: Optional[GoalState] = load_goal(session_id)
+        self._evaluation_snapshot: Optional[str] = None
 
     def refresh(self) -> None:
         """Re-read state from the DB (another writer, e.g. a tool, moved it)."""
@@ -1153,7 +1184,12 @@ class GoalManager:
     # --- mutation -----------------------------------------------------
 
     def _save(self) -> Optional[GoalState]:
-        save_goal(self.session_id, self._state)
+        expected = self._evaluation_snapshot
+        if expected is not None:
+            committed = self._state.to_json()
+        save_goal(self.session_id, self._state, expected_state=expected)
+        if expected is not None:
+            self._evaluation_snapshot = committed
         return self._state
 
     def _require_goal(self) -> GoalState:
@@ -1497,6 +1533,51 @@ class GoalManager:
         background_processes: Optional[list[dict[str, Any]]] = None,
         active_delegations: int = 0,
     ) -> dict[str, Any]:
+        """Judge only the captured goal; newer controls retain ownership of its saved state."""
+        state = self._state
+        evaluation = copy(self)
+        evaluation._evaluation_snapshot = state.to_json() if state else None
+        evaluation._state = GoalState.from_json(evaluation._evaluation_snapshot) if state else None
+        try:
+            try:
+                return evaluation._evaluate_after_turn(last_response, state, user_initiated=user_initiated,
+                    background_processes=background_processes, active_delegations=active_delegations)
+            except _GoalChangedDuringEvaluation:
+                return evaluation._updated_goal_decision()
+        except _GoalChangedDuringEvaluation:
+            self.refresh()
+            return _decision(self._state.status if self._state else None, False, None,
+                             'skipped', 'goal changed during evaluation', '')
+        except _GoalStateUnavailable:
+            logger.warning('Goal continuation deferred: saved state is unavailable for %s', self.session_id, exc_info=True)
+            return _decision(self._state.status if self._state else None, False, None, 'skipped',
+                             'goal state unavailable', 'Goal continuation deferred: unable to update its saved state.')
+        finally:
+            self.refresh()
+
+    def _updated_goal_decision(self) -> dict[str, Any]:
+        snapshot = self._evaluation_snapshot
+        assert snapshot is not None  # only a guarded evaluation write can conflict
+        previous = GoalState.from_json(snapshot)
+        self.refresh()
+        current = self._state
+        if (current is not None and current.status == 'active' and current.created_at == previous.created_at
+                and _goal_criteria(current) != _goal_criteria(previous)):
+            self._evaluation_snapshot = current.to_json()
+            if self.is_waiting():
+                return self._waiting_decision(current)
+            if current.turns_used >= current.max_turns:
+                return self._budget_pause(current, 'continue', 'goal criteria changed')
+            return _decision('active', True, self.next_continuation_prompt(), 'continue',
+                             'goal criteria changed', '↻ Continuing with the updated goal criteria.')
+        return _decision(current.status if current else None, False, None,
+                         'skipped', 'goal changed during evaluation', '')
+
+    def _evaluate_after_turn(
+        self, last_response: str, visible_state: Optional[GoalState], *, user_initiated: bool = True,
+        background_processes: Optional[list[dict[str, Any]]] = None,
+        active_delegations: int = 0,
+    ) -> dict[str, Any]:
         """Run gates + judge and update state. Return a decision dict (``status``, ``should_continue``,
         ``continuation_prompt``, ``verdict``, ``reason``, ``message``). Both real user prompts and our
         own continuations increment ``turns_used`` — both consume model budget."""
@@ -1508,14 +1589,20 @@ class GoalManager:
         if self.is_waiting():
             return self._waiting_decision(state)
 
-        state.waiting_wake_id = None
         state.turns_used += 1
         state.last_turn_at = time.time()
+        # Controls on the live manager see the charged turn without sharing judge mutations.
+        assert visible_state is not None
+        visible_state.turns_used = state.turns_used
+        visible_state.last_turn_at = state.last_turn_at
+        self._save()
 
         # Gates run BEFORE the judge: a failing gate is deterministic evidence the goal is not done,
         # so the judge is skipped and the gate's output drives the next turn (same turn budget).
         gate_decision = self._check_gates()
         if gate_decision is not None:
+            state.waiting_wake_id = None
+            self._save()
             if gate_decision.get("should_continue") and state.turns_used >= state.max_turns:
                 return self._budget_pause(state, "gate_failed", gate_decision.get("reason", ""), note=" (a quality gate is still failing)")
             return gate_decision
@@ -1524,6 +1611,7 @@ class GoalManager:
             state.goal, last_response, subgoals=state.subgoals or None, background_processes=background_processes,
             contract=state.contract if state.has_contract() else None, active_delegations=active_delegations,
         )
+        state.waiting_wake_id = None
         state.last_verdict = verdict
         state.last_reason = reason
         # Parse failures reset on any usable reply INCLUDING transport errors, so a flaky network
