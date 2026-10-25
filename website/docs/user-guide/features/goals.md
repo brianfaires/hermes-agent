@@ -215,6 +215,10 @@ Any real message you send while a goal is active takes priority over the continu
 
 While an agent is already running, `/goal status`, `/goal pause`, `/goal clear`, `/goal wait`, and `/goal unwait` are safe to run — they only touch control-plane state and don't interrupt the current turn. Setting a **new** goal mid-run (`/goal <new text>`) is rejected with a message telling you to `/stop` first, so the old continuation can't race the new one.
 
+An in-flight judge result cannot overwrite a newer accepted pause, clear or replacement goal.
+If you update the current goal's criteria while the judge is running, its old verdict is discarded
+and the next continuation uses the updated criteria. The completed work turn is still counted once.
+
 ### Continuation replies do not quote the goal message (gateway)
 
 A continuation prompt is not a reply to the message that set the goal, so on platforms that quote a reply target (Telegram) its progress bubbles and final reply are posted to the chat/topic without quoting that original message. Only your own messages are answered as replies.
