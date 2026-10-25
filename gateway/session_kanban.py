@@ -43,12 +43,19 @@ def build_kanban_policy(connection, params, config):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
             skills = list(task.skills or ())
+            required_skills = []
             if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
-                skills = list(dict.fromkeys([*skills, 'sdlc-review']))
+                required_skills = ['sdlc-review']
+                skills = list(dict.fromkeys([*skills, *required_skills]))
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
+    from hermes_cli.kanban_launch import resolve_worker_skills, WorkerCapabilityError
+    try:
+        effective_skills = resolve_worker_skills(task, str(authority.profile_id), required_skills, workspace=cwd)
+    except WorkerCapabilityError as exc:
+        raise RuntimeStoreError('kanban_skills_unavailable', detail=str(exc)) from exc
     params_policy = {'source': 'cli', 'cwd': cwd}
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
@@ -60,7 +67,8 @@ def build_kanban_policy(connection, params, config):
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
-        skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
+        skills=skills, effective_skills=effective_skills, required_skills=required_skills,
+        goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
@@ -348,11 +356,26 @@ def worker_exit_code(path, params):
     return worker_result(path, params).get('exit_code', 1)
 
 
-def _run_task_turns(agent, frame, history, context):
+def _load_task_skill_prompt(task_id, context):
     from agent.skill_commands import build_preloaded_skills_prompt
-    skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
-    if missing and not loaded:
-        raise ValueError('kanban_skills_unavailable')
+    requested = context.get('effective_skills', context['skills'])
+    required = context.get('required_skills')
+    if required is None:
+        prompt, loaded, missing = build_preloaded_skills_prompt(requested, task_id=task_id)
+        if missing and not loaded:
+            raise ValueError('kanban_skills_unavailable')
+        return prompt
+    required_prompt, loaded, missing = build_preloaded_skills_prompt(required, task_id=task_id)
+    if missing:
+        raise ValueError('kanban_skills_unavailable: ' + ', '.join(missing))
+    optional = [identifier for identifier in requested if identifier not in required]
+    optional_prompt, _, _ = build_preloaded_skills_prompt(
+        optional, task_id=task_id, excluded_loaded_names=set(loaded))
+    return '\n\n'.join(part for part in (required_prompt, optional_prompt) if part)
+
+
+def _run_task_turns(agent, frame, history, context):
+    skills = _load_task_skill_prompt(agent.session_id, context)
     prompt = '\n\n'.join(p for p in (skills, context['context'], frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history)
 
