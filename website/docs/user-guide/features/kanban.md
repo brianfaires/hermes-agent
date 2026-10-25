@@ -1490,6 +1490,10 @@ Existing sticky blocks survive escalation to triage. Automatic specification, de
 
 Task creation and decomposition share workspace/branch metadata checks. A directory needs an absolute path (or the board's default workdir); scratch and worktree defaults remain supported. Worktree children retain an explicitly requested branch, and malformed Git branch refs are rejected before a card or fan-out is committed. Unassigned tasks remain parked unless a default assignee is explicitly configured; a missing profile never silently selects a different identity.
 
+### Cron work with inherited worker context
+
+A cron job launched inside a dispatched worker inherits a read-only fence for that worker's board lineage. An explicit task or run ID does not grant ownership; the worker retains its lifecycle and workspace. The fence follows subprocesses and survives a temporary profile/home change. Independent cron work and scratch boards outside that lineage retain their normal write access. This is cooperative runtime scope, not OS confinement of arbitrary code.
+
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
