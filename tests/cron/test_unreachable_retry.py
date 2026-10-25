@@ -146,6 +146,8 @@ def test_ladder_reruns_do_not_spend_extra_repeat_budget(tmp_cron_home, monkeypat
     # "crash": a rung whose run raises leaves through the crash tail, which must not count it either.
     monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(sched, "mark_execution_running", lambda *_a, **_kw: {})
+    # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+    monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
     monkeypatch.setattr(sched, "_deliver_crash_failure", lambda *_a, **_kw: (None, "suppressed"))
     job_id = create_job("digest", "every 24h", repeat=2)["id"]
 
