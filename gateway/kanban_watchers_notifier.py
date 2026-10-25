@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import secrets
 from functools import partial
 from pathlib import Path
 import weakref
@@ -311,12 +312,20 @@ class _Collector:
         if _adapter_for_subscription(self.runner, Platform(platform), sub, owner_profile or self.notifier_profile) is None:
             _warn_anchorless_thread_sub_once(sub, platform)
             return None
+        claim_token = secrets.token_hex(16)
         old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
+            thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS, claim_token=claim_token,
         )
         if not events:
             return None
+        receipts = _kbn().notify_claim_receipts(
+            conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
+            thread_id=sub.get("thread_id") or "", claim_token=claim_token,
+        )
+        if receipts is None:
+            return None
+        sub = {**sub, **receipts, "_notify_claim_token": claim_token}
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
@@ -745,6 +754,41 @@ class _KanbanNotification:
                 return False
         return True
 
+    def _pending_wake_payloads(self) -> list:
+        """An admitted group stays examined while a different group retries."""
+        from gateway.warning_notifications import warning_notifications_enabled
+
+        original_events = self.d["events"]
+        pending = [ev for ev in original_events if ev.kind not in _WAKE_KINDS or ev.id > int(
+            self.sub.get("last_diagnostic_wake_event_id" if diagnostic_event(ev)
+                         else "last_wake_event_id") or 0)]
+        split = not warning_notifications_enabled(self.platform_str)
+        groups = ([pending] if not split else [
+            [ev for ev in pending if diagnostic_event(ev)],
+            [ev for ev in pending if not diagnostic_event(ev)],
+        ])
+        payloads = []
+        for events in groups:
+            if not events:
+                continue
+            self.d = {**self.d, "events": events}
+            self.wake_handoff = self.wake_review_detail = ""
+            for ev in events:
+                self.format_event(ev)
+            self.build_wake_text()
+            if self.wake_kinds:
+                payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds, events))
+        self.d = {**self.d, "events": original_events}
+        return payloads
+
+    async def _record_wake_admission(self, events: list) -> None:
+        relevant = [ev for ev in events if ev.kind in _WAKE_KINDS]
+        result_cursor = max((ev.id for ev in relevant if not diagnostic_event(ev)), default=0)
+        diagnostic_cursor = max((ev.id for ev in relevant if diagnostic_event(ev)), default=0)
+        await _to_thread_process_service(
+            self.runner._kanban_record_wake, self.sub, result_cursor, diagnostic_cursor, self.board_slug,
+        )
+
     async def deliver(self) -> None:
         try:
             self.plat = self.platform_cls(self.platform_str)
@@ -770,34 +814,16 @@ class _KanbanNotification:
         async with self._owner_scope():
             if not await self._send_pings():
                 return
-            # All text pings delivered (or skipped for non-push / wake-only).
-            original_events = self.d["events"]
-            from gateway.warning_notifications import warning_notifications_enabled
-            split = not warning_notifications_enabled(self.platform_str)
-            wake_groups = ([original_events] if not split else [
-                [ev for ev in original_events if diagnostic_event(ev)],
-                [ev for ev in original_events if not diagnostic_event(ev)],
-            ])
-            wake_payloads = []
-            for events in wake_groups:
-                if not events:
-                    continue
-                self.d = {**self.d, "events": events}
-                self.wake_handoff = self.wake_review_detail = ""
-                for ev in events:
-                    self.format_event(ev)
-                self.build_wake_text()
-                if self.wake_kinds:
-                    wake_payloads.append((self.synth, self.wake_diagnostic, self.wake_kinds))
-            self.d = {**self.d, "events": original_events}
+            wake_payloads = self._pending_wake_payloads()
         is_push = self.is_push_adapter
         from gateway.wake import WakeNotAccepted
 
         # A requested wake is required even when its passive ping already landed.
         if wake_payloads:
             try:
-                for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
+                for self.synth, self.wake_diagnostic, self.wake_kinds, events in wake_payloads:
                     await self.wake()
+                    await self._record_wake_admission(events)
                 self.clear_failures()
             except WakeNotAccepted:
                 # Startup / full queue is not a dead destination. Keep the durable

@@ -1494,6 +1494,12 @@ Task creation and decomposition share workspace/branch metadata checks. A direct
 
 A cron job launched inside a dispatched worker inherits a read-only fence for that worker's board lineage. An explicit task or run ID does not grant ownership; the worker retains its lifecycle and workspace. The fence follows subprocesses and survives a temporary profile/home change. Independent cron work and scratch boards outside that lineage retain their normal write access. This is cooperative runtime scope, not OS confinement of arbitrary code.
 
+### Notification recovery
+
+Gateway notification claims have a two-minute recovery lease. An abandoned pre-delivery claim can be retried after that deadline; successful admission settles its exact claim, so repeated checks of an unchanged wait consume no new model turns. Superseded claims cannot rewind or settle their successors. Sent passive pings keep their separate durable receipt and are not repeated during wake retries. Task completion still requires actual task/run evidence; notification recovery never completes an unlaunched successor.
+
+Successful diagnostic and result wake admissions keep separate checkpoints, so a failure in one group does not repeat a group already admitted. A crash between admission and its checkpoint leaves an uncertain outcome; only the bounded recovery deadline permits reevaluation. This provides recovery rather than an exactly-once promise across that crash window.
+
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
