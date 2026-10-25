@@ -1975,31 +1975,29 @@ def _synthesize_ended_run(
 # --- Dependency resolution (todo -> ready) ---
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """True when the newest ``blocked``/``unblocked``/``gave_up`` event says the
-    block must wait for an operator: an explicit ``kanban_block`` (#28712), or a
-    breaker trip ``_record_task_failure`` stamped ``sticky`` — the clean-exit
-    protocol-violation budget or a systemic same-error wave. Those trip on a
-    policy independent of ``consecutive_failures``, so ``recompute_ready``'s
-    counter check cannot see them — without this the trip is promoted back to
-    ``ready`` in the same tick and the card respawns forever. A plain
-    (unified-budget) ``gave_up`` carries no marker and is judged by the counter,
-    so raising ``failure_limit`` or ``assign_task`` to a fresh profile still
-    releases it; a task with no such event at all (direct DB edit) auto-recovers.
-    """
+    """Only an explicit release supersedes a human hold, including legacy creation."""
+    rows = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN "
+        "('created', 'blocked', 'block_loop_detected', 'gave_up', 'unblocked', "
+        "'promoted_manual') ORDER BY id DESC", (task_id,),
+    )
+    for row in rows:
+        kind = row['kind']
+        payload = _json_dict(row['payload'])
+        if kind in {'unblocked', 'promoted_manual'}:
+            return False
+        if kind in {'blocked', 'block_loop_detected'}:
+            return True
+        if kind == 'gave_up' and payload.get('sticky'):
+            return True
+        if kind == 'created' and payload.get('status') == 'blocked':
+            return True
+    # Older boards may have recurrence state without the corresponding events.
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
+        'SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?', (task_id,),
     ).fetchone()
-    if row and row["kind"] == "blocked":
-        return True
-    trip = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'gave_up' AND id > COALESCE("
-        "  (SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'unblocked'), 0) "
-        "ORDER BY id DESC LIMIT 1", (task_id, task_id),
-    ).fetchone()
-    return bool(trip) and bool(_json_dict(trip["payload"]).get("sticky"))
+    return bool(row and row['status'] in {'blocked', 'triage'}
+                and row['block_recurrences'] and row['block_kind'] != 'dependency')
 
 
 def _latest_event(
@@ -2033,16 +2031,10 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
-    returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
+    """Promote dependency-ready tasks unless sticky-blocked or over their failure budget.
 
-    ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
-    ``consecutive_failures`` reached the limit (else the breaker could never
-    trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
-    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
-
-    1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
-    explicit ``kanban_unblock`` (#28712).
+    Precedence: max_retries > failure_limit > DEFAULT_FAILURE_LIMIT.
+    Opens its own IMMEDIATE txn; call outside another write txn.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -2055,7 +2047,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+            if _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
             parents = conn.execute(
@@ -2126,6 +2118,8 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    if _has_sticky_block(conn, task_id):
+        return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -3558,17 +3552,22 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    """Release dormant work, preserving parent/review gates; never release running cards."""
     now = int(time.time())
     with write_txn(conn):
+        status = _task_status(conn, task_id)
+        held = _has_sticky_block(conn, task_id)
+        if status not in {'blocked', 'scheduled'} and not (
+            held and status in {'triage', 'todo', 'ready', 'review'}
+        ):
+            return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
-            else "ready"
+            if status == 'blocked' or held
+            else 'ready'
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=("blocked", "scheduled", "triage", "todo", "ready", "review"), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3578,15 +3577,12 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             if landing_status == "ready" and resume_status == "review"
             else landing_status
         )
-        # ``block_kind``/``block_recurrences`` deliberately survive the unblock:
-        # resetting them is the amnesia that let cron-unblock <-> re-block loop
-        # unbounded; only complete_task clears them. ``consecutive_failures``
-        # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
-        # is a fresh start for the retry budget.
+        # Preserve block recurrence: resetting it reopens unblock/re-block loops.
+        # Explicit unblock resets only dispatch failures, giving retries a fresh budget.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled', 'triage', 'todo', 'ready', 'review')", (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
@@ -3744,6 +3740,8 @@ def specify_triage_task(
         raise ValueError("title cannot be blank")
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
+        if _has_sticky_block(conn, task_id):
+            return False
         existing = conn.execute(
             "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
