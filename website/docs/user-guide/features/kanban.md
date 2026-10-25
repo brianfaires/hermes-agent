@@ -1518,6 +1518,9 @@ an ordinary technical wait through the native unblock path; genuine operator
 holds and release/merge approval still apply. Target success never automatically
 completes its source, an unlaunched successor or a release operation.
 
+### Declared result files
+
+Declared local evidence for a managed scratch task is copied into durable task attachments before review handoff or successful cleanup, including files outside its scratch directory. Existing durable attachments are reused. Missing required scratch or previously stored evidence prevents acceptance and preserves the workspace; remote references remain references.
 
 ## Out of scope
 

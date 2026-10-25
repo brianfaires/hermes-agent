@@ -2726,9 +2726,8 @@ def _stage_completion_artifacts(
     conn: sqlite3.Connection, task_id: str, metadata: dict, now: int, *,
     uploaded_by: str = "kanban_complete",
 ) -> list[Path]:
-    """Copy scratch artifacts to the attachments dir and record each as an
-    attachment row; returns the copies so the caller can discard them if its
-    transaction rolls back."""
+    """Record saved completion files; return new copies for rollback cleanup.
+    Reused attachments must never enter the staged-copy rollback list."""
     _persist_scratch_completion_artifacts(conn, task_id, metadata)
     staged = [Path(stored_path) for stored_path in metadata.pop("_staged_artifacts", [])]
     for path in staged:
@@ -2756,11 +2755,6 @@ def _completed_event_payload(
     notifiers / dashboard WS render without a second round-trip; verified
     cards; and ``metadata["artifacts"]`` promoted so the notifier can upload
     them as native attachments without fetching the run row."""
-    # Mirror CLI's _show_voice_status: include STT/TTS provider availability so the user can tell at a
-    # glance *why* voice mode isn't working ("STT provider: MISSING ..." is the common case). ``record_key``
-    # mirrors the configured ``voice.record_key`` so the TUI can both bind it (frontend
-    # ``isVoiceToggleKey``) and display it in /voice status — previously the TUI hardcoded Ctrl+B and
-    # ignored the config (#18994).
     payload: dict = {
         "result_len": len(result) if result else 0,
         "summary": _first_line(event_summary, 400) or None,
@@ -2832,7 +2826,7 @@ def _merge_completion_prose_artifacts(
 def _persist_scratch_completion_artifacts(
     conn: sqlite3.Connection, task_id: str, metadata: dict,
 ) -> None:
-    """Copy scratch-workspace completion artifacts before cleanup removes them."""
+    """Preserve declared local files for managed scratch tasks before cleanup."""
     raw_artifacts = metadata.get("artifacts")
     if not isinstance(raw_artifacts, (list, tuple)):
         return
@@ -2851,6 +2845,7 @@ def _persist_scratch_completion_artifacts(
 
     attachment_dir = task_attachments_dir(task_id, board=board)
     persisted: list[str] = []
+    staged: list[str] = []
     used_destinations: set[Path] = set()
     changed = False
 
@@ -2868,7 +2863,8 @@ def _persist_scratch_completion_artifacts(
             persisted.append(artifact)
             continue
 
-        if not resolved_src.is_relative_to(workspace_root):
+        already_stored = resolved_src.is_relative_to(attachment_dir.resolve())
+        if not already_stored and not resolved_src.is_relative_to(workspace_root) and not src.is_file():
             persisted.append(artifact)
             continue
 
@@ -2883,6 +2879,10 @@ def _persist_scratch_completion_artifacts(
         if problem:
             _discard_copies()
             raise ArtifactPreservationError(problem)
+
+        if already_stored:
+            persisted.append(artifact)
+            continue
 
         dest: Optional[Path] = None
         try:
@@ -2900,14 +2900,14 @@ def _persist_scratch_completion_artifacts(
                 f"could not preserve declared scratch artifact {artifact}: {exc}"
             ) from exc
         used_destinations.add(dest)
-        persisted.append(str(dest.resolve()))
+        stored_path = str(dest.resolve())
+        persisted.append(stored_path)
+        staged.append(stored_path)
         changed = True
 
     if changed:
         metadata["artifacts"] = persisted
-        metadata["_staged_artifacts"] = [
-            path for path in persisted if path.startswith(str(attachment_dir.resolve()))
-        ]
+        metadata["_staged_artifacts"] = staged
 
 
 def _discard_staged_copies(copies: Iterable[Path], attachment_dir: Path) -> None:
