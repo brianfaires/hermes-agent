@@ -17,7 +17,8 @@ def plugin_command_args(name: str, command: str, fallback: str) -> str:
         return fallback
     text = command.lstrip().removeprefix("/")
     head = text.split(maxsplit=1)[0] if text else ""
-    return text[len(head) + 1:] if head.lower() == name else fallback
+    canonical = head.lower().split("@", 1)[0].replace("_", "-")
+    return text[len(head) + 1:] if canonical == name.replace("_", "-") else fallback
 
 
 def invoke_plugin_command(handler: Callable, raw_args: str, **context: Any) -> Any:

@@ -18,7 +18,8 @@ def install(home):
         '    (get_hermes_home() / "captured.txt").write_text(raw)\n'
         '    return "Logged"\n'
         'def register(ctx):\n'
-        '    ctx.register_command("log", capture, argument_mode="text")\n'
+        '    ctx.register_command("log", capture, args_hint="<text>", argument_mode="text")\n'
+        '    ctx.register_command("capture_note", capture, argument_mode="text")\n'
         '    ctx.register_command("options-example", capture, argument_mode="options")\n')
     (home / 'config.yaml').write_text('plugins:\n  enabled: [text-example]\n')
     manager = get_plugin_manager()
@@ -38,6 +39,8 @@ def test_cli_text_command_preserves_note_and_legacy_options_stay_trimmed(tmp_pat
             cli.agent = None
             cli.chat = Mock(side_effect=AssertionError('no model turn'))
             assert cli.process_command('/log  café\n  indented\n\nend \n')
+            assert (home / 'captured.txt').read_text() == ' café\n  indented\n\nend \n'
+            assert cli.process_command('/capture_note  café\n  indented\n\nend \n')
             assert (home / 'captured.txt').read_text() == ' café\n  indented\n\nend \n'
             assert cli.process_command('/options-example  option \n')
             assert (home / 'captured.txt').read_text() == 'option'
