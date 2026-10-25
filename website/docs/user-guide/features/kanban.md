@@ -1464,6 +1464,10 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 
 `hermes kanban tail <id>` shows these for a single task. `hermes kanban watch` streams them board-wide.
 
+### Sticky blocks during task preparation
+
+Existing sticky blocks survive escalation to triage. Automatic specification, decomposition and claims skip held cards, including legacy cards created blocked. After resolving the decision, explicitly `hermes kanban unblock <id>`; release restores the resumable phase, including review, even if a stale writer changed the dormant status. A legacy blocked card may also be manually promoted.
+
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
