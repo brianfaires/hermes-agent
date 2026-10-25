@@ -1500,6 +1500,25 @@ Gateway notification claims have a two-minute recovery lease. An abandoned pre-d
 
 Successful diagnostic and result wake admissions keep separate checkpoints, so a failure in one group does not repeat a group already admitted. A crash between admission and its checkpoint leaves an uncertain outcome; only the bounded recovery deadline permits reevaluation. This provides recovery rather than an exactly-once promise across that crash window.
 
+### Cross-board handoffs and external executor waits
+
+Use native cards, exact runs, comments and attachments for a handoff. Record both
+board/card/run identities, the execution identity and the owning notification
+route. A stable target-card `idempotency_key` derived from the source run and
+requested operation reuses the same non-archived card, even for concurrent
+requests. Archiving deliberately ends key reuse.
+
+A planned command or ready card is intent. Record actual launch separately,
+including the native PID/start fingerprint when adopting a local executor, then
+persist its real exit code and durable result evidence against that exact run.
+A failed or uncertain result remains unresolved for its owner; rechecking a wait
+must inspect those receipts before considering another launch. Keep the source
+card waiting on the concrete target identity. Its authorized owner may reconcile
+an ordinary technical wait through the native unblock path; genuine operator
+holds and release/merge approval still apply. Target success never automatically
+completes its source, an unlaunched successor or a release operation.
+
+
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
