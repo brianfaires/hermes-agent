@@ -174,6 +174,11 @@ You don't type anything for this — it's the judge's decision, made from the pr
 
 The barrier (pid- or time-based) is persisted with the goal in `SessionDB.state_meta`, so it survives `/resume`. `/goal pause`, `/goal resume`, and `/goal clear` all drop it. If the PID is already dead when the barrier is set (or dies while parked), or the time deadline passes, the barrier clears on the next check — a stale barrier can never wedge the loop.
 
+On messaging gateways, the existing background poller checks persisted waits and queues one
+continuation when a wait is satisfied, including after a gateway restart. A refused admission stays
+due for retry; an unchanged live wait does not start an agent turn. Pausing, clearing or replacing
+the goal invalidates a queued wait continuation. Global pause defers admission until resume.
+
 Typical flow: the agent pushes a PR, starts a CI watcher with `terminal(background=true, notify_on_complete=true)`, and reports "watching CI." The judge sees the watcher process still running, returns `wait` on its pid, and the loop goes quiet — then picks back up the instant CI finishes and judges the goal against the actual result.
 
 ## Behavior details
