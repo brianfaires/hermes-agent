@@ -1464,6 +1464,10 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 
 `hermes kanban tail <id>` shows these for a single task. `hermes kanban watch` streams them board-wide.
 
+### Prerequisites and workspace ownership
+
+Decomposition preserves the root's external prerequisites on child entrypoints, including nested fan-outs. Parallel children cannot share overlapping directory or explicit scratch workspaces; add a dependency for deliberate sequential reuse, or select separate directories/worktrees. Scratch children get independent paths. Claims serialize exclusion of resolved worktree, directory and explicit scratch destinations across boards in the same Kanban fleet, so legacy/retried cards wait while an overlapping directory has a running owner. Separate independently configured Kanban homes remain separate fleets.
+
 ### Sticky blocks during task preparation
 
 Existing sticky blocks survive escalation to triage. Automatic specification, decomposition and claims skip held cards, including legacy cards created blocked. After resolving the decision, explicitly `hermes kanban unblock <id>`; release restores the resumable phase, including review, even if a stale writer changed the dormant status. A legacy blocked card may also be manually promoted.
