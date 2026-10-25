@@ -3,7 +3,7 @@ import pytest
 
 from agent.runtime_session_store import RuntimeSessionStore, WorkerPersistenceError
 from hermes_state import SessionDB
-from hermes_state_runtime import begin_runtime_epoch, mutate_worker_execution, register_worker_execution
+from hermes_state_runtime import RuntimeStoreError, begin_runtime_epoch, mutate_worker_execution, register_worker_execution
 
 
 def test_worker_context_preserves_authority_identity_and_prompt_receipts(tmp_path):
@@ -74,3 +74,20 @@ def test_worker_constructor_restores_persisted_compressor_guards(tmp_path):
             store.close()
     finally:
         db.close()
+
+
+@pytest.mark.parametrize('pin', [
+    {'version': 'fixture', 'tools': [], 'schema_pins': 'terminal'},
+    {'version': 'fixture', 'tools': [], 'schema_pins': [None]},
+    {'version': 'fixture', 'tools': [], 'schema_pins': [], 'unexpected': []},
+    {'version': 'fixture', 'schema_pins': []},
+])
+def test_invalid_worker_tool_preferences_preserve_the_existing_pin(worker, pin):
+    db, store = worker
+    store.update_session_tool_names('owned', {'version': 'original', 'tools': []})
+    before = db.get_session('owned')['tool_names']
+    with pytest.raises(RuntimeStoreError, match='invalid_params'):
+        mutate_worker_execution(db, **store.scope, sequence=store.journal['next_sequence'],
+                                operation='session.tools', payload={'tool_names': pin})
+    assert db.get_session('owned')['tool_names'] == before
+    assert store.get_session('owned')['tool_names'] == before
