@@ -1062,9 +1062,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     supports_async_delivery: bool = False
     # ``/p/<profile>/v1/...`` on the shared listener (``_make_profile_prefix_middleware``).
     serves_profile_prefix: bool = True
-    # Same statelessness applies to the startup auto-resume prompt: no client is waiting to answer "session
-    # restored — what next?", so a resumed turn should complete the interrupted work rather than acknowledge
-    # (#57056).
+    # Stateless startup recovery has no waiting client: continue authorized work
+    # or report its concrete blocker instead of a restore-only acknowledgement.
     interactive_resume: bool = False
     # Opt-in cap (chars) on tool outputs / tool-call arguments in the stored /v1/responses
     # transcript; 0 = store verbatim (gateway.api_server.history_tool_output_max_chars, #82513).
