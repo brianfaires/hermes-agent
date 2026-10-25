@@ -105,6 +105,7 @@ def decompose_triage_task(
     )
 
     from hermes_cli.kanban_db import _has_sticky_block
+    from hermes_cli.kanban_workspace_claims import inherit_prerequisites, validate_parallel_workspaces
 
     if not children:
         return None
@@ -129,6 +130,7 @@ def decompose_triage_task(
             (task_id,),
         ).fetchone():
             return None
+        validate_parallel_workspaces(root_row, children)
         child_ids = [
             _insert_decomposed_child(conn, task_id, root_row, child, author, now)
             for child in children
@@ -139,6 +141,7 @@ def decompose_triage_task(
                 parent_id, child_id = child_ids[p_idx], child_ids[idx]
                 _link(conn, parent_id, child_id)
                 _append_event(conn, child_id, "linked", {"parent": parent_id, "child": child_id})
+        inherit_prerequisites(conn, task_id, child_ids, children)
         # Root waits for the whole graph: link it under EVERY child (simpler
         # than computing leaves; cycle-free since the root is only ever a child).
         for cid in child_ids:
@@ -175,27 +178,17 @@ def _insert_decomposed_child(
     """Insert one decomposed child as ``todo`` (linked under the root later so
     the dispatcher only ever sees a coherent graph); returns its id.
 
-    Workspace: per-child override wins, else inherit the root's kind. Path
-    inherits only when kinds match (a 'dir' child must not point at the
-    root's worktree) and NEVER for worktrees — siblings dispatch concurrently
-    and one shared checkout would put them all on the first sibling's branch
-    with no lock; leaving it unset makes dispatch materialize a fresh
-    ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
+    Workspace: per-child override wins, else inherit the root's kind. Only
+    directory children inherit a matching root path; their dependency graph
+    must order any overlap. Scratch/worktree children use independent native
+    destinations so materialized root paths cannot collapse sibling writes.
     """
     from hermes_cli.kanban_db import (
         _new_task_id, _canonical_assignee, _append_event,
     )
+    from hermes_cli.kanban_workspace_claims import child_workspace
 
-    root_ws_kind = root_row["workspace_kind"] or "scratch"
-    child_ws_kind = child.get("workspace_kind") or root_ws_kind
-    if child.get("workspace_path"):
-        child_ws_path = child.get("workspace_path")
-    elif child_ws_kind == "worktree":
-        child_ws_path = None
-    elif child_ws_kind == root_ws_kind:
-        child_ws_path = root_row["workspace_path"]
-    else:
-        child_ws_path = None
+    child_ws_kind, child_ws_path = child_workspace(root_row, child)
     new_id = _new_task_id()
     body = child.get("body")
     conn.execute(
