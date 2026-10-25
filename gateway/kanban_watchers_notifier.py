@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import re
 import secrets
+import sqlite3
 from functools import partial
 from pathlib import Path
 import weakref
@@ -114,6 +115,59 @@ def _wake_scope_id(adapter: Any, sub: dict) -> Optional[str]:
         logger.debug("kanban notifier: scope lookup failed for chat %s: %s", sub.get("chat_id"), exc, exc_info=True)
         return None
     return str(resolved) if resolved else None
+
+
+def _wake_source(adapter, platform, sub, profile):
+    from gateway.session import SessionSource
+
+    metadata = sub.get('delivery_metadata') or {}
+    source = SessionSource(
+        platform=platform, chat_id=sub['chat_id'],
+        chat_type=str(sub.get('chat_type') or metadata.get('chat_type') or '').strip() or 'group',
+        thread_id=sub.get('thread_id') or None, user_id=sub.get('user_id'), user_id_alt=sub.get('user_id_alt'),
+        profile=profile or None, scope_id=_wake_scope_id(adapter, sub), parent_chat_id=metadata.get('parent_chat_id'))
+    source._transport_adapter_ref = weakref.ref(adapter)
+    return source
+
+
+def has_pending_goal_wake(runner, source, dependency):
+    """Let the matching durable subscription deliver its update before adding a goal wake."""
+    from hermes_cli import kanban_db as kb, kanban_db_notify as notify
+    from hermes_cli.goals_kanban import _read_board
+
+    if not getattr(runner, '_kanban_notifier_enabled', False):
+        return False
+    collector = _Collector(runner, kb, notifier_profile=getattr(runner, '_kanban_notifier_profile', None)
+                           or runner._active_profile_name(), gc_due=False, gc_retention_days=30)
+    adapter = runner._delivery_adapter_for(source)
+    key = runner._session_key_for_source(source)
+    try:
+        with _read_board(dependency.db_path) as conn:
+            events = [event for event in kb.list_events(conn, dependency.task_id)
+                      if event.run_id == dependency.run_id and event.kind in _WAKE_KINDS]
+            for sub in notify.list_notify_subs(conn, dependency.task_id,
+                                              notifier_profiles=collector.notifier_profiles,
+                                              include_unowned=collector.include_unowned):
+                if sub.get('delivery_mode') not in ('wake', 'notify+wake') or sub['platform'] != source.platform.value:
+                    continue
+                if _adapter_for_subscription(runner, source.platform, sub,
+                                             sub.get('notifier_profile') or collector.notifier_profile) is not adapter:
+                    continue
+                candidate = _wake_source(adapter, source.platform, sub, sub.get('notifier_profile'))
+                if (runner._session_key_for_source(candidate) != key
+                        or str(runner._resolve_profile_home_for_source(candidate).resolve()) != dependency.profile_home):
+                    continue
+                cursor_key = ('notify_claim_from_event_id' if sub.get('notify_claim_token') is not None
+                              else 'last_event_id')
+                cursor = int(sub.get(cursor_key) or 0)
+                if any(event.id > cursor and event.id > int(sub.get(
+                    'last_diagnostic_wake_event_id' if diagnostic_event(event) else 'last_wake_event_id') or 0)
+                       for event in events):
+                    return True
+    except (OSError, sqlite3.Error):
+        logger.warning('Cannot inspect notifications for %s; keeping goal wake available',
+                       dependency.description, exc_info=True)
+    return False
 
 
 _ANCHORLESS_WARNED: set[tuple] = set()
@@ -652,25 +706,7 @@ class _KanbanNotification:
                                    notification_category="diagnostic" if self.wake_diagnostic else "result")
             self._log_woke()
             return
-        from gateway.session import SessionSource
-        # Rebuild the creator's real session scope from the persisted chat_type:
-        # build_session_key() keys DMs differently from group/thread, so a
-        # hardcoded "group" mis-routed DM/thread creators into a fresh session.
-        # Legacy rows may carry chat_type in delivery_metadata; last resort is
-        # "group". A mismatch only degrades to a fresh session.
-        # Legacy rows written before the column existed may still carry chat_type in delivery_metadata
-        # (#60600 rows) — fall back to that, then to "group" (the historical default that suits the
-        # dashboard/group flows). handle_message() get_or_create_session's the target, so a mismatch only
-        # ever degrades to a fresh session, never an exception.
-        _delivery_meta = sub.get("delivery_metadata") or {}
-        _chat_type = str(sub.get("chat_type") or _delivery_meta.get("chat_type") or "").strip()
-        _source = SessionSource(
-            platform=self.plat, chat_id=sub["chat_id"], chat_type=_chat_type or "group",
-            thread_id=sub.get("thread_id") or None, user_id=sub.get("user_id"), user_id_alt=sub.get("user_id_alt"),
-            profile=self.sub_profile or None, scope_id=_wake_scope_id(self.adapter, sub),
-            parent_chat_id=_delivery_meta.get("parent_chat_id"),
-        )
-        _source._transport_adapter_ref = weakref.ref(self.adapter)
+        _source = _wake_source(self.adapter, self.plat, sub, self.sub_profile)
         from gateway.run import _async_profile_runtime_scope
         if self.sub_profile and getattr(getattr(self.runner, "config", None), "multiplex_profiles", False):
             from hermes_cli.profiles import profile_exists

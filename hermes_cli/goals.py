@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli._subprocess_compat import noninteractive_git_env
+from hermes_cli.goals_kanban import KanbanWait
 from hermes_time import safe_strftime
 
 logger = logging.getLogger(__name__)
@@ -439,11 +440,13 @@ class GoalState:
     # Wait barrier (judge ``wait`` verdict or ``/goal wait``): parks the loop instead of re-poking the
     # agent into busy-work. pid → until exit; session → until that process_registry session's OWN
     # trigger fires (exit OR watch_patterns match — preferred for watchers that signal mid-run);
+    # Kanban → exact conversation-owned task/run, including its process fingerprint;
     # until → wall-clock deadline. While ANY is active evaluate_after_turn returns
     # should_continue=False without burning a turn; cleared lazily when satisfied or by unwait/pause/
     # resume/clear. Defaults empty so old state_meta rows load unchanged.
     waiting_on_pid: Optional[int] = None
     waiting_on_session: Optional[str] = None
+    waiting_on_kanban: Optional[KanbanWait] = None
     waiting_until: float = 0.0
     # Live delegation batches when a timed WAIT was set because of them; the barrier lifts as soon
     # as that count drops (a batch returned), not only when the timer runs out.
@@ -475,6 +478,7 @@ class GoalState:
             subgoals=[str(s).strip() for s in raw_subgoals if str(s).strip()] if isinstance(raw_subgoals, list) else [],
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
+            waiting_on_kanban=(KanbanWait(**data['waiting_on_kanban']) if data.get('waiting_on_kanban') else None),
             waiting_reason=data.get("waiting_reason"),
             waiting_wake_id=data.get("waiting_wake_id") or (
                 f"{data.get('created_at')}:{data['waiting_since']}" if data.get("waiting_since") else None),
@@ -496,6 +500,7 @@ class GoalState:
     def clear_wait(self) -> None:
         self.waiting_on_pid = None
         self.waiting_on_session = None
+        self.waiting_on_kanban = None
         self.waiting_until = 0.0
         self.waiting_on_delegations = 0
         self.waiting_reason = None
@@ -1051,8 +1056,7 @@ def last_user_message_from_db(session_id: Optional[str]) -> Any:
 
 
 def gather_background_processes(task_id: Optional[str] = None, *, owner_task_id: Optional[str] = None) -> list[dict[str, Any]]:
-    """Fail-safe snapshot of RUNNING ``process_registry`` sessions for the judge; ``[]`` on any error
-    so the loop degrades to its pre-wait-barrier behavior.
+    """Running terminal processes and verified conversation-owned Kanban attempts for the judge.
 
     ``owner_task_id`` restricts the snapshot to processes the goal's OWN session spawned. The registry's
     ``task_id`` is the container key, which collapses to one value for every agent in the process, so
@@ -1065,10 +1069,12 @@ def gather_background_processes(task_id: Optional[str] = None, *, owner_task_id:
         sessions = process_registry.list_sessions(task_id=task_id) or []
     except Exception as exc:
         logger.debug("gather_background_processes failed: %s", exc)
-        return []
+        sessions = []
     running = [s for s in sessions if isinstance(s, dict) and s.get("status") != "exited"]
     if owner_task_id:
         running = [s for s in running if str(s.get("owner_task_id") or s.get("task_id") or "") == str(owner_task_id)]
+        from hermes_cli.goals_kanban import gather_workers
+        running.extend(gather_workers(str(owner_task_id)))
     return running
 
 
@@ -1165,6 +1171,8 @@ class GoalManager:
         gat = f", {len(s.gates)} gate{'s' if len(s.gates) != 1 else ''}" if s.gates else ""
         meta = f"{turns}{sub}{con}{gat}"
         if s.status == "active":
+            if s.waiting_on_kanban and s.waiting_on_kanban.is_running(self.session_id):
+                return f"⏳ Goal (parked on {s.waiting_on_kanban.description}, {meta}): {s.goal}"
             if s.waiting_on_session and _session_waiting(s.waiting_on_session):
                 return f"⏳ Goal (parked on {s.waiting_reason or f'session {s.waiting_on_session}'}, {meta}): {s.goal}"
             if s.waiting_on_pid and _pid_alive(s.waiting_on_pid):
@@ -1445,10 +1453,10 @@ class GoalManager:
         return self._park(reason, waiting_until=time.time() + seconds, waiting_on_delegations=max(0, int(on_delegations)))
 
     def stop_waiting(self) -> bool:
-        """Clear any active wait barrier (pid / session / time). Returns True if one was cleared."""
+        """Clear any active wait barrier. Returns True if one was cleared."""
         s = self._state
         if s is None or (s.waiting_on_pid is None and s.waiting_on_session is None
-                         and not s.waiting_until and not s.waiting_wake_id):
+                         and s.waiting_on_kanban is None and not s.waiting_until and not s.waiting_wake_id):
             return False
         s.clear_wait()
         self._save()
@@ -1463,7 +1471,9 @@ class GoalManager:
         s = self._state
         if s is None:
             return False
-        if s.waiting_on_session is not None:
+        if s.waiting_on_kanban is not None:
+            still = s.waiting_on_kanban.is_running(self.session_id)
+        elif s.waiting_on_session is not None:
             still = _session_waiting(s.waiting_on_session)
         elif s.waiting_on_pid is not None:
             still = _pid_alive(s.waiting_on_pid)
@@ -1476,21 +1486,26 @@ class GoalManager:
                     still = False
         else:
             return False
-        if still and s.waiting_since and s.waiting_until == 0.0 and time.time() - s.waiting_since > _MAX_BARRIER_WAIT_S:
+        if (still and not s.waiting_on_kanban and s.waiting_since and s.waiting_until == 0.0
+                and time.time() - s.waiting_since > _MAX_BARRIER_WAIT_S):
             logger.info("goal %s: wait barrier on %s exceeded %ds; resuming judging",
                         self.session_id, s.waiting_on_session or s.waiting_on_pid, _MAX_BARRIER_WAIT_S)
             still = False
         if not still and clear_satisfied:
             wake_id = s.waiting_wake_id
+            dependency = s.waiting_on_kanban
             s.clear_wait()
             s.waiting_wake_id = wake_id
+            s.waiting_on_kanban = dependency
             self._save()
         return still
 
     # --- the main entry point called after every turn -----------------
 
     def _waiting_decision(self, state: GoalState) -> dict[str, Any]:
-        if state.waiting_on_session is not None:
+        if state.waiting_on_kanban is not None:
+            tgt = state.waiting_on_kanban.description
+        elif state.waiting_on_session is not None:
             tgt = f"session {state.waiting_on_session}"
         elif state.waiting_on_pid is not None:
             tgt = f"pid {state.waiting_on_pid}"
@@ -1499,7 +1514,8 @@ class GoalManager:
         reason = state.waiting_reason or tgt
         return _decision("active", False, None, "waiting", reason, f"⏳ Goal parked — waiting on {tgt}: {reason}")
 
-    def _apply_wait_directive(self, wait_directive: dict[str, Any], reason: str, *, active_delegations: int = 0) -> Optional[dict[str, Any]]:
+    def _apply_wait_directive(self, wait_directive: dict[str, Any], reason: str, *, active_delegations: int = 0,
+                              background_processes=None) -> Optional[dict[str, Any]]:
         """Judge said WAIT: set the barrier and park. The counted turn stands (the judge ran) but no
         continuation fires; the loop resumes once the barrier clears. ``None`` = the barrier is
         unobservable here, so the caller continues instead."""
@@ -1507,6 +1523,15 @@ class GoalManager:
             tgt = f"session {self.wait_on_session(str(wait_directive['session_id']), reason=reason).waiting_on_session}"
         elif wait_directive.get("pid"):
             pid = int(wait_directive["pid"])
+            dependency = next((process['kanban_wait'] for process in background_processes or []
+                               if process.get('pid') == pid and process.get('kanban_wait')), None)
+            if dependency is not None:
+                wait = KanbanWait(**dependency)
+                if not wait.is_running(self.session_id):
+                    return None
+                self._park(reason, waiting_on_kanban=wait)
+                return _decision('active', False, None, 'wait', reason,
+                                 f'⏳ Goal parked (judge) — waiting on {wait.description}: {reason}')
             try:
                 tgt = f"pid {self.wait_on(pid, reason=reason).waiting_on_pid}"
             except ValueError:
@@ -1589,6 +1614,7 @@ class GoalManager:
         if self.is_waiting():
             return self._waiting_decision(state)
 
+        state.waiting_on_kanban = None
         state.turns_used += 1
         state.last_turn_at = time.time()
         # Controls on the live manager see the charged turn without sharing judge mutations.
@@ -1621,7 +1647,8 @@ class GoalManager:
         state.consecutive_transport_failures = state.consecutive_transport_failures + 1 if transport_failed else 0
 
         if verdict == "wait" and wait_directive:
-            parked = self._apply_wait_directive(wait_directive, reason, active_delegations=active_delegations)
+            parked = self._apply_wait_directive(wait_directive, reason, active_delegations=active_delegations,
+                                                background_processes=background_processes)
             if parked is not None:
                 return parked
 

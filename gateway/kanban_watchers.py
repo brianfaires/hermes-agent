@@ -76,7 +76,8 @@ class GatewayKanbanWatchersMixin:
         except Exception as exc:
             logger.warning("kanban notifier: cannot load config (%s); continuing enabled", exc)
             kanban_cfg = {}
-        if not kanban_cfg.get("notify_in_gateway", True):
+        self._kanban_notifier_enabled = bool(kanban_cfg.get("notify_in_gateway", True))
+        if not self._kanban_notifier_enabled:
             logger.info("kanban notifier: disabled via config kanban.notify_in_gateway=false")
             return
 
