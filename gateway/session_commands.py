@@ -468,6 +468,8 @@ async def execute_command(connection, ref, params, *, dispatch=False):
         from gateway.plugin_command_choice import viewer_choices
         with (_profile_runtime_scope(home), _session_workspace(authority.runner, live.source),
               viewer_choices(live, ref.session_id)):
+            from hermes_cli.plugin_command_dispatch import plugin_command_args
+            arg = plugin_command_args(name, params.get('command', ''), arg)
             output = await _run_runner_command(authority.runner, live, name, arg, *runner_command)
         return {'type': 'exec', 'output': _text(output)}
     if definition is None:

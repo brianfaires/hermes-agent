@@ -8,6 +8,18 @@ from typing import Any, Callable
 _KEYWORD_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 
 
+def plugin_command_args(name: str, command: str, fallback: str) -> str:
+    """Text-mode plugins own whitespace after the single command separator."""
+    from hermes_cli.plugins import get_plugin_commands
+
+    entry = get_plugin_commands().get(name)
+    if not entry or entry.get("argument_mode") != "text":
+        return fallback
+    text = command.lstrip().removeprefix("/")
+    head = text.split(maxsplit=1)[0] if text else ""
+    return text[len(head) + 1:] if head.lower() == name else fallback
+
+
 def invoke_plugin_command(handler: Callable, raw_args: str, **context: Any) -> Any:
     """Call *handler* once with *raw_args* plus the *context* keywords it declares.
 
