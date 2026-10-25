@@ -327,15 +327,18 @@ def test_generic_submit_failure_finishes_attempt_and_releases_guard(monkeypatch)
     assert "submit-fail" not in scheduler.get_running_job_ids()
 
 
-def test_run_one_job_records_running_then_terminal(monkeypatch):
+def test_run_one_job_records_running_then_terminal(monkeypatch, tmp_path):
     from cron import scheduler
 
+    executions = _point_ledger(monkeypatch, tmp_path)
+    execution_id = executions.create_execution("job-3", source="direct")["id"]
+    mark_running = scheduler.mark_execution_running
     events = []
     run_execution_ids = []
     monkeypatch.setattr(
         scheduler,
         "mark_execution_running",
-        lambda execution_id: events.append(("running", execution_id)) or {},
+        lambda execution_id: events.append(("running", execution_id)) or mark_running(execution_id),
         raising=False,
     )
     monkeypatch.setattr(
@@ -355,10 +358,10 @@ def test_run_one_job_records_running_then_terminal(monkeypatch):
     monkeypatch.setattr(scheduler, "_deliver_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(scheduler, "mark_job_run", lambda *_args, **_kwargs: None)
 
-    assert scheduler.run_one_job({"id": "job-3", "execution_id": "exec-3"}) is True
-    assert run_execution_ids == ["exec-3"]
-    assert events[0] == ("running", "exec-3")
-    assert events[-1][0:2] == ("finish", "exec-3")
+    assert scheduler.run_one_job({"id": "job-3", "execution_id": execution_id}) is True
+    assert run_execution_ids == [execution_id]
+    assert events[0] == ("running", execution_id)
+    assert events[-1][0:2] == ("finish", execution_id)
     assert events[-1][2]["success"] is True
 
 
