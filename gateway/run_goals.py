@@ -308,23 +308,22 @@ class GatewayGoalsMixin:
         if mgr is None or not mgr.is_active():
             return
 
-        _bg_procs, _active_deleg = None, 0
-        with suppress(Exception):
-            from hermes_cli.goals import count_active_delegations, gather_background_processes as _gather_bg
-            # Only THIS session's processes (gateway turns register under turn_ctx.session_id):
-            # subagents' pollers must not park the parent's goal.
-            _bg_procs = _gather_bg(owner_task_id=getattr(session_entry, "session_id", None) or None)
-            _active_deleg = count_active_delegations(getattr(session_entry, "session_id", None))
+        def _decide():
+            _bg_procs, _active_deleg = None, 0
+            with suppress(Exception):
+                from hermes_cli.goals import count_active_delegations, gather_background_processes as _gather_bg
+                # Never let another conversation's workers park this goal.
+                _bg_procs = _gather_bg(owner_task_id=session_entry.session_id)
+                _active_deleg = count_active_delegations(session_entry.session_id)
+            return mgr.evaluate_after_turn(
+                final_response or "", user_initiated=True, background_processes=_bg_procs,
+                active_delegations=_active_deleg,
+            )
 
         # judge_goal() is a synchronous aux-LLM HTTP call (10-40 s; would block Discord heartbeats).
         # _run_in_executor_with_context carries the profile secret scope / aux runtime contextvars
         # without which aux credential resolution fails under multiplexing.
-        decision = await self._run_in_executor_with_context(
-            lambda: mgr.evaluate_after_turn(
-                final_response or "", user_initiated=True, background_processes=_bg_procs,
-                active_delegations=_active_deleg,
-            ),
-        )
+        decision = await self._run_in_executor_with_context(_decide)
         msg = decision.get("message") or ""
         # Deferred until the visible final response is delivered, else "✓ Goal achieved" precedes it.
         if msg and source is not None:

@@ -68,9 +68,14 @@ def _ready_waits(runner):
                 with runner._profile_scope_for_source(group[0][1]):
                     for entry, source in group:
                         manager = GoalManager(entry.session_id)
-                        if (manager.is_active() and manager.state.waiting_wake_id
-                                and not manager.is_waiting(clear_satisfied=False)):
-                            ready.append((entry.session_key, entry.session_id, source))
+                        if (not manager.is_active() or not manager.state.waiting_wake_id
+                                or manager.is_waiting(clear_satisfied=False)):
+                            continue
+                        from gateway.kanban_watchers_notifier import has_pending_goal_wake
+                        dependency = manager.state.waiting_on_kanban
+                        if dependency and has_pending_goal_wake(runner, source, dependency):
+                            continue
+                        ready.append((entry.session_key, entry.session_id, source))
             except Exception:
                 logger.warning('Goal wait profile for %s unavailable; retrying next poll',
                                group[0][0].session_key, exc_info=True)

@@ -159,6 +159,16 @@ Some goals are gated on something that takes minutes and runs on its own — CI 
 
 **This is handled automatically.** Every turn, the judge is shown the agent's own live background processes (the `terminal(background=true)` registry entries this session spawned — pid, session id, command, uptime, recent output, and any `watch_patterns` / `notify_on_complete` trigger; processes started by delegated subagents are not shown, so a fan-out parent is never parked on a worker's poller) alongside the goal and the agent's response. When the agent's progress is genuinely gated on one of them, the judge returns a **`wait`** verdict instead of `continue`, and the loop **parks**: the next turns are skipped (no judge call, no continuation, no turn consumed) until the wait is satisfied — then it resumes normally with the result in hand. A pid/session wait is capped at 30 minutes; a process that never exits (a watcher, a forgotten poller) cannot park the goal indefinitely. The judge can also park on a **time** basis (`wait_for_seconds`) for backoff/cooldown waits. `/goal status` shows `⏳ Goal (parked …)` while parked.
 
+The judge also sees verified Kanban workers created by this conversation, including on named
+boards and across conversation compression. If it chooses to wait for one, the goal tracks that
+exact task attempt. Completion, failure, parking for CI or worker disappearance releases the wait,
+even if the original process has not exited yet. Unrelated conversations cannot park the goal.
+While that verified attempt keeps running, the goal stays quiet without the generic PID wait's
+30-minute recheck. The judge can still continue when there is independent work to do.
+An enabled subscription delivering the same task result supplies that wake; the wait poller
+does not start a second owner turn for the same update. Disabled notifications and task parking
+still use the normal goal wake path.
+
 The judge picks the right kind of wait from the process's own signal:
 
 - **`wait_on_session <id>`** — releases when the process's *own trigger* fires: it exits, **or** (if it was started with `watch_patterns`) its pattern matches. This is the one for a long-lived watcher / server / poller that signals **mid-run** (e.g. a build process that prints `BUILD SUCCESSFUL` and keeps running, or a `notify_on_complete` watcher) and may never exit on its own.
