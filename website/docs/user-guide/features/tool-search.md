@@ -132,7 +132,35 @@ shipped curated set; the runtime fallback uses the same value.
 | `max_search_limit` | `25` | Hard upper bound the model can request via `limit` (per query). Range 1–50. |
 | `listing` | `auto` | Embed a skills-style manifest of every deferred tool (name + first sentence of its description, ≤60 chars, grouped by MCP server) in the `tool_search` bridge description. `auto` includes it when it fits the budget (falling back to names-only, then to the tier-2 server summary); `on`/`off` force either way. |
 | `listing_max_tokens` | `4000` | Absolute cap on the embedded listing, regardless of context size. Range 200–60000. Large catalogs degrade to names-only or per-server summaries, keeping full schemas available through search. |
+| `pinned` | `{}` | Map platform names to lists of already-authorized tool names whose schemas stay visible in new conversations. |
 | `defer` | Curated list | Tool names replaced by the bridge by default. The list may include cold built-in tools as well as MCP/plugin tools; an explicit list replaces it, and `[]` disables deferral for every tool. |
+
+### Keep selected schemas visible on a platform
+
+Use `tools.tool_search.pinned` to keep selected **already-enabled** tool schemas
+visible while other tools remain available through tool search:
+
+```yaml
+tools:
+  tool_search:
+    pinned:
+      discord: [cronjob_manage, mcp_calendar_list_events]
+      cli: [todo_list]
+```
+
+Use exact tool names and platform names such as `discord`, `telegram`, `cli`,
+`tui`, or `desktop`. Pins override deferral, including the `defer` list, for
+schemas that pass normal toolset, profile and availability checks. A pin does
+not enable a toolset, grant permission, or make an unavailable tool available.
+Unknown tool names have no effect. Invalid platform lists are warned about and
+ignored.
+
+Visibility preferences are captured when an agent is constructed. Edits apply
+to new conversations; an existing conversation and a resume on the same build
+keep their saved schema bytes and visibility preferences, including across
+platform changes. Normal authorization gates still apply. A code upgrade may
+rebuild definitions under the native session-pin rules. No registry globals or
+per-request schema injection is involved.
 
 Per-call array caps are internal safety bounds, not configuration. Over-cap
 calls return an error so the model can retry with a smaller batch.
