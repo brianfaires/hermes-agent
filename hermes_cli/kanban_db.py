@@ -3472,32 +3472,30 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Release dormant work, preserving parent/review gates; never release running cards."""
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *, expected_scheduled_run_id: Optional[int] = None, note: Optional[str] = None,
+) -> bool:
+    """Release dormant work; fenced observers name the parked run and preserve human holds."""
     now = int(time.time())
     with write_txn(conn):
         status = _task_status(conn, task_id)
         held = _has_sticky_block(conn, task_id)
-        if status not in {'blocked', 'scheduled'} and not (
-            held and status in {'triage', 'todo', 'ready', 'review'}
-        ):
+        if expected_scheduled_run_id is not None:
+            parked = conn.execute(
+                "SELECT run_id FROM task_events WHERE task_id = ? AND kind = 'scheduled' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if status != 'scheduled' or held or not parked or parked[0] != int(expected_scheduled_run_id):
+                return False
+        if status not in {'blocked', 'scheduled'} and not (held and status in {'triage', 'todo', 'ready', 'review'}):
             return False
-        resume_status = (
-            _resume_status_from_events(conn, task_id)
-            if status == 'blocked' or held
-            else 'ready'
-        )
+        resume_status = _resume_status_from_events(conn, task_id) if status == 'blocked' or held else 'ready'
         _reclaim_dangling_run(
             conn, task_id, statuses=("blocked", "scheduled", "triage", "todo", "ready", "review"), now=now,
             note="invariant recovery on unblock",
         )
-        # Re-gate on parent completion before restoring the source phase.
         landing_status = _landing_status_after_parents(conn, task_id)
-        new_status = (
-            "review"
-            if landing_status == "ready" and resume_status == "review"
-            else landing_status
-        )
+        new_status = 'review' if landing_status == 'ready' and resume_status == 'review' else landing_status
         # Preserve block recurrence: resetting it reopens unblock/re-block loops.
         # Explicit unblock resets only dispatch failures, giving retries a fresh budget.
         cur = conn.execute(
@@ -3507,6 +3505,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
+        if note:
+            add_comment(conn, task_id, 'system', note)
         _append_event(
             conn, task_id, "unblocked",
             (
