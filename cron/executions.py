@@ -55,6 +55,9 @@ def _connect() -> sqlite3.Connection:
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     from hermes_cli.sqlite_util import add_column_if_missing
+    from cron.execution_results import initialize_results
+
+    initialize_results(conn)
 
     conn.execute(
         """CREATE TABLE IF NOT EXISTS executions (
@@ -199,6 +202,9 @@ def touch_execution_progress(execution_id: str) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
+    from cron.execution_results import retain_terminal_results
+
+    retain_terminal_results(conn)
     conn.execute(
         """DELETE FROM executions WHERE id IN (
              SELECT id FROM executions
@@ -311,7 +317,7 @@ def mark_execution_running(execution_id: str) -> Optional[dict[str, Any]]:
 
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
-    delivery_outcome: Optional[str] = None,
+    delivery_outcome: Optional[str] = None, final_response: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten.
 
@@ -333,14 +339,17 @@ def finish_execution(
         )
         if cur.rowcount != 1:
             return None
-        _prune_unlocked(conn)
+        from cron.execution_results import retain_terminal_result
+
         record = _fetch(conn, execution_id)
+        retain_terminal_result(conn, record, final_response=final_response)
+        _prune_unlocked(conn)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     record_cron_finish(record, delivery_outcome)
     return record
 
 
-def recover_receipted_execution(execution_id, job_id, *, success, error=None, delivery_outcome=None):
+def recover_receipted_execution(execution_id, job_id, *, success, error=None, delivery_outcome=None, final_response=None):
     """Settle a verified canonical receipt after owner loss, including its unknown audit row.
 
     Terminal verdicts stay immutable. A live firer still owns its bookkeeping
@@ -356,18 +365,32 @@ def recover_receipted_execution(execution_id, job_id, *, success, error=None, de
                handoff_started_at=NULL, delivery_outcome=? WHERE id=?""",
             ('completed' if success else 'failed', now, None if success else (str(error) if error else 'unknown failure'),
              delivery_outcome, execution_id))
-        _prune_unlocked(conn)
+        from cron.execution_results import retain_terminal_result
+
         record = _fetch(conn, execution_id)
+        if record is None:
+            record = dict(row, status='completed' if success else 'failed', finished_at=now,
+                          error=None if success else (str(error) if error else 'unknown failure'),
+                          handoff_pending=0, handoff_started_at=None, delivery_outcome=delivery_outcome)
+        retain_terminal_result(conn, record, final_response=final_response)
+        _prune_unlocked(conn)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     record_cron_finish(record, delivery_outcome)
     return record
 
 
 def _recoverable_row(conn, execution_id, job_id):
-    return conn.execute(
+    row = conn.execute(
         """SELECT status, process_id, pid, process_started_at FROM executions
            WHERE id=? AND job_id=? AND status IN ('claimed','running','unknown')""",
         (str(execution_id), str(job_id))).fetchone()
+    if row is not None or _fetch(conn, execution_id) is not None:
+        return row
+    from cron.execution_results import retained_execution
+    archived = retained_execution(conn, execution_id)
+    if archived and archived['job_id'] == str(job_id) and archived['status'] == 'unknown':
+        return archived
+    return None
 
 
 def _row_owner_live(row) -> bool:
@@ -399,7 +422,13 @@ def settle_delivery_outcome(execution_id: str, outcome: str) -> bool:
                  AND status IN ('completed','failed','unknown')""",
             (outcome, execution_id),
         )
-    return cur.rowcount == 1
+        from cron.execution_results import settle_retained_delivery
+        if cur.rowcount == 1:
+            settle_retained_delivery(conn, execution_id, outcome)
+            return True
+        if _fetch(conn, execution_id) is None:
+            return settle_retained_delivery(conn, execution_id, outcome)
+    return False
 
 
 _OWNER_GONE_REASON = (
