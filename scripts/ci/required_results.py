@@ -4,6 +4,8 @@
 Behavior tests: tests/ci/test_required_results.py
 
 Input: the JSON ``toJSON(needs)`` of the all-checks-pass job on stdin.
+With ``--headless-tests``, the fork's headless Ubuntu suite must succeed even when
+the broad qualification jobs are inapplicable.
 Failures always fail the gate. A skipped or missing update/E2E consumer also
 fails whenever ``detect.outputs`` selects its lane. Other skips additionally
 fail in release mode unless the job is in :data:`EXCLUDED_JOBS` (PR-only jobs
@@ -21,11 +23,12 @@ import os
 import sys
 from typing import Any
 
-# Jobs that can never run on a release (push/tag) event, plus the deferred
-# Desktop E2E. These are the only skips a strict run tolerates.
+# Jobs inapplicable to broad release runs, plus deferred Desktop E2E.
+# The headless suite remains required when selected, even though broad runs skip it.
 PR_ONLY_JOBS = ("history-check", "lockfile-diff", "prompt-surface-diff", "supply-chain")
 DEFERRED_JOBS = ("e2e-desktop",)
-EXCLUDED_JOBS = frozenset((*PR_ONLY_JOBS, *DEFERRED_JOBS))
+HEADLESS_ONLY_JOBS = ("headless-tests",)
+EXCLUDED_JOBS = frozenset((*PR_ONLY_JOBS, *DEFERRED_JOBS, *HEADLESS_ONLY_JOBS))
 
 NEEDS_JSON_OUTPUT = "needs-json"
 
@@ -45,6 +48,7 @@ _UPDATE_CONSUMER_LANES = {
 def evaluate_gate(
     needs: dict[str, dict[str, Any]] | None,
     release: bool = False,
+    headless: bool = False,
 ) -> dict[str, Any]:
     """Verdict for a ``needs`` context; see the module docstring.
 
@@ -57,6 +61,8 @@ def evaluate_gate(
     lanes = (entries.get("detect") or {}).get("outputs") or {}
     required = {job for job, keys in _UPDATE_CONSUMER_LANES.items()
                 if any(lanes.get(key) in ("true", True) for key in keys)}
+    if headless:
+        required.add("headless-tests")
     if not entries:
         failed.append("<no-needs>")
     failed.extend(required - entries.keys())
@@ -100,10 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Strict mode: a skipped excluded job is the only tolerated skip.",
     )
+    parser.add_argument("--headless-tests", action="store_true",
+                        help="Require the fork's headless Ubuntu suite even when broad qualification is skipped.")
     args = parser.parse_args(argv)
 
     needs = json.load(sys.stdin)
-    verdict = evaluate_gate(needs, release=args.release)
+    verdict = evaluate_gate(needs, release=args.release, headless=args.headless_tests)
     compact = compact_results(needs)
 
     output_file = os.environ.get("GITHUB_OUTPUT")
@@ -115,7 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     for line in render_report(needs, verdict):
         print(line)
     if verdict["ok"]:
-        print("All checks passed" if args.release else "All checks passed (or were skipped)")
+        if args.headless_tests:
+            print("Headless Ubuntu tests passed; desktop/platform qualification was not requested")
+        else:
+            print("All checks passed" if args.release else "All checks passed (or were skipped)")
     return 0 if verdict["ok"] else 1
 
 
