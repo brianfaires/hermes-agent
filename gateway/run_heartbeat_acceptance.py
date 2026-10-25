@@ -36,6 +36,12 @@ def heartbeat_owner_is_current(runner, event, session_key):
     return current is not None and not current.suspended and current.session_id == expected
 
 
+async def automation_owner_is_current(runner, event, session_key):
+    from gateway.run_goal_waits import goal_wait_is_current
+    return (heartbeat_owner_is_current(runner, event, session_key)
+            and await goal_wait_is_current(runner, event, session_key))
+
+
 def settle_heartbeat_attempt(event, manager):
     if not getattr(event, "_heartbeat_execution_started", False):
         try:
