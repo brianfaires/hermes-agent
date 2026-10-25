@@ -293,6 +293,7 @@ _R15_CASES = {
     "hermes_cli/memory_provider_migration.py": ("e2e_upgrade", "e2e_desktop_update"),
     "hermes_cli/source_build.py": ("e2e_upgrade", "e2e_desktop_update"),
     "hermes_cli/source_completion.py": ("e2e_upgrade", "e2e_desktop_update"),
+    "cron/schedule_kind.py": ("e2e_upgrade",),
     "apps/desktop/electron/update-marker.ts": ("desktop_updater", "e2e_desktop_update"),
     "apps/desktop/electron/handoff-result.ts": ("desktop_updater", "e2e_desktop_update"),
 }

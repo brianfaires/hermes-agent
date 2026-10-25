@@ -8,6 +8,10 @@ description: "How Hermes stores, schedules, edits, pauses, skill-loads, and deli
 
 The cron subsystem provides scheduled task execution — from simple one-shot delays to recurring cron-expression jobs with skill injection and cross-platform delivery.
 
+## Imports during source updates
+
+A running gateway can retain an older `cron.constants` module while loading updated bookkeeping siblings. Recurrence checks live in the import-free `cron.schedule_kind` leaf so fresh tick/retry imports do not require a symbol that the cached timing module lacks. Fire-claim timing constants keep their existing values and behavior.
+
 ## Key Files
 
 | File | Purpose |
