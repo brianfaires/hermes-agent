@@ -1038,45 +1038,32 @@ def _is_fresh_gateway_interruption(
 
 def build_resume_recovery_note(
     reason: Optional[str], message: str = "", *, interactive: bool = True) -> str:
-    """Build the resume-pending recovery system note for an interrupted turn (empty ``message`` = auto-resume).
-
-    Interactive platforms report the restore and ask what next; non-interactive ones finish the work.
-
-    On non-interactive event platforms (webhook, API server — adapters with ``interactive_resume = False``)
-    nobody can answer; the resumed turn must instead complete the interrupted work, or the task is silently
-    abandoned behind a "restored" acknowledgement that goes nowhere (#57056).
-    """
+    """Resume current authorized work after reconciling effects and newer instructions."""
     reason_phrase = (
         "a gateway restart" if reason == "restart_timeout"
         else "a gateway shutdown" if reason == "shutdown_timeout" else "a gateway interruption")
     if message:
-        resume_guidance = (
-            "Address the user's NEW message below FIRST and focus on what the user is asking now.")
-        tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
-        )
-    elif interactive:
-        resume_guidance = (
-            "Report to the user that the session was restored "
-            "successfully and ask what they would like to do next.")
-        tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any unfinished work from the conversation history."
-        )
+        guidance = (
+            "Address the user's NEW message below FIRST. A newer stop, cancellation, "
+            "redirect or scope reduction takes priority over interrupted work. "
+            "Continue earlier work only where it remains consistent with that instruction.")
     else:
-        resume_guidance = (
-            "No user is present on this non-interactive platform, "
-            "so do NOT emit a 'session restored' acknowledgement "
-            "or ask questions. Review the conversation history and "
-            "CONTINUE the interrupted task to completion.")
-        tail_guidance = (
-            "Do NOT re-run tool calls whose results already "
-            "appear in the history — resume from the first step that has no recorded result.")
+        guidance = (
+            "Review the current task, owner, approval reference, checkpoint and evidence; "
+            "CONTINUE the interrupted task from its first unfinished authorized step. "
+            "The interruption does not itself revoke approval or require another confirmation. "
+            "Respect current holds, genuine expiry, permissions and ownership boundaries.")
+        if not interactive:
+            guidance += " No user is present; do not emit a restore-only acknowledgement or ask what next."
     return (
-        f"[System note: The previous turn was interrupted by "
-        f"{reason_phrase}; the gateway is now back online. "
-        f"Any restart/shutdown command in the history has already "
-        f"run — do NOT re-execute or verify it. {resume_guidance} {tail_guidance}]"
-        + (f"\n\n{message}" if message else ""))
+        f"[System note: The previous turn was interrupted by {reason_phrase}; "
+        "the gateway is now back online. Any restart/shutdown command in the history "
+        "has already run — do NOT re-execute or verify it. "
+        f"{guidance} Tool results already appear in the history for completed steps; "
+        "do not replay those mutations. For a missing result, inspect durable receipts "
+        "and actual effects before retrying: a missing report does not prove the action failed. "
+        "Perform only the next unfinished covered step, or report its concrete blocker "
+        "to the responsible owner.]" + (f"\n\n{message}" if message else ""))
 
 
 def _prepare_resume_pending_message(
