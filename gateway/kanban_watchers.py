@@ -140,14 +140,21 @@ class GatewayKanbanWatchersMixin:
                 conn.close()
 
     def _kanban_advance(self, sub: dict, cursor: int, board: Optional[str] = None) -> None:
-        self._kanban_sub_op(board, "advance_notify_cursor", sub, new_cursor=cursor)
+        self._kanban_sub_op(board, "advance_notify_cursor", sub, new_cursor=cursor,
+                            claim_token=sub.get("_notify_claim_token"))
+
+    def _kanban_record_wake(self, sub: dict, result_cursor: int, diagnostic_cursor: int,
+                            board: Optional[str] = None) -> None:
+        self._kanban_sub_op(board, "record_notify_wake", sub, result_event_id=result_cursor,
+                            diagnostic_event_id=diagnostic_cursor)
 
     def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
         self._kanban_sub_op(board, "remove_notify_sub", sub)
 
     def _kanban_rewind(self, sub: dict, claimed_cursor: int, old_cursor: int, board: Optional[str] = None) -> None:
         """Undo a claimed notification cursor after send failure."""
-        self._kanban_sub_op(board, "rewind_notify_cursor", sub, claimed_cursor=claimed_cursor, old_cursor=old_cursor)
+        self._kanban_sub_op(board, "rewind_notify_cursor", sub, claimed_cursor=claimed_cursor, old_cursor=old_cursor,
+                            claim_token=sub.get("_notify_claim_token"))
 
     async def _deliver_kanban_artifacts(self, *, adapter, chat_id: str, metadata: dict, event_payload: Optional[dict], task) -> None:
         """Upload artifact files referenced by a completed kanban task.

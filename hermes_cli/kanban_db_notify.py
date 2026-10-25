@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
+_NOTIFY_CLAIM_TTL_SECONDS = 120
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -357,35 +358,75 @@ def claim_unseen_events_for_sub(
     chat_id: str,
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
+    claim_token: Optional[str] = None,
 ) -> tuple[int, int, list[Event]]:
-    """Atomically claim unseen events for one subscription.
+    """Atomically claim events; gateway tokens lease the range until acknowledged.
 
-    Returns ``(old_cursor, new_cursor, events)``; when events are returned the
-    row's ``last_event_id`` has already been advanced inside ``BEGIN IMMEDIATE``,
-    so concurrent gateway watchers on the same board DB serialize on SQLite's
-    writer lock and only the first claims a given event range. Callers send the
-    events, then leave the cursor or call :func:`rewind_notify_cursor` on
-    delivery failure.
+    An expired lease restores its saved cursor, allowing bounded recovery after
+    a crash before admission. Legacy immediate consumers retain atomic claims.
     """
+    key = _sub_key(task_id, platform, chat_id, thread_id)
+    now = int(time.time())
     with _kb.write_txn(conn):
-        old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
-        if old_cursor is None:
+        row = conn.execute(
+            "SELECT last_event_id, notify_claim_token, notify_claim_from_event_id, "
+            "notify_claim_expires FROM kanban_notify_subs " + _SUB_KEY_WHERE, key,
+        ).fetchone()
+        if row is None:
             return 0, 0, []
+        old_cursor = int(row['last_event_id'])
+        if row['notify_claim_token'] is not None:
+            if int(row['notify_claim_expires']) > now:
+                return old_cursor, old_cursor, []
+            old_cursor = int(row['notify_claim_from_event_id'])
+            conn.execute(
+                "UPDATE kanban_notify_subs SET last_event_id = ?, notify_claim_token = NULL, "
+                "notify_claim_from_event_id = NULL, notify_claim_expires = NULL " + _SUB_KEY_WHERE,
+                (old_cursor, *key),
+            )
         new_cursor, events = unseen_events_for_sub(
             conn, task_id=task_id, platform=platform, chat_id=chat_id,
             thread_id=thread_id, kinds=kinds,
         )
         if not events:
             return old_cursor, old_cursor, []
-        _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
+        if claim_token is None:
+            _cas_cursor(conn, key, new_cursor, old_cursor)
+        else:
+            conn.execute(
+                "UPDATE kanban_notify_subs SET last_event_id = ?, notify_claim_token = ?, "
+                "notify_claim_from_event_id = ?, notify_claim_expires = ? " + _SUB_KEY_WHERE,
+                (new_cursor, claim_token, old_cursor, now + _NOTIFY_CLAIM_TTL_SECONDS, *key),
+            )
         return old_cursor, new_cursor, events
 
 
-def _cas_cursor(conn: sqlite3.Connection, key: tuple, new_cursor: int, expected: int) -> sqlite3.Cursor:
-    """Move ``last_event_id`` only if it still equals ``expected``."""
+def notify_claim_receipts(conn: sqlite3.Connection, *, task_id: str, platform: str,
+                          chat_id: str, thread_id: Optional[str], claim_token: str) -> Optional[dict]:
+    """Fresh delivery checkpoints for the lease we acquired, not an earlier subscription snapshot."""
+    row = conn.execute(
+        "SELECT last_ping_event_id, last_wake_event_id, last_diagnostic_wake_event_id "
+        "FROM kanban_notify_subs " + _SUB_KEY_WHERE + " AND notify_claim_token = ?",
+        (*_sub_key(task_id, platform, chat_id, thread_id), claim_token),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _claim_guard(claim_token: Optional[str]) -> tuple[str, tuple]:
+    if claim_token is None:
+        return " AND notify_claim_token IS NULL", ()
+    return " AND notify_claim_token = ?", (claim_token,)
+
+
+def _cas_cursor(conn: sqlite3.Connection, key: tuple, new_cursor: int, expected: int,
+                claim_token: Optional[str] = None) -> sqlite3.Cursor:
+    """Settle or rewind only the exact owner, never a successor lease."""
+    guard, args = _claim_guard(claim_token)
     return conn.execute(
-        "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE + " AND last_event_id = ?",
-        (int(new_cursor), *key, int(expected)),
+        "UPDATE kanban_notify_subs SET last_event_id = ?, notify_claim_token = NULL, "
+        "notify_claim_from_event_id = NULL, notify_claim_expires = NULL "
+        + _SUB_KEY_WHERE + " AND last_event_id = ?" + guard,
+        (int(new_cursor), *key, int(expected), *args),
     )
 
 
@@ -397,11 +438,15 @@ def advance_notify_cursor(
     chat_id: str,
     thread_id: Optional[str] = None,
     new_cursor: int,
+    claim_token: Optional[str] = None,
 ) -> None:
+    guard, args = _claim_guard(claim_token)
     with _kb.write_txn(conn):
         conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE,
-            (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id)),
+            "UPDATE kanban_notify_subs SET last_event_id = ?, notify_claim_token = NULL, "
+            "notify_claim_from_event_id = NULL, notify_claim_expires = NULL "
+            + _SUB_KEY_WHERE + " AND last_event_id <= ?" + guard,
+            (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id), int(new_cursor), *args),
         )
 
 
@@ -418,6 +463,19 @@ def record_notify_ping(
         )
 
 
+def record_notify_wake(
+    conn: sqlite3.Connection, *, task_id: str, platform: str, chat_id: str,
+    thread_id: Optional[str] = None, result_event_id: int = 0, diagnostic_event_id: int = 0,
+) -> None:
+    """Persist successful admission facts even when another group still needs retry."""
+    with _kb.write_txn(conn):
+        conn.execute(
+            "UPDATE kanban_notify_subs SET last_wake_event_id = MAX(last_wake_event_id, ?), "
+            "last_diagnostic_wake_event_id = MAX(last_diagnostic_wake_event_id, ?) " + _SUB_KEY_WHERE,
+            (int(result_event_id), int(diagnostic_event_id), *_sub_key(task_id, platform, chat_id, thread_id)),
+        )
+
+
 def rewind_notify_cursor(
     conn: sqlite3.Connection,
     *,
@@ -427,13 +485,53 @@ def rewind_notify_cursor(
     thread_id: Optional[str] = None,
     claimed_cursor: int,
     old_cursor: int,
+    claim_token: Optional[str] = None,
 ) -> bool:
     """Undo a claim when delivery fails. The CAS guard only rewinds if no later
     notifier advanced the row, so retries never clobber newer progress.
     """
     with _kb.write_txn(conn):
-        cur = _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), old_cursor, claimed_cursor)
+        cur = _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), old_cursor, claimed_cursor, claim_token)
     return cur.rowcount > 0
+
+
+def inherit_notify_subs(
+    conn: sqlite3.Connection, child_id: str, parents: Iterable[str], *,
+    created_at: Optional[int] = None,
+) -> None:
+    """Copy parents' notify subscriptions to a child, cursor caught up to the
+    child's current event so a late ``link_tasks`` never replays history.
+
+    Single owner of inheritance (create_task, link_tasks, decompose). It must
+    copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
+    completions wake a fresh group session instead of the originating DM.
+
+    Omitting columns here silently degrades routing: a DM-originated child completion falls back to
+    chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
+    """
+    parent_ids = tuple(dict.fromkeys(p for p in parents if p))
+    if not parent_ids:
+        return
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?", (child_id,),
+    ).fetchone()
+    cursor = int(row["cursor"] if row is not None else 0)
+    placeholders = ",".join("?" * len(parent_ids))
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
+             chat_type, notifier_profile, delivery_mode, delivery_metadata,
+             created_at, last_event_id)
+        SELECT ?, platform, chat_id, thread_id, user_id, user_id_alt,
+               COALESCE(chat_type, 'dm'), notifier_profile,
+               COALESCE(delivery_mode, 'notify'), delivery_metadata, ?, ?
+          FROM kanban_notify_subs
+         WHERE task_id IN ({placeholders})
+        """,
+        (child_id, int(created_at if created_at is not None else time.time()), cursor, *parent_ids),
+    )
+
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
