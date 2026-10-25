@@ -4,6 +4,8 @@ name: CI
 # calls the sub-workflows that a PR can actually affect. A final
 # ``all-checks-pass`` gate job aggregates results so branch protection only
 # needs to require a single check.
+# This fork defaults to the headless Ubuntu suite; full_qualification or release
+# opts back into the existing classifier and broad sub-workflows.
 #
 # Sub-workflows are triggered via ``workflow_call`` and keep their own job
 # definitions, matrices, and concurrency settings. They no longer have
@@ -17,6 +19,10 @@ name: CI
 on:
   workflow_dispatch:
     inputs:
+      full_qualification:
+        description: 'Opt into the existing broad CI, including desktop, other operating systems and packaging.'
+        type: boolean
+        default: false
       release:
         description: 'Stable-release candidate run: force every applicability lane and make the aggregate gate strict (skipped required lanes fail).'
         required: false
@@ -29,6 +35,10 @@ on:
         default: ''
   workflow_call:
     inputs:
+      full_qualification:
+        description: Include desktop, other operating systems and packaging qualification.
+        type: boolean
+        default: false
       commit:
         description: Commit to test and build. Empty keeps the triggering commit.
         type: string
@@ -58,18 +68,46 @@ concurrency:
   cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
 
 jobs:
+  # This fork runs the relevant offline Python suite on Ubuntu by default;
+  # release/full_qualification still selects the original workflow below.
+  headless-tests:
+    name: Headless Ubuntu tests
+    if: github.repository == 'brianfaires/hermes-agent' && inputs.release != true && inputs.full_qualification != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+      - uses: ./.github/actions/setup-pm
+        with:
+          extras: '["all", "messaging", "tts-premium", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+      - name: Run the headless Ubuntu suite
+        env:
+          PYTHON_CPU_COUNT: '4'
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/4
+        run: |
+          mapfile -t exclusions < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' scripts/ci/headless-test-exclusions.txt)
+          scripts/run_tests.sh "${exclusions[@]}" -j 4 --file-retries 0 --file-timeout 600 -q
+
   # ─────────────────────────────────────────────────────────────────────
   # detect: run the classifier once. Every downstream job reads its outputs
   # to decide whether to run. On push/dispatch the classifier fails open
   # (all lanes true) so post-merge validation is never weakened.
   #
-  # A release run (inputs.release) additionally forces every lane true via
+  # A release or full_qualification run additionally forces every lane true via
   # the `release-forced-*` outputs: a stable candidate must run the FULL
   # pipeline, not the lanes its diff would touch — the diff of a release
   # tag is not a meaningful applicability signal.
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
+    if: github.repository != 'brianfaires/hermes-agent' || inputs.release == true || inputs.full_qualification == true
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 3
     outputs:
@@ -105,27 +143,29 @@ jobs:
         uses: ./.github/actions/detect-changes
         with:
           github-token: ${{ github.token }}
-      - name: Force all lanes on release; E2E only on release or dispatch
-        # Overwrite the classifier outputs with 'true' when inputs.release. The E2E
-        # lanes are forced off unless this is a release run or a manual dispatch
+      - name: Force all lanes on full qualification; E2E otherwise only on dispatch
+        # Full qualification always includes the unfiltered plugin suites.
+        # Overwrite classifier outputs for release/full_qualification. The E2E
+        # lanes are forced off except for full qualification/release or manual dispatch
         # (whose empty diff already turns every lane on): never on a pull request
         # or a push to main, whatever the diff or labels say.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
+          FULL_QUALIFICATION: ${{ inputs.full_qualification }}
           EVENT_NAME: ${{ github.event_name }}
           CLASSIFIED: ${{ toJSON(steps.classify.outputs) }}
         run: |
           python3 - <<'PY'
           import json, os
           values = json.loads(os.environ['CLASSIFIED'])
-          release = os.environ['RELEASE'] == 'true'
-          e2e_allowed = release or os.environ['EVENT_NAME'] == 'workflow_dispatch'
+          full = os.environ['RELEASE'] == 'true' or os.environ['FULL_QUALIFICATION'] == 'true'
+          e2e_allowed = full or os.environ['EVENT_NAME'] == 'workflow_dispatch'
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               for lane, value in values.items():
                   if lane.startswith('e2e') and not e2e_allowed:
                       value = 'false'
-                  elif release and value in ('true', 'false'):
+                  elif full and value in ('true', 'false'):
                       value = 'true'
                   if '\n' in value or '\r' in value:
                       continue
@@ -427,6 +467,7 @@ jobs:
   all-checks-pass:
     name: All required checks pass (v2)
     needs:
+      - headless-tests
       - detect
       - tests
       - tests-os
@@ -462,12 +503,12 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit || github.sha }}
       - name: Evaluate job results
@@ -478,9 +519,11 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           RELEASE: ${{ inputs.release }}
+          HEADLESS_TESTS: ${{ github.repository == 'brianfaires/hermes-agent' && inputs.release != true && inputs.full_qualification != true }}
         run: |
           args=()
           if [ "$RELEASE" = true ]; then args+=(--release); fi
+          if [ "$HEADLESS_TESTS" = true ]; then args+=(--headless-tests); fi
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
 
   # ─────────────────────────────────────────────────────────────────────
@@ -499,7 +542,7 @@ jobs:
       contents: read
       actions: read # download completed jobs' cache transfer logs
     needs: [all-checks-pass]
-    if: always()
+    if: always() && (github.repository != 'brianfaires/hermes-agent' || inputs.release == true || inputs.full_qualification == true)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
