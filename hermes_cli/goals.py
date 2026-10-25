@@ -16,6 +16,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, UTC
 from pathlib import Path
@@ -448,6 +449,8 @@ class GoalState:
     waiting_on_delegations: int = 0
     waiting_reason: Optional[str] = None
     waiting_since: float = 0.0
+    # A satisfied barrier still owes its owner a turn until the next evaluation.
+    waiting_wake_id: Optional[str] = None
     contract: GoalContract = field(default_factory=GoalContract)
     # /goal gate add <cmd>: ALL must pass before the judge may declare done.
     gates: list[GoalGate] = field(default_factory=list)
@@ -472,6 +475,8 @@ class GoalState:
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
             waiting_reason=data.get("waiting_reason"),
+            waiting_wake_id=data.get("waiting_wake_id") or (
+                f"{data.get('created_at')}:{data['waiting_since']}" if data.get("waiting_since") else None),
             contract=GoalContract.from_dict(data.get("contract")),
             gates=[
                 GoalGate.from_dict(g) for g in (data.get("gates") or [])
@@ -494,6 +499,7 @@ class GoalState:
         self.waiting_on_delegations = 0
         self.waiting_reason = None
         self.waiting_since = 0.0
+        self.waiting_wake_id = None
 
 
 # ── Persistence (SessionDB state_meta) ────────────────────────────────
@@ -1367,6 +1373,7 @@ class GoalManager:
             setattr(state, k, v)
         state.waiting_reason = (reason or "").strip() or None
         state.waiting_since = time.time()
+        state.waiting_wake_id = uuid.uuid4().hex
         return self._save()
 
     def wait_on(self, pid: int, reason: str = "") -> GoalState:
@@ -1404,13 +1411,14 @@ class GoalManager:
     def stop_waiting(self) -> bool:
         """Clear any active wait barrier (pid / session / time). Returns True if one was cleared."""
         s = self._state
-        if s is None or (s.waiting_on_pid is None and s.waiting_on_session is None and not s.waiting_until):
+        if s is None or (s.waiting_on_pid is None and s.waiting_on_session is None
+                         and not s.waiting_until and not s.waiting_wake_id):
             return False
         s.clear_wait()
         self._save()
         return True
 
-    def is_waiting(self) -> bool:
+    def is_waiting(self, *, clear_satisfied: bool = True) -> bool:
         """True iff a barrier is set AND not yet satisfied. A satisfied barrier is cleared here
         (lazy auto-clear) so the next evaluation resumes normal judging. A pid/session barrier
         also expires after ``_MAX_BARRIER_WAIT_S``: a watcher or poller that never exits would
@@ -1436,8 +1444,11 @@ class GoalManager:
             logger.info("goal %s: wait barrier on %s exceeded %ds; resuming judging",
                         self.session_id, s.waiting_on_session or s.waiting_on_pid, _MAX_BARRIER_WAIT_S)
             still = False
-        if not still:
-            self.stop_waiting()
+        if not still and clear_satisfied:
+            wake_id = s.waiting_wake_id
+            s.clear_wait()
+            s.waiting_wake_id = wake_id
+            self._save()
         return still
 
     # --- the main entry point called after every turn -----------------
@@ -1497,6 +1508,7 @@ class GoalManager:
         if self.is_waiting():
             return self._waiting_decision(state)
 
+        state.waiting_wake_id = None
         state.turns_used += 1
         state.last_turn_at = time.time()
 
