@@ -343,6 +343,20 @@ time.
 
 #### Workers and systemd cgroups
 
+Before launching a native worker, dispatch resolves requested skills in the
+assigned profile and task workspace, without running skill commands or installing
+their tools. The actual owner freezes the usable skills for its new worker session;
+the card keeps its original requested skills. Missing optional guidance is skipped; the review role still requires `sdlc-review`. When terminal tools
+are enabled, it also runs a bounded harmless command through that profile's
+configured terminal backend for the assigned workspace, including scratch.
+The probe binds the same workspace mount context as the worker and cleans up
+its own temporary sandbox.
+An available model does not establish that the workspace route works.
+An unavailable required skill or command route parks the task as a
+`capability` block with its underlying reason. The assigning owner repairs
+that prerequisite or selects a capable profile, then explicitly unblocks it;
+unchanged idle checks do not repeat the launch. Candidate files remain intact.
+
 Workers are fire-and-forget processes that outlive the dispatcher tick, so
 wherever the dispatcher runs inside a systemd unit the worker is launched in
 its own transient scope (`systemd-run --user --scope --unit hermes-worker-kanban-<task>-run-<run>`)
@@ -1471,6 +1485,10 @@ Decomposition preserves the root's external prerequisites on child entrypoints, 
 ### Sticky blocks during task preparation
 
 Existing sticky blocks survive escalation to triage. Automatic specification, decomposition and claims skip held cards, including legacy cards created blocked. After resolving the decision, explicitly `hermes kanban unblock <id>`; release restores the resumable phase, including review, even if a stale writer changed the dormant status. A legacy blocked card may also be manually promoted.
+
+### Task workspace and branch settings
+
+Task creation and decomposition share workspace/branch metadata checks. A directory needs an absolute path (or the board's default workdir); scratch and worktree defaults remain supported. Worktree children retain an explicitly requested branch, and malformed Git branch refs are rejected before a card or fan-out is committed. Unassigned tasks remain parked unless a default assignee is explicitly configured; a missing profile never silently selects a different identity.
 
 ## Out of scope
 
