@@ -337,7 +337,7 @@ class TestExtractMedia:
     def test_inline_code_survives_when_real_media_present(self):
         """When a real MEDIA: tag is delivered, an inline-code example in the
         same reply must not be blanked to whitespace."""
-        content = "See MEDIA:/r/a.png and `MEDIA:/ex/b.png` inline"
+        content = "See\nMEDIA:/r/a.png\nand `MEDIA:/ex/b.png` inline"
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert [p for p, _ in media] == ["/r/a.png"]
         assert "`MEDIA:/ex/b.png`" in cleaned
