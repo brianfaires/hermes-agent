@@ -705,15 +705,8 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
         )
 
 
-def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
-    """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
-    target = repo_root / ".worktrees" / task_id
-    _ensure_git_worktree(repo_root, target, branch_name)
-    return target, branch_name
-
-
-def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
-    """Resolve + materialize a linked git worktree for ``task``. With no
+def worktree_destination(task: Task, *, board: Optional[str] = None) -> tuple[Path, str, Optional[Path]]:
+    """Plan (destination, branch, repository to materialize), without filesystem writes. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
     instead of the dispatcher's incidental CWD (whatever dir the gateway was
@@ -741,7 +734,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return repo_root / ".worktrees" / task.id, branch_name, repo_root
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
@@ -754,7 +747,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     if requested.exists() and _is_linked_worktree_checkout(requested):
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
-            return requested_resolved, actual_branch
+            return requested_resolved, actual_branch, None
         # The requested path is an existing checkout of a DIFFERENT task's
         # branch (decompose children inherit the root's workspace_path
         # verbatim, so siblings all point here). Reusing it would run this task
@@ -764,15 +757,14 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         if fallback_root is not None:
             fallback = fallback_root / ".worktrees" / task.id
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
-                _ensure_git_worktree(fallback_root, fallback, branch_name)
-                return fallback.resolve(strict=False), branch_name
+                return fallback.resolve(strict=False), branch_name, fallback_root
         # No repo to anchor a fallback on (or the occupied path IS this task's
         # own canonical worktree): keep the legacy reuse rather than fail dispatch.
-        return requested_resolved, actual_branch or branch_name
+        return requested_resolved, actual_branch or branch_name, None
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return repo_root / ".worktrees" / task.id, branch_name, repo_root
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
@@ -780,8 +772,14 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
-    _ensure_git_worktree(repo_root, requested, branch_name)
-    return requested, branch_name
+    return requested, branch_name, repo_root
+
+
+def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
+    destination, branch, repository = worktree_destination(task, board=board)
+    if repository is not None:
+        _ensure_git_worktree(repository, destination, branch)
+    return destination, branch
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:

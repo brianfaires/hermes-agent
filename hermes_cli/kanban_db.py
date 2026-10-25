@@ -2112,55 +2112,6 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
     return [(row["id"], row["status"]) for row in rows]
 
 
-def _claim_and_open_run(
-    conn: sqlite3.Connection, task_id: str, source_status: str, lock: str, expires: int, now: int,
-    *, event_extra: Optional[dict] = None,
-) -> Optional[int]:
-    """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
-    when the CAS lost. Caller holds the txn."""
-    if _has_sticky_block(conn, task_id):
-        return None
-    cur = conn.execute(
-        f"""
-        UPDATE tasks
-           SET status        = 'running',
-               claim_lock    = ?,
-               claim_expires = ?,
-               started_at    = COALESCE(started_at, ?)
-         WHERE id = ?
-           AND status = '{source_status}'
-           AND claim_lock IS NULL
-        """,
-        (lock, expires, now, task_id),
-    )
-    if cur.rowcount != 1:
-        return None
-    trow = conn.execute(
-        "SELECT assignee, max_runtime_seconds, current_step_key "
-        "FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    run_cur = conn.execute(
-        """
-        INSERT INTO task_runs (
-            task_id, profile, step_key, status,
-            claim_lock, claim_expires, max_runtime_seconds,
-            started_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
-        """,
-        (
-            task_id, trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
-            lock, expires, trow["max_runtime_seconds"] if trow else None, now,
-        ),
-    )
-    run_id = run_cur.lastrowid
-    conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
-    _append_event(
-        conn, task_id, "claimed",
-        {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
-    )
-    return run_id
-
-
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
@@ -2170,10 +2121,14 @@ def claim_task(
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
+    from hermes_cli.kanban_workspace_claims import claim_and_open_run, workspace_claim_slot
+
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
+    with workspace_claim_slot() as acquired, write_txn(conn):
+        if not acquired:
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2188,7 +2143,7 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+        run_id = claim_and_open_run(conn, task_id, "ready", lock, expires, now)
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2203,10 +2158,14 @@ def claim_review_task(
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
+    from hermes_cli.kanban_workspace_claims import claim_and_open_run, workspace_claim_slot
+
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    with write_txn(conn):
+    with workspace_claim_slot() as acquired, write_txn(conn):
+        if not acquired:
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2218,7 +2177,7 @@ def claim_review_task(
                     {"reason": "parent_reopened", "source_status": "review"},
                 )
             return None
-        run_id = _claim_and_open_run(
+        run_id = claim_and_open_run(
             conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
         )
         if run_id is None:
