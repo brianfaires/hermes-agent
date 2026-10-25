@@ -21,6 +21,7 @@ directly would bypass the path the gateway actually executes.
 from __future__ import annotations
 
 import importlib
+import sys
 import threading
 import types
 from pathlib import Path
@@ -44,7 +45,7 @@ def hermes_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def server(hermes_home):
+def server(hermes_home, monkeypatch):
     # Mocks are scoped to the initial import only (see
     # tests/tui_gateway/test_protocol.py for the rationale).
     with patch.dict(
@@ -56,6 +57,8 @@ def server(hermes_home):
     ):
         mod = importlib.import_module("tui_gateway.server")
 
+    # patch.dict removes newly imported modules; late imports must keep this session registry.
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", mod)
     methods = dict(mod._methods)
     yield mod
     # Restore in place instead of clear+reload: importlib.reload re-registers
