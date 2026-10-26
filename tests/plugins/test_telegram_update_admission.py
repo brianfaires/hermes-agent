@@ -396,12 +396,14 @@ async def _check_error_registration(monkeypatch, adapter, app):
 
 async def _check_error_cancel_before_entry(monkeypatch, adapter, app, delivered):
     scheduled, effects = [], []
+    cancellation_settled = asyncio.Event()
     create = app._Application__create_task
 
     def cancel_on_schedule(coroutine, *args, **kwargs):
         task = create(coroutine, *args, **kwargs)
         if kwargs.get("is_error_handler"):
             scheduled.append((task, coroutine))
+            task.add_done_callback(lambda done: cancellation_settled.set())
             task.cancel()
         return task
 
@@ -417,6 +419,8 @@ async def _check_error_cancel_before_entry(monkeypatch, adapter, app, delivered)
         await app.process_update(update(app.bot))
         await app.stop()
     assert len(scheduled) == 1 and not effects
+    # stop() awaits tasks, but their scheduled cancellation callbacks can still be pending.
+    await cancellation_settled.wait()
     assert not adapter._inflight_update_ids and not adapter._seen_update_ids
     # The cancelled PTB task never awaited the callback coroutine: it must be closed too.
     try:

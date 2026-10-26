@@ -39,9 +39,9 @@ def _read_message_body(positional: Optional[str], file_path: Optional[str]) -> O
                 f"hermes send: {file_path} is not a text file. --file reads the "
                 "message *body* (logs, reports, markdown).\n"
                 "To send an image/document/audio file as a native attachment, "
-                "reference it with MEDIA: in the message text instead:\n"
+                "put MEDIA:<path> on its own line in the message text instead:\n"
                 f'  hermes send --to telegram "MEDIA:{file_path}"\n'
-                f'  hermes send --to telegram "optional caption MEDIA:{file_path}"\n'
+                "For a caption, put the text on the preceding line.\n"
                 "Add [[as_document]] to deliver an image as an uncompressed file:\n"
                 f'  hermes send --to telegram "[[as_document]] MEDIA:{file_path}"',
                 _USAGE_EXIT)
