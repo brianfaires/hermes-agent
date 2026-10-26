@@ -105,8 +105,11 @@ def test_sole_addressee_text_stays_clean_and_prompt_is_session_stable(trigger):
 
         assert len(events) == 2
         first, second = events
-        expected_text = {"command": "/new", "mention": "😀 2", "code": "@hermes_bot"}.get(trigger, msg.text)
+        expected_text = {"mention": "😀 2", "code": "@hermes_bot"}.get(trigger, msg.text)
         assert first.text == expected_text
+        if trigger == "command":
+            assert first.get_command() == "new"
+            assert first.get_command_args() == ""
         if trigger == "dm":
             assert not first.channel_prompt
         else:

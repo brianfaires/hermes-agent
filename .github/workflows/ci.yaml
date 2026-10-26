@@ -85,6 +85,7 @@ jobs:
           ref: ${{ inputs.commit }}
       - uses: ./.github/actions/setup-pm
         with:
+          packages: ripgrep
           extras: '["all", "messaging", "tts-premium", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
       - name: Run the headless Ubuntu suite
