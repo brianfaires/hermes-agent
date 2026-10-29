@@ -16,6 +16,33 @@ class WorkerCapabilityError(RuntimeError):
     """A selected launch prerequisite requires an owner action before retry."""
 
 
+def lane_skills(profile_home: str | None, lane: str) -> list[str]:
+    """Skills every worker the assigned profile runs in *lane* must load: its ``kanban.lane_skills``.
+
+    Read from the ASSIGNEE's config, not the dispatcher's, because which review procedure a profile
+    follows is that profile's policy. ``None`` (an assignee that does not resolve; launch validation
+    reports that) applies the defaults. A malformed entry adds nothing (warned) rather than failing
+    every spawn in the lane."""
+    from hermes_cli.config import load_config
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    from hermes_cli.kanban_db_dispatch import _worker_profile_scope
+
+    if profile_home is None:
+        configured = DEFAULT_CONFIG["kanban"]["lane_skills"]
+    else:
+        with _worker_profile_scope(profile_home):
+            configured = ((load_config() or {}).get("kanban") or {}).get("lane_skills") or {}
+    entry = configured.get(lane) if isinstance(configured, dict) else None
+    if entry is None:
+        return []
+    if isinstance(entry, str):
+        entry = [entry]
+    if not isinstance(entry, list) or not all(isinstance(s, str) for s in entry):
+        _log.warning("kanban.lane_skills.%s in %s is not a list of skill names; ignoring it", lane, profile_home)
+        return []
+    return list(dict.fromkeys(s.strip() for s in entry if s.strip()))
+
+
 def resolve_worker_skills(task: Task, profile_home: str, required_skills: list[str],
                           *, workspace: str | None) -> list[str]:
     """Resolve current pins while retaining hard requirements of the assigned role."""

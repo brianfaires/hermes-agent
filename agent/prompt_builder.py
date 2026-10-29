@@ -344,6 +344,32 @@ KANBAN_GUIDANCE = (
     "own run; board tasks are for cross-agent handoffs that outlive one API loop."
 )
 
+
+def kanban_worker_guidance() -> str:
+    """KANBAN_GUIDANCE plus the file ``kanban.worker_guidance`` names: a profile's own rules for its
+    dispatched workers, which only owned-task sessions see. A relative path resolves against
+    HERMES_HOME. The file is the user's own config, so it loads like SOUL.md (scanned, warned, capped)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        configured = ((load_config_readonly() or {}).get("kanban") or {}).get("worker_guidance") or ""
+    except Exception as e:
+        logger.debug("Could not read kanban.worker_guidance: %s", e)
+        configured = ""
+    if not isinstance(configured, str) or not configured.strip():
+        return KANBAN_GUIDANCE
+    path = Path(os.path.expandvars(configured.strip())).expanduser()
+    if not path.is_absolute():
+        path = get_hermes_home() / path
+    content = _read_context_file(path)
+    if not content:
+        # A configured rule file that vanished is a silent policy loss; say so on every worker start.
+        logger.warning("kanban.worker_guidance file %s is missing or empty; workers get only the built-in protocol",
+                       path)
+        return KANBAN_GUIDANCE
+    content = _scan_context_content(content, path.name, user_authored=True)
+    return f"{KANBAN_GUIDANCE}\n\n{_truncate_content(content, path.name, read_path=str(path))}"
+
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do or plan to do without actually doing "

@@ -323,8 +323,14 @@ kanban:
   dispatch_in_gateway: true        # default
   dispatch_interval_seconds: 60    # default
   review_dispatch: true            # default: spawn the assigned profile with
-                                   # the bundled sdlc-review skill. Set false
-                                   # for human-only review boards.
+                                   # its lane_skills.review. Set false for
+                                   # human-only review boards.
+  lane_skills:                     # skills a worker must load per lane, read
+    review: [sdlc-review]          # from the ASSIGNED profile's config (default
+    # ready: [my-org-rules]        # shown). `ready` covers rework too.
+  worker_guidance: ""              # file appended to the kanban protocol in
+                                   # every dispatched worker's system prompt;
+                                   # relative paths resolve against HERMES_HOME.
   # dispatch_profiles: [sage]       # unset (key omitted): this home may claim
                                    # cards for any existing profile. Set to a
                                    # list (or comma-separated string) of profile
@@ -346,7 +352,7 @@ time.
 Before launching a native worker, dispatch resolves requested skills in the
 assigned profile and task workspace, without running skill commands or installing
 their tools. The actual owner freezes the usable skills for its new worker session;
-the card keeps its original requested skills. Missing optional guidance is skipped; the review role still requires `sdlc-review`. When terminal tools
+the card keeps its original requested skills. Missing optional guidance is skipped; a skill the assignee's `kanban.lane_skills` lists for the lane is required, and a missing one blocks the card as a capability gap. When terminal tools
 are enabled, it also runs a bounded harmless command through that profile's
 configured terminal backend for the assigned workspace, including scratch.
 The probe binds the same workspace mount context as the worker and cleans up

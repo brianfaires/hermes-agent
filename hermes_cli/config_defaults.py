@@ -1908,9 +1908,16 @@ DEFAULT_CONFIG = {
         # Run the dispatcher inside the gateway process (~300µs per idle tick). False only if you
         # run it as a separate unit or don't want the gateway spawning workers.
         "dispatch_in_gateway": True,
-        # Auto-claim tasks in the review column and spawn the assigned profile with the bundled
-        # sdlc-review skill. Disable where every review is done manually from the dashboard.
+        # Auto-claim tasks in the review column and spawn the assigned profile with its
+        # lane_skills["review"]. Disable where every review is done manually from the dashboard.
         "review_dispatch": True,
+        # Skills a worker must load per dispatch lane ("ready" includes rework, "review" the
+        # reviewer), read from the ASSIGNED profile's config. A listed skill the profile cannot
+        # load blocks the card as a capability gap. Set review: [] when reviewers bring their own.
+        "lane_skills": {"review": ["sdlc-review"]},
+        # File appended to the kanban protocol in every dispatched worker's system prompt
+        # (relative paths resolve against HERMES_HOME): this profile's own rules for its workers.
+        "worker_guidance": "",
         # Seconds between dispatcher ticks. Lower = snappier pickup; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,

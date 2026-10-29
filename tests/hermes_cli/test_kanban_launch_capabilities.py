@@ -61,6 +61,37 @@ def test_missing_required_review_skill_parks_once_before_executor_launch(workflo
                             expected_run_id=kb.get_task(conn, card).current_run_id)
 
 
+def test_reviewer_profile_lane_skills_replace_the_default_review_skill(workflow):
+    """A profile whose reviewers bring their own procedure clears review: no sdlc-review needed."""
+    conn, profile, workspace, marker = workflow
+    (profile / 'config.yaml').write_text('terminal: {backend: local}\nkanban: {lane_skills: {review: []}}\n')
+    card = kb.create_task(conn, title='Review with the profile procedure', assignee='reviewer',
+                          workspace_kind='dir', workspace_path=str(workspace))
+    assert kb.request_review(conn, card, reviewer='reviewer', summary='Candidate ready.')
+    assert [row[0] for row in dispatch.dispatch_once(conn).spawned] == [card]
+    assert wait_until(marker.exists, timeout=10)
+    assert kb.complete_task(conn, card, summary='Reviewed.', expected_run_id=kb.get_task(conn, card).current_run_id)
+
+
+def test_ready_lane_skill_from_profile_config_is_required(workflow):
+    conn, profile, workspace, marker = workflow
+    (profile / 'config.yaml').write_text('terminal: {backend: local}\nkanban: {lane_skills: {ready: [org-rules]}}\n')
+    card = kb.create_task(conn, title='Implement under org rules', assignee='reviewer',
+                          workspace_kind='dir', workspace_path=str(workspace))
+    assert dispatch.dispatch_once(conn).spawned == []
+    task = kb.get_task(conn, card)
+    assert task.status == 'blocked' and task.block_kind == 'capability'
+    assert 'org-rules' in kb.list_runs(conn, card)[-1].summary
+    assert not marker.exists()
+    skill = profile / 'skills' / 'org-rules' / 'SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: org-rules\ndescription: Org rules for workers.\n---\nFollow the org rules.\n')
+    assert kb.unblock_task(conn, card)
+    assert [row[0] for row in dispatch.dispatch_once(conn).spawned] == [card]
+    assert wait_until(marker.exists, timeout=10)
+    assert kb.complete_task(conn, card, summary='Done.', expected_run_id=kb.get_task(conn, card).current_run_id)
+
+
 def test_missing_optional_pin_does_not_prevent_worker_execution(workflow):
     conn, _profile, workspace, marker = workflow
     card = kb.create_task(conn, title='Execute with an archived guidance pin', assignee='reviewer',

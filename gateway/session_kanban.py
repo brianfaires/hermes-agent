@@ -42,16 +42,14 @@ def build_kanban_policy(connection, params, config):
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
-            skills = list(task.skills or ())
-            required_skills = []
-            if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
-                # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
-                required_skills = ['sdlc-review']
-                skills = list(dict.fromkeys([*skills, *required_skills]))
+            lane = 'review' if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review' else 'ready'
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
-    from hermes_cli.kanban_launch import resolve_worker_skills, WorkerCapabilityError
+    from hermes_cli.kanban_launch import lane_skills, resolve_worker_skills, WorkerCapabilityError
+    # Same rule as the dispatcher: the owning profile's kanban.lane_skills for this lane.
+    required_skills = lane_skills(str(authority.profile_id), lane)
+    skills = list(dict.fromkeys([*(task.skills or ()), *required_skills]))
     try:
         effective_skills = resolve_worker_skills(task, str(authority.profile_id), required_skills, workspace=cwd)
     except WorkerCapabilityError as exc:
