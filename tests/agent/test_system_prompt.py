@@ -85,7 +85,7 @@ def test_kanban_guidance_requires_worker_task_at_agent_init(monkeypatch, task_id
 
 
 def test_owned_worker_guidance_carries_org_rules_after_the_protocol(monkeypatch):
-    """Fork-only: the org rules follow upstream's protocol, which they refine where named."""
+    """Fork-only: the org rules follow upstream's protocol."""
     from agent.agent_init import _load_tools
     from agent.kanban_org_guidance import KANBAN_ORG_GUIDANCE
     import model_tools
