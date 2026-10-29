@@ -123,32 +123,3 @@ def test_worker_rechecks_required_vs_optional_after_admission(tmp_path, monkeypa
             result = _run_task_turns(agent, {'text': 'Do the work'}, [], json.loads(policy.kanban_json))
             assert result['failed'] is False
             agent.run_conversation.assert_called_once()
-
-
-def test_owner_run_follows_the_owning_profile_lane_skills(tmp_path, monkeypatch):
-    """The owner-run path applies the same kanban.lane_skills as the dispatcher, not a fixed skill."""
-    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
-    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
-    monkeypatch.delenv('HERMES_KANBAN_BOARD', raising=False)
-    (tmp_path / 'config.yaml').write_text('kanban:\n  lane_skills: {review: [], ready: [org-rules]}\n')
-    kb.create_board('owned')
-    review_ws, build_ws = tmp_path / 'review', tmp_path / 'build'
-    review_ws.mkdir()
-    build_ws.mkdir()
-    actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
-    connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
-    with connect_closing(board='owned') as conn:
-        def policy_for(task):
-            params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
-            policy, _ = build_kanban_policy(connection, params, {'model': {'default': 'fixture', 'provider': 'custom'}})
-            return json.loads(policy.kanban_json)
-        reviewed = kb.create_task(conn, title='Review it', assignee='default',
-                                  workspace_kind='dir', workspace_path=str(review_ws))
-        assert kb.request_review(conn, reviewed, reviewer='default', summary='Ready for review.')
-        assert policy_for(kb.claim_review_task(conn, reviewed))['required_skills'] == []
-        built = kb.create_task(conn, title='Build it', assignee='default',
-                               workspace_kind='dir', workspace_path=str(build_ws))
-        with pytest.raises(Exception, match='kanban_skills_unavailable'):
-            policy_for(kb.claim_task(conn, built))

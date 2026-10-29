@@ -84,36 +84,22 @@ def test_kanban_guidance_requires_worker_task_at_agent_init(monkeypatch, task_id
     assert (agent._kanban_worker_guidance == KANBAN_GUIDANCE) is expected
 
 
-@pytest.mark.parametrize("configured", ["worker-rules.md", "{home}/worker-rules.md"])
-def test_kanban_worker_guidance_file_extends_owned_worker_prompt(monkeypatch, configured):
-    """``kanban.worker_guidance`` names a file whose text follows the protocol, for workers only."""
+def test_owned_worker_guidance_carries_org_rules_after_the_protocol(monkeypatch):
+    """Fork-only: the org rules follow upstream's protocol, so they override it where they differ."""
     from agent.agent_init import _load_tools
-    from agent.prompt_builder import KANBAN_GUIDANCE
-    from hermes_constants import get_hermes_home
+    from agent.kanban_org_guidance import KANBAN_ORG_GUIDANCE
     import model_tools
 
-    home = get_hermes_home()
-    (home / "worker-rules.md").write_text("Code review goes to ang.\n")
-    (home / "config.yaml").write_text(f"kanban:\n  worker_guidance: {configured.format(home=home)}\n")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
     monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
     monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **_kwargs: [{"function": {"name": "kanban_show"}}])
-    for task_id, expected in ((None, ""), ("t_worker", f"{KANBAN_GUIDANCE}\n\nCode review goes to ang.")):
-        if task_id is None:
-            monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-        else:
-            monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
-        agent = SimpleNamespace(quiet_mode=True)
-        _load_tools(agent, enabled_toolsets=["kanban"], disabled_toolsets=None)
-        assert agent._kanban_worker_guidance == expected
+    agent = SimpleNamespace(quiet_mode=True)
 
+    _load_tools(agent, enabled_toolsets=["kanban"], disabled_toolsets=None)
 
-def test_missing_kanban_worker_guidance_file_keeps_the_protocol(monkeypatch, caplog):
-    from agent.prompt_builder import KANBAN_GUIDANCE, kanban_worker_guidance
-    from hermes_constants import get_hermes_home
-
-    (get_hermes_home() / "config.yaml").write_text("kanban:\n  worker_guidance: gone.md\n")
-    assert kanban_worker_guidance() == KANBAN_GUIDANCE
-    assert "gone.md is missing or empty" in caplog.text
+    guidance = agent._kanban_worker_guidance
+    assert guidance.startswith("# Kanban task execution protocol")
+    assert guidance.endswith(f"\n\n{KANBAN_ORG_GUIDANCE}")
 
 
 @pytest.mark.parametrize("task_id, owner, expected", [

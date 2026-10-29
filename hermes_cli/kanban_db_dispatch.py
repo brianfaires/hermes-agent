@@ -2116,19 +2116,15 @@ def _dispatch_lane_task(
     if claimed.workspace_kind == "worktree":
         _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
     _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+    if lane == "review":
+        # Force-load sdlc-review; the kanban lifecycle is already in every
+        # worker's system prompt via KANBAN_GUIDANCE.
+        claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
-        from hermes_cli.kanban_launch import lane_skills, spawn_worker
-        from hermes_cli.profiles import resolve_profile_env
+        from hermes_cli.kanban_launch import spawn_worker
 
-        try:
-            assignee_home = resolve_profile_env(claimed.assignee or "default")
-        except Exception:
-            assignee_home = None  # spawn_worker's launch validation reports the unresolvable assignee
-        # The assignee's kanban.lane_skills (default: review -> sdlc-review); the kanban
-        # lifecycle itself is already in every worker's system prompt via KANBAN_GUIDANCE.
-        required = lane_skills(assignee_home, lane)
-        claimed.skills = list(dict.fromkeys([*(claimed.skills or []), *required])) or claimed.skills
-        pid = spawn_worker(spawn_fn, claimed, str(workspace), board, required_skills=required)
+        pid = spawn_worker(spawn_fn, claimed, str(workspace), board,
+                           required_skills=["sdlc-review"] if lane == "review" else [])
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
