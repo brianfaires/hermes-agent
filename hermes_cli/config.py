@@ -1207,7 +1207,21 @@ def validate_config_structure(config: Optional[dict[str, Any]] = None) -> list[C
 
     _validate_web_backends(config, issues)
     _validate_quoted_containers(config, issues)
+    _validate_skill_description_limit(config, issues)
     return issues
+
+
+def _validate_skill_description_limit(config: dict[str, Any], issues: list[ConfigIssue]) -> None:
+    """``skills.prompt_description_limit`` must be an int >= 20 or ``full``; otherwise the index uses 60."""
+    skills = config.get("skills")
+    if not isinstance(skills, dict) or "prompt_description_limit" not in skills:
+        return
+    from agent.skill_utils import coerce_prompt_description_limit
+    try:
+        coerce_prompt_description_limit(skills["prompt_description_limit"])
+    except ValueError as exc:
+        _issue(issues, "error", str(exc),
+               "Set an integer such as 120, or 'full' to show whole descriptions; until fixed the skill index uses 60")
 
 
 def print_config_warnings(config: Optional[dict[str, Any]] = None) -> None:
