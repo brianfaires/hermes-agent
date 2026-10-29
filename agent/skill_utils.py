@@ -836,7 +836,43 @@ def resolve_skill_config_values(config_vars: list[dict[str, Any]]) -> dict[str, 
     return resolved
 
 
-SKILL_PROMPT_DESC_LIMIT = 60
+SKILL_PROMPT_DESC_LIMIT = 60  # default `skills.prompt_description_limit`
+SKILL_PROMPT_DESC_MIN = 20
+
+
+def coerce_prompt_description_limit(raw: Any) -> int | None:
+    """``skills.prompt_description_limit`` as a character budget, or None for full descriptions.
+
+    Accepts an int >= SKILL_PROMPT_DESC_MIN or the string ``full``; raises ValueError otherwise."""
+    if isinstance(raw, str) and raw.strip().lower() == "full":
+        return None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        raw = int(raw.strip())
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < SKILL_PROMPT_DESC_MIN:
+        raise ValueError(f"skills.prompt_description_limit must be an integer >= {SKILL_PROMPT_DESC_MIN} or 'full'")
+    return raw
+
+
+def skill_prompt_description_limit(config: dict[str, Any] | None = None) -> int | None:
+    """The active profile's skill-index description budget (None = full); invalid values use the default."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+            config = load_config_readonly()
+        except Exception:
+            config = {}
+    skills = config.get("skills") if isinstance(config, dict) else None
+    raw = skills.get("prompt_description_limit", SKILL_PROMPT_DESC_LIMIT) if isinstance(skills, dict) else SKILL_PROMPT_DESC_LIMIT
+    try:
+        return coerce_prompt_description_limit(raw)
+    except ValueError as exc:
+        logger.warning("%s; using %d", exc, SKILL_PROMPT_DESC_LIMIT)
+        return SKILL_PROMPT_DESC_LIMIT
+
+
+def fit_skill_description(desc: str, limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> str:
+    """*desc* cut to *limit* characters (with ``...``); None keeps it whole."""
+    return desc if limit is None or len(desc) <= limit else desc[:limit - 3] + "..."
 
 
 def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
@@ -845,15 +881,14 @@ def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
     return str(raw_desc).strip().strip("'\"") if raw_desc else ""
 
 
-def extract_skill_description(frontmatter: dict[str, Any]) -> str:
-    """Extract a system-prompt-length description from parsed frontmatter."""
-    desc = _normalize_skill_description(frontmatter)
-    return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..." if len(desc) > SKILL_PROMPT_DESC_LIMIT else desc
+def extract_skill_description(frontmatter: dict[str, Any], limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> str:
+    """Extract a system-prompt-length description from parsed frontmatter (None = untruncated)."""
+    return fit_skill_description(_normalize_skill_description(frontmatter), limit)
 
 
-def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any]) -> bool:
+def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any], limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> bool:
     """True when the description will be truncated in the system prompt skill index."""
-    return len(_normalize_skill_description(frontmatter)) > SKILL_PROMPT_DESC_LIMIT
+    return limit is not None and len(_normalize_skill_description(frontmatter)) > limit
 
 
 def iter_skill_index_files(skills_dir: Path, filename: str):

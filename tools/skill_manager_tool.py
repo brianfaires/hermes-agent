@@ -26,7 +26,7 @@ from agent.skill_utils import (
     extract_skill_description,
     is_skill_description_truncated_for_prompt,
     parse_frontmatter as _parse_frontmatter,
-    SKILL_PROMPT_DESC_LIMIT)
+    skill_prompt_description_limit)
 from tools.skill_manager_guards import (
     _background_review_delete_guard, _background_review_preflight, _background_review_read_before_write_guard,
     _containing_skills_root, _curator_consolidation_delete_guard, _is_path_redirect, _pinned_guard,
@@ -145,7 +145,7 @@ def _validate_category(category: Optional[str]) -> Optional[str]:
 
 def _validate_frontmatter(content: str, *, new_skill: bool = False) -> Optional[str]:
     """Validate frontmatter (name + description) and a non-empty body. ``new_skill`` (create
-    only) also enforces SKILL_PROMPT_DESC_LIMIT so new skills never lose routing signal to
+    only) also enforces the configured index budget so new skills never lose routing signal to
     index truncation; edit/patch skip it so existing over-limit skills stay maintainable."""
     if not content.strip():
         return "Content cannot be empty."
@@ -167,12 +167,13 @@ def _validate_frontmatter(content: str, *, new_skill: bool = False) -> Optional[
     desc = str(parsed["description"])
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
-    if new_skill and len(desc.strip().strip("'\"")) > SKILL_PROMPT_DESC_LIMIT:
+    limit = skill_prompt_description_limit() if new_skill else None
+    if limit is not None and len(desc.strip().strip("'\"")) > limit:
         return (
             f"Description is {len(desc.strip())} chars — new skills must fit the "
-            f"{SKILL_PROMPT_DESC_LIMIT}-char system-prompt budget (one sentence, trigger first, "
+            f"{limit}-char system-prompt budget (one sentence, trigger first, "
             f"ends with a period). The skill index truncates longer descriptions to "
-            f"{SKILL_PROMPT_DESC_LIMIT - 3} chars + '...', destroying the routing signal. "
+            f"{limit - 3} chars + '...', destroying the routing signal. "
             f"Move detail into the skill body.")
     if not content[end_match.end() + 3:].strip():
         return "SKILL.md must have content after the frontmatter (instructions, procedures, etc.)."
@@ -416,10 +417,11 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
 
 def _add_description_prompt_preview(result: dict[str, Any], content: str) -> dict[str, Any]:
     fm, _ = _parse_frontmatter(content)
-    if is_skill_description_truncated_for_prompt(fm):
+    limit = skill_prompt_description_limit()
+    if is_skill_description_truncated_for_prompt(fm, limit):
         result["system_prompt_preview"] = (
-            f"System prompt will show: \"{extract_skill_description(fm)}\" — keep the trigger "
-            f"self-contained in the first {SKILL_PROMPT_DESC_LIMIT - 3} chars.")
+            f"System prompt will show: \"{extract_skill_description(fm, limit)}\" — keep the trigger "
+            f"self-contained in the first {limit - 3} chars.")
     return result
 
 
