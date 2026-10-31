@@ -1268,7 +1268,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         the pool store, is token authority for those sources; a row with no
         token material at all is refused for the same reason.
         """
-        if self.provider not in ("anthropic", "xai-oauth") and plugin_refresh_hook(self.provider) is None:
+        if self.provider not in ("anthropic", "xai-oauth", "openai-codex") and plugin_refresh_hook(self.provider) is None:
             return entry
         is_anthropic = self.provider == "anthropic"
         is_xai = self.provider == "xai-oauth"
@@ -1505,16 +1505,16 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # there was no recovery path at all). Serialize through the shared
         # cross-process auth-store flock; a waiter's in-lock re-sync picks up
         # the winner's rotated token and skips the POST.
-        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+        from agent.credential_pool_oauth_authority import pool_refresh_transaction
+        with pool_refresh_transaction(self.provider, self._single_use_refresh_lock_timeout()):
+            synced = self._sync_entry_from_pool_store(entry)
             if self.provider == "openai-codex":
-                synced = self._sync_entry_from_auth_store(entry)
-                if synced is not entry and not force and not self._entry_needs_refresh(synced):
+                synced = self._sync_entry_from_auth_store(synced)
+                if synced is not entry and not self._entry_needs_refresh(synced):
                     return synced
                 return self._refresh_entry_impl(synced, force=force)
-            synced = self._sync_entry_from_pool_store(entry)
             if self.provider == "anthropic" and synced.source == "claude_code":
-                # claude_code entries are NOT profile-owned: the refresh token
-                # lives in one shared ~/.claude/.credentials.json (or Keychain)
+                # claude_code refresh tokens live in one shared credentials file (or Keychain)
                 # every profile reads. The profile-scoped lock above only covers
                 # THIS profile's auth.json, so take the dedicated shared-file
                 # lock (inner, per the ordering invariant on ``_auth_store_lock``)
