@@ -1286,11 +1286,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             # (blank) generation, recorded before the no-token-material bail-out below.
             self._persisted_token_pairs[entry.id] = auth_mod._credential_token_pair(persisted)
             stored = PooledCredential.from_dict(self.provider, persisted)
-            # No token material at all is never a "rotation" (anthropic borrowed rows, a plugin row a
-            # peer blanked mid-write): adopting it would replace a usable credential with nothing.
-            if not is_xai and not (stored.access_token or "").strip() and not (stored.refresh_token or "").strip():
+            # A tokenless DEAD row is authoritative quarantine, not an unhydrated reference.
+            if not is_xai and stored.last_status != STATUS_DEAD and not (stored.access_token or "").strip() and not (stored.refresh_token or "").strip():
                 return entry
-            if stored.access_token != entry.access_token or stored.refresh_token != entry.refresh_token:
+            if stored.last_status == STATUS_DEAD or stored.access_token != entry.access_token or stored.refresh_token != entry.refresh_token:
                 logger.debug(
                     "Pool entry %s: adopting %s OAuth tokens rotated by another pool instance",
                     entry.id, display,
@@ -1508,6 +1507,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         from agent.credential_pool_oauth_authority import pool_refresh_transaction
         with pool_refresh_transaction(self.provider, self._single_use_refresh_lock_timeout()):
             synced = self._sync_entry_from_pool_store(entry)
+            if synced.last_status == STATUS_DEAD or not synced.refresh_token:
+                return None
             if self.provider == "openai-codex":
                 synced = self._sync_entry_from_auth_store(synced)
                 if synced is not entry and not self._entry_needs_refresh(synced):

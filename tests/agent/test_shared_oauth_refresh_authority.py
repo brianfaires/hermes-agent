@@ -147,5 +147,54 @@ def test_terminal_borrowed_pool_failure_cannot_resurrect_through_singleton(tmp_p
         reset_hermes_home_override(token)
 
 
+@pytest.mark.parametrize('provider', ['openai-codex', 'xai-oauth'])
+def test_preloaded_peer_cannot_restore_quarantined_generation(tmp_path, monkeypatch, provider):
+    from agent import credential_pool as cp
+    from hermes_cli import auth
+    root = tmp_path / 'authority'
+    for name in ('a', 'b'):
+        home = root / 'profiles' / name
+        home.mkdir(parents=True)
+        (home / 'auth.json').write_text('{}')
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('HERMES_HOME', str(root))
+    (root / 'auth.json').write_text(json.dumps({'credential_pool': {provider: [
+        {'id':'shared','source':'manual:device_code','auth_type':'oauth',
+         'access_token':'fixture-stale-at','refresh_token':'fixture-stale-rt'}]}}))
+    pools = []
+    for name in ('a', 'b'):
+        token = set_hermes_home_override(root / 'profiles' / name)
+        try:
+            pools.append(cp.load_pool(provider))
+        finally:
+            reset_hermes_home_override(token)
+
+    def reject(*args, **kwargs):
+        code = 'codex_refresh_failed' if provider == 'openai-codex' else 'xai_refresh_failed'
+        raise auth.AuthError('synthetic revoked grant', provider=provider, code=code, relogin_required=True)
+
+    monkeypatch.setattr(auth, cp._TOKENS_SINGLETON_PROVIDERS[provider][2], reject)
+    token = set_hermes_home_override(root / 'profiles' / 'a')
+    try:
+        assert pools[0]._refresh_entry(pools[0].entries()[0], force=True) is None
+    finally:
+        reset_hermes_home_override(token)
+    calls = []
+
+    def transient(*args, **kwargs):
+        calls.append(True)
+        raise TimeoutError('synthetic transient endpoint failure')
+
+    monkeypatch.setattr(auth, cp._TOKENS_SINGLETON_PROVIDERS[provider][2], transient)
+    token = set_hermes_home_override(root / 'profiles' / 'b')
+    try:
+        assert pools[1]._refresh_entry(pools[1].entries()[0], force=True) is None
+    finally:
+        reset_hermes_home_override(token)
+    assert calls == [], 'a peer must adopt the terminal owner state before contacting the provider'
+    row = json.loads((root / 'auth.json').read_text())['credential_pool'][provider][0]
+    assert row['last_status'] == 'dead' and not row.get('access_token') and not row.get('refresh_token')
+
+
 if __name__ == '__main__':
     _refresh_worker(*sys.argv[1:])
