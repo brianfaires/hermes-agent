@@ -1780,7 +1780,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 return None
         elif self.provider in _TOKENS_SINGLETON_PROVIDERS:
             _, display, _, terminal_fn_name = _TOKENS_SINGLETON_PROVIDERS[self.provider]
-            synced = self._sync_entry_from_auth_store(entry)
+            synced = self._sync_entry_from_pool_store(entry)
+            synced = self._sync_entry_from_auth_store(synced)
             if synced.refresh_token != entry.refresh_token:
                 logger.debug("%s OAuth refresh failed but auth.json has newer tokens — adopting", display)
                 return self._adopt(synced, **_MARK_OK)
@@ -1852,31 +1853,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             )
 
     def _clear_terminal_tokens_state(self, entry: PooledCredential, exc: Exception) -> None:
-        """Drop the dead Codex/xAI token pair from auth.json unless a peer already rotated it."""
-        display = _TOKENS_SINGLETON_PROVIDERS[self.provider][1]
-        try:
-            with _auth_store_lock():
-                auth_store = _load_auth_store()
-                state = _load_provider_state(auth_store, self.provider) or {}
-                tokens = (state.get("tokens") or {}) if isinstance(state, dict) else None
-                if isinstance(tokens, dict):
-                    store_refresh = str(tokens.get("refresh_token") or "").strip()
-                    if not store_refresh or store_refresh == str(entry.refresh_token or "").strip():
-                        tokens.pop("access_token", None)
-                        tokens.pop("refresh_token", None)
-                        state["tokens"] = tokens
-                        state["last_auth_error"] = {
-                            "provider": self.provider,
-                            "code": getattr(exc, "code", "unknown"),
-                            "message": str(exc),
-                            "reason": "credential_pool_refresh_failure",
-                            "relogin_required": True,
-                            "at": datetime.now(UTC).isoformat(),
-                        }
-                        _save_provider_state(auth_store, self.provider, state)
-                        _save_auth_store(auth_store)
-        except Exception as clear_exc:
-            logger.debug("Failed to clear terminal %s OAuth state: %s", display, clear_exc)
+        """Quarantine the exact Codex/xAI generation at its durable owner."""
+        from agent.credential_pool_oauth_authority import quarantine_pool_grant
+        quarantine_pool_grant(self, entry, exc)
 
     def _clear_terminal_nous_state(self, entry: PooledCredential, exc: Exception) -> None:
         try:

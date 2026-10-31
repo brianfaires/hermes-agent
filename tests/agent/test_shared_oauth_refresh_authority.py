@@ -102,5 +102,50 @@ def test_distinct_profile_processes_redeem_shared_grant_once(tmp_path, provider)
         assert not json.loads((root / 'profiles' / name / 'auth.json').read_text()).get('credential_pool', {}).get(provider)
 
 
+@pytest.mark.parametrize('provider', ['openai-codex', 'xai-oauth'])
+@pytest.mark.parametrize('has_other', [False, True])
+def test_terminal_borrowed_pool_failure_cannot_resurrect_through_singleton(tmp_path, monkeypatch, provider, has_other):
+    from agent import credential_pool as cp
+    from hermes_cli import auth
+    root = tmp_path / 'authority'
+    profile = root / 'profiles' / 'worker'
+    profile.mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('HERMES_HOME', str(root))
+    (profile / 'auth.json').write_text('{}')
+    rows = [
+        {'id':'shared','source':'manual:device_code','auth_type':'oauth',
+         'access_token':'fixture-revoked-at','refresh_token':'fixture-revoked-rt'}]
+    if has_other:
+        rows.append({'id':'independent','source':'manual:device_code','auth_type':'oauth','priority':1,
+                     'access_token':'fixture-healthy-at','refresh_token':'fixture-healthy-rt'})
+    (root / 'auth.json').write_text(json.dumps({'credential_pool': {provider: rows}}))
+
+    def reject(*args, **kwargs):
+        code = 'codex_refresh_failed' if provider == 'openai-codex' else 'xai_refresh_failed'
+        raise auth.AuthError('synthetic invalid_grant', provider=provider, code=code, relogin_required=True)
+
+    monkeypatch.setattr(auth, cp._TOKENS_SINGLETON_PROVIDERS[provider][2], reject)
+    token = set_hermes_home_override(profile)
+    try:
+        pool = cp.load_pool(provider)
+        assert pool._refresh_entry(pool.entries()[0], force=True) is None
+        assert not json.loads((profile / 'auth.json').read_text()).get('providers', {}).get(provider)
+        row = json.loads((root / 'auth.json').read_text())['credential_pool'][provider][0]
+        assert not row.get('access_token') and not row.get('refresh_token')
+        assert row['last_status'] == 'dead'
+        # Both the active pool and a new singleton resolver must reject the quarantined grant.
+        resolver = auth.resolve_codex_runtime_credentials if provider == 'openai-codex' else auth.resolve_xai_oauth_runtime_credentials
+        if has_other:
+            assert pool.peek().access_token == 'fixture-healthy-at'
+            assert resolver(refresh_if_expiring=False)['api_key'] == 'fixture-healthy-at'
+        else:
+            assert not pool.peek()
+            with pytest.raises(auth.AuthError):
+                resolver(refresh_if_expiring=False)
+    finally:
+        reset_hermes_home_override(token)
+
+
 if __name__ == '__main__':
     _refresh_worker(*sys.argv[1:])
