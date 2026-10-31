@@ -155,7 +155,7 @@ def _save_xai_oauth_tokens(
     Pass ``set_active=False`` for side-tool bootstrap (TTS/setup, tools config, dashboard, refresh)
     so inference routing is unchanged.
     """
-    from hermes_cli.auth import _auth_store_lock, _global_auth_file_path, _load_auth_store, _same_path, _save_auth_store, _store_provider_state, _utc_now_z, _write_through_xai_oauth_to_global_root
+    from hermes_cli.auth import _auth_store_lock, _global_auth_file_path, _load_auth_store, _load_provider_state_with_source, _same_path, _save_auth_store, _store_provider_state, _utc_now_z, _write_through_xai_oauth_to_global_root
     if last_refresh is None:
         last_refresh = _utc_now_z()
     with _auth_store_lock():
@@ -163,7 +163,7 @@ def _save_xai_oauth_tokens(
         # A profile lacking its own xai-oauth block reads root's grant via fallback; refreshing it
         # must write the rotated chain back to root or root keeps a revoked refresh token. Decide by
         # where the grant was resolved FROM (key presence lies: _store_provider_state creates it).
-        state, source_path = _xai_oauth_state_with_source(auth_store)
+        state, source_path = _load_provider_state_with_source(auth_store, "xai-oauth")
         state = state if state is not None else {}
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode=auth_mode)
         if discovery:
@@ -372,6 +372,44 @@ def refresh_xai_oauth_pure(
     return {**_xai_tokens_from_payload(payload, refreshed_access, refresh_token), "last_refresh": _utc_now_z()}
 
 
+def _write_xai_generation(state, source, previous_tokens, tokens, *, error=None):
+    """Update only the source's exact grant generation, including its pool-backed representation."""
+    from hermes_cli.auth import _load_auth_store, _save_auth_store, _store_provider_state
+    store = _load_auth_store(source)
+    previous_rt = _clean(previous_tokens.get("refresh_token"))
+    providers = store.get("providers")
+    block = providers.get("xai-oauth") if isinstance(providers, dict) else None
+    changed = False
+    if previous_rt and _token_pair((block or {}).get("tokens"))[1] == previous_rt:
+        updated = {**state, "tokens": tokens}
+        if error:
+            updated["last_auth_error"] = error
+        else:
+            updated.pop("last_auth_error", None)
+        _store_provider_state(store, "xai-oauth", updated, set_active=False)
+        changed = True
+    pool = store.get("credential_pool")
+    rows = pool.get("xai-oauth") if isinstance(pool, dict) else None
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict):
+            continue
+        if not previous_rt or _clean(row.get("refresh_token")) != previous_rt:
+            continue
+        if error:
+            row.pop("access_token", None)
+            row.pop("refresh_token", None)
+            row.update(last_status="dead", last_status_at=time.time(),
+                       last_error_code=error["code"], last_error_reason=error["code"],
+                       last_error_message=error["message"])
+        else:
+            row.update(tokens)
+            row["last_refresh"] = state["last_refresh"]
+        changed = True
+    if not changed:
+        raise _xai_err("xAI grant generation changed before persistence.", "xai_generation_changed")
+    _save_auth_store(store, target_path=source)
+
+
 def _refresh_xai_oauth_tokens(
     tokens: dict[str, Any], *, token_endpoint: str, redirect_uri: str = "", timeout_seconds: float
 ) -> dict[str, Any]:
@@ -396,30 +434,28 @@ def _refresh_xai_oauth_tokens(
             updated_tokens["expires_in"] = refreshed["expires_in"]
         if refreshed.get("token_type"):
             updated_tokens["token_type"] = refreshed["token_type"]
-        # set_active=False: side tools (TTS) refresh xAI tokens while chat routes elsewhere.
-        _save_xai_oauth_tokens(
-            updated_tokens, discovery={"token_endpoint": token_endpoint}, redirect_uri=redirect_uri,
-            last_refresh=refreshed["last_refresh"], auth_mode=auth_mode, set_active=False,
-        )
+        updated_state = {**(state or {}), "last_refresh": refreshed["last_refresh"],
+                         "auth_mode": auth_mode, "discovery": {"token_endpoint": token_endpoint}}
+        if redirect_uri:
+            updated_state["redirect_uri"] = redirect_uri
+        _write_xai_generation(updated_state, _source, tokens, updated_tokens)
         return updated_tokens
 
 
 def _quarantine_xai_oauth_tokens(exc: AuthError, *, observed_refresh_token: Optional[str] = None) -> None:
     """Quarantine the failed generation at its source, preserving a peer's newer grant."""
-    from hermes_cli.auth import _last_auth_error_marker, _load_auth_store, _save_provider_state_to_source
+    from hermes_cli.auth import _last_auth_error_marker
     try:
         with _xai_refresh_transaction(float(AUTH_LOCK_TIMEOUT_SECONDS)) as (state, source):
             state = dict(state or {})
             tokens = dict(state.get("tokens") or {})
             if observed_refresh_token and tokens.get("refresh_token") != observed_refresh_token:
                 return
-            tokens.pop("access_token", None)
-            tokens.pop("refresh_token", None)
-            state["tokens"] = tokens
-            state["last_auth_error"] = _last_auth_error_marker(
+            error = _last_auth_error_marker(
                 "xai-oauth", exc, reason="runtime_refresh_failure", default_code="xai_refresh_failed",
             )
-            _save_provider_state_to_source(_load_auth_store(), "xai-oauth", state, source)
+            metadata = {key: value for key, value in tokens.items() if key not in ("access_token", "refresh_token")}
+            _write_xai_generation(state, source, tokens, metadata, error=error)
     except Exception as save_exc:
         logger.debug("xAI OAuth: failed to persist quarantined state: %s", save_exc)
 
