@@ -103,3 +103,23 @@ def test_verified_recovery_and_delivery_settlement_keep_the_final_native_facts(t
         assert receipt['final_response'] == 'Verified final answer'
         assert executions.recover_receipted_execution(
             row['id'], 'recovered-job', success=False, final_response='late overwrite') is None
+
+
+def test_terminal_result_retained_on_pre_default_snapshot_schema(tmp_path, monkeypatch):
+    """#175: tables created before ``snapshot`` had ``DEFAULT '{}'`` must still retain results."""
+    import sqlite3
+
+    from cron.execution_results import iter_execution_results
+
+    db = tmp_path / "executions.db"
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", db)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE execution_results (execution_id TEXT PRIMARY KEY, "
+                 "snapshot TEXT NOT NULL, terminal_record TEXT)")
+    conn.commit()
+    conn.close()
+    row = executions.create_execution("old-schema", source="fixture")
+    assert executions.mark_execution_running(row["id"])
+    assert executions.finish_execution(row["id"], success=True, final_response="Kept")
+    results = list(iter_execution_results())
+    assert [r["final_response"] for r in results] == ["Kept"]

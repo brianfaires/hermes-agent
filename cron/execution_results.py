@@ -38,7 +38,10 @@ def retain_terminal_result(conn, record, *, final_response=None):
     """Called inside the existing status transaction, after its owner-fenced CAS."""
     if record is None:
         return
-    conn.execute('INSERT OR IGNORE INTO execution_results (execution_id) VALUES (?)', (record['id'],))
+    # Databases created before ``snapshot`` gained its default reject a row without one, and
+    # OR IGNORE would swallow that NOT NULL failure too: supply it and ignore only the key conflict.
+    conn.execute("INSERT INTO execution_results (execution_id, snapshot) VALUES (?, '{}') "
+                 'ON CONFLICT(execution_id) DO NOTHING', (record['id'],))
     prior = conn.execute('SELECT terminal_record FROM execution_results WHERE execution_id=?',
                          (record['id'],)).fetchone()['terminal_record']
     # Native verified receipt recovery may settle an earlier uncertain audit outcome.
