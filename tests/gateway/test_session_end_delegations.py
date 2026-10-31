@@ -357,3 +357,30 @@ async def test_other_local_automation_is_unchanged(tmp_path, monkeypatch):
         assert not [m for m in authority.db.get_messages(target) if 'TICK' in str(m.get('content'))]
     finally:
         authority.db.close()
+
+
+@pytest.mark.asyncio
+async def test_kanban_wake_rebuilt_local_source_enters_the_owner_fifo(tmp_path, monkeypatch):
+    """A notifier rebuilds its source from the subscription; it has no original source object."""
+    from gateway.session import SessionSource
+    from gateway.wake import deliver_wake
+
+    runner, authority, ref, _actor = await _local(tmp_path, monkeypatch)
+    try:
+        live = authority.sessions[ref.session_id]
+        adapter = runner._adapter_for_source(live.source)
+        subscriber_source = SessionSource(
+            platform=live.source.platform, chat_id=live.source.chat_id,
+            user_id=live.source.user_id, chat_type=live.source.chat_type,
+            profile=live.source.profile,
+        )
+        await deliver_wake(adapter, text='Kanban child completed', source=subscriber_source)
+
+        assert [row['status'] for row in _admissions(authority, ref)] == ['queued']
+        assert not live.subscribers
+        seen = _record_turns(runner)
+        await authority._drain(ref)
+        assert seen == ['Kanban child completed']
+        assert [row['outcome'] for row in _admissions(authority, ref)] == ['completed']
+    finally:
+        authority.db.close()
