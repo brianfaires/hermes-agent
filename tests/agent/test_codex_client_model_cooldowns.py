@@ -43,11 +43,12 @@ def _seed_pool(cooled_model):
 
 
 @pytest.mark.parametrize("raw_codex", [True, False], ids=["main", "auxiliary"])
-def test_other_model_cooldown_does_not_hide_codex_credentials(profile, raw_codex):
+@pytest.mark.parametrize("requested_model", [MODEL, f"openai/{MODEL}", f" {MODEL} "])
+def test_other_model_cooldown_does_not_hide_codex_credentials(profile, raw_codex, requested_model):
     from agent.auxiliary_client import resolve_provider_client
 
     _seed_pool(OTHER_MODEL)
-    client, model = resolve_provider_client("openai-codex", MODEL, raw_codex=raw_codex)
+    client, model = resolve_provider_client("openai-codex", requested_model, raw_codex=raw_codex)
     assert client is not None, "an unrelated model's cooldown must not prevent client construction"
     try:
         assert model == MODEL
@@ -58,10 +59,11 @@ def test_other_model_cooldown_does_not_hide_codex_credentials(profile, raw_codex
 
 
 @pytest.mark.parametrize("raw_codex", [True, False], ids=["main", "auxiliary"])
-def test_requested_model_cooldown_still_blocks_codex_client(profile, raw_codex):
+@pytest.mark.parametrize("requested_model", [MODEL, f"openai/{MODEL}", f" {MODEL} "])
+def test_requested_model_cooldown_still_blocks_codex_client(profile, raw_codex, requested_model):
     from agent.auxiliary_client import resolve_provider_client
 
     _seed_pool(MODEL)
-    client, model = resolve_provider_client("openai-codex", MODEL, raw_codex=raw_codex)
+    client, model = resolve_provider_client("openai-codex", requested_model, raw_codex=raw_codex)
     assert client is None
     assert model is None
