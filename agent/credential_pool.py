@@ -1284,7 +1284,12 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 return entry
             # Same base policy as _persist/load_pool: a token-less disk row is a known
             # (blank) generation, recorded before the no-token-material bail-out below.
-            self._persisted_token_pairs[entry.id] = auth_mod._credential_token_pair(persisted)
+            pair = auth_mod._credential_token_pair(persisted)
+            base = self._persisted_token_pairs.get(entry.id)
+            if self.provider == "openai-codex" and any(pair) and base is not None and pair == base and pair != (entry.access_token, entry.refresh_token):
+                # Our refresh may have succeeded before its save failed; unchanged disk is older.
+                return entry
+            self._persisted_token_pairs[entry.id] = pair
             stored = PooledCredential.from_dict(self.provider, persisted)
             # A tokenless DEAD row is authoritative quarantine, not an unhydrated reference.
             if not is_xai and stored.last_status != STATUS_DEAD and not (stored.access_token or "").strip() and not (stored.refresh_token or "").strip():
@@ -1497,40 +1502,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         if self.provider not in _SINGLE_USE_REFRESH_PROVIDERS and plugin_refresh_hook(self.provider) is None:
             return self._refresh_entry_impl(entry, force=force)
 
-        # Single-use refresh tokens: sync -> POST -> write-back must be atomic
-        # across Hermes processes, or two processes adopt the same on-disk
-        # token, both POST it, and the loser gets ``refresh_token_reused`` /
-        # ``invalid_grant`` (for Anthropic sources other than claude_code
-        # there was no recovery path at all). Serialize through the shared
-        # cross-process auth-store flock; a waiter's in-lock re-sync picks up
-        # the winner's rotated token and skips the POST.
-        from agent.credential_pool_oauth_authority import pool_refresh_transaction
-        with pool_refresh_transaction(self.provider, self._single_use_refresh_lock_timeout()):
-            synced = self._sync_entry_from_pool_store(entry)
-            if synced.last_status == STATUS_DEAD or not synced.refresh_token:
-                return None
-            if self.provider == "openai-codex":
-                synced = self._sync_entry_from_auth_store(synced)
-                if synced is not entry and not self._entry_needs_refresh(synced):
-                    return synced
-                return self._refresh_entry_impl(synced, force=force)
-            if self.provider == "anthropic" and synced.source == "claude_code":
-                # claude_code refresh tokens live in one shared credentials file (or Keychain)
-                # every profile reads. The profile-scoped lock above only covers
-                # THIS profile's auth.json, so take the dedicated shared-file
-                # lock (inner, per the ordering invariant on ``_auth_store_lock``)
-                # and re-read that authoritative file before any
-                # adopt-and-return shortcut fires. The official ``claude`` CLI
-                # rotating out-of-band is handled by the sync-and-retry-once
-                # fallback in ``_recover_failed_refresh``.
-                with self._claude_code_credentials_lock():
-                    synced = self._sync_anthropic_entry_from_credentials_file(synced)
-                    if synced.refresh_token != entry.refresh_token:
-                        return synced
-                    return self._refresh_entry_impl(synced, force=force)
-            if synced.access_token != entry.access_token or synced.refresh_token != entry.refresh_token:
-                return synced
-            return self._refresh_entry_impl(synced, force=force)
+        from agent.credential_pool_oauth_authority import refresh_pool_entry
+        return refresh_pool_entry(self, entry, force=force)
 
     def _claude_code_credentials_lock(self):
         """Cross-process lock keyed to the shared claude_code credentials file.
@@ -1676,7 +1649,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             last_refresh=refreshed.get("last_refresh"),
         )
 
-    def _refresh_entry_impl(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
+    def _refresh_entry_impl(self, entry: PooledCredential, *, force: bool, defer_terminal: bool = False) -> Optional[PooledCredential]:
         # Single-use-token providers adopt fresher tokens from their store
         # BEFORE spending the refresh_token; ``entry`` is rebound to the synced
         # row so the failure path below recovers against the pair we POSTed.
@@ -1684,7 +1657,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if self.provider == "anthropic":
                 updated = self._refresh_anthropic(entry)
             elif self.provider in _TOKENS_SINGLETON_PROVIDERS:
-                entry = self._sync_entry_from_auth_store(entry)
+                if self.provider != "openai-codex":
+                    entry = self._sync_entry_from_auth_store(entry)
                 updated = self._post_tokens_refresh(entry)
             elif (plugin_refresh := plugin_refresh_hook(self.provider)) is not None:
                 rotated = plugin_refresh(entry)
@@ -1711,7 +1685,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             return done.result
         except Exception as exc:
             logger.debug("Credential refresh failed for %s/%s: %s", self.provider, entry.id, exc)
-            return self._recover_failed_refresh(entry, exc)
+            return self._recover_failed_refresh(entry, exc, defer_terminal=defer_terminal)
 
         updated = replace(updated, **_MARK_OK)
         self._replace_entry(entry, updated)
@@ -1724,7 +1698,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         self._sync_device_code_entry_to_auth_store(updated)
         return updated
 
-    def _recover_failed_refresh(self, entry: PooledCredential, exc: Exception) -> Optional[PooledCredential]:
+    def _recover_failed_refresh(self, entry: PooledCredential, exc: Exception, *, defer_terminal: bool = False) -> Optional[PooledCredential]:
         """After a failed refresh POST: adopt a peer's rotation, quarantine a dead grant, or bench.
 
         Another process may have consumed the refresh token between our
@@ -1780,26 +1754,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 self._mark_dead_refresh_grant(entry, exc)
                 return None
         elif self.provider in _TOKENS_SINGLETON_PROVIDERS:
-            _, display, _, terminal_fn_name = _TOKENS_SINGLETON_PROVIDERS[self.provider]
-            synced = self._sync_entry_from_pool_store(entry)
-            synced = self._sync_entry_from_auth_store(synced)
-            if synced.refresh_token != entry.refresh_token:
-                logger.debug("%s OAuth refresh failed but auth.json has newer tokens — adopting", display)
-                return self._adopt(synced, **_MARK_OK)
-            # Terminal error with no newer tokens: the stored refresh_token is
-            # dead. Clear it from auth.json so the next session does not
-            # re-seed the revoked credentials, and drop singleton-seeded
-            # entries from the pool (mirrors the Nous quarantine path).
-            if getattr(auth_mod, terminal_fn_name)(exc):
-                # WARNING, not debug: this is the moment a login is lost. At the default log level a
-                # silent quarantine looked like "I logged in once and Hermes keeps failing" (#113023).
-                logger.warning(
-                    "%s OAuth refresh token is terminally invalid (%s); clearing local token state. "
-                    "Re-run 'hermes auth add %s' to sign in again.", display, exc, self.provider)
-                self._clear_terminal_tokens_state(entry, exc)
-                self._quarantine_sources(entry, {"device_code"})
-                self._mark_dead_refresh_grant(entry, exc)
-                return None
+            from agent.credential_pool_oauth_authority import recover_tokens_refresh
+            return recover_tokens_refresh(self, entry, exc, defer_terminal=defer_terminal)
         elif self.provider == "nous":
             synced = self._sync_nous_entry_from_auth_store(entry)
             if synced.refresh_token != entry.refresh_token:

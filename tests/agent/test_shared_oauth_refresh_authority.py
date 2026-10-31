@@ -1,4 +1,5 @@
 """A borrowed rotating pool grant must be locked at its actual owner during redemption."""
+import base64
 import json
 import os
 import subprocess
@@ -45,7 +46,12 @@ def test_pool_refresh_locks_owning_store_during_redemption(tmp_path, monkeypatch
     assert not json.loads((profile / "auth.json").read_text()).get("credential_pool", {}).get(provider)
 
 
-def _refresh_worker(root, provider, name):
+def _jwt(exp):
+    payload = base64.urlsafe_b64encode(json.dumps({'exp': exp}).encode()).decode().rstrip('=')
+    return f'eyJhbGciOiJub25lIn0.{payload}.fixture'
+
+
+def _refresh_worker(root, provider, name, refresh_kind):
     from agent import credential_pool as cp
     from hermes_cli import auth
     from tests.waiting import wait_until
@@ -60,7 +66,7 @@ def _refresh_worker(root, provider, name):
             state.append({'presented': refresh_token,
                           'owner_locked': getattr(auth._auth_lock_holder_for(root / 'auth.json'), 'depth', 0) > 0})
             server.write_text(json.dumps(state))
-        return {'access_token':'fixture-peer-access','refresh_token':'fixture-peer-refresh',
+        return {'access_token':_jwt(4102444800),'refresh_token':'fixture-peer-refresh',
                 'last_refresh':'2026-10-31T00:00:00Z'}
 
     setattr(auth, cp._TOKENS_SINGLETON_PROVIDERS[provider][2], endpoint)
@@ -68,12 +74,13 @@ def _refresh_worker(root, provider, name):
     stale = pool.entries()[0]
     (root / (name + '.ready')).write_text('ready')
     assert wait_until(lambda: all((root / (n + '.ready')).exists() for n in ('a', 'b')), timeout=20)
-    result = pool._refresh_entry(stale, force=True)
+    result = pool.select() if refresh_kind == 'selection' else pool._refresh_entry(stale, force=True)
     assert result is not None and result.refresh_token == 'fixture-peer-refresh'
 
 
 @pytest.mark.parametrize('provider', ['openai-codex', 'xai-oauth'])
-def test_distinct_profile_processes_redeem_shared_grant_once(tmp_path, provider):
+@pytest.mark.parametrize('refresh_kind', ['selection', 'forced'])
+def test_distinct_profile_processes_redeem_shared_grant_once(tmp_path, provider, refresh_kind):
     root = tmp_path / 'authority'
     for name in ('a', 'b'):
         home = root / 'profiles' / name
@@ -82,10 +89,10 @@ def test_distinct_profile_processes_redeem_shared_grant_once(tmp_path, provider)
         (home / 'config.yaml').write_text(json.dumps({'auth': {'adopt_external_logins': False}}))
     (root / 'auth.json').write_text(json.dumps({'credential_pool': {provider: [
         {'id':'shared','source':'manual:device_code','auth_type':'oauth','priority':0,
-         'access_token':'fixture-old-access','refresh_token':'fixture-old-refresh'}]}}))
+         'access_token':_jwt(1),'refresh_token':'fixture-old-refresh'}]}}))
     (root / 'fake-server.json').write_text('[]')
     workers = [subprocess.Popen([sys.executable, '-m', 'tests.agent.test_shared_oauth_refresh_authority',
-                                 str(root), provider, name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                 str(root), provider, name, refresh_kind], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                for name in ('a', 'b')]
     try:
         for process in workers:

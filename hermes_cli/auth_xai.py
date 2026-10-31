@@ -148,12 +148,13 @@ def _write_through_xai_oauth_to_global_root(state: dict[str, Any]) -> None:
 def _save_xai_oauth_tokens(
     tokens: dict[str, Any], *, discovery: Optional[dict[str, Any]] = None, redirect_uri: str = "",
     last_refresh: Optional[str] = None, auth_mode: str = "oauth_device_code",
-    set_active: bool = True,
+    set_active: bool = True, write_through: bool = False,
 ) -> None:
     """Persist xAI OAuth tokens; *set_active* also promotes ``xai-oauth`` to ``active_provider``.
 
     Pass ``set_active=False`` for side-tool bootstrap (TTS/setup, tools config, dashboard, refresh)
-    so inference routing is unchanged.
+    so inference routing is unchanged. Fresh logins belong to the active profile;
+    only an explicit refresh write-through may replace a borrowed root grant.
     """
     from hermes_cli.auth import _auth_store_lock, _global_auth_file_path, _load_auth_store, _load_provider_state_with_source, _same_path, _save_auth_store, _store_provider_state, _utc_now_z, _write_through_xai_oauth_to_global_root
     if last_refresh is None:
@@ -171,7 +172,7 @@ def _save_xai_oauth_tokens(
         if redirect_uri:
             state["redirect_uri"] = redirect_uri
         global_root = _global_auth_file_path()
-        if source_path is not None and global_root is not None and _same_path(source_path, global_root):
+        if write_through and source_path is not None and global_root is not None and _same_path(source_path, global_root):
             # Root-only write-back: a profile copy would shadow root and disable write-through.
             _write_through_xai_oauth_to_global_root(state)
         else:
