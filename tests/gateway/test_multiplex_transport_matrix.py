@@ -162,8 +162,8 @@ def test_inferred_primary_transport_does_not_hide_a_secondary_local_session_poli
     from gateway.session_policy import policy_for_source
 
     runner = mux.runner
-    primary_authority = SimpleNamespace(sessions={})
-    secondary_authority = SimpleNamespace(sessions={})
+    primary_authority = SimpleNamespace(runner=runner, sessions={})
+    secondary_authority = SimpleNamespace(runner=runner, sessions={})
     primary_adapter = LocalSessionAdapter(primary_authority)
     secondary_adapter = LocalSessionAdapter(secondary_authority)
     runner.adapters[Platform.LOCAL] = primary_adapter
