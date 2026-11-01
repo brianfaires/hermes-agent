@@ -9,16 +9,18 @@ _BUDGET_KEY = "skills_prompt_description_limit"
 
 
 def session_description_limit(agent: Any, home: Path | None) -> int | None:
-    """Use native session model_config persistence rather than rereading config on compression."""
+    """Resolve once at initialization; prompt rebuilds perform no database operations."""
+    if "_skills_prompt_description_limit" in vars(agent):
+        return agent._skills_prompt_description_limit
     config = getattr(agent, "_session_init_model_config", None)
     if not isinstance(config, dict):
         config = agent._session_init_model_config = {}
-    if _BUDGET_KEY in config:
-        return coerce_prompt_description_limit(config[_BUDGET_KEY])
-
     db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", None)
-    stored = db.get_session_model_config_value(session_id, _BUDGET_KEY) if db and session_id else None
+    read = getattr(db, "get_session_model_config_value", None)
+    stored = config.get(_BUDGET_KEY)
+    if stored is None and callable(read) and session_id:
+        stored = read(session_id, _BUDGET_KEY)
     if stored is None:
         token = set_hermes_home_override(home) if home is not None else None
         try:
@@ -26,15 +28,19 @@ def session_description_limit(agent: Any, home: Path | None) -> int | None:
         finally:
             if token is not None:
                 reset_hermes_home_override(token)
-        # Pre-feature sessions with a stored prompt used the old 60-character budget.
-        if db and session_id and (db.get_session(session_id) or {}).get("system_prompt"):
+        # Stored pre-feature prompts have the implicit default; keep it implicit
+        # so ordinary compression never rewrites unrelated model_config state.
+        if callable(read) and session_id and (db.get_session(session_id) or {}).get("system_prompt"):
             limit = SKILL_PROMPT_DESC_LIMIT
         stored = "full" if limit is None else limit
-        if db and session_id:
+        if limit != SKILL_PROMPT_DESC_LIMIT and callable(read) and session_id:
             written = db.update_conversation_model_config_value(
                 session_id, _BUDGET_KEY, lambda current: stored if current is None else current,
             )
             if written:
-                stored = db.get_session_model_config_value(written, _BUDGET_KEY)
-    config[_BUDGET_KEY] = stored
-    return coerce_prompt_description_limit(stored)
+                stored = read(written, _BUDGET_KEY)
+    resolved = coerce_prompt_description_limit(stored)
+    if resolved != SKILL_PROMPT_DESC_LIMIT:
+        config[_BUDGET_KEY] = stored
+    agent._skills_prompt_description_limit = resolved
+    return resolved

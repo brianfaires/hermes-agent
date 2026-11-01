@@ -60,3 +60,28 @@ def test_stored_legacy_prompt_retains_default_budget(tmp_path):
         prompt = _skills_prompt(_agent(db, "legacy"))
         assert DESC[:57] + "..." in prompt
         assert "flag retractions" not in prompt
+
+
+def test_native_agent_pins_own_profile_before_prompt_rebuild(tmp_path, monkeypatch):
+    ambient, owner = tmp_path / "ambient", tmp_path / "owner"
+    ambient.mkdir()
+    skill = owner / "skills/evidence"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(f'---\nname: evidence\ndescription: "{DESC}"\n---\nBody.\n')
+    (owner / "config.yaml").write_text("skills:\n  prompt_description_limit: full\n")
+    monkeypatch.setenv("HERMES_HOME", str(ambient))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    from run_agent import AIAgent
+    with SessionDB(db_path=owner / "state.db") as db:
+        db.create_session("native", source="cli")
+        agent = AIAgent(api_key="fixture", base_url="https://openrouter.ai/api/v1", model="test/model",
+                        session_db=db, session_id="native", quiet_mode=True, skip_context_files=True, skip_memory=True)
+        try:
+            assert db.get_session_model_config_value("native", "skills_prompt_description_limit") == "full"
+            (owner / "config.yaml").write_text("skills:\n  prompt_description_limit: 60\n")
+            def failed_read(*_args):
+                raise AssertionError("prompt rebuild must not access session storage")
+            monkeypatch.setattr(db, "get_session", failed_read)
+            assert "flag retractions" in _skills_prompt(agent)
+        finally:
+            agent.close()
