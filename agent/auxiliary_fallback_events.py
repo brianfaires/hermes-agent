@@ -51,7 +51,8 @@ def emit_auxiliary_fallback(old_provider, old_model, provider, model, *, task, r
         )
         thread.start()
     except Exception as exc:
-        logging.getLogger(__name__).warning('Auxiliary fallback observer dispatch failed (%s)', type(exc).__name__)
+        logging.getLogger(__name__).warning('Auxiliary fallback observer dispatch failed (%s)', type(exc).__name__,
+                                            exc_info=True)
 
 
 _SUMMARY_FALLBACK = ContextVar('summary_fallback_activation', default=None)

@@ -244,7 +244,7 @@ def test_unusable_pinned_summary_does_not_report_proposed_route(routes):
 def test_slow_observer_does_not_delay_configured_fallback_request(routes):
     import threading
     from agent.memory_provider import spawn_context_thread
-    events, requests, _, _ = routes
+    _events, requests, _, _ = routes
     observer = get_plugin_manager()._plugins['probe'].module
     observer.gate, observer.entered = threading.Event(), threading.Event()
     finished = threading.Event()
