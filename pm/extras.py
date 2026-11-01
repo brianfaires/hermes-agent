@@ -51,6 +51,7 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "modal": "modal",
     "daytona": "daytona",
     "vercel": "vercel",
+    "scripts": "yaml",
     "google": ("googleapiclient", "google.auth", "google_auth_oauthlib.flow", "google_auth_httplib2"),
     "google-chat": "google.cloud.pubsub_v1",
     "google-meet": ("playwright.sync_api", "websockets"),
