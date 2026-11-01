@@ -81,6 +81,7 @@ def test_real_aiagent_freezes_section_within_life_and_rerenders_on_invalidate(mo
     assert "rules render 2" in rebuilt
     assert "rules render 1" not in rebuilt
     assert calls[0]["session_id"] == agent.session_id
+    assert calls[0]["skip_context_files"] is True
     assert calls[1]["session_id"] == agent.session_id
     assert "## Plugin Context: example.rules" in rebuilt
     assert rebuilt.index("## Plugin Context: example.rules") < rebuilt.index("Conversation started:")

@@ -413,7 +413,7 @@ def register(ctx):
         "kanban-advanced.worker-rules",
         board_rules,                       # a string is also accepted
         position="after_memory",
-        max_chars=4000,
+        max_chars=10000,
     )
 ```
 
@@ -425,12 +425,14 @@ The contract is deliberately narrow:
   rendered after memory/profile context and before session metadata; plugins
   cannot reorder or replace core prompt content.
 - A callable receives a read-only mapping with `session_id`, `model`,
-  `provider`, `platform`, `profile_name`, and `cwd`. It runs **once for a new
-  session**. Its rendered bytes are frozen on compression and recovered from
-  the already-persisted full system prompt after a process restart/resume;
-  plugin state is not re-read for an existing session.
-- `max_chars` is capped at 4,000 characters. All plugin sections together,
-  including their audit headings, are capped at 8,000 characters and 32
+  `provider`, `platform`, `profile_name`, `cwd`, and the boolean `skip_context_files`.
+  When that flag is true, native project context is disabled, so plugins must
+  retain required policy rather than deduplicate it against those files.
+  It runs **once for a new session**. Rendered bytes remain fixed within the
+  conversation and are recovered from the persisted full prompt on restart/resume;
+  compression is the supported rebuild boundary.
+- `max_chars` defaults to and is capped at 10,000 characters. All plugin sections together,
+  including their audit headings, are capped at 20,000 characters and 32
   sections. Empty, non-string, oversized, aggregate-over-budget, or raising
   sections are skipped with a warning; prompt construction continues.
 - Every accepted section is named in the prompt and logged at session start

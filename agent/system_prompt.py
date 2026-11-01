@@ -83,14 +83,15 @@ def _tui_embedded_pane_clarifier(hint: str) -> str:
     return hint + _TUI_EMBEDDED_PANE_CLARIFIER
 
 
-def _plugin_session_info(agent: Any) -> dict[str, str]:
+def _plugin_session_info(agent: Any) -> dict[str, Any]:
     """Return immutable-at-render-time metadata exposed to prompt sections."""
     try:
         cwd = str(resolve_context_cwd() or "")
     except Exception:
         cwd = ""
-    info = {k: str(getattr(agent, k, None) or "") for k in ("session_id", "model", "provider", "platform")}
+    info: dict[str, Any] = {k: str(getattr(agent, k, None) or "") for k in ("session_id", "model", "provider", "platform")}
     info.update(profile_name=_active_profile_name(agent, _ambient_plugin_profile_name), cwd=cwd)
+    info['skip_context_files'] = bool(getattr(agent, 'skip_context_files', False))
     return info
 
 
