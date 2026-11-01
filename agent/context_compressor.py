@@ -3783,7 +3783,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         )
         try:
             # Compression is atomic: shield the summary call from gateway interrupts. Re-entrant.
-            with aux_interrupt_protection():
+            from agent.auxiliary_fallback_events import summary_fallback_scope
+            origin = getattr(self, '_summary_fallback_origin', None)
+            self._summary_fallback_origin = None
+            with aux_interrupt_protection(), summary_fallback_scope(origin):
                 response = call_llm(**call_kwargs)
         finally:
             route_known = bool(_aux_route.get("provider") and _aux_route.get("model"))

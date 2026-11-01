@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import re
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, NamedTuple, Optional
 
 
@@ -29,13 +32,51 @@ def _effective_provider_for_client(client: Any, fallback: str) -> str:
 
 
 def emit_auxiliary_fallback(old_provider, old_model, provider, model, *, task, reason):
-    """Emit a selected auxiliary route; reason is a fixed label, never an exception."""
-    from agent.fallback_events import emit_fallback_activated
-    emit_fallback_activated(
-        old_provider=_fallback_provider_from_label(old_provider), old_model=old_model,
-        new_provider=_fallback_provider_from_label(provider), new_model=model,
-        stage='auxiliary', task=task, reason=reason,
-    )
+    """Dispatch a selected route off the inference thread, under its owning profile.
+
+    Non-daemon work finishes on normal one-shot shutdown; hook subprocess timeouts
+    still apply. A slow observer must not spend compression's inference deadline.
+    """
+    try:
+        from agent.fallback_events import active_profile_name, emit_fallback_activated
+        from agent.memory_provider import spawn_context_thread
+        from hermes_cli.lifecycle import has_hook
+        if not has_hook('fallback_activated'):
+            return
+        thread = spawn_context_thread(
+            emit_fallback_activated, name='auxiliary-fallback-notification', daemon=False,
+            kwargs=dict(old_provider=_fallback_provider_from_label(old_provider), old_model=old_model,
+                        new_provider=_fallback_provider_from_label(provider), new_model=model,
+                        stage='auxiliary', task=task, reason=reason, profile_name=active_profile_name()),
+        )
+        thread.start()
+    except Exception as exc:
+        logging.getLogger(__name__).warning('Auxiliary fallback observer dispatch failed (%s)', type(exc).__name__)
+
+
+_SUMMARY_FALLBACK = ContextVar('summary_fallback_activation', default=None)
+
+
+@contextmanager
+def summary_fallback_scope(origin):
+    """Carry one summary retry's reason until a usable request route is resolved."""
+    token = _SUMMARY_FALLBACK.set(origin)
+    try:
+        yield
+    finally:
+        _SUMMARY_FALLBACK.reset(token)
+
+
+def summary_fallback_pending():
+    return _SUMMARY_FALLBACK.get() is not None
+
+
+def emit_resolved_summary_fallback(provider, model):
+    origin = _SUMMARY_FALLBACK.get()
+    if origin is not None:
+        _SUMMARY_FALLBACK.set(None)
+        old_provider, old_model, reason = origin
+        emit_auxiliary_fallback(old_provider, old_model, provider, model, task='compression', reason=reason)
 
 
 class _ResolvedAuxRoute(NamedTuple):

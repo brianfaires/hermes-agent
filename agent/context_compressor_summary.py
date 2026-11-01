@@ -39,9 +39,7 @@ class SummaryDispatchMixin:
         failed = str(
             failed_model or self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
         ).strip()
-        from agent.auxiliary_fallback_events import emit_auxiliary_fallback
-        emit_auxiliary_fallback(getattr(self, "_last_aux_resolved_provider", ""), failed, self.provider, self.model,
-                                task='compression', reason='summary_failed')
+        self._summary_fallback_origin = (getattr(self, '_last_aux_resolved_provider', ''), failed, 'summary_failed')
         self._summary_model_fallen_back = True
         logger.warning(
             "Summary model '%s' %s (%s). Falling back to main model '%s' for compression.",
@@ -68,11 +66,9 @@ class SummaryDispatchMixin:
         policy but never fills an unset endpoint/key/wire mode from the failed aux route (#130895).
         """
         if pinned:
-            from agent.auxiliary_fallback_events import emit_auxiliary_fallback
-            emit_auxiliary_fallback(
+            self._summary_fallback_origin = (
                 getattr(self, '_last_aux_resolved_provider', ''),
-                getattr(self, '_last_aux_resolved_model', '') or self.summary_model,
-                pinned.get('provider'), pinned.get('model'), task='compression', reason='summary_stalled',
+                getattr(self, '_last_aux_resolved_model', '') or self.summary_model, 'summary_stalled',
             )
             # Clear first: a keyless pin (local server) resolves its own credential, never the main one.
             for key in ("provider", "model", "base_url", "api_key", "api_mode"):

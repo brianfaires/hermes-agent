@@ -57,6 +57,7 @@ def emit_fallback_activated(
     platform: Any = "",
     api_mode: Any = "",
     task: Any = "",
+    profile_name: Any = None,
 ) -> None:
     """Fire the fallback_activated hook, swallowing hook failures.
 
@@ -83,7 +84,7 @@ def emit_fallback_activated(
             reason=_reason_label(reason),
             platform=_clean(platform),
             api_mode=_clean(api_mode),
-            profile_name=active_profile_name(),
+            profile_name=_clean(profile_name) if profile_name is not None else active_profile_name(),
         )
     except Exception:
         logger.debug("fallback_activated hook emission failed", exc_info=True)

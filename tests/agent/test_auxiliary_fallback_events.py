@@ -8,6 +8,7 @@ import pytest
 from agent import auxiliary_client as ac
 from hermes_cli.plugins import get_plugin_manager
 from hermes_constants import get_hermes_home
+from tests.waiting import wait_until
 
 
 @pytest.fixture
@@ -17,7 +18,7 @@ def routes(monkeypatch):
     observer.mkdir(parents=True)
     (observer / 'plugin.yaml').write_text('name: probe\nversion: 1.0.0\n')
     (observer / '__init__.py').write_text(
-        "events = []\ndef register(ctx):\n    ctx.register_hook('fallback_activated', lambda **kw: events.append(kw))\n")
+        "events = []\ngate = None\nentered = None\ndef observe(**kw):\n    events.append(kw)\n    if gate is not None:\n        entered.set()\n        gate.wait(15)\ndef register(ctx):\n    ctx.register_hook('fallback_activated', observe)\n")
     config = {
         'plugins': {'enabled': ['probe']},
         'auxiliary': {'title_generation': {
@@ -76,6 +77,7 @@ def test_configured_auxiliary_fallback_emits_each_distinct_activation(routes):
         result = ac.call_llm(task='title_generation', messages=[{'role': 'user', 'content': 'title'}])
         assert result.choices[0].message.content == 'OK'
     assert requests == ['primary.invalid', 'backup.invalid'] * 2
+    assert wait_until(lambda: len(events) == 2)
     assert [(e['stage'], e['provider'], e['model']) for e in events] == [
         ('auxiliary', 'custom:backup', 'backup-model')] * 2
     assert all(e['profile_name'] == 'default' and e['task'] == 'title_generation' for e in events)
@@ -99,6 +101,7 @@ async def test_async_fallback_uses_same_configured_route_and_activation(routes, 
         result = await ac.async_call_llm(task='title_generation', messages=[{'role': 'user', 'content': 'title'}])
         assert result.choices[0].message.content == 'OK'
         assert requests == ['primary.invalid', 'backup.invalid']
+        assert wait_until(lambda: len(events) == 1)
         assert [(e['stage'], e['provider'], e['model']) for e in events] == [
             ('auxiliary', 'custom:backup', 'backup-model')]
     finally:
@@ -115,6 +118,7 @@ def test_missing_explicit_credentials_activates_configured_backup_once(routes):
     result = ac.call_llm(task='title_generation', messages=[{'role': 'user', 'content': 'title'}])
     assert result.choices[0].message.content == 'OK'
     assert requests == ['backup.invalid']
+    assert wait_until(lambda: len(events) == 1)
     assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
         ('nous', 'custom:backup', 'provider_unavailable')]
 
@@ -142,6 +146,7 @@ async def test_auto_route_unavailable_main_notifies_even_with_cached_backup(rout
             result = await ac.async_call_llm(**kwargs) if async_mode else ac.call_llm(**kwargs)
             assert result.choices[0].message.content == 'OK'
         assert requests == ['backup.invalid'] * 2
+        assert wait_until(lambda: len(events) == 2)
         assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
             ('nous', 'custom:backup', 'provider_unavailable')] * 2
     finally:
@@ -166,8 +171,9 @@ def test_real_summary_failure_switches_to_main_without_mutating_input(routes):
     assert 'OK' in compressor._generate_summary(messages)
     assert messages == before
     assert requests == ['primary.invalid', 'backup.invalid']
+    assert wait_until(lambda: len(events) == 1)
     assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
-        ('custom:primary', 'custom:backup', 'summary_failed')]
+        ('custom:primary', 'custom', 'summary_failed')]
 
 
 def test_real_stall_recovery_pins_summary_backup_once(routes):
@@ -202,6 +208,7 @@ def test_real_stall_recovery_pins_summary_backup_once(routes):
     assert len(result) == 1 and 'OK' in result[0]['content'] and prompt == 'stable prompt'
     assert messages == [{'role': 'user', 'content': 'remember this'}]
     assert requests == ['backup.invalid'] and len(attempts) == 2
+    assert wait_until(lambda: len(events) == 1)
     assert [(e['provider'], e['model'], e['reason']) for e in events] == [
         ('custom:backup', 'backup-model', 'summary_stalled')]
 
@@ -214,5 +221,46 @@ def test_vision_auto_rescue_reports_selected_aggregator(routes, monkeypatch):
         messages=[{'role': 'user', 'content': 'describe'}])
     assert result.choices[0].message.content == 'OK'
     assert requests == ['openrouter.ai']
+    assert wait_until(lambda: len(events) == 1)
     assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
         ('nous', 'openrouter', 'provider_unavailable')]
+
+
+
+def test_unusable_pinned_summary_does_not_report_proposed_route(routes):
+    from agent.context_compressor import ContextCompressor, pin_summary_route
+    events, requests, _, _ = routes
+    config_path = get_hermes_home() / 'config.yaml'
+    config = json.loads(config_path.read_text())
+    config['auxiliary']['compression'] = {'provider': 'nous', 'model': 'missing', 'fallback_chain': []}
+    config_path.write_text(json.dumps(config))
+    compressor = ContextCompressor(model='main-model', provider='nous',
+                                   config_context_length=100000, quiet_mode=True)
+    with pin_summary_route({'provider': 'nous', 'model': 'missing'}):
+        assert compressor._generate_summary([{'role': 'user', 'content': 'remember this'}]) is None
+    assert requests == [] and events == []
+
+
+def test_slow_observer_does_not_delay_configured_fallback_request(routes):
+    import threading
+    from agent.memory_provider import spawn_context_thread
+    events, requests, _, _ = routes
+    observer = get_plugin_manager()._plugins['probe'].module
+    observer.gate, observer.entered = threading.Event(), threading.Event()
+    finished = threading.Event()
+    results = []
+    def run():
+        try:
+            results.append(ac.call_llm(task='title_generation', messages=[{'role': 'user', 'content': 'title'}]))
+        finally:
+            finished.set()
+    thread = spawn_context_thread(run, name='test-fallback-caller', daemon=False)
+    thread.start()
+    try:
+        assert observer.entered.wait(5)
+        assert finished.wait(5), 'notification observer consumed the inference budget'
+        assert results[0].choices[0].message.content == 'OK'
+        assert requests == ['primary.invalid', 'backup.invalid']
+    finally:
+        observer.gate.set()
+        thread.join(10)

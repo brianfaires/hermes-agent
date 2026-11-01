@@ -27,6 +27,7 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 from agent.auxiliary_fallback_events import (
     _record_route_info, _fallback_provider_from_label, _effective_provider_for_client,
     emit_auxiliary_fallback, remember_auto_fallback, _ResolvedAuxRoute,
+    summary_fallback_pending, emit_resolved_summary_fallback,
 )
 
 from agent.local_prompt_progress import (
@@ -7433,7 +7434,7 @@ def _resolve_call_client(
     if fallback_from is None and (resolved_provider in {"auto", "", None} or task == "vision"):
         origin = getattr(client, "_hermes_aux_fallback_origin", None)
         fallback_from = origin if isinstance(origin, tuple) else None
-    if fallback_from:
+    if fallback_from and not summary_fallback_pending():
         emit_auxiliary_fallback(*fallback_from, effective_provider, final_model,
                                 task=task, reason="provider_unavailable")
     return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider)
@@ -7485,6 +7486,7 @@ def _prepare_aux_request(
         if isinstance(client, (CodexAuxiliaryClient, AsyncCodexAuxiliaryClient)) else None
     )
     request_provider = effective_provider or resolved_provider
+    emit_resolved_summary_fallback(request_provider, final_model)
     if not async_mode:
         compression_config = _get_auxiliary_task_config(task) if task == "compression" else {}  # authoritative: no aux route
         _, effective_extra_body = _compression_fast_lane_controls(
