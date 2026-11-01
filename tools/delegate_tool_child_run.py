@@ -1049,7 +1049,8 @@ class _ChildRun:
         if handed:
             entry["handed_off_processes"] = handed
         with _quiet(None):
-            from tools.process_registry import process_registry, _output_tail
+            from tools.process_registry import process_registry
+            from tools.process_registry_output import redact_output_tail
             leftover = process_registry.running_owned_by(self.child_task_id)
             if leftover:
                 entry["orphaned_processes"] = [
@@ -1059,7 +1060,7 @@ class _ChildRun:
             if unread:
                 entry["unread_completions"] = [
                     {"session_id": s.id, "command": redact_child_text(s.command, force=False)[:200], "exit_code": s.exit_code,
-                     "output_tail": redact_child_text(_output_tail(s, len(s.output_buffer)), force=False)[-600:]} for s in unread]
+                     "output_tail": redact_output_tail(s, 600)} for s in unread]
 
     def emit_complete(self, result: dict[str, Any], entry: dict[str, Any], duration: float) -> None:
         """Fire ``subagent.complete`` with the per-branch observability payload (tokens, cost, files touched,

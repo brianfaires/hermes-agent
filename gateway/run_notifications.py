@@ -1643,20 +1643,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
     @staticmethod
     def _redacted_output_tail(session, limit: int) -> str:
         """Last ``limit`` chars of process output through the secret redactors (unconditional floor)."""
-        from gateway.run import _redact_gateway_user_facing_secrets
-        from tools.ansi_strip import strip_ansi
-        from tools.process_registry import transform_process_output
-        new_output = strip_ansi(session.output_buffer[-limit:]) if session.output_buffer else ""
-        if new_output:
-            from agent.redact import redact_terminal_output
-            _command = getattr(session, "command", "") or ""
-            new_output = transform_process_output(new_output, command=_command, returncode=session.exit_code,
-                                                  task_id=getattr(session, "task_id", "") or "")
-            new_output = redact_terminal_output(new_output, _command)
-            # redact_terminal_output() is unforced (raw when security.redact_secrets is off); this goes
-            # straight to the adapter, so apply the same unconditional floor as agent-notify.
-            new_output = _redact_gateway_user_facing_secrets(new_output)
-        return new_output
+        from tools.process_registry_output import gateway_tail
+        return gateway_tail(session, limit)
 
     async def _launching_turn_active(self, platform_name: str, watcher: dict) -> bool:
         """Whether the session that launched *watcher*'s process is still inside a turn on its
@@ -1686,11 +1674,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from agent.redact import redact_terminal_output
         from tools.ansi_strip import strip_ansi
         from tools.process_registry import transform_process_output
+        from tools.process_registry_output import capture_source
         _command = getattr(session, "command", "") or ""
-        _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
+        _raw = strip_ansi(capture_source(session)) if session.output_buffer else ""
         _raw = transform_process_output(_raw, command=_command, returncode=session.exit_code,
                                         task_id=getattr(session, "task_id", "") or "") if _raw else _raw
-        _raw = redact_terminal_output(_raw, _command)
+        _raw = _redact_gateway_user_facing_secrets(redact_terminal_output(_raw, _command, force=True))
         # Keep the last ~2000 chars snapped to a line boundary, with a marker when cut.
         _LIMIT = 2000
         # Truncate at line boundaries so notifications never start mid-line (fixes #23284). Keep the last
@@ -1715,7 +1704,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             "exit_code": session.exit_code,
             "completion_reason": getattr(session, "completion_reason", "exited"),
             "termination_source": getattr(session, "termination_source", ""),
-            "output": _redact_gateway_user_facing_secrets(_out),
+            "output": _out,
             # Spawning session-db id: lets pre-flight drop this completion if the user /new'd first.
             "parent_session_id": (
                 watcher.get("parent_session_id") or getattr(session, "parent_session_id", "") or ""

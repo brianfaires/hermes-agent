@@ -263,6 +263,7 @@ def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch)
 
 def test_process_tool_redacts_explicit_kill_output(monkeypatch):
     from tools import process_registry as pr_module
+    from tools import process_registry_output
 
     registry = ProcessRegistry()
     session = ProcessSession(
@@ -282,7 +283,7 @@ def test_process_tool_redacts_explicit_kill_output(monkeypatch):
         result["output"] = "PRIVATE_TOKEN=<redacted>\n"
         return result
 
-    monkeypatch.setattr(pr_module, "_redact_process_result", _redact)
+    monkeypatch.setattr(process_registry_output, "redact_process_result", _redact)
 
     result = json.loads(pr_module._handle_process({
         "action": "kill",
