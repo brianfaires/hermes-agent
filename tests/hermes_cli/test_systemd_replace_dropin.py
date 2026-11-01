@@ -25,6 +25,7 @@ def _current_unit_with_dropin(tmp_path, monkeypatch, dropin_text: str):
     monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit)
     monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda **_: "[Unit]\nDescription=current\n")
     monkeypatch.setattr(gateway_cli, "_sync_hermes_home_from_systemd_unit", lambda **_: None)
+    monkeypatch.setattr(gateway_cli, "_systemctl_show", lambda *_args, **_kwargs: {})
     calls = []
     monkeypatch.setattr(gateway_cli, "_run_systemctl", lambda args, **kwargs: calls.append((args, kwargs)))
     dropin = unit.parent / f"{unit.name}.d" / "20-replace.conf"
