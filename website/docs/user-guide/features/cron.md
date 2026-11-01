@@ -1392,6 +1392,22 @@ Cron jobs run in a completely fresh agent session. The prompt must contain every
 
 **GOOD:** `"SSH into server 192.168.1.100 as user 'deploy', check if nginx is running with 'systemctl status nginx', and verify https://example.com returns HTTP 200."`
 
+## Retained final receipts
+
+The profile execution database also retains terminal receipts independently
+of the bounded operational history. A receipt includes job label/schedule, observed
+status and delivery outcome, and the final response. Prompts, intermediate tool output,
+and session transcripts are excluded. Removed one-shots and long integration outages
+do not expire these receipts. Known answers are immutable; native verified recovery
+may settle an unknown outcome, and queued delivery can settle without changing the answer.
+Recovery records an unknown outcome without inventing an answer; transport-cancelled answers are discarded. Historical answers from before
+receipt support are unavailable. Receipts remain private profile data until the operator
+removes the database; backups include them.
+
+Integrations read `cron.execution_results.iter_execution_results(page_size=...)`, which
+releases each page's transaction before external I/O. Scheduling and owner fencing remain
+native; downstream mirrors never become a source of cron truth.
+
 ## Security
 
 Scheduled task prompts are scanned for prompt-injection and credential-exfiltration patterns at creation and update time. Prompts containing invisible Unicode tricks, SSH backdoor attempts, or obvious secret-exfiltration payloads are blocked.

@@ -150,6 +150,8 @@ class TestRunningJobGuard:
             else None,
         )
         monkeypatch.setattr(sched, "mark_execution_running", lambda *_a, **_kw: {})
+        # This pipeline test stubs execution bookkeeping, including its receipt snapshot.
+        monkeypatch.setattr("cron.execution_results.capture_execution_job", lambda *_args: None)
         monkeypatch.setattr(sched, "heartbeat_fire_claim", lambda *_a, **_kw: True)
 
         n = sched.tick(verbose=False)
