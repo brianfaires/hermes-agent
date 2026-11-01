@@ -40,6 +40,8 @@ scripts/run_tests.sh -v --tb=long                       # pytest flags pass thro
   under `tests/scripts/{install,desktop_update}/`. Only tests of root-level modules (`batch_runner`,
   `utils`, `hermes_constants`, packaging) sit directly in `tests/`. No issue numbers in filenames —
   cite the issue in the module docstring (`test_89315_x.py` → `test_x.py`, "Regression for #89315").
+- **Organization scenarios:** tests asserting organization-specific profile roles, board conventions,
+  or business workflows live in `tests/scenarios/`; read its `README.md` when adding one.
 - **Placement (CI lanes):** `scripts/ci/classify_changes.py` picks jobs by changed files. A Python test
   asserting about `package.json`, `package-lock.json`, `tsconfig.json`, or `.ts/.tsx/.js/
   .mjs/.cjs` sources will not run on a JS-only PR (green on PR, red on `main` where the
