@@ -52,9 +52,24 @@ CLI for inspecting and managing the store outside a session:
 | `hermes checkpoints` | Show total size, project count, per-project breakdown |
 | `hermes checkpoints status` | Same as bare `checkpoints` |
 | `hermes checkpoints list` | Alias for `status` |
+| `hermes checkpoints recover-index-lock /path/to/project` | Inspect one project's blocked index; add `--apply` to quarantine its abandoned lock |
 | `hermes checkpoints prune` | Force a sweep: delete orphans/stale, GC, enforce size cap |
 | `hermes checkpoints clear` | Nuke the entire checkpoint base (asks first) |
 | `hermes checkpoints clear-legacy` | Delete only the `legacy-*` archives from v1 migration |
+
+### Recovering an abandoned index lock
+
+After an interrupted checkpoint, Git may report that `store/indexes/<hash>.lock`
+already exists. Run `hermes checkpoints recover-index-lock /path/to/project` for
+the exact working directory shown by `hermes checkpoints status`. The command
+takes the checkpoint-store lock and uses native Git process/descriptor inspection;
+an active writer or an unverifiable owner keeps the lock in place. It never uses
+file age as proof. Where process inspection is unavailable, recovery is refused.
+
+Add `--apply` to recheck and move that one lock to
+`checkpoints/quarantined-index-locks/`. The index, refs, objects and history stay
+in place. The quarantine path is printed; retry checkpoint creation in a new turn.
+Concurrent maintenance holds the same store lock and also prevents recovery.
 
 ## How Checkpoints Work
 
