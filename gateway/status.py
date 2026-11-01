@@ -552,10 +552,8 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         raw_tokens = command.split()
     # Strip surrounding quotes, normalize slashes + case per token.
     cased_tokens = [t.strip("\"'").replace("\\", "/") for t in raw_tokens]
-    tokens = [t.lower() for t in cased_tokens]
-    if not tokens:
+    if not cased_tokens:
         return None
-    basenames = [t.rsplit("/", 1)[-1] for t in tokens]
     # ``python -c <src> … -m hermes_cli.main gateway run``: the trailing argv belongs to the program
     # the inline source will spawn later, not to this process (#107002). Case-preserving tokens:
     # the operand-taking ``-X``/``-W``/``-Q`` must not be conflated with ``-q``/``-b``.
@@ -565,35 +563,8 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         cased_tokens = inline_bootstrap_argv(cased_tokens)
         if cased_tokens is None:
             return None
-        tokens = [t.lower() for t in cased_tokens]
-        basenames = [t.rsplit("/", 1)[-1] for t in tokens]
-    # The launchd job's osascript wrapper (gateway_launchd.launchd_program_arguments) carries the gateway argv
-    # inside one JXA script string; the gateway itself is its child and is matched on its own command line.
-    if basenames[0] == "osascript":
-        return None
-    # Gateway-dedicated entrypoints carry no subcommand to inspect (``python -m gateway.run`` is the
-    # module spelling of the same script: its PID record renders argv as ``gateway/run.py``, and a
-    # liveness probe that read the live ``-m`` cmdline as "not a gateway" made every fixture-launched
-    # standalone owner invisible to the multiplex preflight).
-    if any(t == "gateway/run.py" or t.endswith("/gateway/run.py") for t in tokens):
-        return "run"
-    if any(tokens[i] == "-m" and tokens[i + 1] == "gateway.run" for i in range(len(tokens) - 1)):
-        return "run"
-    # Atomic Hermes' bundled desktop runner shares HERMES_HOME with the CLI; without this,
-    # `gateway run --replace` does not recognise it as a running gateway, skips the
-    # terminate-and-scoped-lock-handoff path, and collides with its still-held scoped locks
-    # (e.g. the Discord bot-token lock). See #22418.
-    if any(b == "desktop-gateway.py" for b in basenames):
-        return "run"
-    if any(b in ("hermes-gateway", "hermes-gateway.exe") for b in basenames):
-        return "run"
-    joined = " ".join(tokens)
-    if "hermes_cli.main" not in joined and "hermes_cli/main.py" not in joined and not any(
-        b in ("hermes", "hermes.exe") for b in basenames
-    ):
-        return None
-    from gateway.status_command import gateway_cli_subcommand
-    return gateway_cli_subcommand(tokens)
+    from gateway.status_command import gateway_process_subcommand
+    return gateway_process_subcommand(cased_tokens)
 
 
 def gateway_spawn_intent_subcommand(command: str | None) -> str | None:
