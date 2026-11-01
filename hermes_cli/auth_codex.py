@@ -474,7 +474,7 @@ def _codex_refresh_failure_error(response: httpx.Response) -> AuthError:
     # A 401/403 from the token endpoint always means the refresh token is invalid/expired —
     # force relogin even if the body error code wasn't one of the known strings.
     relogin_required = (
-        code in {"invalid_grant", "invalid_token", "invalid_request", "refresh_token_reused"}
+        code in {"invalid_grant", "invalid_token", "invalid_request", "refresh_token_reused", "token_expired"}
         or response.status_code in {401, 403})
     return _codex_err(message, code, relogin=relogin_required)
 
