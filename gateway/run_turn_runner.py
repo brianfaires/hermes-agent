@@ -851,8 +851,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             ctx.message = note + "\n\n" + ctx.message
 
     def _resume_note_interactive(self) -> bool:
-        """Interactive platforms report the restore and ask what next; event platforms (webhook,
-        API server) continue the work — nobody is present to answer."""
+        """Whether recovery has an interactive destination for a useful outcome or blocker."""
         return bool(getattr(self._runner._delivery_adapter_for(self._ctx.source), "interactive_resume", True))
 
     def _prepare_turn_message(self, agent_history):
