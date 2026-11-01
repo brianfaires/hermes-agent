@@ -22,7 +22,7 @@ from hermes_constants import (
 from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
+    EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS, SKILL_PROMPT_DESC_LIMIT,
     TIER_LOCAL, extract_skill_conditions, extract_skill_description, fit_skill_description, get_disabled_skill_names,
     get_skill_search_roots, skill_prompt_description_limit,
     iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
@@ -1395,7 +1395,7 @@ def _oneshot_prompt_variant() -> bool:
 def _build_skills_system_prompt_inner(
     skills_dir: Path, extra_roots: list[tuple[int, Path]], available_tools: set[str] | None,
     available_toolsets: set[str] | None, compact_categories: frozenset[str] | None,
-    desc_limit: int | None,
+    desc_limit: int | None = SKILL_PROMPT_DESC_LIMIT,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
