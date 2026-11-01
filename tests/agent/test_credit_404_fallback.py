@@ -5,7 +5,7 @@ no retry burn) and the resulting switch must be a WARNING naming the failing pro
 
 import logging
 
-from agent.chat_completion_helpers import _log_fallback_activated
+from agent.fallback_events import log_fallback_activated
 from agent.error_classifier import FailoverReason, classify_api_error
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
@@ -42,7 +42,7 @@ def test_billing_fallback_warning_names_failing_profile_and_remedy(tmp_path, cap
         try:
             caplog.clear()
             with caplog.at_level(logging.INFO, logger="agent.chat_completion_helpers"):
-                _log_fallback_activated(None, FailoverReason.billing, "z-ai/glm-5.2", "nous", "free/model", "nous")
+                log_fallback_activated(None, FailoverReason.billing, "z-ai/glm-5.2", "nous", "free/model", "nous")
         finally:
             reset_hermes_home_override(token)
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -55,5 +55,5 @@ def test_billing_fallback_warning_names_failing_profile_and_remedy(tmp_path, cap
 
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="agent.chat_completion_helpers"):
-        _log_fallback_activated(None, FailoverReason.server_error, "a", "p", "b", "q")
+        log_fallback_activated(None, FailoverReason.server_error, "a", "p", "b", "q")
     assert [r.levelno for r in caplog.records] == [logging.INFO]

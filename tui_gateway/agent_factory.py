@@ -531,6 +531,13 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
                 logging.getLogger(__name__).warning(
                     "Primary %s (%s), falling back to %s model %s",
                     primary_failure_wording(primary_exc)[0], primary_exc, fb_provider, fb_model)
+                from agent.fallback_events import emit_fallback_activated
+                previous = resolve_kwargs or {}
+                emit_fallback_activated(old_provider=previous.get('requested') or primary_exc.provider,
+                                        old_model=previous.get('target_model'),
+                                        new_provider=runtime['provider'], new_model=fb_model,
+                                        stage='tui_runtime', reason='auth_resolution',
+                                        platform=_resolve_session_platform(), api_mode=runtime.get('api_mode', ''))
                 return _RuntimeFallbackResolution(runtime, fb_model, True)
             except Exception:
                 continue
