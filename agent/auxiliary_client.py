@@ -24,6 +24,11 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING, Union
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+from agent.auxiliary_fallback_events import (
+    _record_route_info, _fallback_provider_from_label, _effective_provider_for_client,
+    emit_auxiliary_fallback,
+)
+
 from agent.local_prompt_progress import (
     PromptReadingClock, current_prompt_reading_hook, prompt_progress, prompt_reading_hook, with_prompt_progress)
 from agent.error_classifier import (
@@ -2599,15 +2604,6 @@ def _set_relay_auxiliary_route(provider: str | None, model: str | None, api_mode
     context["api_mode"] = str(api_mode or "chat_completions")
 
 
-def _record_route_info(
-    route_info: Optional[dict[str, str]], provider: Optional[str], model: Optional[str]
-) -> None:
-    """Expose the concrete route selected for one auxiliary call."""
-    if route_info is not None:
-        route_info["provider"] = provider or "auto"
-        route_info["model"] = model or "default"
-
-
 def _relay_auxiliary_metadata(
     *, provider: str | None = None, api_mode: str | None = None
 ) -> tuple[str, str, dict[str, Any]] | None:
@@ -3952,11 +3948,6 @@ def _fallback_entry_timeout(task: Optional[str], fb_label: str) -> Optional[floa
     return _coerce_positive_timeout(entry.get("timeout") if entry else None)
 
 
-def _fallback_provider_from_label(label: str) -> str:
-    """Recover the provider identifier from a fallback display label."""
-    match = re.match(r"(?:fallback_chain\[\d+\]|fallback_providers\[\d+\]|main-agent)\(([^)]+)\)$", label or "")
-    return match.group(1).strip() if match else str(label or "").strip()
-
 
 class _FallbackDestination(NamedTuple):
     provider: str
@@ -4692,13 +4683,6 @@ def _resolve_auto_route(
         return None, None, ""
     return _try_discovery_chain()
 
-
-def _effective_provider_for_client(client: Any, fallback: str) -> str:
-    """Return the concrete provider selected for an auto-routed client."""
-    effective_provider = getattr(client, "_hermes_aux_effective_provider", "")
-    if isinstance(effective_provider, str) and effective_provider:
-        return effective_provider
-    return str(fallback or "")
 
 
 # Centralized Provider Router: resolve_provider_client() is the single entry point for building a configured
@@ -7394,6 +7378,7 @@ def _resolve_call_client(
     """Resolve the client for one aux call: vision chain, or cached text client with the
     explicit-provider fallback_chain / auto-chain rescue; RuntimeError when nothing is configured."""
     effective_provider = resolved_provider
+    fallback_from = None
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
@@ -7403,6 +7388,7 @@ def _resolve_call_client(
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning("Vision provider %s unavailable, falling back to auto vision backends",
                            resolved_provider)
+            fallback_from = (resolved_provider, resolved_model)
             effective_provider, client, final_model = resolve_vision_provider_client(
                 provider="auto", model=resolved_model, async_mode=async_mode,
                 main_runtime=main_runtime)
@@ -7425,6 +7411,7 @@ def _resolve_call_client(
                     nous_detail = nous_credential_failure_detail() if _explicit == "nous" else None
                     raise AuxiliaryClientUnavailable(
                         nous_detail or missing_provider_credentials_message(_explicit))
+                fallback_from = (resolved_provider, resolved_model)
                 client, final_model = fb_client, fb_model
                 if async_mode:
                     client, final_model = _to_async_client(
@@ -7436,12 +7423,16 @@ def _resolve_call_client(
             if client is None and not resolved_base_url:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
+                fallback_from = (resolved_provider, resolved_model)
                 client, final_model = _get_cached_client(
                     "auto", async_mode=async_mode, main_runtime=main_runtime, task=task)
                 effective_provider = _effective_provider_for_client(client, "auto")
     if client is None:
         raise AuxiliaryClientUnavailable(f"No LLM provider configured for task={task} "
                                          f"provider={resolved_provider}. Run: hermes setup")
+    if fallback_from:
+        emit_auxiliary_fallback(*fallback_from, effective_provider, final_model,
+                                task=task, reason="provider_unavailable")
     return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider)
 
 
@@ -7908,6 +7899,9 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
             break
         tried_lanes.add(lane)
         _record_route_info(route.route_info, _fallback_provider_from_label(fb_label), fb_model)
+        emit_auxiliary_fallback(resolved_provider, route.final_model,
+                                _effective_provider_for_client(fb_client, fb_label), fb_model,
+                                task=task, reason=reason)
         fb_resp = yield _LadderStep("fallback", (fb_client, fb_model, fb_label))
         if fb_resp is not None:
             return fb_resp
