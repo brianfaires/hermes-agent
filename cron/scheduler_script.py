@@ -453,6 +453,7 @@ def _run_job_script(
         if argv is None:
             return False, err
         from tools.environments.local import build_subprocess_env
+        from tools.process_registry import systemd_user_bus_env
         # Lossy decode only: keep the platform-default (locale) encoding — gating ``encoding=``
         # to win32 was deliberate (#66566: unconditional UTF-8 leaked into POSIX) — but
         # ``errors=`` must not stay 'strict': one stray non-UTF-8 byte in the script's stdout
@@ -478,7 +479,7 @@ def _run_job_script(
         # semantics) before the sanitizer, which also overlays the names the owning profile declares
         # in terminal.env_passthrough from that scope (#114209). The factory snapshots the process
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
-        env = build_subprocess_env(strip_launch_profile=True)
+        env = systemd_user_bus_env(build_subprocess_env(strip_launch_profile=True))
         env.update(env_overlay)
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
