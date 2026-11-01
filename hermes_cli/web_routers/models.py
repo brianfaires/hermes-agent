@@ -307,9 +307,8 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
         from hermes_cli import config as config_mod
         from hermes_cli.moa_config import normalize_moa_config, validate_moa_payload
 
-        # Serialize the full RMW with dashboard autosaves and with non-HTTP
-        # save_config callers, which only hold the config module's reentrant lock.
-        with config_write_scope(body.profile or profile), config_mod._CONFIG_LOCK:
+        # Share the native writer lock across the entire read/merge/replace.
+        with config_write_scope(body.profile or profile), config_mod.config_mutation_lock(config_mod.get_config_path()):
             legacy_flat_update = not body.presets
             if not legacy_flat_update:
                 raw = {

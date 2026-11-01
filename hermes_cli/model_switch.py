@@ -1852,14 +1852,14 @@ def persist_model_selection(result: ModelSwitchResult, config_path: Any = None) 
     The replace deletes keys missing from the snapshot, so every route decision (and its disk
     I/O) is made from a pre-read BEFORE the snapshot; read -> merge -> replace is then a pure
     in-memory section. Only when another writer changed ``model:`` in between are the updates
-    recomputed against the fresh block. ``_CONFIG_LOCK`` is in-process only: a cross-process
-    config lock, once one exists, must wrap the same section."""
+    recomputed against the fresh block. The shared config mutation lock covers this
+    read/merge/replace section across threads and processes."""
     from pathlib import Path
-    from hermes_cli.config import _CONFIG_LOCK, atomic_config_replace, get_config_path, read_user_config_raw
+    from hermes_cli.config import config_mutation_lock, atomic_config_replace, get_config_path, read_user_config_raw
     path = Path(config_path) if config_path else get_config_path()
     planned_from = read_user_config_raw(path).get("model")
     updates = model_selection_config_updates(result, planned_from)
-    with _CONFIG_LOCK:
+    with config_mutation_lock(path):
         config = read_user_config_raw(path)
         model_cfg = config.get("model")
         if model_cfg != planned_from:

@@ -267,10 +267,10 @@ def handle_metadata_args(args, project_root: Path) -> bool:
 @contextmanager
 def _channel_write_lock(config_path: Path):
     """Serialize channel selection and retirement across CLI processes."""
-    from hermes_cli.config import _CONFIG_LOCK
+    from hermes_cli.config import config_mutation_lock
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with _CONFIG_LOCK, config_path.with_suffix(".channels.lock").open("a+b") as lock:
+    with config_mutation_lock(config_path), config_path.with_suffix(".channels.lock").open("a+b") as lock:
         if os.name == "nt":
             import msvcrt
             lock.write(b"\0")

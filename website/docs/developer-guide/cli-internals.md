@@ -8,6 +8,39 @@ description: "How hermes_cli is shaped: slash dispatch, config loaders, the skin
 
 Companion to `hermes_cli/AGENTS.md` (the rules) — this page holds the longer explanations.
 
+## Configuration transactions
+
+Native settings changes and the standalone `hermes_config_patch` structural editor share
+`hermes_cli.config_transactions.config_mutation_lock(path)`. Hold it around the complete
+read/edit/write, or use `mutate_config(path, callback)` to read fresh raw settings, apply a
+validated callback and publish once. A callback exception leaves the file unchanged.
+The callback must validate the complete proposed state before returning; the transaction
+helper supplies exclusion and persistence, not a schema validator.
+
+The lock identifies the canonical parent directory and filename, so atomic file replacement
+does not change its identity. It is reentrant per thread and uses the existing native
+cross-process lock backend. Acquire it before the in-process `_CONFIG_LOCK`; a writer waiting
+on another process must not hold up local cached readers. Config set/unset, plugin settings,
+model selection, onboarding/consent, update channels and dashboard MoA writes follow this order.
+Dotted round-trip YAML updates use the same lock.
+
+Mutable loaders return dictionary snapshots carrying their source path and revision outside
+the serialized mapping. Saving a stale or wrong-profile snapshot raises `ConfigConflictError`
+with a reload-and-retry message. `copy()` and `deepcopy()` retain the revision; deliberately
+building a plain dictionary discards it and keeps explicit full-state replacement semantics.
+A successful save advances the caller's revision, and a complete `clear()`/`update()` refresh
+adopts the incoming snapshot. Read-only runtime loaders retain their existing caching behavior;
+mutable reads under continuous file churn remain available but cannot save an uncertain revision.
+Frozen managed workers keep their owner-supplied snapshot without probing the live profile;
+their existing three-way write-back rebases edited leaves under the shared writer lock.
+
+All writes retain the native comment-preserving writer, unreadable-file refusal and omission
+checks. A committed `mutate_config` callback also synchronizes native terminal environment
+mirrors, skin refresh and language-cache invalidation from the final changed leaves, including
+parent replacement or removal, under the owning profile. These effects happen after the atomic
+YAML publication; a later mirror failure is reported without claiming rollback across files.
+Uncooperative direct filesystem writes are outside this locking protocol.
+
 ## Update pipeline
 
 User-facing behaviour (receipts, `--plan`, snapshot modes) is in
