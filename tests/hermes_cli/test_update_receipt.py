@@ -393,6 +393,36 @@ class TestFleetClassification:
 
         assert fleet[0]["served_profiles"] == ["default", "coder"]
 
+    @pytest.mark.parametrize("identity_kind", ["valid", "foreign-home", "mismatched-id"])
+    def test_socket_multiplexer_reports_profile_home_identities(self, monkeypatch, tmp_path, identity_kind):
+        """Session-runtime identify uses absolute home identities, unlike status name lists."""
+        home = tmp_path / "fleet_home"
+        home.mkdir()
+        monkeypatch.setattr(ur, "_profile_homes", lambda: [
+            ("default", home), ("coder", home / "profiles/coder")])
+        monkeypatch.setattr(ur, "_code_identity", lambda refresh=False: {"sha": "current"})
+        monkeypatch.setattr(ur, "_gateway_code_root", lambda *_args: None)
+        coder_home = str(home / "profiles/coder")
+        coder = {"profile_id": coder_home, "home": coder_home}
+        if identity_kind == "foreign-home":
+            coder = {"profile_id": str(tmp_path / "foreign"), "home": str(tmp_path / "foreign")}
+        elif identity_kind == "mismatched-id":
+            coder["profile_id"] = str(home)
+        monkeypatch.setattr(ur, "_socket_identity", lambda _home: (4242, {
+            "code_sha": "current",
+            "served_profiles": [
+                {"profile_id": str(home), "home": str(home)},
+                coder,
+            ],
+        }))
+
+        fleet = ur.collect_fleet_versions()
+        assert fleet[0]["state"] == "current"
+        if identity_kind == "valid":
+            assert fleet[0]["served_profiles"] == ["default", "coder"]
+        else:
+            assert "served_profiles" not in fleet[0]
+
     def test_stale_gateway(self, monkeypatch, tmp_path):
         fleet = self._fleet_with(
             monkeypatch, tmp_path,

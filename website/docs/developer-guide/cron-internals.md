@@ -14,6 +14,7 @@ The cron subsystem provides scheduled task execution — from simple one-shot de
 |------|---------|
 | `cron/jobs.py` | Job model, storage, atomic read/write to `jobs.json` |
 | `cron/scheduler.py` | Scheduler loop — due-job detection, execution, repeat tracking |
+| `cron/self_removal.py` | Run-scoped self-removal acknowledgement, including script subprocesses |
 | `tools/cronjob_tools.py` | Model-facing `cronjob_manage` tool registration and handler |
 | `gateway/run.py` | Gateway integration — cron ticking in the long-running loop |
 | `hermes_cli/cron.py` | CLI `hermes cron` subcommands |
@@ -32,6 +33,12 @@ Four schedule formats are supported:
 The model-facing surface is a single `cronjob_manage` tool with action-style operations: `create`, `list`, `update`, `pause`, `resume`, `run`, `remove`.
 
 ## Job Storage
+
+A job may remove its own record and still finish its execution and final delivery. The scheduler
+keeps this permission in the run's context; script subprocesses receive a private temporary receipt
+path through an internal process protocol. `remove_job` acknowledges only the matching job, store,
+and fire owner while holding the store lock. An external deletion or a replacement record with the
+same id never grants permission to deliver a stale result. The receipt is removed when the run ends.
 
 Jobs are stored in `~/.hermes/cron/jobs.json` with atomic write semantics (write to temp file, then rename). Each job record contains:
 

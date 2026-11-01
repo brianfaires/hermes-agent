@@ -441,6 +441,51 @@ def test_self_removed_job_still_delivers_after_post_removal_heartbeat(tmp_path, 
         assert jobs.load_jobs() == []
 
 
+@pytest.mark.parametrize("removal", ["self", "external", "replacement"])
+def test_script_subprocess_removal_preserves_fire_ownership(tmp_path, monkeypatch, removal):
+    """A real script may retire itself; another process's deletion grants no delivery rights."""
+    import sys
+    from pathlib import Path
+    from cron import jobs, scheduler_script
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+
+    def run_script(jobs_mod, job):
+        script = scripts / "observer.py"
+        source = (
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(Path(jobs.__file__).resolve().parents[1])!r})\n"
+            "from cron import jobs\n"
+        )
+        if removal == "external":
+            # Simulate an operator process, which has no run-local acknowledgement capability.
+            source += "os.environ.pop('_HERMES_CRON_SELF_REMOVAL', None)\n"
+        source += f"assert jobs.remove_job({job['id']!r})\n"
+        if removal == "replacement":
+            replacement = {k: v for k, v in job.items() if k != "execution_id"}
+            replacement["fire_claim"] = {"at": job["fire_claim"]["at"], "by": "other-owner"}
+            source += f"jobs.save_jobs([{replacement!r}])\n"
+        script.write_text(source, encoding="utf-8")
+        success, output = scheduler_script._run_job_script(
+            str(script), interpreter=sys.executable)
+        assert success, output
+
+    delivered, finished = _run_claimed_job_with_mid_run_action(
+        tmp_path, monkeypatch, run_script, execution_id="script-removal-execution")
+    if removal == "self":
+        delivered.assert_called_once()
+        assert finished.call_args.kwargs["success"] is True
+        with jobs.use_cron_store(tmp_path):
+            assert jobs.load_jobs() == []
+    else:
+        delivered.assert_not_called()
+        finished.assert_called_once_with(
+            "script-removal-execution", success=False,
+            error="Fire claim ownership lost; stale result was discarded.")
+
+
 def test_self_removed_job_leaves_no_output_directory(tmp_path, monkeypatch):
     """remove_job() deletes <cron>/output/<job_id>/; the finishing run must not re-create it
     (an orphan directory per self-removing job), so 'only the job record is gone' stays true."""

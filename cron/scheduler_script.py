@@ -481,6 +481,8 @@ def _run_job_script(
         # env itself — no raw copy at the spawn site (test_subprocess_env_guard).
         env = systemd_user_bus_env(build_subprocess_env(strip_launch_profile=True))
         env.update(env_overlay)
+        from cron.self_removal import script_self_removal_env
+        env.update(script_self_removal_env())
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent

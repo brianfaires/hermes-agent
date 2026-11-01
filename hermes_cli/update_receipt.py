@@ -1147,6 +1147,25 @@ def _fleet_row(
 _NOT_EXPECTED_STATES = {"stopped", "startup_failed"}
 
 
+def _served_profile_names(identities: Any, homes: list[tuple[str, Path]]) -> Any:
+    """Normalize session-runtime home identities using this installation's profile inventory."""
+    if not isinstance(identities, list) or not identities or not isinstance(identities[0], dict):
+        return identities  # Legacy status records already carry profile names.
+    names_by_home = {str(home.resolve()): name for name, home in homes}
+    names = []
+    for identity in identities:
+        if not isinstance(identity, dict):
+            return None
+        home = identity.get("home")
+        if not isinstance(home, str) or not Path(home).is_absolute():
+            return None
+        canonical = str(Path(home).resolve())
+        if identity.get("profile_id") != home or canonical not in names_by_home:
+            return None
+        names.append(names_by_home[canonical])
+    return names
+
+
 def collect_fleet_versions(
     *, pre_restart_pids: Optional[list[int]] = None, self_restart_pending: Optional[set] = None,
 ) -> list[dict[str, Any]]:
@@ -1185,13 +1204,14 @@ def collect_fleet_versions(
             runtime_status_pid_is_live,
         )
 
-        for profile, home in _profile_homes():
+        homes = _profile_homes()
+        for profile, home in homes:
             sock = _socket_identity(home)
             if sock is not None:
                 pid, identity = sock
                 row = _fleet_row(
                     profile, pid, identity.get("code_sha"), identity.get("code_version"), expected_sha,
-                    served_profiles=identity.get("served_profiles"),
+                    served_profiles=_served_profile_names(identity.get("served_profiles"), homes),
                     code_root=_gateway_code_root(pid, home), expected_root=expected_root,
                     self_restart_pending=_pending,
                 )
