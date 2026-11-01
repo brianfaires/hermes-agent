@@ -7,6 +7,12 @@ Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (de
 `agent/prompt_caching.py`, `gateway/run_turn_hygiene.py` (session hygiene), `agent/compression_facade.py` (search for `_compress_context`)
 
 
+## Spoken assistant content
+
+Compression serializes distinct `text_to_speech` text as assistant output before applying the native redaction and size limits. Spoken content survives long tool arguments and deterministic fallback summaries, including messages that also call other tools. Formatting-only duplicates of visible text are kept once; meaningful case, signs and punctuation remain distinct. Paired speech-delivery results and output paths are omitted from conversational summary input.
+
+This uses the existing compression pipeline. Protected tails, native compaction, summary bounds and atomic history rotation keep their native behavior.
+
 ## Bedrock context window cache
 
 Bedrock context resolution in `agent/model_metadata.py` uses this precedence:
