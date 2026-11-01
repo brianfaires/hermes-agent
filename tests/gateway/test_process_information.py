@@ -24,3 +24,23 @@ def test_information_command_is_not_a_running_gateway(args, native_launcher):
 
     assert not looks_like_gateway_command_line(command(args))
     assert looks_like_gateway_command_line(command(["gateway", "run"]))
+
+
+@pytest.mark.parametrize("argv", [
+    ["python", "-m", "compileall", "-q", "-j", "0", "--", "gateway/run.py", "hermes_cli/main.py"],
+    ["python", "-m", "compileall", "--", "desktop-gateway.py"],
+    ["python", "-m", "pytest", "--", "hermes", "gateway", "run"],
+    ["echo", "hermes", "gateway", "run"],
+])
+def test_program_arguments_are_not_gateway_entrypoints(argv):
+    assert not looks_like_gateway_command_line(shlex.join(argv))
+
+
+@pytest.mark.parametrize("argv", [
+    ["python", "-Imgateway.run"],
+    ["python", "-X", "gateway/run.py", "-m", "hermes_cli.main", "gateway", "run"],
+    ["python", "-W", "gateway", "hermes_cli/main.py", "gateway", "run"],
+    ["pythonw.exe", "-m", "hermes_cli.main", "gateway", "run"],
+])
+def test_python_options_preserve_the_selected_gateway_entrypoint(argv):
+    assert looks_like_gateway_command_line(shlex.join(argv))
