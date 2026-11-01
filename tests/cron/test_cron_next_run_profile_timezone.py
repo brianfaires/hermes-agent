@@ -30,8 +30,14 @@ def _fresh_tz_cache(monkeypatch):
     hermes_time.reset_cache()
 
 
+@pytest.mark.parametrize('now_iso', [
+    '2026-01-15T20:00:00+00:00',
+    '2026-07-15T20:00:00+00:00',
+    '2026-03-07T20:00:00+00:00',
+    '2026-10-31T20:00:00+00:00',
+], ids=['winter', 'summer', 'spring-forward', 'fall-back'])
 def test_foreign_process_tick_persists_owning_profile_offset(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, now_iso
 ):
     """next_run_at persisted during a multiplex tick uses the ticked
     profile's timezone, not the backend process's."""
@@ -59,6 +65,9 @@ def test_foreign_process_tick_persists_owning_profile_offset(
     )
     from cron.jobs import create_job, load_jobs, use_cron_store
 
+    now = datetime.fromisoformat(now_iso)
+    monkeypatch.setattr('cron.jobs._hermes_now', lambda: now.astimezone(hermes_time.get_timezone()))
+
     # Exactly the scoping the multiplex ticker applies per profile
     # (cron/scheduler_provider.py::_tick_profiles).
     token = set_hermes_home_override(str(profile_a))
@@ -70,7 +79,8 @@ def test_foreign_process_tick_persists_owning_profile_offset(
         reset_hermes_home_override(token)
 
     next_run = datetime.fromisoformat(job["next_run_at"])
-    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()
+    # A next-day occurrence can have a different offset after a DST transition.
+    expected_offset = next_run.astimezone(ZoneInfo("America/New_York")).utcoffset()
     assert next_run.utcoffset() == expected_offset, (
         f"next_run_at {job['next_run_at']} persisted with foreign offset "
         f"{next_run.utcoffset()} instead of the owning profile's "
