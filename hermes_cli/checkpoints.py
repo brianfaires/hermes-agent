@@ -200,6 +200,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p_list.add_argument("--limit", type=int, default=20)
     p_list.set_defaults(func=cmd_status)
 
+    from tools.checkpoint_index_locks import cmd_recover_index_lock
+
+    p_recover = subs.add_parser("recover-index-lock", help="Inspect one project's index lock; quarantine with --apply")
+    p_recover.add_argument("working_dir", help="Project working directory used for its checkpoints")
+    p_recover.add_argument("--apply", action="store_true", help="Quarantine only if no live writer can own the lock")
+    p_recover.set_defaults(func=cmd_recover_index_lock)
+
     p_prune = subs.add_parser("prune", help="Delete orphan/stale checkpoints and GC the store")
     p_prune.add_argument("--retention-days", type=int, default=7,
                          help="Drop projects whose last_touch is older than N days (default 7)")
