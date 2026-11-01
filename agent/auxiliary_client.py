@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 
 from agent.auxiliary_fallback_events import (
     _record_route_info, _fallback_provider_from_label, _effective_provider_for_client,
-    emit_auxiliary_fallback,
+    emit_auxiliary_fallback, remember_auto_fallback, _ResolvedAuxRoute,
 )
 
 from agent.local_prompt_progress import (
@@ -4674,10 +4674,12 @@ def _resolve_auto_route(
         fb_client, fb_model, fb_label = _try_configured_fallback_chain(
             task, main_provider or "auto", reason="main provider unavailable")
         if fb_client is not None:
+            remember_auto_fallback(fb_client, main_provider, main_model)
             return fb_client, fb_model, _fallback_provider_from_label(fb_label)
     fb_client, fb_model, fb_label = _try_main_fallback_chain(
         task, main_provider or "auto", reason="main provider unavailable")
     if fb_client is not None:
+        remember_auto_fallback(fb_client, main_provider, main_model)
         return fb_client, fb_model, fb_label
     if not _discovery_chain_allowed(main_provider, task):
         return None, None, ""
@@ -4982,6 +4984,9 @@ def _resolve_auto_branch(req: _ResolveRequest) -> _ResolveResult:
     if routed_client is not None and effective_provider:
         try:
             routed_client._hermes_aux_effective_provider = effective_provider
+            origin = getattr(client, "_hermes_aux_fallback_origin", None)
+            if isinstance(origin, tuple):
+                remember_auto_fallback(routed_client, *origin)
         except (AttributeError, TypeError):
             logger.debug("Auxiliary client %s cannot retain effective provider %s",
                          type(routed_client).__name__, effective_provider)
@@ -5651,7 +5656,9 @@ def _vision_auto_route(
             continue  # already tried above
         sync_client, default_model = _resolve_strict_vision_backend(candidate)
         if sync_client is not None:
-            return _finalize_vision_client(candidate, sync_client, default_model, resolved_model, async_mode)
+            result = _finalize_vision_client(candidate, sync_client, default_model, resolved_model, async_mode)
+            remember_auto_fallback(result[1], main_provider, main_model)
+            return result
     logger.debug("Auxiliary vision client: none available")
     return None, None, None
 
@@ -7362,13 +7369,6 @@ async def _acreate_with_progress(
 # only in how a request is awaited, so route resolution and the ordered recovery ladder are
 # written once. The ladder is a generator yielding ``_LadderStep`` requests and receiving the
 # response (or thrown exception), so rung ORDER and accept/re-raise contracts match on both wires.
-class _ResolvedAuxRoute(NamedTuple):
-    client: Any
-    final_model: Optional[str]
-    resolved_provider: str
-    effective_provider: str
-
-
 def _resolve_call_client(
     task: Optional[str], *, provider: Optional[str], model: Optional[str], base_url: Optional[str],
     api_key: Optional[str], resolved_provider: str, resolved_model: Optional[str],
@@ -7430,6 +7430,9 @@ def _resolve_call_client(
     if client is None:
         raise AuxiliaryClientUnavailable(f"No LLM provider configured for task={task} "
                                          f"provider={resolved_provider}. Run: hermes setup")
+    if fallback_from is None and (resolved_provider in {"auto", "", None} or task == "vision"):
+        origin = getattr(client, "_hermes_aux_fallback_origin", None)
+        fallback_from = origin if isinstance(origin, tuple) else None
     if fallback_from:
         emit_auxiliary_fallback(*fallback_from, effective_provider, final_model,
                                 task=task, reason="provider_unavailable")

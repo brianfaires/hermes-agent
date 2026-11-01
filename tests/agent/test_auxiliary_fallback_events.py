@@ -33,15 +33,27 @@ def routes(monkeypatch):
     manager.discover_and_load(force=True)
     events = manager._plugins['probe'].module.events
     requests = []
+    modes = []
+
+    def completion(request, text, finish='stop'):
+        model = json.loads(request.content).get('model')
+        payload = {'id': 'synthetic', 'created': 0, 'model': model,
+                   'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish,
+                       'message': {'role': 'assistant', 'content': text}}]}
+        if json.loads(request.content).get('stream'):
+            payload.update(object='chat.completion.chunk', choices=[{'index': 0, 'finish_reason': finish,
+                            'delta': {'role': 'assistant', 'content': text}}])
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                                  text='data: ' + json.dumps(payload) + '\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json=payload)
 
     def send(request):
         requests.append(request.url.host)
+        if request.url.host == 'primary.invalid' and modes == ['partial']:
+            return completion(request, 'partial summary', 'length')
         if request.url.host == 'primary.invalid':
             return httpx.Response(402, json={'error': {'message': 'Insufficient credits: synthetic-secret'}})
-        return httpx.Response(200, json={
-            'id': 'synthetic', 'object': 'chat.completion', 'created': 0,
-            'model': 'backup-model', 'choices': [{'index': 0, 'finish_reason': 'stop',
-                'message': {'role': 'assistant', 'content': 'OK'}}]})
+        return completion(request, 'OK')
 
     clients = []
     def client(*args, **kwargs):
@@ -51,14 +63,14 @@ def routes(monkeypatch):
         return result
     monkeypatch.setattr(ac, 'OpenAI', client)
     ac._reset_aux_unhealthy_cache()
-    yield events, requests, send
+    yield events, requests, send, modes
     for item in clients:
         item.close()
     ac._reset_aux_unhealthy_cache()
 
 
 def test_configured_auxiliary_fallback_emits_each_distinct_activation(routes):
-    events, requests, _ = routes
+    events, requests, _, _ = routes
     for _ in range(2):
         ac._reset_aux_unhealthy_cache()
         result = ac.call_llm(task='title_generation', messages=[{'role': 'user', 'content': 'title'}])
@@ -75,7 +87,7 @@ def test_configured_auxiliary_fallback_emits_each_distinct_activation(routes):
 @pytest.mark.asyncio
 async def test_async_fallback_uses_same_configured_route_and_activation(routes, monkeypatch):
     from openai import AsyncOpenAI
-    events, requests, send = routes
+    events, requests, send, _ = routes
     clients = []
     def to_async(client, model, **kwargs):
         result = AsyncOpenAI(api_key='synthetic-secret', base_url=str(client.base_url),
@@ -94,25 +106,8 @@ async def test_async_fallback_uses_same_configured_route_and_activation(routes, 
             await client.close()
 
 
-def test_compression_fallback_routes_emit_without_changing_prompt_or_leaking_keys(routes):
-    from agent.context_compressor_summary import SummaryDispatchMixin
-    events, _, _ = routes
-    compressor = SummaryDispatchMixin()
-    compressor.provider, compressor.model, compressor.summary_model = 'custom:main', 'main-model', 'summary-model'
-    compressor._last_aux_resolved_provider = 'custom:summary'
-    compressor._last_aux_resolved_model = 'summary-model'
-    compressor._clear_compression_failure_cooldown = lambda: None
-    compressor._fallback_to_main_for_compression(Exception('synthetic-secret'), 'failed')
-    kwargs = {'task': 'compression'}
-    compressor._apply_summary_route(kwargs, {'provider': 'custom:backup', 'model': 'backup-model', 'api_key': 'synthetic-secret'})
-    assert [(e['old_provider'], e['old_model'], e['provider'], e['model'], e['reason']) for e in events] == [
-        ('custom:summary', 'summary-model', 'custom:main', 'main-model', 'summary_failed'),
-        ('custom:summary', 'summary-model', 'custom:backup', 'backup-model', 'summary_stalled')]
-    assert 'synthetic-secret' not in json.dumps(events)
-
-
 def test_missing_explicit_credentials_activates_configured_backup_once(routes):
-    events, requests, _ = routes
+    events, requests, _, _ = routes
     home = get_hermes_home()
     config = json.loads((home / 'config.yaml').read_text())
     config['auxiliary']['title_generation']['provider'] = 'nous'
@@ -122,3 +117,102 @@ def test_missing_explicit_credentials_activates_configured_backup_once(routes):
     assert requests == ['backup.invalid']
     assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
         ('nous', 'custom:backup', 'provider_unavailable')]
+
+
+@pytest.mark.parametrize('async_mode', [False, True])
+@pytest.mark.asyncio
+async def test_auto_route_unavailable_main_notifies_even_with_cached_backup(routes, monkeypatch, async_mode):
+    from openai import AsyncOpenAI
+    events, requests, send, _ = routes
+    config_path = get_hermes_home() / 'config.yaml'
+    config = json.loads(config_path.read_text())
+    config['auxiliary']['title_generation']['provider'] = 'auto'
+    config_path.write_text(json.dumps(config))
+    clients = []
+    def to_async(client, model, **kwargs):
+        result = AsyncOpenAI(api_key='synthetic-secret', base_url=str(client.base_url), max_retries=0,
+                             http_client=httpx.AsyncClient(transport=httpx.MockTransport(send)))
+        clients.append(result)
+        return result, model
+    monkeypatch.setattr(ac, '_to_async_client', to_async)
+    try:
+        for _ in range(2):
+            kwargs = dict(task='title_generation', main_runtime={'provider': 'nous', 'model': 'main-model'},
+                          messages=[{'role': 'user', 'content': 'title'}])
+            result = await ac.async_call_llm(**kwargs) if async_mode else ac.call_llm(**kwargs)
+            assert result.choices[0].message.content == 'OK'
+        assert requests == ['backup.invalid'] * 2
+        assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
+            ('nous', 'custom:backup', 'provider_unavailable')] * 2
+    finally:
+        for client in clients:
+            await client.close()
+
+
+def test_real_summary_failure_switches_to_main_without_mutating_input(routes):
+    from copy import deepcopy
+    from agent.context_compressor import ContextCompressor
+    events, requests, _, modes = routes
+    modes.append('partial')
+    config_path = get_hermes_home() / 'config.yaml'
+    config = json.loads(config_path.read_text())
+    config['auxiliary']['compression'] = {'provider': 'custom:primary', 'model': 'summary-model'}
+    config_path.write_text(json.dumps(config))
+    compressor = ContextCompressor(model='main-model', provider='custom:backup',
+        base_url='https://backup.invalid/v1', api_key='synthetic-secret',
+        config_context_length=100000, quiet_mode=True)
+    messages = [{'role': 'user', 'content': 'remember this'}, {'role': 'assistant', 'content': 'yes'}]
+    before = deepcopy(messages)
+    assert 'OK' in compressor._generate_summary(messages)
+    assert messages == before
+    assert requests == ['primary.invalid', 'backup.invalid']
+    assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
+        ('custom:primary', 'custom:backup', 'summary_failed')]
+
+
+def test_real_stall_recovery_pins_summary_backup_once(routes):
+    import threading
+    from agent.context_compressor import ContextCompressor
+    from agent.conversation_compression import run_compress_context_with_progress_timeout
+    events, requests, _, _ = routes
+    config_path = get_hermes_home() / 'config.yaml'
+    config = json.loads(config_path.read_text())
+    config['auxiliary']['compression'] = {'provider': 'custom:primary', 'model': 'summary-model',
+        'fallback_chain': [{'provider': 'custom:backup', 'model': 'backup-model', 'timeout': 10}]}
+    config_path.write_text(json.dumps(config))
+    compressor = ContextCompressor(model='main-model', provider='custom:primary',
+        base_url='https://primary.invalid/v1', api_key='synthetic-secret',
+        config_context_length=100000, quiet_mode=True)
+    messages = [{'role': 'user', 'content': 'remember this'}]
+    release = threading.Event()
+    attempts = []
+    def worker(fence):
+        attempts.append(fence)
+        if len(attempts) == 1:
+            release.wait(15)
+            return messages, 'stable prompt'
+        summary = compressor._generate_summary(messages)
+        return [{'role': 'user', 'content': summary}], 'stable prompt'
+    try:
+        result, prompt = run_compress_context_with_progress_timeout(
+            worker=worker, messages=messages, system_prompt_fallback='stable prompt',
+            idle_timeout_seconds=2, total_ceiling_seconds=12)
+    finally:
+        release.set()
+    assert len(result) == 1 and 'OK' in result[0]['content'] and prompt == 'stable prompt'
+    assert messages == [{'role': 'user', 'content': 'remember this'}]
+    assert requests == ['backup.invalid'] and len(attempts) == 2
+    assert [(e['provider'], e['model'], e['reason']) for e in events] == [
+        ('custom:backup', 'backup-model', 'summary_stalled')]
+
+
+def test_vision_auto_rescue_reports_selected_aggregator(routes, monkeypatch):
+    events, requests, _, _ = routes
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'synthetic-secret')
+    result = ac.call_llm(task='vision', provider='auto',
+        main_runtime={'provider': 'nous', 'model': 'main-model'},
+        messages=[{'role': 'user', 'content': 'describe'}])
+    assert result.choices[0].message.content == 'OK'
+    assert requests == ['openrouter.ai']
+    assert [(e['old_provider'], e['provider'], e['reason']) for e in events] == [
+        ('nous', 'openrouter', 'provider_unavailable')]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 
 def _record_route_info(
@@ -36,3 +36,19 @@ def emit_auxiliary_fallback(old_provider, old_model, provider, model, *, task, r
         new_provider=_fallback_provider_from_label(provider), new_model=model,
         stage='auxiliary', task=task, reason=reason,
     )
+
+
+class _ResolvedAuxRoute(NamedTuple):
+    client: Any
+    final_model: Optional[str]
+    resolved_provider: str
+    effective_provider: str
+
+
+def remember_auto_fallback(client, provider, model):
+    """Keep fallback provenance alongside the existing cached-client route metadata."""
+    try:
+        client._hermes_aux_fallback_origin = (provider, model)
+    except (AttributeError, TypeError):
+        pass  # Availability probe stubs need not retain request metadata.
+    return client
