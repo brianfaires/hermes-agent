@@ -3750,31 +3750,6 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         shown = [i for s, e in selected for i in range(s, e)]
         return _render(selected), _coverage(sum(len(display_records[i]) for i in shown), len(shown))
 
-    def _fallback_to_main_for_compression(
-        self, e: Exception, reason: str, failed_model: Optional[str] = None
-    ) -> None:
-        """Fall back from a separate ``summary_model`` to the main model: record the aux failure, clear model + cooldown.
-
-        ``failed_model`` names the model that actually failed — an ``auto`` route resolves one per call
-        without setting ``summary_model``, so without it the user warning would have no model to name
-        (#116472)."""
-        failed = str(
-            failed_model or self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
-        ).strip()
-        self._summary_model_fallen_back = True
-        logger.warning(
-            "Summary model '%s' %s (%s). Falling back to main model '%s' for compression.",
-            failed or "(auto)", reason, e, self.model,
-        )
-        self._last_aux_model_failure_error = _short_error_text(e)
-        self._last_aux_model_failure_model = failed or None
-        telemetry = getattr(self, "_active_compression_telemetry", None)
-        if isinstance(telemetry, dict):
-            telemetry["fallback_used"] = True
-            telemetry["failure_class"] = telemetry.get("failure_class") or "aux_model_fallback"
-        self.summary_model = ""  # empty = use main model
-        self._clear_compression_failure_cooldown()  # no cooldown — retry immediately
-
     def _call_summary_llm(self, prompt: str, prompt_started_at: float) -> str:
         """Issue the single aux summary call; return validated content text.
         Raises RuntimeError for empty content or a length-truncated (PARTIAL) summary so the failure
@@ -3808,7 +3783,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         )
         try:
             # Compression is atomic: shield the summary call from gateway interrupts. Re-entrant.
-            with aux_interrupt_protection():
+            from agent.auxiliary_fallback_events import summary_fallback_scope
+            origin = getattr(self, '_summary_fallback_origin', None)
+            self._summary_fallback_origin = None
+            with aux_interrupt_protection(), summary_fallback_scope(origin):
                 response = call_llm(**call_kwargs)
         finally:
             route_known = bool(_aux_route.get("provider") and _aux_route.get("model"))
@@ -3816,6 +3794,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # Remember the resolved model for the failure path: an ``auto`` route picks one per call
             # without setting ``summary_model``, so only this names it in the user warning (#116472).
             self._last_aux_resolved_model = _aux_model or None
+            self._last_aux_resolved_provider = _aux_route.get("provider") or ""
             self._record_aux_compression_call(
                 prompt_messages=call_kwargs["messages"],
                 # max_tokens is intentionally absent; .get() keeps the telemetry hook from breaking the call.

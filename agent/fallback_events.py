@@ -7,6 +7,7 @@ share one shell/plugin hook primitive without growing the model tool schema.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ def emit_fallback_activated(
     session_id: Any = "",
     platform: Any = "",
     api_mode: Any = "",
+    task: Any = "",
+    profile_name: Any = None,
 ) -> None:
     """Fire the fallback_activated hook, swallowing hook failures.
 
@@ -68,6 +71,8 @@ def emit_fallback_activated(
             return
         invoke_hook(
             "fallback_activated",
+            event_id=str(uuid.uuid4()),
+            task=_clean(task),
             session_id=_clean(session_id),
             old_provider=_clean(old_provider),
             old_model=_clean(old_model),
@@ -79,7 +84,7 @@ def emit_fallback_activated(
             reason=_reason_label(reason),
             platform=_clean(platform),
             api_mode=_clean(api_mode),
-            profile_name=active_profile_name(),
+            profile_name=_clean(profile_name) if profile_name is not None else active_profile_name(),
         )
     except Exception:
         logger.debug("fallback_activated hook emission failed", exc_info=True)

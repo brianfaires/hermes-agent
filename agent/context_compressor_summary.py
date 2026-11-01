@@ -27,6 +27,33 @@ def _accepts_keyword_argument(callable_obj: Any, name: str) -> bool:
 
 
 class SummaryDispatchMixin:
+    def _fallback_to_main_for_compression(
+        self, e: Exception, reason: str, failed_model: Optional[str] = None
+    ) -> None:
+        """Fall back from a separate ``summary_model`` to the main model: record the aux failure, clear model + cooldown.
+
+        ``failed_model`` names the model that actually failed — an ``auto`` route resolves one per call
+        without setting ``summary_model``, so without it the user warning would have no model to name
+        (#116472)."""
+        from agent.context_compressor import logger, _short_error_text
+        failed = str(
+            failed_model or self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
+        ).strip()
+        self._summary_fallback_origin = (getattr(self, '_last_aux_resolved_provider', ''), failed, 'summary_failed')
+        self._summary_model_fallen_back = True
+        logger.warning(
+            "Summary model '%s' %s (%s). Falling back to main model '%s' for compression.",
+            failed or "(auto)", reason, e, self.model,
+        )
+        self._last_aux_model_failure_error = _short_error_text(e)
+        self._last_aux_model_failure_model = failed or None
+        telemetry = getattr(self, "_active_compression_telemetry", None)
+        if isinstance(telemetry, dict):
+            telemetry["fallback_used"] = True
+            telemetry["failure_class"] = telemetry.get("failure_class") or "aux_model_fallback"
+        self.summary_model = ""  # empty = use main model
+        self._clear_compression_failure_cooldown()  # no cooldown — retry immediately
+
     def _apply_summary_route(self, call_kwargs: dict, pinned: Optional[dict[str, Any]] = None) -> None:
         """Pin the summary route onto ``call_kwargs`` for both compression entry points.
 
@@ -39,6 +66,10 @@ class SummaryDispatchMixin:
         policy but never fills an unset endpoint/key/wire mode from the failed aux route (#130895).
         """
         if pinned:
+            self._summary_fallback_origin = (
+                getattr(self, '_last_aux_resolved_provider', ''),
+                getattr(self, '_last_aux_resolved_model', '') or self.summary_model, 'summary_stalled',
+            )
             # Clear first: a keyless pin (local server) resolves its own credential, never the main one.
             for key in ("provider", "model", "base_url", "api_key", "api_mode"):
                 call_kwargs.pop(key, None)
