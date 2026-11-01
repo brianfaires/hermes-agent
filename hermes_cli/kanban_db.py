@@ -3557,21 +3557,32 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection, task_id: str, *, expected_scheduled_run_id: Optional[int] = None, note: Optional[str] = None,
+) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. A fenced CI
+    observer names the parked run and never releases a held or re-parked card."""
     now = int(time.time())
     with write_txn(conn):
+        status = _task_status(conn, task_id)
+        if expected_scheduled_run_id is not None:
+            parked = conn.execute(
+                "SELECT run_id FROM task_events WHERE task_id = ? AND kind = 'scheduled' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if (status != 'scheduled' or _has_sticky_block(conn, task_id)
+                    or not parked or parked[0] != int(expected_scheduled_run_id)):
+                return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if status == "blocked"
             else "ready"
         )
         _reclaim_dangling_run(
             conn, task_id, statuses=("blocked", "scheduled"), now=now,
             note="invariant recovery on unblock",
         )
-        # Re-gate on parent completion before restoring the source phase.
         landing_status = _landing_status_after_parents(conn, task_id)
         new_status = (
             "review"
@@ -3590,6 +3601,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
+        if note:
+            add_comment(conn, task_id, 'system', note)
         _append_event(
             conn, task_id, "unblocked",
             (
