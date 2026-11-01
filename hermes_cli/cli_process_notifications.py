@@ -28,10 +28,11 @@ class CLIProcessNotificationsMixin:
         turn-starting injection is suppressed."""
         try:
             from cli import CLI_CONFIG
-            mode = str((CLI_CONFIG.get("display") or {}).get("background_process_notifications") or "").strip().lower()
+            mode = (CLI_CONFIG.get("display") or {}).get("background_process_notifications")
         except Exception:
             return False
-        return mode == "off"
+        # YAML's unquoted ``off`` becomes False, which the gateway also treats as off.
+        return mode is False or str(mode or "").strip().lower() == "off"
 
     def _drain_process_notifications(self, consumer: str) -> None:
         from hermes_cli.gateway_tools_notify import gateway_store, queue_admitted_turn
