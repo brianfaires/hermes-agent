@@ -41,6 +41,12 @@ parent replacement or removal, under the owning profile. These effects happen af
 YAML publication; a later mirror failure is reported without claiming rollback across files.
 Uncooperative direct filesystem writes are outside this locking protocol.
 
+Policy consumers such as the disk-cleanup plugin use
+`load_user_config_effective(fail_closed=True)` before acting on settings. Strict reads reject
+non-mapping YAML as well as parse errors, including after a tolerant reader cached an empty
+fallback. They reuse cached results only after the user layer's mapping root was verified.
+Normal readers keep their last-known-good recovery behavior; missing and empty files remain valid.
+
 ## Update pipeline
 
 User-facing behaviour (receipts, `--plan`, snapshot modes) is in

@@ -26,7 +26,7 @@ from utils import fast_safe_load
 # path -> raw user mapping from the last successful parse in this process; served (through the
 # normal pipeline) when the file is later found mid-edit as broken YAML.
 _LAST_GOOD_USER_RAW: dict[str, dict[str, Any]] = {}
-# path -> (*user_signature, *managed_signature, effective, env_snapshot); see utils.file_signature.
+# path -> (*user_signature, *managed_signature, effective, env_snapshot, root_verified).
 _EFFECTIVE_CACHE: dict[str, tuple[Any, ...]] = {}
 
 
@@ -55,8 +55,8 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     here, so ``{}`` sentinels and presence-sensitive bridges keep working. An absent file is an
     empty user layer (the managed layer still applies). Returns a fresh deepcopy.
 
-    Broken YAML: ``fail_closed=True`` raises the parse error (for callers that keep their own
-    last-good state); otherwise the last successfully parsed user file — in-process first, then
+    Broken or non-mapping YAML: ``fail_closed=True`` raises the parse error (for callers that
+    keep their own last-good state); otherwise the last successfully parsed user file — in-process first, then
     the newest ``backups/config/*.good.*`` copy — is served through the same pipeline, so a
     mid-edit torn write never silently drops user overrides (same contract as ``load_config``).
     Cached on the user + managed file signatures and the values of every referenced env var."""
@@ -73,26 +73,34 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:8] == cache_sig:
+        # Other raw readers can collapse a non-mapping root to {}; strict reads
+        # may reuse only a root this parser actually verified.
+        root_verified = bool(cached is not None and cached[:4] == user_sig and cached[10])
+        if (cached is not None and cache_sig is not None and cached[:8] == cache_sig
+                and (not fail_closed or root_verified)):
             if all(_config._env_ref_lookup(k) == v for k, v in cached[9].items()):
                 return copy.deepcopy(cached[8])
 
         raw: dict[str, Any] = {}
         recovered = False
         raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
-        if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig:
+        if (user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig
+                and (not fail_closed or root_verified)):
             raw = copy.deepcopy(raw_hit[4])  # one parse per process, shared with read_raw_config()
             _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
         elif user_sig is not None:
             try:
                 with open(config_path, encoding="utf-8-sig") as f:
                     loaded = fast_safe_load(f)
+                if loaded is not None and not isinstance(loaded, dict):
+                    raise ValueError('top-level YAML must be a mapping')
             except Exception as exc:
                 if fail_closed:
                     raise
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
+                root_verified = True
                 _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw))
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
@@ -110,7 +118,7 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         # A recovered result is never cached under the corrupt file's signature: a later
         # ``fail_closed`` caller must still see the parse error, not a cache hit.
         if cache_sig is not None and not recovered:
-            _EFFECTIVE_CACHE[path_key] = (*cache_sig, copy.deepcopy(effective), env_snapshot)
+            _EFFECTIVE_CACHE[path_key] = (*cache_sig, copy.deepcopy(effective), env_snapshot, root_verified)
         else:
             _EFFECTIVE_CACHE.pop(path_key, None)
         return effective
