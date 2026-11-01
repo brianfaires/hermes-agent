@@ -21,7 +21,7 @@ from hermes_cli import update_cmd
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+    return subprocess.run(["git", "-C", str(root), *args], check=True, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8").stdout.strip()
 
 
