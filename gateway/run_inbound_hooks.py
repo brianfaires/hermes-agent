@@ -273,7 +273,8 @@ class GatewayInboundHooksMixin:
         """Run a resolved plugin command handler for *source* → its reply text or None; raises what
         the handler raises (``gateway/session_commands.py`` resolves the exact registered name).
         *args* is the argument as typed (a local session's command); otherwise the message's
-        command arguments, with the messaging dash repair of ``get_command_args``."""
+        command arguments. Text-mode plugins retain the payload after one separator;
+        option-mode commands keep messaging dash repair and trimming."""
         # The agent-turn path binds HERMES_SESSION_* via _set_session_env; this dispatch
         # sits before it, so a handler reading get_session_env() would see an empty or a
         # foreign (cron agent's os.environ) session (#108698). A local session's command
@@ -290,7 +291,11 @@ class GatewayInboundHooksMixin:
         if session_entry is None:
             _plugin_context.session_key = self._session_key_for_source(source)
         user_args = event.get_command_args().strip() if args is None else args
-        from hermes_cli.plugin_command_dispatch import invoke_plugin_command
+        from hermes_cli.plugin_command_dispatch import invoke_plugin_command, plugin_command_args
+        if args is None:
+            user_args = plugin_command_args(
+                (event.get_command() or "").replace("_", "-"), event._command_text(), user_args,
+            )
         from gateway.plugin_messages import bind_live_source
         from gateway.plugin_command_choice import chat_choices
         call = functools.partial(

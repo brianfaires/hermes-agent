@@ -1781,7 +1781,11 @@ def register(ctx):
 
 After registration, users can type `/mystatus` in any session. The command appears in autocomplete, `/help` output, and the Telegram bot menu.
 
-**Signature:** `ctx.register_command(name: str, handler: Callable, description: str = "", args_hint: str = "")`
+**Signature:** `ctx.register_command(name: str, handler: Callable, description: str = "", args_hint: str = "", argument_mode: str | None = None)`
+
+Set `argument_mode="text"` for free-form input such as `/log <note>`. CLI/TUI
+dispatch removes one separator after the command name and preserves the remaining
+spaces, newlines and pasted text. Normal command history and observers still apply.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

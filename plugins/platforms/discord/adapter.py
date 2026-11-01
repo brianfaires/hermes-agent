@@ -4602,7 +4602,7 @@ class DiscordAdapter(DiscordTransportMixin, DiscordAuthorizationMixin, DiscordMe
                 description=_truncate_discord_component_text(
                     description or t("platform.discord.command.auto_description_fallback", name=name),
                     _DISCORD_APP_COMMAND_TEXT_LIMIT),
-                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint), prefix="auto_slash_"),
+                callback=self._slash_proxy(name, args, template, None, strip=False, prefix="auto_slash_"),
             )
             try:
                 tree.add_command(auto_cmd)
@@ -6076,16 +6076,9 @@ class DiscordAdapter(DiscordTransportMixin, DiscordAuthorizationMixin, DiscordMe
         self, message: DiscordMessage, role_authorized: bool = False, *, recovered: bool = False,
     ) -> bool:
         """Handle one Discord message and report whether it reached dispatch."""
-        # Server channels (not DMs) require @mention unless free-response or an already-joined thread.
-        #
-        # Config (discord.* in config.yaml or DISCORD_* env vars):
-        #   discord.require_mention: Require @mention in server channels (default: true)
-        #   discord.free_response_channels: Channel IDs where bot responds without mention
-        #   discord.ignored_channels: Channel IDs where bot NEVER responds (even when mentioned)
-        #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
-        #   discord.no_thread_channels: Channel IDs where bot responds directly without creating thread
-        #   discord.auto_thread: Auto-create thread on @mention in channels (default: true)
-        #   discord.free_response_auto_thread: Free-response channels also auto-thread (default: false)
+        # Server channels require @mention unless free-response or an already-joined thread.
+        # discord.* policy: require_mention, free_response_channels, ignored_channels,
+        # allowed_channels, no_thread_channels, auto_thread, free_response_auto_thread.
         thread_id = None
         parent_channel_id = None
         is_thread = isinstance(message.channel, discord.Thread)
@@ -6094,7 +6087,8 @@ class DiscordAdapter(DiscordTransportMixin, DiscordAuthorizationMixin, DiscordMe
             parent_channel_id = self._get_parent_channel_id(message.channel)
         is_voice_linked_channel = False
         # Save stripped text now: create_thread() can clobber message.content (breaks /command detection).
-        raw_content = message.content.strip()
+        original_content = message.content
+        raw_content = original_content.strip()
         normalized_content = raw_content
         mention_prefix = False
         snapshot_attachments = []
@@ -6113,6 +6107,8 @@ class DiscordAdapter(DiscordTransportMixin, DiscordAuthorizationMixin, DiscordMe
                 normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
                 normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
             message.content = normalized_content
+        from plugins.platforms.discord.command_text import original_command_text
+        normalized_content = original_command_text(original_content, getattr(self._client.user, "id", None)) or normalized_content
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
             if parent_channel_id:

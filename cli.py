@@ -1199,7 +1199,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
                 session_key=getattr(self, "session_id", None), platform="cli",
             )
         if entry is None:
-            return self._process_unregistered_slash(cmd_original, cmd_lower)
+            return self._process_unregistered_slash(command.lstrip(), cmd_lower)
         from hermes_cli.gateway_cli_commands import run as run_gateway_command
         if run_gateway_command(self, canonical, cmd_original):
             return True  # state the gateway session owns (checkpoints, .env, handoff)
@@ -1225,7 +1225,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         gone = False
         skill_commands = _session_skill_commands(self)  # after lookup: the catalog its miss re-read
         if plugin or (plugin is None and bare in _get_plugin_cmd_handler_names()):
-            gone = self._run_plugin_slash_command(base_cmd, user_args) is gateway_plugin_commands.GONE
+            gone = self._run_plugin_slash_command(base_cmd, cmd_original[len(base_cmd) + 1:]) is gateway_plugin_commands.GONE
             if not gone:
                 return True
             skill_commands = _session_skill_commands(self)  # the reload may have changed the skills
@@ -1284,11 +1284,12 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
         answered = gateway_plugin_commands.run(self, base_cmd.lstrip("/"), user_args)
         if answered:
             return answered  # ran beside the plugin's hooks, tools and MCP servers in the gateway, or GONE
-        from hermes_cli.plugin_command_dispatch import invoke_plugin_command
+        from hermes_cli.plugin_command_dispatch import invoke_plugin_command, plugin_command_args
         from hermes_cli.plugins import get_plugin_command_handler, resolve_plugin_command_result
         plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
         if not plugin_handler:
             return
+        user_args = plugin_command_args(base_cmd.lstrip('/'), base_cmd + ' ' + user_args, user_args.strip())
         session_id = getattr(self, "session_id", None) or ""
         from hermes_cli.plugin_choices import bind_asker, clarify_asker
         try:

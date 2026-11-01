@@ -132,7 +132,8 @@ class CLIModalMixin:
         prompt_toolkit loop, so it must stay cheap/non-blocking."""
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
         try:
-            text = (getattr(buffer, "text", "") or "").strip()
+            raw = getattr(buffer, "text", "") or ""
+            text = raw.lstrip() if _looks_like_slash_command(raw.lstrip()) else raw.strip()
         except Exception:
             return
         if not text:
@@ -157,7 +158,7 @@ class CLIModalMixin:
 
         if _looks_like_slash_command(text):
             try:
-                if not self.process_command(text):
+                if not self.process_command(self._expand_paste_references(text)):
                     self._should_exit = True
                     if app is not None and app.is_running:
                         app.exit()

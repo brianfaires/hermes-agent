@@ -1422,7 +1422,10 @@ class CLITuiMixin:
         if time.monotonic() - getattr(self, "_tui_last_text_change", 0.0) < _RAPID_INPUT_ENTER_WINDOW_S:
             buf.insert_text("\n")
             return
-        text = raw_text.strip()
+        if _looks_like_slash_command(raw_text.lstrip()):
+            self._inline_pastes(buf)
+            raw_text = buf.text
+        text = raw_text.lstrip() if _looks_like_slash_command(raw_text.lstrip()) else raw_text.strip()
         has_images = bool(self._attached_images)
         if not (text or has_images):
             return
@@ -1701,7 +1704,7 @@ class CLITuiMixin:
             buf = event.current_buffer
             if (
                 self._tui_paste_over_threshold(pasted_text, line_count, "paste_collapse_threshold")
-                and not buf.text.strip().startswith('/')):
+                and not (buf.text + pasted_text).lstrip().startswith('/')):
                 placeholder = self._tui_collapse_paste(pasted_text, line_count, fallback=False)
                 prefix = "\n" if buf.cursor_position > 0 and buf.text[buf.cursor_position - 1] != '\n' else ""
                 buf.insert_text(prefix + placeholder)
@@ -1753,7 +1756,7 @@ class CLITuiMixin:
         if (
             self._tui_paste_over_threshold(text, line_count, "paste_collapse_threshold_fallback")
             and is_paste
-            and not text.startswith('/')):
+            and not text.lstrip().startswith('/')):
             buf.text = self._tui_collapse_paste(text, line_count, fallback=True)
             buf.cursor_position = len(buf.text)
 
