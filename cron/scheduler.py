@@ -513,7 +513,8 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
 from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
-    save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
+    save_job_output, use_cron_store)
+from cron.self_removal import self_removal_delivery_allowed, self_removal_delivery_scope
 from cron import store_health
 from cron.execution_identity import exit_cron_execution
 from cron.executions import (
@@ -2897,7 +2898,7 @@ def run_one_job(
         _running_fire_owners.setdefault(_fire_key, {})[execution_token] = (
             fire_owner or None, profile_home)
     try:
-        with self_removal_delivery_scope(job["id"]):
+        with self_removal_delivery_scope(job["id"], expected_fire_owner=fire_owner or None):
             return _run_with_fire_claim_heartbeat(
                 job,
                 lambda lost_ownership: _run_one_job_body(

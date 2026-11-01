@@ -592,21 +592,8 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         b in ("hermes", "hermes.exe") for b in basenames
     ):
         return None
-    # Drop --profile X / -p X / --profile=X / -p=X (consumes a VALUE of "gateway" too).
-    filtered: list[str] = []
-    skip_next = False
-    for token in tokens:
-        if skip_next:
-            skip_next = False
-        elif token in ("--profile", "-p"):
-            skip_next = True
-        elif not token.startswith(("--profile=", "-p=")):
-            filtered.append(token)
-    for i, token in enumerate(filtered):
-        if token == "gateway":
-            # Bare `hermes gateway` defaults to `run`.
-            return filtered[i + 1] if i + 1 < len(filtered) else "run"
-    return None
+    from gateway.status_command import gateway_cli_subcommand
+    return gateway_cli_subcommand(tokens)
 
 
 def gateway_spawn_intent_subcommand(command: str | None) -> str | None:
