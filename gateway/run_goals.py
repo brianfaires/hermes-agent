@@ -202,6 +202,8 @@ class GatewayGoalsMixin:
                 await asyncio.sleep(POLL_SECONDS)
                 from gateway.run_heartbeat_restore import restore_heartbeat_watches
                 await restore_heartbeat_watches(self)
+                from gateway.run_goal_waits import poll_goal_waits
+                await poll_goal_waits(self)
                 watch = getattr(self, "_heartbeat_watch", None)
                 if watch:
                     await self._heartbeat_poll_once(watch)

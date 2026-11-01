@@ -174,6 +174,11 @@ You don't type anything for this — it's the judge's decision, made from the pr
 
 The barrier (pid- or time-based) is persisted with the goal in `SessionDB.state_meta`, so it survives `/resume`. `/goal pause`, `/goal resume`, and `/goal clear` all drop it. If the PID is already dead when the barrier is set (or dies while parked), or the time deadline passes, the barrier clears on the next check — a stale barrier can never wedge the loop.
 
+On messaging gateways, the existing background poller checks persisted waits and queues one
+continuation when a wait is satisfied, including after a gateway restart. A refused admission stays
+due for retry; an unchanged live wait does not start an agent turn. Pausing, clearing or replacing
+the goal invalidates a queued wait continuation. Global pause defers admission until resume.
+
 Typical flow: the agent pushes a PR, starts a CI watcher with `terminal(background=true, notify_on_complete=true)`, and reports "watching CI." The judge sees the watcher process still running, returns `wait` on its pid, and the loop goes quiet — then picks back up the instant CI finishes and judges the goal against the actual result.
 
 ## Behavior details
@@ -209,6 +214,10 @@ Any real message you send while a goal is active takes priority over the continu
 ### Mid-run safety (gateway)
 
 While an agent is already running, `/goal status`, `/goal pause`, `/goal clear`, `/goal wait`, and `/goal unwait` are safe to run — they only touch control-plane state and don't interrupt the current turn. Setting a **new** goal mid-run (`/goal <new text>`) is rejected with a message telling you to `/stop` first, so the old continuation can't race the new one.
+
+An in-flight judge result cannot overwrite a newer accepted pause, clear or replacement goal.
+If you update the current goal's criteria while the judge is running, its old verdict is discarded
+and the next continuation uses the updated criteria. The completed work turn is still counted once.
 
 ### Continuation replies do not quote the goal message (gateway)
 
