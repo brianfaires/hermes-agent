@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping, NoReturn, Sequence
+from typing import Any, Mapping, NoReturn, Sequence, cast
 
 __all__ = [
     "FILTER_DISCOVERY_FAILED",
@@ -760,6 +760,15 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
     except Exception:
         _legacy_kill_process_tree(proc)
         return
+    finally:
+        if not IS_WINDOWS and (pgid := getattr(proc, "_hermes_probe_pgid", None)) is not None:
+            import signal
+
+            try:
+                # Sweep live ancestry first; this owned group also survives a reaped leader.
+                os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok — POSIX-owned probe group
+            except OSError:
+                pass
     # Ensure Popen's own bookkeeping sees the exit so communicate()/wait() cannot hang.
     try:
         proc.kill()
@@ -830,6 +839,9 @@ def bounded_probe_run(
             stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
             text=True, encoding="utf-8", errors=errors,
             env=dict(env) if env is not None else None, cwd=cwd, **_popen_kwargs)
+        if not IS_WINDOWS:
+            # process_group=0 created this private group; remember it before communicate reaps the leader.
+            cast(Any, proc)._hermes_probe_pgid = proc.pid
     except Exception:
         if raise_on_spawn_failure:
             raise

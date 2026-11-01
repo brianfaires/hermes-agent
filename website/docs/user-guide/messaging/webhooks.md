@@ -228,6 +228,11 @@ Script outcomes:
 - Non-JSON text stdout is added to the payload as `script_output`.
 - Empty stdout, exact `[SILENT]`, `{"__hermes_ignore__": true}`, timeout, missing script, or nonzero exit code returns HTTP 200 with `{"status":"ignored","reason":"script"}`.
 
+Timeout cleanup uses the native bounded runner to stop the script's POSIX process
+group or Windows containment job and drain captured output within a bound. On
+POSIX, a child that detaches into a new session and outlives its parent can survive
+this cleanup.
+
 ### Prompt Templates
 
 Prompts use dot-notation to access nested fields in the webhook payload:
