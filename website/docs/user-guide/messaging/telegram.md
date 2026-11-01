@@ -329,7 +329,7 @@ list. YAML duplicate keys silently override earlier ones.
 
 ### Supported `MEDIA:` file extensions
 
-The gateway extracts `MEDIA:/path/to/file` tags from agent replies and ships the referenced file as a platform-native attachment. Supported extensions across all gateway platforms:
+The gateway extracts standalone `MEDIA:/path/to/file` lines from agent replies and ships the referenced file as a platform-native attachment. Supported extensions across all gateway platforms:
 
 | Category | Extensions |
 |---|---|

@@ -17,6 +17,7 @@ from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.i18n import t
+from gateway.platforms.api_server_media import resolve_media_to_data_urls
 
 try:
     from aiohttp import web
@@ -827,7 +828,7 @@ class OpenAICompatRoutesMixin:
         from gateway.platforms.api_server import (
             ThreadSafeAsyncQueue, _api_request_profile, _chat_usage_payload, _coerce_request_bool,
             _content_has_visible_payload, _derive_chat_session_id, _error_response, _invalid_request,
-            _openai_error, _redact_api_error_text, _resolve_media_to_data_urls)
+            _openai_error, _redact_api_error_text)
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
@@ -977,7 +978,7 @@ class OpenAICompatRoutesMixin:
             return err
         result, usage = outcome
         presentation_muted = result.get("_notification_presentation_suppressed") is True
-        final_response = _resolve_media_to_data_urls(result.get("final_response") or "")
+        final_response = resolve_media_to_data_urls(result.get("final_response") or "")
         completed, is_partial, is_failed, err_msg = _result_flags(result)
         if err_msg:
             err_msg = _redact_api_error_text(err_msg)
@@ -1119,7 +1120,7 @@ class OpenAICompatRoutesMixin:
         """Stream ``chat.completion.chunk`` frames from the agent's delta queue. On client
         disconnect the agent is interrupted (stops LLM calls), then its task wrapper cancelled."""
         from gateway.platforms.api_server import (
-            _abandon_agent_task, _chat_usage_payload, _resolve_media_to_data_urls, _sse_frame)
+            _abandon_agent_task, _chat_usage_payload, _sse_frame)
         response = await self._prepare_sse_response(request, session_id, gateway_session_key)
 
         def _chunk(delta: dict[str, Any], finish_reason=None, **extra) -> dict[str, Any]:
@@ -1176,7 +1177,7 @@ class OpenAICompatRoutesMixin:
             # once so the client does not see an empty stream (#31449). Mirrors
             # _ResponsesStream.collect_result for /v1/responses.
             if not content_sent and not presentation_muted and isinstance(result, dict):
-                fallback_text = _resolve_media_to_data_urls(result.get("final_response") or "")
+                fallback_text = resolve_media_to_data_urls(result.get("final_response") or "")
                 if fallback_text:
                     await response.write(_sse_frame(_chunk({"content": fallback_text})))
             elif not presentation_muted:
@@ -1328,7 +1329,7 @@ class OpenAICompatRoutesMixin:
         from gateway.platforms.api_server import (
             ThreadSafeAsyncQueue, _coerce_request_bool,
             _error_response, _invalid_request, _redact_api_error_text,
-            _resolve_media_to_data_urls, _responses_usage_payload)
+            _responses_usage_payload)
         # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
@@ -1419,7 +1420,7 @@ class OpenAICompatRoutesMixin:
             if _settled(replay):
                 return web.json_response(replay['response'], headers=replay.get('headers') or {})
         result, usage = outcome
-        final_response = _resolve_media_to_data_urls(result.get("final_response", ""))
+        final_response = resolve_media_to_data_urls(result.get("final_response", ""))
         if not final_response:
             final_response = _redact_api_error_text(result.get("error", "(No response generated)"))
         full_history = self._build_response_conversation_history(
@@ -1583,7 +1584,7 @@ class OpenAICompatRoutesMixin:
                     "output": msg.get("content", "")})
         final = result.get("final_response", "") or _redact_api_error_text(
             result.get("error", "(No response generated)"))
-        items.append(_message_item(final))
+        items.append(_message_item(resolve_media_to_data_urls(final)))
         if response_id is not None:
             from gateway.platforms.api_server_response_identity import identify_output
             return identify_output(items, response_id)

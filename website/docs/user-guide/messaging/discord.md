@@ -728,9 +728,9 @@ gateway:
 
 Leaving this at `true` on the "primary" gateway keeps the normal behavior — global `/`-menu commands for built-ins and installed skills.
 
-## Sending Media (inline `MEDIA:` tags)
+## Sending Media (standalone `MEDIA:` tags)
 
-The Discord adapter supports native file uploads for every common media type via inline `MEDIA:/path/to/file` tags emitted in the agent's response — the adapter strips the tag and auto-uploads the file:
+The Discord adapter supports native file uploads for every common media type via `MEDIA:/path/to/file` tags on their own lines in the agent's response — the adapter strips the tag and auto-uploads the file:
 
 | Type | How it's delivered |
 |---|---|

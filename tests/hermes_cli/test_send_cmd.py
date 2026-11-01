@@ -148,7 +148,7 @@ def test_whatsapp_mentions_ride_the_first_bridge_payload_only(whatsapp_bridge, t
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(_parse([
             "--to", _GROUP, "--mention", "+1 (555) 000-0001", "--mention", "15550000001@s.whatsapp.net",
-            f"{long_message} MEDIA:{image}",
+            f"{long_message}\nMEDIA:{image}",
         ]))
     assert exc.value.code == 0
     text_payloads = [payload for path, payload in calls if path == "send"]
@@ -158,7 +158,7 @@ def test_whatsapp_mentions_ride_the_first_bridge_payload_only(whatsapp_bridge, t
 
     calls.clear()
     with pytest.raises(SystemExit) as exc:
-        send_cmd.cmd_send(_parse(["--to", _GROUP, "--mention", "15550000001", f"hello @15550000001 MEDIA:{image}"]))
+        send_cmd.cmd_send(_parse(["--to", _GROUP, "--mention", "15550000001", f"hello @15550000001\nMEDIA:{image}"]))
     assert exc.value.code == 0
     assert [path for path, _ in calls] == ["send-media"]
     assert calls[0][1]["mentions"] == ["15550000001@s.whatsapp.net"]
