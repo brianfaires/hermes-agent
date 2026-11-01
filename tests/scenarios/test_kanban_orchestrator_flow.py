@@ -1,4 +1,4 @@
-"""Single-board orchestration contract for #173, revised by ADR 0001.
+"""Organization workflow scenario for #173, revised by shared ADR 0001.
 
 The request closes after planning; Rook follows through on dependency-gated
 milestone and close-out cards. Model decisions and worker processes are scripted.
