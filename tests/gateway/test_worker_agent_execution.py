@@ -42,8 +42,10 @@ class Model(BaseHTTPRequestHandler):
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize('probe_constructors', [False, True])
-def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, probe_constructors):
+@pytest.mark.parametrize(('probe_constructors', 'description_limit'), [
+    (False, 60), (True, 60), (False, 'full'), (False, 120),
+])
+def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, probe_constructors, description_limit):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -55,6 +57,7 @@ def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, p
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     (home / 'config.yaml').write_text(json.dumps({'gateway': {'multiplex_profiles': False},
         'model': {'provider': 'custom', 'default': 'worker-model', 'base_url': url},
+        'skills': {'prompt_description_limit': description_limit},
         'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': []}}))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
@@ -93,6 +96,8 @@ def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, p
             with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
                 assert db.execute('SELECT COUNT(*) FROM session_turn_leases').fetchone()[0] == 0
                 assert db.execute('SELECT input_tokens,output_tokens FROM sessions WHERE id=?', (sid,)).fetchone() == (10, 5)
+                model_config = json.loads(db.execute('SELECT model_config FROM sessions WHERE id=?', (sid,)).fetchone()[0] or '{}')
+                assert model_config.get('skills_prompt_description_limit', 60) == description_limit
                 rows = db.execute('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (sid,)).fetchall()
                 assert any(role == 'user' and 'WORKER_INFERENCE' in content for role, content in rows)
                 assert any(role == 'assistant' and 'RECOVERY_ACK_WORKER_INFERENCE' in content for role, content in rows)
