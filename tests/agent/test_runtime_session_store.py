@@ -115,7 +115,8 @@ def test_outbox_journal_survives_a_cross_device_rename(tmp_path, monkeypatch):
         store._outbox_owner.close()
 
 
-def test_worker_store_persists_and_restores_the_tools_prefix_pin(tmp_path):
+@pytest.mark.parametrize('schema_pins', [None, frozenset(), frozenset({'terminal'})])
+def test_worker_store_persists_and_restores_the_tools_prefix_pin(tmp_path, schema_pins):
     """persist_agent_tool_names writes the pin through the worker facade and a rebuilt worker
     agent reads it back from the same row (F26). Without the facade method the pin stays NULL
     and a config flip between turns silently forks the cached tools[] prefix."""
@@ -133,9 +134,10 @@ def test_worker_store_persists_and_restores_the_tools_prefix_pin(tmp_path):
         try:
             tools = [{'type': 'function', 'function': {'name': n, 'parameters': {}}}
                      for n in ('terminal', 'tool_search', 'tool_describe', 'tool_call')]
-            persist_agent_tool_names(SimpleNamespace(_session_db=store, session_id='owned', tools=tools))
+            preferences = {} if schema_pins is None else {'_tool_search_pinned_tools': schema_pins}
+            persist_agent_tool_names(SimpleNamespace(_session_db=store, session_id='owned', tools=tools, **preferences))
             db.create_session('direct', 'cli', system_prompt='prefix')
-            persist_agent_tool_names(SimpleNamespace(_session_db=db, session_id='direct', tools=tools))
+            persist_agent_tool_names(SimpleNamespace(_session_db=db, session_id='direct', tools=tools, **preferences))
             # The same pin the direct store writes (the RPC canonicalizes key order for its receipt
             # digest): a worker-pinned session rebuilt in-process reads back version + tools intact.
             assert json.loads(db.get_session('owned')['tool_names']) == json.loads(db.get_session('direct')['tool_names'])

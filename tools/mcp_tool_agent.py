@@ -118,12 +118,14 @@ def refresh_agent_mcp_tools(
     first turn) a same-name schema change is published. The caller has already
     accepted the cache break, or nothing has been cached yet."""
     from model_tools import get_tool_definitions
+    from tools.tool_search_pinning import agent_pinned_tools
     from tools.registry import registry
     enabled, disabled = _resolve_refresh_toolsets(agent, enabled_override, disabled_override)
     # Generation captured BEFORE the slow get_tool_definitions call (a slower caller holding an
     # OLDER set must not clobber a newer one); definitions computed OUTSIDE the lock.
     snapshot_generation = registry._generation
-    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or [])
+    new_defs = list(get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode,
+                                         pinned_tools=agent_pinned_tools(agent)) or [])
     new_names = {_def_name(t) for t in new_defs}
     # Post-build families re-appended on LOCALS only; live attributes untouched until publish.
     staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
@@ -176,7 +178,9 @@ def persist_agent_tool_names(agent) -> None:
     if not db or not session_id:
         return
     try:
-        db.update_session_tool_names(session_id, {"version": tool_pin_version(), "tools": _agent_tool_defs(agent)})
+        from tools.tool_search_pinning import pin_preferences
+        db.update_session_tool_names(session_id, {"version": tool_pin_version(), "tools": _agent_tool_defs(agent),
+                                                  **pin_preferences(agent)})
     except Exception:
         logger.debug("tool_names persist skipped", exc_info=True)
 
@@ -239,6 +243,10 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
     Pinned by other code (``hermes update``, a legacy name list) a tool's contract may have moved,
     so each takes its current definition. A pinned tool this process did not build is carried
     only while its toolset config allows it here; deregistered tools drop, new tools append."""
+    preferences_rebuilt = False
+    if isinstance(saved, dict) and saved.get("version") == tool_pin_version():
+        from tools.tool_search_pinning import restore_pin_preferences
+        preferences_rebuilt = restore_pin_preferences(agent, saved)
     pinned, same_code, pinned_defs = _pinned_tool_defs(saved, {_def_name(t): t for t in _agent_tool_defs(agent)})
     if not pinned:
         return False
@@ -260,7 +268,7 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
         with _agent_tools_lock:
             agent.tools = merged
             agent.valid_tool_names = merged_names
-    if not same_code or merged != list(pinned):
+    if preferences_rebuilt or not same_code or merged != list(pinned):
         persist_agent_tool_names(agent)
     return changed
 

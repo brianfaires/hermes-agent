@@ -1015,7 +1015,6 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         discover_plugins()
     except Exception:
         logger.warning("Plugin discovery failed during agent setup", exc_info=True)
-
     # Capture the registry generation FIRST so a concurrent refresh can detect staleness.
     try:
         from tools.registry import registry as _snapshot_registry
@@ -1023,11 +1022,12 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     except Exception:
         agent._tool_snapshot_generation = 0
     import model_tools
+    from tools.tool_search_pinning import agent_pinned_tools
     from toolsets import agent_tool_drops, session_disabled_toolsets
     disabled_toolsets = session_disabled_toolsets(disabled_toolsets, getattr(agent, "platform", None))
     agent.disabled_toolsets = disabled_toolsets  # so the tool_search bridge and delegate children drop them too
     agent.tools = model_tools.get_tool_definitions(
-        enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets, quiet_mode=agent.quiet_mode)
+        enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets, quiet_mode=agent.quiet_mode, pinned_tools=agent_pinned_tools(agent))
     # A finite -q run has no later session to learn for: no skill authoring tool (agent/oneshot_footprint.py).
     from agent.oneshot_footprint import prune_oneshot_tools
     agent.tools = prune_oneshot_tools(agent.tools or [])
