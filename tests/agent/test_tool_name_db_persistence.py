@@ -30,6 +30,7 @@ def test_tool_name_persisted_to_session_db():
     the batched flush so the column is populated on first write to the
     session DB."""
     session_db = MagicMock()
+    session_db.get_session_model_config_value.return_value = None
     agent = _make_agent(session_db)
 
     messages = [

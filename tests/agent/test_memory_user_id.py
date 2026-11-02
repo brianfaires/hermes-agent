@@ -96,6 +96,7 @@ class TestMemoryManagerUserIdThreading:
 
         provider = RecordingProvider()
         session_db = MagicMock()
+        session_db.get_session_model_config_value.return_value = None
         session_db.get_session_title.return_value = "Generated title"
         session_db.get_session_title_source.return_value = "llm"
 

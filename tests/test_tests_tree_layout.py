@@ -28,11 +28,12 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # "installation": python driver for the tests/install shell e2e assets.
 # "_fixtures": topic modules tests/conftest.py is split into — suite-wide
 # plumbing (env filtering, live-system guard, platform gating), not tests.
+# "scenarios": organization workflows spanning profiles, tools, and the shared board.
 _NON_MIRROR_DIRS = {
     "compat", "installation", "_fixtures",
     "ci", "conformance", "dashboard", "desktop", "docker", "e2e", "evals",
     "fakes", "fixtures", "install", "integration", "manual",
-    "monitoring", "perf_guards", "scripts", "secret_sources",
+    "monitoring", "perf_guards", "scenarios", "scripts", "secret_sources",
     "security", "skills", "verify", "website", "computer_use", "hermes_state",
 }
 
