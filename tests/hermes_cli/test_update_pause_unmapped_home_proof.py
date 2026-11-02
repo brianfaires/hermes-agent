@@ -24,13 +24,18 @@ from gateway.status import get_process_start_time
 from hermes_cli import dashboard_procs, gateway, process_identity, update_cmd_windows
 from hermes_cli import update_pause_record as pause_record
 from hermes_cli.update_cmd_windows import _pause_windows_gateways_for_update, _unmapped_ready_filter
+from tests.waiting import wait_until
 
 
 @pytest.fixture
 def homes_and_spawn(tmp_path):
     entry = tmp_path / "bin" / "hermes"  # a ``hermes`` entry token: the cmdline reads as a gateway
     entry.parent.mkdir()
-    entry.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    entry.write_text(
+        "import os, sys\nfrom pathlib import Path\n"
+        "Path(os.environ['TEST_GATEWAY_READY']).touch()\nsys.stdin.read()\n",
+        encoding="utf-8",
+    )
     argv = [sys.executable, str(entry), "gateway", "run"]
     root = os.environ["HERMES_HOME"]  # the sandboxed home this update owns, with two profiles
     home_a, home_b = (os.path.join(root, "profiles", name) for name in ("a", "b"))
@@ -39,14 +44,19 @@ def homes_and_spawn(tmp_path):
     procs: list[subprocess.Popen] = []
 
     def spawn(home) -> subprocess.Popen:
-        proc = subprocess.Popen(argv, env={**os.environ, "HERMES_HOME": str(home)})
+        ready = tmp_path / f"ready-{len(procs)}"
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, env={
+            **os.environ, "HERMES_HOME": str(home), "TEST_GATEWAY_READY": str(ready),
+        })
         procs.append(proc)
+        wait_until(ready.exists, what="stub gateway startup")
         return proc
 
     yield home_a, home_b, spawn
     for proc in procs:
         proc.kill()
         proc.wait(timeout=10)
+        proc.stdin.close()
 
 
 @pytest.mark.platforms("linux")
@@ -54,7 +64,6 @@ def homes_and_spawn(tmp_path):
 def test_a_ledger_proven_unmapped_gateway_is_recorded_with_its_home(homes_and_spawn, monkeypatch):
     home_a, home_b, spawn = homes_and_spawn
     a = spawn(home_a)
-    time.sleep(0.05)
     ct = process_identity._process_create_time(a.pid)
     assert process_identity._append_entry(process_identity.LedgerEntry(
         a.pid, ct, "gateway", process_identity.install_id(), None, None, time.time(), "", hermes_home=home_a))

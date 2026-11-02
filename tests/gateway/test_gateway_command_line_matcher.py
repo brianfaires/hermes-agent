@@ -156,8 +156,8 @@ def test_spawn_intent_ignores_inline_source_without_a_gateway_argv():
 # ``gateway run --replace`` enters the replace/lock-handoff path instead of
 # colliding with the desktop runner's still-held scoped locks.
 ATOMIC_DESKTOP = (
-    "/Applications/Atomic Hermes.app/Contents/Resources/python-server/python "
-    "/Applications/Atomic Hermes.app/Contents/Resources/python-server/desktop-gateway.py"
+    '"/Applications/Atomic Hermes.app/Contents/Resources/python-server/python" '
+    '"/Applications/Atomic Hermes.app/Contents/Resources/python-server/desktop-gateway.py"'
 )
 
 

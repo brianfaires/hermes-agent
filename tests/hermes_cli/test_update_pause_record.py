@@ -317,15 +317,16 @@ print(subprocess.run([sys.executable, "-c", probe], capture_output=True, text=Tr
 
 # The intermediate is a stand-in script, not a real gateway/update: nothing touches the checkout.
 @pytest.mark.live_system_guard_bypass
-@pytest.mark.parametrize("host_argv, adopts", [
-    (("hermes_cli.main", "gateway", "run"), False),
-    (("hermes_cli.main", "--profile", "work", "gateway", "run"), False),
-    (("/opt/hermes/hermes_cli/main.py", "-p", "work", "gateway", "run"), False),
-    (("-m", "hermes_cli.main", "--profile", "work", "dashboard"), False),
-    (("hermes_cli.main", "status"), True),
+@pytest.mark.parametrize("entry, host_argv, adopts", [
+    ("hermes", ("gateway", "run"), False),
+    ("hermes", ("--profile", "work", "gateway", "run"), False),
+    ("hermes_cli/main.py", ("-p", "work", "gateway", "run"), False),
+    ("hermes", ("--profile", "work", "dashboard"), False),
+    ("hermes", ("status",), True),
 ])
-def test_update_started_from_a_relaunched_gateway_does_not_share_the_claim(tmp_path, host_argv, adopts):
-    script = tmp_path / "host.py"
+def test_update_started_from_a_relaunched_gateway_does_not_share_the_claim(tmp_path, entry, host_argv, adopts):
+    script = tmp_path / entry
+    script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(_HOST, encoding="utf-8")
     holder = _child(_HOLDER, str(script), *host_argv, env={"HERMES_HOME": str(tmp_path)})
     out, _ = holder.communicate(timeout=60)
