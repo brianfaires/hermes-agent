@@ -19,9 +19,13 @@ import pytest
 
 
 def _git(cwd, *args, check=True):
-    return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check
-    )
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check
+        )
+    except subprocess.CalledProcessError as exc:
+        exc.add_note(f"Git fixture stderr:\n{exc.stderr}")
+        raise
 
 
 @pytest.fixture
