@@ -49,6 +49,23 @@ _GATEWAY_LOOKALIKE_MARK = "spawns_gateway_lookalike"
 _LIVE_GUARD_PROTECTED_GIT_ROOTS = (PROJECT_ROOT,)
 
 
+def _gateway_spawn_intent(cmd, cmd_str: str) -> str | None:
+    """Keep inline source opaque without hiding real bootstrap or watcher argv."""
+    import shlex
+    from gateway.status import (
+        gateway_spawn_intent_subcommand, inline_bootstrap_argv, inline_source_flag_index,
+    )
+    if isinstance(cmd, (list, tuple)):
+        tokens = [str(part) for part in cmd]
+        source_index = inline_source_flag_index(tokens)
+        if source_index is not None:
+            tokens = inline_bootstrap_argv(tokens) or [
+                *tokens[:source_index + 1], "pass", *tokens[source_index + 2:],
+            ]
+        cmd_str = shlex.join(tokens)
+    return gateway_spawn_intent_subcommand(cmd_str)
+
+
 @pytest.fixture(autouse=True)
 def _live_system_guard(request, monkeypatch):
     """Block real os.kill / systemctl / gateway-pid scans during tests.
@@ -414,14 +431,13 @@ def _live_system_guard(request, monkeypatch):
         # webhook port. 2026-09-03: 39 such orphans lived 6 days after a
         # sibling refactor moved the spawn seam and left tests patching the
         # facade. The canonical matcher, never an argv substring.
-        from gateway.status import gateway_spawn_intent_subcommand
         # A gateway launched INSIDE a container (`docker exec … hermes gateway start`) cannot
         # reach the host's systemd unit or webhook port; tests/docker/ exists to exercise it.
         in_container = _first_token_basename(cmd_str) in _CONTAINER_RUNTIMES
         if (
             not lookalike_ok
             and not in_container
-            and gateway_spawn_intent_subcommand(cmd_str) in ("run", "start", "restart")
+            and _gateway_spawn_intent(cmd, cmd_str) in ("run", "start", "restart")
             and not _sandboxed_gateway_child(cmd_str, (kwargs or {}).get("env"))
         ):
             raise RuntimeError(

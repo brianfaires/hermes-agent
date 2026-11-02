@@ -399,6 +399,25 @@ def test_subprocess_run_gateway_status_passes_through():
     assert result.returncode == 0
 
 
+def test_subprocess_run_inline_import_probe_is_not_gateway_spawn():
+    """The source operand of ``-c`` is data, even when it names gateway.run."""
+    source = """
+import sys, types
+gateway = types.ModuleType('gateway')
+gateway.__path__ = []
+sys.modules['gateway'] = gateway
+sys.modules['gateway.run'] = types.ModuleType('gateway.run')
+import gateway.run
+print('import-only probe')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source], capture_output=True, text=True,
+        timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "import-only probe"
+
+
 # ──────────────────── bypass marker ─────────────────────────────
 
 

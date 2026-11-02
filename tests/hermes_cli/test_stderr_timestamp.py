@@ -28,6 +28,7 @@ def _script(tmp_path, name: str, source: str) -> str:
     gateway (#107002).
     """
     path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
     return str(path)
 
@@ -180,13 +181,13 @@ def test_main_injects_flag_into_stale_gateway_child(tmp_path, monkeypatch):
     marker_path = tmp_path / "argv.txt"
     script = _script(
         tmp_path,
-        "record_argv.py",
+        "hermes",
         "import sys\n"
         "from pathlib import Path\n"
         f"Path({str(marker_path)!r}).write_text("
         "'\\n'.join(sys.argv[1:]), encoding='utf-8')\n",
     )
-    stale = [sys.executable, script, "-m", "hermes_cli.main", "gateway", "run", "--replace"]
+    stale = [sys.executable, script, "gateway", "run", "--replace"]
 
     rc = stderr_timestamp.main(
         ["--error-log", str(log_path), "--", *stale]
@@ -254,14 +255,15 @@ def test_main_does_not_mark_unsupervised_child(tmp_path, monkeypatch):
 
 
 @pytest.mark.spawns_gateway_lookalike
+@pytest.mark.spawns_gateway_lookalike  # gateway-shaped stub scripts, reaped by main()
 def test_main_maps_gateway_ex_config_to_clean_stop(tmp_path):
     """launchd KeepAlive.SuccessfulExit=false parks exit 0; the wrapper must
     turn gateway EX_CONFIG (78) into that clean stop without swallowing the
     please-restart code (75) or a non-gateway child's 78."""
     log_path = tmp_path / "gateway.error.log"
-    gateway_tail = ["-m", "hermes_cli.main", "gateway", "run"]
-    exit_config = _script(tmp_path, "exit_config.py", f"raise SystemExit({GATEWAY_FATAL_CONFIG_EXIT_CODE})\n")
-    exit_restart = _script(tmp_path, "exit_restart.py", f"raise SystemExit({GATEWAY_SERVICE_RESTART_EXIT_CODE})\n")
+    gateway_tail = ["gateway", "run"]
+    exit_config = _script(tmp_path / "config", "hermes", f"raise SystemExit({GATEWAY_FATAL_CONFIG_EXIT_CODE})\n")
+    exit_restart = _script(tmp_path / "restart", "hermes", f"raise SystemExit({GATEWAY_SERVICE_RESTART_EXIT_CODE})\n")
 
     rc_config = stderr_timestamp.main(
         [
