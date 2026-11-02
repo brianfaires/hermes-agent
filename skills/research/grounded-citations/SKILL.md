@@ -1,7 +1,7 @@
 ---
 name: grounded-citations
 description: "Ground answers and documents in cited, verifiable sources."
-version: 1.2.0
+version: 1.2.1
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -50,21 +50,27 @@ None beyond the standard toolset. `scripts/sources.py` is stdlib-only Python 3.
 Retrieval comes from whatever is configured: `web_search`, `web_extract`,
 `browser_navigate`, or `terminal` (curl, CLIs).
 
-Ledger location: `$HERMES_HOME/cache/citations/ledger.json` (profile-aware).
-Override per task with `--ledger <path>` or `HERMES_CITATION_LEDGER`.
+The default ledger, `$HERMES_HOME/cache/citations/ledger.json`, is shared by
+tasks in a profile. Select a task-owned path with `HERMES_CITATION_LEDGER` or
+`--ledger <path>` before running any command.
 
 ## How to Run
 
 ```bash
 S=~/.hermes/skills/research/grounded-citations/scripts/sources.py
+# Replace with a fresh absolute path owned by this task; save it with the task record.
+export HERMES_CITATION_LEDGER="/absolute/path/to/this-task/citations.json"
 
-python "$S" reset                                  # start a clean ledger
 python "$S" add https://example.com/a --title "A"  # prints: [1]
 python "$S" add https://example.com/b --title "B"  # prints: [2]
 python "$S" list                                   # ledger table
 python "$S" render                                 # Sources: block
 python "$S" verify draft.md                        # catch bad citations
 ```
+
+Use a different path for each independent task. An absent ledger starts empty.
+For a continuation, restore the saved path in each `terminal` invocation instead
+of allocating or resetting a ledger. All examples below use that selection.
 
 `add` is idempotent and URL-normalized: the same page always returns the same
 id within a ledger, so ids stay stable across many search/extract rounds.
@@ -73,7 +79,7 @@ id within a ledger, so ids stay stable across many search/extract rounds.
 
 | Action | Command |
 |---|---|
-| Fresh ledger for a new task | `sources.py reset` |
+| Select a new task's ledger | Set `HERMES_CITATION_LEDGER` as above |
 | Register a source, get its id | `sources.py add <url> [--title T]` |
 | Register several at once | `sources.py add <url1> <url2> ...` |
 | Register from JSON tool output | `sources.py ingest results.json` |
@@ -86,9 +92,8 @@ id within a ledger, so ids stay stable across many search/extract rounds.
 
 ## Procedure
 
-① **Reset the ledger** at the start of a task that will produce a grounded
-answer or document. Skip the reset when continuing work whose ids are already
-in a draft — reusing the ledger keeps the numbering stable.
+① **Select the task's ledger** using the How to Run setup. A new task gets a
+fresh path; a continuation restores its saved path so existing ids stay stable.
 
 ② **Register every source at retrieval time.** After each `web_search` /
 `web_extract` / `browser_navigate` / fetch, pass the URLs to `sources.py add`
@@ -219,8 +224,8 @@ and read the `info: stats:` line to see the counts before picking a number.
   not reconstructed from the draft — that reintroduces exactly the hallucinated
   -URL risk the numbering removes.
 - **Renumbering mid-task.** Never hand-edit ids in a draft. Ids are ledger
-  identities; if a draft cites `[4]`, `[4]` must stay that source. Run `reset`
-  only between tasks.
+  identities; if a draft cites `[4]`, `[4]` must stay that source. Use `reset`
+  only when deliberately discarding that task's source mapping.
 - **Retyping URLs into the Sources block.** Always `render`. A hand-typed URL
   is an unverified claim.
 - **Citing a search snippet as if you read the page.** A `web_search`
@@ -230,9 +235,10 @@ and read the `info: stats:` line to see the counts before picking a number.
   clause makes text unreadable and hides which source carries the load.
 - **Citing the ledger in code/config artifacts.** Source comments belong in
   prose deliverables and doc headers, not inside generated code.
-- **Parallel subagents.** Each subagent has its own working directory; point
-  them all at one ledger with `--ledger` (or `HERMES_CITATION_LEDGER`) if their
-  outputs get merged, otherwise their ids will collide.
+- **Parallel subagents.** For merged outputs, the parent selects one task ledger
+  and passes its absolute path to each subagent via `--ledger` or
+  `HERMES_CITATION_LEDGER`. Subagents reuse it without resetting. Independent
+  tasks keep separate ledgers.
 - **Quoting from a snippet instead of the page.** Evidence quotes must come
   from the extracted page text, not a search-result description — `web_extract`
   first, save the text, then `quote --from` that file.
