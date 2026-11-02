@@ -416,7 +416,6 @@ def _runtime(
         rooms=[BINDING],
         rpc=rpc,
         turn_lock=locks or RecordingTurnLocks(),
-        lease_ttl_seconds=kwargs.pop("lease_ttl_seconds", 0.4),
         poll_interval_seconds=kwargs.pop("poll_interval_seconds", 0.01),
         **kwargs,
     )
@@ -532,7 +531,6 @@ def test_transport_resolver_selects_member_transport_without_forking_state(
         rooms=[BINDING],
         transport_resolver=resolve_transport,
         turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4,
         poll_interval_seconds=0.01,
     )
 
@@ -665,7 +663,6 @@ def test_waiting_room_does_not_block_an_independent_room(tmp_path: Path):
             waiting if binding.room_id == "room-waiting" else healthy
         ),
         turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4,
         poll_interval_seconds=0.01,
         max_concurrent_rooms=2,
     )
@@ -713,7 +710,6 @@ def test_bounded_scheduler_eventually_runs_later_room(tmp_path: Path):
         rooms=bindings,
         rpc=FakeSessionRPC(),
         turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4,
         poll_interval_seconds=0.01,
         max_concurrent_rooms=2,
     )
@@ -1013,7 +1009,6 @@ def test_deadline_releases_worker_capacity_for_later_room(tmp_path: Path):
         rooms=bindings,
         rpc=rpc,
         turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4,
         poll_interval_seconds=0.02,
         active_poll_interval_seconds=0.01,
         turn_timeout_seconds=0.05,
