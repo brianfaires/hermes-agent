@@ -168,6 +168,21 @@ dependency declaration does not join the shared environment. Its external
 sidecar remains separately owned. See the
 [plugin guide](../developer-guide/plugins/index.md).
 
+### Document helpers
+
+Install the declared document features before running maintained helpers:
+
+```bash
+hermes pm install --extra documents --extra documents-pdf
+scripts/run-in-hermes-env python /path/to/document-helper.py [args]
+```
+
+`documents` provides Word, Excel, PowerPoint and basic PDF libraries;
+`documents-pdf` adds PDF text extraction and rasterization. Default `all`
+installs and bundled builds omit both features. Explicit setup uses the existing
+application environment and preserves them as recorded extras. Optional
+OCR engines and their model downloads are separate setup choices.
+
 ### Lazy-install policy
 
 `security.allow_lazy_installs` controls on-demand installation. Already installed
