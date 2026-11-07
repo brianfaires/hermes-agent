@@ -144,7 +144,7 @@ def test_google_readiness_requires_its_oauth_imports(monkeypatch):
 
 @pytest.mark.parametrize(("extra", "modules"), [
     ("documents", {"docx", "openpyxl", "pptx", "reportlab", "pypdf"}),
-    ("documents-pdf", {"pdfplumber", "pypdfium2"}),
+    ("documents-pdf", {"pdfplumber", "pypdfium2", "pymupdf", "pymupdf4llm", "pandas", "tabulate"}),
 ])
 def test_document_readiness_requires_every_library(monkeypatch, extra, modules):
     present = set(modules)

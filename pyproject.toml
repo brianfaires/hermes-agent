@@ -480,6 +480,11 @@ documents = [
 documents-pdf = [
   "pdfplumber==0.11.10",
   "pypdfium2==5.14.0",
+  "PyMuPDF==1.28.2",
+  "pymupdf4llm==0.3.4",
+  # Keep Python 3.14 support without pandas 3's additional platform marker split.
+  "pandas==2.3.3",
+  "tabulate==0.10.0",
 ]
 google = [
   # Required by the google-workspace skill (Gmail, Calendar, Drive, Contacts,

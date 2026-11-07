@@ -178,7 +178,8 @@ scripts/run-in-hermes-env python /path/to/document-helper.py [args]
 ```
 
 `documents` provides Word, Excel, PowerPoint and basic PDF libraries;
-`documents-pdf` adds PDF text extraction and rasterization. Default `all`
+`documents-pdf` adds PDF text extraction and rasterization, including PyMuPDF
+Markdown and table helpers with their pandas/tabulate dependencies. Default `all`
 installs and bundled builds omit both features. Explicit setup uses the existing
 application environment and preserves them as recorded extras. Optional
 OCR engines and their model downloads are separate setup choices.
