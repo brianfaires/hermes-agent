@@ -109,7 +109,7 @@ jobs:
   detect:
     name: Detect affected areas
     if: github.repository != 'brianfaires/hermes-agent' || inputs.release == true || inputs.full_qualification == true
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     outputs:
       python: ${{ steps.gate-lanes.outputs.python }}
@@ -544,7 +544,7 @@ jobs:
       actions: read # download completed jobs' cache transfer logs
     needs: [all-checks-pass]
     if: always() && (github.repository != 'brianfaires/hermes-agent' || inputs.release == true || inputs.full_qualification == true)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout code
