@@ -142,6 +142,20 @@ def test_google_readiness_requires_its_oauth_imports(monkeypatch):
     assert extras.available("google")
 
 
+@pytest.mark.parametrize(("extra", "modules"), [
+    ("documents", {"docx", "openpyxl", "pptx", "reportlab", "pypdf"}),
+    ("documents-pdf", {"pdfplumber", "pypdfium2"}),
+])
+def test_document_readiness_requires_every_library(monkeypatch, extra, modules):
+    present = set(modules)
+    monkeypatch.setattr(extras, "_importable", lambda name: name in present)
+    assert extras.available(extra)
+    for module in modules:
+        present.remove(module)
+        assert not extras.available(extra)
+        present.add(module)
+
+
 def test_available_unknown_extra_uses_underscore_guess(monkeypatch):
     monkeypatch.setitem(sys.modules, "some_new_thing", SimpleNamespace())
     assert extras.available("some-new-thing") is True
