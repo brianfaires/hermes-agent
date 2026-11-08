@@ -2,14 +2,11 @@
 
 Covers the two follow-up fixes layered on top of the salvaged contributor PRs:
 
-1. Sentence-final punctuation — ``MEDIA:/x/data.csv.`` at the end of a
-   sentence must extract ``data.csv`` (the trailing ``.`` is a boundary, not
-   part of the path), while multi-part extensions (``archive.tar.gz``)
-   remain intact.
+1. Multi-part extensions (``archive.tar.gz``) remain intact.
 
 2. Inline-code-wrapped tags — a whole ``MEDIA:`` tag inside inline backticks
    (`` `MEDIA:/path.csv` ``) is a real delivery directive when the path
-   validates on disk; prose examples with non-existent paths stay masked
+   validates on disk; prose examples stay literal even when their paths exist
    (#35695), and fenced code blocks are always masked.
 """
 
@@ -43,12 +40,14 @@ class TestTrailingPunctuation:
 
 
 class TestInlineCodeWrappedTags:
-    def test_real_path_in_inline_code_delivers(self, real_file):
-        media, cleaned = BasePlatformAdapter.extract_media(
-            f"Here is your file `MEDIA:{real_file}`"
-        )
+    def test_standalone_inline_code_tag_delivers(self, real_file):
+        media, cleaned = BasePlatformAdapter.extract_media(f"`MEDIA:{real_file}`")
         assert [p for p, _ in media] == [real_file]
         assert "MEDIA:" not in cleaned
+
+    def test_inline_prose_code_example_stays_literal(self, real_file):
+        text = f"Here is the example `MEDIA:{real_file}`"
+        assert BasePlatformAdapter.extract_media(text) == ([], text)
 
 
 class TestEmphasisAndDedupeIntegration:
@@ -59,12 +58,12 @@ class TestEmphasisAndDedupeIntegration:
         assert [p for p, _ in media] == [real_file]
         assert "MEDIA:" not in cleaned
 
-    def test_two_tags_one_line_both_deliver(self, tmp_path):
+    def test_two_standalone_tags_both_deliver(self, tmp_path):
         a = tmp_path / "a.csv"
         b = tmp_path / "b.csv"
         a.write_text("1")
         b.write_text("2")
-        media, _ = BasePlatformAdapter.extract_media(f"MEDIA:{a} MEDIA:{b}")
+        media, _ = BasePlatformAdapter.extract_media(f"MEDIA:{a}\nMEDIA:{b}")
         assert [p for p, _ in media] == [str(a), str(b)]
 
 

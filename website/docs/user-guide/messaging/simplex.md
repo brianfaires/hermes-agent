@@ -115,7 +115,7 @@ The adapter supports native SimpleX attachments in both directions:
   the receiving SimpleX client renders images inline and plays voice
   notes inline rather than offering them as downloads.
 
-Agent replies can also embed `MEDIA:/path/to/file` tags in plain text —
+Agent replies can also place `MEDIA:/path/to/file` on its own line —
 the adapter strips the tag from the body and sends the file as either a
 voice note (audio extensions) or a document.
 

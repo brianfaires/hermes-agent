@@ -315,7 +315,12 @@ class StreamTransportMixin:
         """Send or edit the streaming message; True if delivered.  ``finalize`` marks the
         last edit.  Transport order: native frame → draft frame → edit existing → first
         send; a transport returns None to fall through to the next."""
-        text = self._clean_for_display(text)
+        # Clean before the cursor: a standalone directive is a whole line, so "MEDIA:/x.ogg ▉" is not one.
+        cursor = self.cfg.cursor
+        if cursor and text.endswith(cursor):
+            text = self._clean_for_display(text[:-len(cursor)]) + cursor
+        else:
+            text = self._clean_for_display(text)
         # Stream-is-the-message draft frames must stay prefix-stable: a closing ```
         # on a mid-code-block frame makes frame N not a prefix of N+1 and the
         # connector re-appends the whole snapshot.  The final is still fence-closed.

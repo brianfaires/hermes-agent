@@ -11,6 +11,8 @@ make_image tool several turns earlier must not leak onto a later
 text-only reply, even when the path-based dedup set fails to capture it.
 """
 
+from gateway import run
+
 import json
 from unittest.mock import MagicMock
 

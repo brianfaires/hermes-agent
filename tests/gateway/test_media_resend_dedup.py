@@ -205,7 +205,7 @@ async def test_bare_local_path_history_dedup_survives_and_logs(tmp_path, monkeyp
 
     async def handler(_event):
         # Bare path, no MEDIA: directive — the auto-detect lane.
-        return f"The chart is at {png} by the way."
+        return f"The chart:\n{png}\nBy the way."
 
     adapter.set_message_handler(handler)
     event = _make_event()
@@ -304,7 +304,7 @@ async def test_bare_path_history_lookup_does_not_block_event_loop(tmp_path, monk
     adapter.set_session_store(store)
 
     async def handler(_event):
-        return f"Generated file: {pdf}"
+        return f"Generated file:\n{pdf}"
 
     adapter.set_message_handler(handler)
     event = _make_event()
@@ -346,7 +346,7 @@ async def test_bare_path_history_lookup_timeout_fails_open(tmp_path, monkeypatch
     adapter.set_session_store(_WedgedStore())
 
     async def handler(_event):
-        return f"Generated file: {pdf}"
+        return f"Generated file:\n{pdf}"
 
     adapter.set_message_handler(handler)
     event = _make_event()
