@@ -118,6 +118,9 @@ def test_auth_failure_fallback_then_reset_matches_requests_and_display(tmp_path,
     first, second = receipts
     assert backup_requests and primary_requests, (
         receipts, run.stdout[-5000:], run.stderr[-3000:])
+    assert any('FIRST-AUTH-FAILURE' in str(chat_messages(body, 'user')) for body in primary_requests)
+    assert any('FIRST-AUTH-FAILURE' in str(chat_messages(body, 'user')) for body in backup_requests)
+    assert 'Model fallback:' in run.stdout and 'authentication failed' in run.stdout
     assert first['answer'] == 'FALLBACK-FIRST', first
     assert (first['agent_model'], first['agent_provider']) == ('gpt-4.1-mini', 'custom:backup'), first
     assert 'Model: gpt-4.1-mini (custom:backup)' in first['status'], first
@@ -143,4 +146,4 @@ def test_auth_failure_fallback_then_reset_matches_requests_and_display(tmp_path,
             # at request time; no explicit effort is saved in the session.
             assert body.get('reasoning_effort') == 'medium'
     assert all(row['reasoning'] is None for row in receipts)
-    assert all('Reasoning: high' not in row['status'] for row in receipts)
+    assert all('Reasoning:' not in row['status'] for row in receipts)
