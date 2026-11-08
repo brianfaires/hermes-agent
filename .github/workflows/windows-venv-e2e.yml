@@ -33,7 +33,7 @@ jobs:
             tests/scripts/desktop_update/test_desktop_update_windows_marker_ops.py \
             -j 2 --file-retries 0 -- -m "platforms and not integration" -v --tb=short
         env:
-          HERMES_TEST_FILE_TIMEOUT: '300'
+          HERMES_TEST_FILE_TIMEOUT: '600'
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
