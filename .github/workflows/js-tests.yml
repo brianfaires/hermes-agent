@@ -15,7 +15,9 @@ jobs:
     # Share setup once; run one workspace check at a time on four cores.
     # vitest, tsc and eslint size their own worker pools from that same CPU count.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The previous parallel run measured about 45 minutes of total check
+    # work. Keep that coverage inside a bounded serial-job budget.
+    timeout-minutes: 60
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
         with:
