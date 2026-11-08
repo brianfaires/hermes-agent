@@ -32,9 +32,11 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 _PLUGIN_SECTION_FRAME_RE = re.compile(
-    r"^## Plugin Context: (?P<id>[a-z0-9][a-z0-9._-]{0,127})\n<!-- hermes-plugin-section-chars:(?P<chars>[0-9]{1,4}) -->\n\n",
+    r"^## Plugin Context: (?P<id>[a-z0-9][a-z0-9._-]{0,127})\n<!-- hermes-plugin-section-chars:(?P<chars>[0-9]{1,5}) -->\n\n",
     re.MULTILINE,
 )
+# What the builder emits right after the container: the profile line, then the timestamp.
+_PLUGIN_SECTIONS_TRAILING_ANCHORS = ("\n\nActive Hermes profile:", "\n\nConversation started:")
 _GATE_WORDS = {**dict.fromkeys(("true", "always", "yes", "on"), True), **dict.fromkeys(("false", "never", "no", "off"), False)}
 
 
@@ -83,14 +85,15 @@ def _tui_embedded_pane_clarifier(hint: str) -> str:
     return hint + _TUI_EMBEDDED_PANE_CLARIFIER
 
 
-def _plugin_session_info(agent: Any) -> dict[str, str]:
+def _plugin_session_info(agent: Any) -> dict[str, Any]:
     """Return immutable-at-render-time metadata exposed to prompt sections."""
     try:
         cwd = str(resolve_context_cwd() or "")
     except Exception:
         cwd = ""
-    info = {k: str(getattr(agent, k, None) or "") for k in ("session_id", "model", "provider", "platform")}
-    info.update(profile_name=_active_profile_name(agent, _ambient_plugin_profile_name), cwd=cwd)
+    info: dict[str, Any] = {k: str(getattr(agent, k, None) or "") for k in ("session_id", "model", "provider", "platform")}
+    info.update(profile_name=_active_profile_name(agent, _ambient_plugin_profile_name), cwd=cwd,
+                skip_context_files=bool(getattr(agent, "skip_context_files", False)))
     return info
 
 
@@ -148,7 +151,7 @@ def _restore_plugin_prompt_sections(prompt: str) -> tuple:
     if end < 0:
         return ()
     after_end = end + len(PLUGIN_SECTIONS_END)
-    if not prompt[after_end:].startswith("\n\nConversation started:"):
+    if not prompt[after_end:].startswith(_PLUGIN_SECTIONS_TRAILING_ANCHORS):
         return ()
     framed = prompt[start:after_end]
     restored = []
