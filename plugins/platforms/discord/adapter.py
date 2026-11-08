@@ -1397,6 +1397,14 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 )
         asyncio.create_task(_notify())
 
+    def _build_client(self, **options):
+        """Construct a fresh Bot before login; subclasses may add SDK transport options."""
+        return commands.Bot(**options)
+
+    async def _connect_voice_channel(self, channel):
+        """Connect the native voice transport; subclasses may supply an SDK voice client."""
+        return await channel.connect()
+
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Discord and start receiving events."""
         if not DISCORD_AVAILABLE:
@@ -1448,7 +1456,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 finally:
                     self._client = None
                     self._ready_event.clear()
-            self._client = commands.Bot(
+            self._client = self._build_client(
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
                 allowed_mentions=_build_allowed_mentions(getattr(self.config, "extra", None)),
@@ -3759,7 +3767,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 self._reset_voice_timeout(guild_id)
                 self._bind_voice_text_channel(guild_id, text_channel_id, source)
                 return True
-            vc = await channel.connect()
+            vc = await self._connect_voice_channel(channel)
             self._voice_clients[guild_id] = vc
             self._reset_voice_timeout(guild_id)
             self._bind_voice_text_channel(guild_id, text_channel_id, source)
