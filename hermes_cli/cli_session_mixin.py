@@ -72,7 +72,10 @@ def _reset_model_to_config_default(cli, silent: bool) -> None:
     else:
         _raw_default, _config_provider = (_model_config or ""), ""
     _config_model, _ = _split_model_config_default(_raw_default)
-    if not _config_model or _config_model == getattr(cli, "model", None):
+    if not _config_model or (
+        _config_model == getattr(cli, "model", None)
+        and _config_provider in ("", "auto", getattr(cli, "provider", None))
+    ):
         return
     try:
         from hermes_cli.model_switch import switch_model as _switch_model
