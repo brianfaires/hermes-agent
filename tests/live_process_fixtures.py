@@ -33,3 +33,15 @@ def sleeper_script_path() -> str:
         path.write_text(_SLEEPER_SOURCE, encoding="utf-8")
         _sleeper_script = path
     return str(_sleeper_script)
+
+
+def gateway_stub_script_path() -> str:
+    """An inert script at a recognized gateway entrypoint, for identity tests.
+
+    A generic sleeper with a trailing ``hermes gateway run`` operand is
+    correctly rejected by the program-bound identity matcher.
+    """
+    path = Path(sleeper_script_path()).parent / 'gateway' / 'run.py'
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(_SLEEPER_SOURCE, encoding='utf-8')
+    return str(path)

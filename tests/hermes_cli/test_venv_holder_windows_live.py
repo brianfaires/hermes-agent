@@ -161,7 +161,8 @@ class TestAncestorExclusion:
         # The parent's code lives in a FILE too: a ``python -c <src>`` command line is an
         # interpreter running inline source and carries no readable Hermes identity (#107002),
         # so a ``-c`` parent would not be a gateway to any classifier.
-        parent_file = tmp_path / "parent_gateway.py"
+        parent_file = tmp_path / "hermes_cli" / "main.py"
+        parent_file.parent.mkdir()
         parent_file.write_text(
             "import subprocess, sys\n"
             f"r = subprocess.run([sys.executable, {str(child_file)!r}],\n"
