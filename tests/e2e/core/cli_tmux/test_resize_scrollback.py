@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +34,26 @@ WORDS = {1: 60, 2: 260, 3: 130}
 def _reply(turn: int) -> str:
     words = [f"t{turn}w{i:03d}" for i in range(WORDS[turn])]
     return "\n".join(" ".join(words[j:j + 21]) for j in range(0, len(words), 21))
+
+
+def _transcript_content(final: str) -> tuple[list[str], str]:
+    lines = final.split("\n")
+    # Modern layout embeds the same preview after its rule and spinner.
+    stale_preview = [line for line in lines if re.match(r"^\s*(?:\u2500+\s+\S+\s+)?\u2026", line)]
+    return stale_preview, "\n".join(line for line in lines if line not in stale_preview)
+
+
+@pytest.mark.parametrize("frame", ["\u2026 {}", "\u2500\u2500 \u2834 \u2026 {} \u00b7 1s \u2500\u2500"], ids=["plain", "glyph-rule"])
+def test_stale_preview_does_not_duplicate_transcript_words(frame: str) -> None:
+    # The glyph rule is the actual stale row captured by strict CI during a resize.
+    preview = frame.format(" ".join(f"t3w{i:03d}" for i in range(12, 20)))
+    stale, content = _transcript_content(_reply(3) + "\n" + preview)
+    assert Counter(re.findall(r"\bt\dw\d{3}\b", content)) == Counter(
+        f"t3w{i:03d}" for i in range(WORDS[3]))
+    assert stale == [preview]
+    # Real transcript duplication must still reach the invariant's counter.
+    _, duplicated = _transcript_content(_reply(3) + "\nt3w012\n" + preview)
+    assert Counter(re.findall(r"\bt\dw\d{3}\b", duplicated))["t3w012"] == 2
 
 
 def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Path) -> None:
@@ -139,10 +158,9 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     # A streaming-preview row painted as tmux narrowed may have been re-wrapped or clipped: it is
     # left rather than erased (a stale chrome row is benign, an erased transcript row is lost) —
     # at most one per mid-stream recovery: the drag's and each step's (#95375).
-    lines = final.split("\n")
-    stale_preview = [line for line in lines if line.lstrip().startswith("\u2026")]
+    stale_preview, content = _transcript_content(final)
     assert len(stale_preview) <= 3, final
-    words = Counter(re.findall(r"\bt\dw\d{3}\b", "\n".join(ln for ln in lines if ln not in stale_preview)))
+    words = Counter(re.findall(r"\bt\dw\d{3}\b", content))
     expected = {f"t{t}w{i:03d}" for t, n in WORDS.items() for i in range(n)}
     assert sorted(w for w in expected if words[w] != 1) == [], final
     assert [final.count(f"zq{t}q") for t in WORDS] == [1, 1, 1], final
