@@ -32,6 +32,11 @@ results). Selected-Python completion owns launcher publication, builders, cache
 invalidation, all-profile configuration/state/skills maintenance, process scans,
 fleet restart, Windows resume, dashboard deduplication and verification.
 
+Before provisioning tools, completion preserves an established install's recorded
+PM selection. With no dependency ledger, it uses the existing legacy-venv feature
+inventory so the first PM generation retains installed optional SDKs. Launch-time
+dependency recovery uses the same selection rule.
+
 The existing per-kind restart and abort-recovery algorithms remain; transient
 supervisor/process failures are real even without mixed-generation imports. Only
 the purge/reload workaround and independent retry/ZIP tail compositions disappear.
