@@ -4560,7 +4560,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 description=_truncate_discord_component_text(
                     description or t("platform.discord.command.auto_description_fallback", name=name),
                     _DISCORD_APP_COMMAND_TEXT_LIMIT),
-                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint), prefix="auto_slash_"),
+                callback=self._slash_proxy(name, args, template, None, strip=False, prefix="auto_slash_"),
             )
             try:
                 tree.add_command(auto_cmd)
@@ -6090,7 +6090,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             parent_channel_id = self._get_parent_channel_id(message.channel)
         is_voice_linked_channel = False
         # Save stripped text now: create_thread() can clobber message.content (breaks /command detection).
-        raw_content = message.content.strip()
+        original_content = message.content
+        raw_content = original_content.strip()
         normalized_content = raw_content
         mention_prefix = False
         snapshot_attachments = []
@@ -6109,6 +6110,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
                 normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
             message.content = normalized_content
+        from plugins.platforms.discord.command_text import original_command_text
+        normalized_content = original_command_text(original_content, getattr(self._client.user, "id", None)) or normalized_content
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
             if parent_channel_id:

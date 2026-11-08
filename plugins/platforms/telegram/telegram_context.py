@@ -82,9 +82,15 @@ def group_reply_expected(adapter: "TelegramAdapter", message: "Message", chat_ty
     return None if "?" in text or spoken else False
 
 
-def group_trigger_text(adapter: "TelegramAdapter", message: "Message", text: Optional[str]) -> Optional[str]:
+def group_trigger_text(adapter: "TelegramAdapter", message: "Message", text: Optional[str], *, event=None) -> Optional[str]:
     """Strip our own handle only when we are the sole addressee. With other participants named,
     ``@research_bot , @ops_bot are you both listening?`` must not reach us as ``, @ops_bot …``."""
+    if text and text.lstrip().startswith("/"):
+        return text
+    if event is not None and adapter._pending_text_batches:
+        pending = adapter._pending_text_batches.get(adapter._text_batch_key(event))
+        if pending is not None and pending.is_command():
+            return text
     if adapter._is_group_chat(message) and mentions_other_participants(adapter, message):
         return text
     return adapter._clean_bot_trigger_text(text)
