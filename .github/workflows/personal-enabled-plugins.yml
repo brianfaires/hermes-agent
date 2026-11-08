@@ -1,0 +1,47 @@
+name: Personal - Enabled plugins only
+
+# Compare with the existing CI without automatically running both suites on every PR.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-enabled-plugins-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Personal enabled plugins (${{ matrix.slice }})
+    if: github.repository == 'brianfaires/hermes-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Disk usage before setup
+        run: |
+          df -h / /var/tmp "$GITHUB_WORKSPACE"
+          df -i / /var/tmp "$GITHUB_WORKSPACE"
+      - uses: ./.github/actions/setup-pm
+        with:
+          packages: ripgrep
+          extras: '["all", "messaging", "tts-premium", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+      - name: Run the personal Ubuntu suite
+        env:
+          PYTHON_CPU_COUNT: '4'
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/${{ strategy.job-total }}
+        run: |
+          mapfile -t exclusions < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' scripts/ci/personal-enabled-plugins-exclusions.txt)
+          scripts/run_tests.sh "${exclusions[@]}" -j 4 --file-retries 0 --file-timeout 600 -q
+      - name: Disk usage after tests
+        if: always()
+        run: |
+          df -h / /var/tmp "$GITHUB_WORKSPACE"
+          df -i / /var/tmp "$GITHUB_WORKSPACE"

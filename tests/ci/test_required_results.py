@@ -60,8 +60,31 @@ def test_selected_update_consumers_must_succeed(lane, jobs, result):
 
 def test_release_exclusion_policy():
     assert required_results.EXCLUDED_JOBS == {
-        "history-check", "lockfile-diff", "prompt-surface-diff", "supply-chain", "e2e-desktop",
+        "history-check", "lockfile-diff", "prompt-surface-diff", "supply-chain", "e2e-desktop", "headless-tests",
     }
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", "missing"])
+def test_headless_tests_must_succeed_even_when_qualification_is_skipped(result):
+    needs = {name: {"result": "skipped"} for name in ("detect", "tests", "tests-os", "js-tests")}
+    if result != "missing":
+        needs["headless-tests"] = {"result": result}
+    verdict = evaluate_gate(needs, headless=True)
+    assert verdict["ok"] is (result == "success")
+    assert verdict["failed"] == ([] if result == "success" else ["headless-tests"])
+    # Any unexpected failing job still fails this smaller check set.
+    needs["lint"] = {"result": "failure"}
+    assert "lint" in evaluate_gate(needs, headless=True)["failed"]
+
+
+@pytest.mark.parametrize("result,code", [("success", 0), ("skipped", 1)])
+def test_headless_tests_cli_enforces_the_requested_job(result, code):
+    needs = {"headless-tests": {"result": result}, "detect": {"result": "skipped"}}
+    completed = subprocess.run([sys.executable, str(SCRIPT), "--headless-tests"],
+                               input=json.dumps(needs), text=True, capture_output=True, check=False)
+    assert completed.returncode == code, completed.stdout + completed.stderr
+    if not code:
+        assert "desktop/platform qualification was not requested" in completed.stdout
 
 
 @pytest.mark.parametrize("needs", [{}, None])

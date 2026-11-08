@@ -37,18 +37,18 @@ concurrency:
 
 jobs:
   test:
-    # Three 32-core slices instead of one box: on one runner the suite is ~10 min of
-    # nearly fully packed work, and a single bigger runner (96-core) scaled ~1.8x for
-    # 3x the price because files contend for the shared machine. Separate machines
-    # scale linearly. run_tests_parallel.py partitions from the checkout alone, so
-    # every slice agrees on the split without a planning job.
-    name: Run tests (${{ matrix.slice }}/3)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 30
+    # Keep the eight suite slices on the fork's standard GitHub-hosted runners.
+    # The worker cap follows their four CPUs; the longer job budget preserves
+    # the full suite and its existing per-file timeouts on the smaller hosts.
+    # run_tests_parallel.py partitions from the checkout alone, so every slice
+    # agrees on the split without a planning job.
+    name: Run tests (${{ matrix.slice }}/8)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        slice: [1, 2, 3]
+        slice: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - name: Checkout code
         uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
@@ -112,9 +112,9 @@ jobs:
         run: |
           scripts/run_tests.sh
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}/3
+          HERMES_TEST_SLICE: ${{ matrix.slice }}/8
           HERMES_TEST_FORKSERVER: "1"
-          HERMES_TEST_WORKERS: 32
+          HERMES_TEST_WORKERS: 4
           HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
@@ -141,9 +141,9 @@ jobs:
 
   e2e:
     # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
-    # writer processes per test; a 4-vCPU runner serialises them into timeouts.
+    # writer processes per test; keep the bounded process-tree concurrency below.
     if: inputs.e2e
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout code
@@ -271,7 +271,7 @@ jobs:
     # carries the whole tree's wall time against the 60-minute timeout.
     # Skipping this job skips every e2e-upgrade shard with it.
     if: inputs.e2e_upgrade
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
@@ -315,8 +315,13 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      # This fork has no CalVer release tags. Rehearse the upgrade from the
+      # frozen pre-v0.23.0 fork main (origin backup/1108-main-before-v0230-rebuild,
+      # fetched below with full history) through the explicit-baseline contract.
+      HERMES_E2E_UPGRADE_BASE: ${{ github.repository == 'brianfaires/hermes-agent' && '2415b14ccf13a3d3cf58fc17e7765ddbae3298ad' || '' }}
     strategy:
       fail-fast: false
       matrix:

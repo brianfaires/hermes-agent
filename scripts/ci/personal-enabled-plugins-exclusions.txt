@@ -1,0 +1,273 @@
+# Personal Ubuntu coverage, audited 2026-11-08 against the shared plugins matrix
+# and Default, Ang, Ops and Rook configuration. This is independent of the
+# original headless policy. Re-audit when a profile adopts another plugin.
+# Remapped to v0.23.0 paths.
+#
+# Keep configured/default backends as well as plugins.enabled: Codex, xAI and
+# OpenRouter model routes, custom-provider support, Codex/xAI images,
+# Browserbase, Exa, Brave Free, Tavily and default web fallback contracts.
+# Discord, Telegram and configured Email coverage remain. Keep Kanban,
+# security-guidance, disk-cleanup and external-plugin host contracts.
+# Local Chromium, shared TUI/web, gateway, cron, profiles, persistence,
+# auth and source install/update stay. Bot Screen and native GUI control
+# are unused and excluded, including their separately configured CUA plugin.
+# The runner already omits e2e/integration/docker and live-service tests.
+# Shared framework tests stay even when an unused plugin is their fixture.
+
+# ACP is an unused editor transport; this does not exclude MCP or delegation.
+--ignore=tests/acp_adapter
+
+# Bot Screen and native GUI control are not used on the headless server.
+# Retain the local Chromium/browser driver and mixed browser-scope contracts.
+--ignore-glob=tests/**/test_*bot_desktop*.py
+--ignore=tests/computer_use
+--ignore-glob=tests/tools/test_computer_use*.py
+--ignore-glob=tests/hermes_cli/test_computer_use*.py
+--ignore-glob=tests/hermes_cli/test_install_cua_driver.py
+--ignore-glob=tests/hermes_cli/test_update_cua_pm.py
+--ignore-glob=tests/pm/test_cua_driver_package.py
+--ignore-glob=tests/tools/test_browser_headed_mode.py
+--deselect=tests/tools/test_browser_computer_use_profile_cache_keys.py::test_computer_use_backend_not_shared_across_profiles_and_release_finds_it
+
+# Native host/packaging qualification, not this Ubuntu deployment. Pure
+# platform-neutral paths and POSIX tests without these host-specific names stay.
+--ignore-glob=tests/**/test_*windows*.py
+--ignore-glob=tests/**/test_*macos*.py
+--ignore-glob=tests/**/test_*darwin*.py
+--ignore-glob=tests/**/test_*launchd*.py
+--ignore-glob=tests/**/test_*termux*.py
+--ignore=tests/desktop
+--ignore=tests/scripts/desktop_update
+--ignore-glob=tests/scripts/test_desktop_*.py
+--ignore-glob=tests/ci/test_desktop_*.py
+--ignore-glob=tests/scripts/test_icon_*.py
+--ignore-glob=tests/scripts/test_appinstaller.py
+--ignore-glob=tests/scripts/test_install_ps1_desktop_stage.py
+--ignore-glob=tests/scripts/install/test_pm_desktop_launch_capture.py
+--ignore-glob=tests/scripts/install/test_install_desktop_product_present.py
+--ignore-glob=tests/hermes_cli/test_desktop_build_*.py
+--ignore-glob=tests/hermes_cli/test_desktop_swap_*.py
+--ignore-glob=tests/hermes_cli/test_desktop_esbuild_ignore_scripts.py
+--ignore-glob=tests/hermes_cli/test_desktop_exe_integrity.py
+--ignore-glob=tests/hermes_cli/test_desktop_install_after_update.py
+--ignore-glob=tests/hermes_cli/test_desktop_native_deps_stale.py
+--ignore-glob=tests/hermes_cli/test_desktop_source_build.py
+--ignore-glob=tests/hermes_cli/test_desktop_update_verify.py
+--ignore-glob=tests/hermes_cli/test_desktop_wsl_gpu.py
+--ignore-glob=tests/hermes_cli/test_desktop_signin_long_poll.py
+--ignore-glob=tests/hermes_cli/test_anon_desktop_signin.py
+--ignore-glob=tests/hermes_cli/test_linux_desktop_entry.py
+
+# Unused bundled messaging implementations. Scope names to adapter locations:
+# the LINE plugin must never match file line-ending or session-lineage tests.
+--ignore-glob=tests/plugins/test_a2a_*.py
+--ignore-glob=tests/tools/test_a2a_*.py
+--ignore-glob=tests/gateway/test_session_a2a.py
+--ignore-glob=tests/gateway/test_bluebubbles_*.py
+--ignore=tests/plugins/platforms/buzz
+--ignore-glob=tests/gateway/test_buzz_*.py
+--ignore-glob=tests/gateway/test_dingtalk.py
+--ignore-glob=tests/gateway/test_dingtalk_*.py
+--ignore-glob=tests/hermes_cli/test_dingtalk_auth.py
+--ignore-glob=tests/gateway/test_feishu.py
+--ignore-glob=tests/gateway/test_feishu_*.py
+--ignore-glob=tests/gateway/test_setup_feishu.py
+--ignore-glob=tests/gateway/test_google_chat.py
+--ignore-glob=tests/gateway/test_google_chat_*.py
+--ignore-glob=tests/gateway/test_parked_route_refusal_google_chat.py
+--ignore-glob=tests/gateway/test_irc_*.py
+--ignore-glob=tests/plugins/test_irc_*.py
+--ignore-glob=tests/hermes_cli/test_setup_irc.py
+--ignore-glob=tests/gateway/test_line_*.py
+--ignore=tests/plugins/platforms/matrix
+--ignore-glob=tests/gateway/test_matrix.py
+--ignore-glob=tests/gateway/test_matrix_*.py
+--ignore-glob=tests/gateway/test_mattermost.py
+--ignore-glob=tests/gateway/test_mattermost_*.py
+--ignore-glob=tests/gateway/test_ntfy_*.py
+--ignore=tests/plugins/platforms/photon
+--ignore-glob=tests/plugins/platforms/test_qqbot_plugin.py
+--ignore-glob=tests/gateway/test_qqbot.py
+--ignore-glob=tests/gateway/test_qqbot_*.py
+--ignore-glob=tests/tools/test_qqbot_send_message_media.py
+--ignore-glob=tests/gateway/test_raft_*.py
+--ignore-glob=tests/gateway/test_signal.py
+--ignore-glob=tests/gateway/test_signal_*.py
+--ignore-glob=tests/tools/test_signal_media.py
+--ignore-glob=tests/gateway/test_simplex_*.py
+--ignore=tests/plugins/platforms/slack
+--ignore-glob=tests/gateway/test_slack.py
+--ignore-glob=tests/gateway/test_slack_*.py
+--ignore-glob=tests/gateway/relay/test_relay_slack_*.py
+--ignore-glob=tests/tools/test_send_message_slack.py
+--ignore-glob=tests/tools/test_slack_send_message_media.py
+--ignore-glob=tests/gateway/test_sms.py
+--ignore-glob=tests/gateway/test_teams.py
+--ignore-glob=tests/gateway/test_teams_*.py
+--ignore-glob=tests/gateway/test_wecom.py
+--ignore-glob=tests/gateway/test_wecom_*.py
+--ignore-glob=tests/gateway/test_stream_consumer_wecom_native.py
+--ignore-glob=tests/gateway/test_weixin_*.py
+--ignore-glob=tests/gateway/test_whatsapp_*.py
+--ignore-glob=tests/tools/test_whatsapp_send_message_media.py
+--ignore-glob=tests/hermes_cli/test_whatsapp_cloud_setup.py
+--ignore-glob=tests/gateway/test_yuanbao_*.py
+--ignore-glob=tests/gateway/platforms/test_yuanbao_*.py
+
+# Unused standalone, memory and alternative scheduler plugins. Hindsight is
+# external; keep memory discovery, provider isolation and all core cron tests.
+--ignore-glob=tests/plugins/test_achievements_plugin.py
+--ignore-glob=tests/plugins/test_google_meet_*.py
+--ignore-glob=tests/plugins/test_teams_*.py
+--ignore-glob=tests/hermes_cli/test_teams_pipeline_plugin_cli.py
+--ignore-glob=tests/plugins/memory/test_byterover_*.py
+--ignore-glob=tests/plugins/memory/test_retaindb_provider.py
+--ignore-glob=tests/plugins/test_retaindb_plugin.py
+--ignore-glob=tests/plugins/test_chronos_*.py
+
+# Unconfigured dashboard login plugins; shared middleware, token routing,
+# cookie, WebSocket authorization and profile-isolation tests remain.
+--ignore=tests/plugins/dashboard_auth
+--ignore-glob=tests/hermes_cli/test_dashboard_basic_auth_plugin_enable.py
+
+# Unused image/video provider implementations. Keep common image/video tool
+# dispatch and schema contracts, plus both selected image-generation providers.
+--ignore-glob=tests/plugins/image_gen/test_deepinfra_provider.py
+--ignore-glob=tests/plugins/image_gen/test_fal_provider.py
+--ignore-glob=tests/plugins/image_gen/test_krea_provider.py
+--ignore-glob=tests/plugins/image_gen/test_meta_ai_provider.py
+--ignore-glob=tests/plugins/image_gen/test_openai_provider.py
+--ignore-glob=tests/plugins/image_gen/test_openrouter_compat_provider.py
+--ignore=tests/plugins/video_gen
+
+# Native model-provider plugins unused by all four profiles. A model served
+# through OpenRouter does not require its vendor's native provider plugin.
+# Custom-provider and generic provider/OAuth/transport contracts remain.
+--ignore-glob=tests/plugins/model_providers/test_commandcode_profile.py
+--ignore-glob=tests/plugins/model_providers/test_deepinfra_profile.py
+--ignore-glob=tests/plugins/model_providers/test_deepseek_profile.py
+--ignore-glob=tests/plugins/model_providers/test_fireworks_profile.py
+--ignore-glob=tests/plugins/model_providers/test_gemini_profile.py
+--ignore-glob=tests/plugins/model_providers/test_kimi_profile.py
+--ignore-glob=tests/plugins/model_providers/test_minimax_profile.py
+--ignore-glob=tests/plugins/model_providers/test_nous_profile.py
+--ignore-glob=tests/plugins/model_providers/test_ollama_cloud_profile.py
+--ignore-glob=tests/plugins/model_providers/test_opencode_go_profile.py
+--ignore-glob=tests/plugins/model_providers/test_solstice_profile.py
+--ignore-glob=tests/plugins/model_providers/test_thinking_toggle_parity.py
+--ignore-glob=tests/plugins/model_providers/test_upstage_profile.py
+--ignore-glob=tests/plugins/model_providers/test_zai_profile.py
+--ignore-glob=tests/providers/test_meta_ai_profile.py
+
+# Dedicated native auth/picker/wire tests for unconfigured model providers.
+# Explicit files preserve mixed OpenRouter/Codex contracts and keep future tests
+# selected until reviewed. DeepSeek reasoning-content echo stays for OpenRouter.
+--ignore-glob=tests/agent/test_anthropic_adapter_extra_headers.py
+--ignore-glob=tests/agent/test_anthropic_borrowed_row_authority.py
+--ignore-glob=tests/agent/test_anthropic_client_auth.py
+--ignore-glob=tests/agent/test_anthropic_credential_persist_failure.py
+--ignore-glob=tests/agent/test_anthropic_dead_grant_hints.py
+--ignore-glob=tests/agent/test_anthropic_external_login_optout.py
+--ignore-glob=tests/agent/test_anthropic_keychain.py
+--ignore-glob=tests/agent/test_anthropic_kimi_signed_thinking_replay.py
+--ignore-glob=tests/agent/test_anthropic_kwargs_sanitize.py
+--ignore-glob=tests/agent/test_anthropic_mcp_prefix_strip.py
+--ignore-glob=tests/agent/test_anthropic_message_stop.py
+--ignore-glob=tests/agent/test_anthropic_mid_tool_call_drop.py
+--ignore-glob=tests/agent/test_anthropic_model_cooldowns.py
+--ignore-glob=tests/agent/test_anthropic_oauth_pkce.py
+--ignore-glob=tests/agent/test_anthropic_oauth_stress.py
+--ignore-glob=tests/agent/test_anthropic_oauth_ua_prefix.py
+--ignore-glob=tests/agent/test_anthropic_output_field_leak.py
+--ignore-glob=tests/agent/test_anthropic_owned_routing.py
+--ignore-glob=tests/agent/test_anthropic_request_blank_block_guard.py
+--ignore-glob=tests/agent/test_anthropic_request_client_reuse.py
+--ignore-glob=tests/agent/test_anthropic_route_oauth_identity.py
+--ignore-glob=tests/agent/test_anthropic_signed_platform_replay.py
+--ignore-glob=tests/agent/test_anthropic_spent_rotation_verdict.py
+--ignore-glob=tests/agent/test_anthropic_stream_fallbacks.py
+--ignore-glob=tests/agent/test_anthropic_structured_output.py
+--ignore-glob=tests/agent/test_anthropic_thinking_block_order.py
+--ignore-glob=tests/agent/test_anthropic_thinking_disable.py
+--ignore-glob=tests/agent/test_anthropic_token_scope_isolation.py
+--ignore-glob=tests/agent/test_anthropic_truncation_continuation.py
+--ignore-glob=tests/agent/test_anthropic_whitespace_text_blocks.py
+--ignore-glob=tests/agent/test_bedrock_1m_context.py
+--ignore-glob=tests/agent/test_bedrock_adapter.py
+--ignore-glob=tests/agent/test_bedrock_context_cache.py
+--ignore-glob=tests/agent/test_bedrock_converse_reasoning_replay.py
+--ignore-glob=tests/agent/test_bedrock_credential_probe.py
+--ignore-glob=tests/agent/test_bedrock_empty_text_blocks.py
+--ignore-glob=tests/agent/test_bedrock_guardrail_claude_route.py
+--ignore-glob=tests/agent/test_bedrock_interrupt_post_worker.py
+--ignore-glob=tests/agent/test_bedrock_stream_completion.py
+--ignore-glob=tests/agent/test_bedrock_transport_replay.py
+--ignore-glob=tests/agent/test_gemini_alias_native_route.py
+--ignore-glob=tests/agent/test_gemini_fast_fallback.py
+--ignore-glob=tests/agent/test_gemini_free_tier_gate.py
+--ignore-glob=tests/agent/test_gemini_key_surface_guidance.py
+--ignore-glob=tests/agent/test_gemini_long_decode.py
+--ignore-glob=tests/agent/test_gemini_native_adapter.py
+--ignore-glob=tests/agent/test_gemini_schema.py
+--ignore-glob=tests/agent/test_gemini_standard_key_guidance.py
+--ignore-glob=tests/agent/test_gemini_thinking_config.py
+--ignore-glob=tests/agent/test_gemini_type_arrays.py
+--ignore-glob=tests/agent/test_kimi_coding_anthropic_thinking.py
+--ignore-glob=tests/agent/test_kimi_coding_openai_base_url.py
+--ignore-glob=tests/agent/test_minimax_auxiliary_url.py
+--ignore-glob=tests/agent/test_minimax_provider.py
+--ignore-glob=tests/agent/test_nous_credits_gauge.py
+--ignore-glob=tests/agent/test_nous_credits_snapshot.py
+--ignore-glob=tests/agent/test_nous_portal_anthropic_wire.py
+--ignore-glob=tests/agent/test_nous_rate_guard.py
+--ignore-glob=tests/agent/test_nous_usage_profile_context.py
+--ignore-glob=tests/agent/test_nous_welcome_client_contract.py
+--ignore-glob=tests/hermes_cli/test_anthropic_model_flow_stale_oauth.py
+--ignore-glob=tests/hermes_cli/test_anthropic_models_pagination.py
+--ignore-glob=tests/hermes_cli/test_anthropic_oauth_flow.py
+--ignore-glob=tests/hermes_cli/test_anthropic_oauth_routes_to_messages_api.py
+--ignore-glob=tests/hermes_cli/test_anthropic_picker_curated.py
+--ignore-glob=tests/hermes_cli/test_anthropic_pool_model_discovery.py
+--ignore-glob=tests/hermes_cli/test_anthropic_provider_persistence.py
+--ignore-glob=tests/hermes_cli/test_auth_qwen_provider.py
+--ignore-glob=tests/hermes_cli/test_bedrock_region_scoped_picker.py
+--ignore-glob=tests/hermes_cli/test_gemini_express_key_probes.py
+--ignore-glob=tests/hermes_cli/test_gemini_free_tier_setup_block.py
+--ignore-glob=tests/hermes_cli/test_kimi_cn_provider_listing.py
+--ignore-glob=tests/hermes_cli/test_minimax_model_validation.py
+--ignore-glob=tests/hermes_cli/test_nous_account.py
+--ignore-glob=tests/hermes_cli/test_nous_anthropic_wire_default.py
+--ignore-glob=tests/hermes_cli/test_nous_auth_keepalive.py
+--ignore-glob=tests/hermes_cli/test_nous_auth_status_cache.py
+--ignore-glob=tests/hermes_cli/test_nous_billing_request.py
+--ignore-glob=tests/hermes_cli/test_nous_inference_url_validation.py
+--ignore-glob=tests/hermes_cli/test_nous_nonproduction_inference_host.py
+--ignore-glob=tests/hermes_cli/test_nous_picker_cached_only_key.py
+--ignore-glob=tests/hermes_cli/test_nous_picker_on_sale.py
+--ignore-glob=tests/hermes_cli/test_nous_picker_pricing_cached_only.py
+--ignore-glob=tests/hermes_cli/test_nous_policy_filter.py
+--ignore-glob=tests/hermes_cli/test_nous_policy_surfaces.py
+--ignore-glob=tests/hermes_cli/test_nous_portal_staging_allowlist.py
+--ignore-glob=tests/hermes_cli/test_nous_recommendation_disk_cache.py
+--ignore-glob=tests/hermes_cli/test_nous_session_validity.py
+--ignore-glob=tests/hermes_cli/test_nous_subscription.py
+--ignore-glob=tests/hermes_cli/test_opencode_go_validation_fallback.py
+--ignore-glob=tests/hermes_cli/test_opencode_zen_model_limit.py
+--ignore-glob=tests/hermes_cli/test_upstage_provider.py
+--ignore-glob=tests/agent/test_deepseek_anthropic_thinking.py
+
+# Unselected browser/web implementations. Keep mixed provider registries and
+# routing/fallback/security tests; deselect only dedicated implementation cases.
+# Browser Use's local driver and shared cloud-session lifecycle remain covered;
+# they are distinct from the unused Browser Use cloud-provider plugin.
+--ignore-glob=tests/tools/test_web_providers_searxng.py
+--ignore-glob=tests/tools/test_web_tools_perplexity.py
+--deselect=tests/tools/test_browser_use_session_expiry.py::test_browser_use_preserves_provider_timeout
+--deselect=tests/plugins/browser/test_browser_provider_plugins.py::TestIsAvailable::test_browser_use_satisfied_by_api_key
+--deselect=tests/plugins/browser/test_browser_provider_plugins.py::TestIsAvailable::test_firecrawl_requires_api_key
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestIsAvailable::test_searxng_requires_url
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestIsAvailable::test_keenable_requires_api_key
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestIsAvailable::test_parallel_requires_api_key
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestIsAvailable::test_firecrawl_requires_either_key_or_url
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestIsAvailable::test_firecrawl_explicit_config_allows_keyless_cloud
+--deselect=tests/plugins/web/test_web_search_provider_plugins.py::TestFirecrawlScrapeTimeout
