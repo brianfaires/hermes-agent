@@ -13,7 +13,7 @@ reconciliation. No mocks on the components under test.
  4. A running record naming a live NON-gateway process is not a runtime
     (verified identity, not bare PID existence — #109680).
 """
-import io, contextlib, json, os, subprocess, sys, tempfile, time
+import io, contextlib, json, subprocess, sys, time
 from pathlib import Path
 
 WORKTREE = Path(__file__).resolve().parents[1]
@@ -21,7 +21,7 @@ sys.path.insert(0, str(WORKTREE))
 
 import pytest
 
-from tests.live_process_fixtures import SLEEPER_MARKER, sleeper_script_path
+from tests.live_process_fixtures import SLEEPER_MARKER, gateway_stub_script_path, sleeper_script_path
 
 # The stand-in wears a `gateway run` argv; the test spawns and reaps it itself.
 pytestmark = [pytest.mark.platforms("windows"), pytest.mark.spawns_gateway_lookalike]
@@ -56,7 +56,7 @@ def test_plan_reconciliation_live_windows(tmp_path, monkeypatch):
     # which requires a live `gateway run` command line (#109680), so the
     # stand-in wears one; a bare sleeper is recorded too and must NOT count.
     child = subprocess.Popen(
-        [sys.executable, sleeper_script_path(), "hermes", "gateway", "run"],
+        [sys.executable, gateway_stub_script_path()],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     foreign = subprocess.Popen(

@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.live_process_fixtures import sleeper_script_path
+from tests.live_process_fixtures import gateway_stub_script_path
 
 pytestmark = pytest.mark.platforms("windows")  # live Windows named-pipe E2E
 
@@ -197,7 +197,7 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
         # whose PID differs from the process running the command line. The
         # stand-in runs a SCRIPT, not `-c`: gateway identity is no longer
         # inferred from inline `-c` source (#107002).
-        [sys._base_executable, sleeper_script_path(), "hermes", "gateway", "run"],
+        [sys._base_executable, gateway_stub_script_path()],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -314,6 +314,10 @@ jobs:
     needs: e2e-upgrade-plan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      # This fork has no CalVer release tags. Exercise its known installed
+      # pre-candidate source through the existing explicit-baseline contract.
+      HERMES_E2E_UPGRADE_BASE: ${{ github.repository == 'brianfaires/hermes-agent' && '86fed153b9ceb586fbcc438a29b7c152241601b4' || '' }}
     strategy:
       fail-fast: false
       matrix:

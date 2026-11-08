@@ -115,6 +115,27 @@ def test_corrupt_store_still_returns_503(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_budget_interrupt_during_begin_is_a_retryable_browse_refusal(tmp_path):
+    """SQLite may deliver the deadline interrupt at BEGIN rather than later DDL."""
+    import hermes_state_reconcile as reconcile
+
+    path = _pre_merge_store(tmp_path / 'state.db')
+    before = path.read_bytes()
+    budget = reconcile._Budget(60)
+
+    def expire_at_begin(conn):
+        def statement(sql):
+            if sql == 'BEGIN IMMEDIATE':
+                budget.expired = True
+        conn.set_trace_callback(statement)
+        conn.set_progress_handler(lambda: int(budget.expired), 1)
+
+    budget.arm = expire_at_begin
+    with pytest.raises(reconcile.BrowseBudgetExceeded):
+        reconcile._apply_additive_schema(path, budget)
+    assert path.read_bytes() == before
+
+
 def test_missing_history_table_is_refused_not_recreated(tmp_path):
     path = _pre_merge_store(tmp_path / "state.db")
     with closing(sqlite3.connect(path)) as conn:
@@ -571,7 +592,6 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     import os
     import subprocess
     import sys
-    import time
 
     import gateway.run_bootstrap as bootstrap
     import hermes_state_reconcile as reconcile
