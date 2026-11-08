@@ -141,9 +141,10 @@ events made with the default `GITHUB_TOKEN`. `workflow_dispatch` and
 
 ### Runners
 
-`blacksmith-*` labels are Blacksmith runners (`4vcpu` for small jobs,
-`32vcpu` for test suites and builds, `-arm` for native arm64). `macos-15`,
-`windows-latest-32-core` and `windows-latest-32-arm-core` are GitHub-hosted.
+Every runner is GitHub-hosted: `ubuntu-24.04`, `ubuntu-24.04-arm` for native arm64,
+`windows-2025`, `windows-11-arm`, `macos-15` and `macos-latest`. The fork has no
+larger runners or Blacksmith runners, and a job that names one queues forever
+without failing; `tests/ci/test_runner_labels.py` rejects those labels.
 No workflow runs on Intel macOS. Some publish jobs run on `ubuntu-latest` on purpose:
 `docker buildx imagetools` cannot commit manifest lists to Docker Hub from
 Blacksmith.

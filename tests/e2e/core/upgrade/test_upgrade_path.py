@@ -51,6 +51,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import tomllib
@@ -389,7 +390,7 @@ def make_leg(root: Path, template_home: Path | None) -> Leg:
     hermes_home = Path(env_probe["HERMES_HOME"])
     if template_home is not None:
         shutil.rmtree(hermes_home)
-        shutil.copytree(template_home, hermes_home, symlinks=True)
+        _copy_user_state(template_home, hermes_home)
     wrap = _write_wrappers(root, install, hermes_home)
     env = H.isolated_env(root, extra_path=[wrap])
     return Leg(root=root, origin=origin, install=install, env=env, hermes_home=hermes_home, wrap_dir=wrap)
@@ -555,6 +556,17 @@ def provider():
         yield srv
 
 
+def _copy_user_state(source: Path, destination: Path) -> None:
+    # CLI-created control endpoints belong to a process, not the reusable state fixture.
+    shutil.copytree(
+        source, destination, symlinks=True,
+        ignore=lambda directory, names: [
+            name for name in names
+            if stat.S_ISSOCK((Path(directory) / name).lstat().st_mode)
+        ],
+    )
+
+
 @pytest.fixture(scope="module")
 def template_home(tmp_path_factory, provider) -> Path:
     """HERMES_HOME populated by the N-1 CLI itself (sessions, profile, cron, config)."""
@@ -579,7 +591,7 @@ def template_home(tmp_path_factory, provider) -> Path:
     (seed.hermes_home / "config.yaml").write_text(cfg, encoding="utf-8")
     (work / "config.yaml").write_text(cfg, encoding="utf-8")
     template = seed.root / "template-home"
-    shutil.copytree(seed.hermes_home, template, symlinks=True)
+    _copy_user_state(seed.hermes_home, template)
     return template
 
 
