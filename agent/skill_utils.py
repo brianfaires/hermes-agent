@@ -840,12 +840,38 @@ def resolve_skill_config_values(config_vars: list[dict[str, Any]]) -> dict[str, 
     return resolved
 
 
-# Max description chars shown per row of the system-prompt skill index. skill_manage rejects a new or changed
-# description over it and tests/skills/test_authoring_standards.py holds shipped skills to it, so only legacy or
-# hand-edited skills ever reach clip_skill_description().
+# Default max description chars per row of the system-prompt skill index (``skills.prompt_description_limit``
+# overrides it per profile). skill_manage rejects a new or changed description over the configured limit and
+# tests/skills/test_authoring_standards.py holds shipped skills to the default, so only legacy or hand-edited
+# skills ever reach clip_skill_description().
 SKILL_PROMPT_DESC_LIMIT = 60
+SKILL_PROMPT_DESC_MIN = 20
 _LAST_WHITESPACE_RE = re.compile(r"\s\S*$")
 _CLIP_TRAIL_RE = re.compile(r"[\s.,;:\-\u2013\u2014(/]+$")
+
+
+def coerce_prompt_description_limit(raw: Any) -> int | None:
+    """``skills.prompt_description_limit`` as a character budget, or None for full descriptions.
+
+    Accepts an int >= SKILL_PROMPT_DESC_MIN or the string ``full``; raises ValueError otherwise."""
+    if isinstance(raw, str) and raw.strip().lower() == "full":
+        return None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        raw = int(raw.strip())
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < SKILL_PROMPT_DESC_MIN:
+        raise ValueError(f"skills.prompt_description_limit must be an integer >= {SKILL_PROMPT_DESC_MIN} or 'full'")
+    return raw
+
+
+def skill_prompt_description_limit() -> int | None:
+    """The active profile's skill-index budget (None = full); invalid values use the default.
+    Read when a prompt is built, never mid-conversation, so the cached prefix stays stable."""
+    raw = (_skills_cfg() or {}).get("prompt_description_limit", SKILL_PROMPT_DESC_LIMIT)
+    try:
+        return coerce_prompt_description_limit(raw)
+    except ValueError as exc:
+        logger.warning("%s; using %d", exc, SKILL_PROMPT_DESC_LIMIT)
+        return SKILL_PROMPT_DESC_LIMIT
 
 
 def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
@@ -854,25 +880,25 @@ def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
     return str(raw_desc).strip().strip("'\"") if raw_desc else ""
 
 
-def clip_skill_description(desc: str) -> str:
-    """*desc* fitted to SKILL_PROMPT_DESC_LIMIT, cut at a word boundary so the index never shows a half word."""
-    if len(desc) <= SKILL_PROMPT_DESC_LIMIT:
+def clip_skill_description(desc: str, limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> str:
+    """*desc* fitted to *limit* (None keeps it whole), cut at a word boundary so the index never shows a half word."""
+    if limit is None or len(desc) <= limit:
         return desc
-    head = desc[:SKILL_PROMPT_DESC_LIMIT - 2]  # one char past the budget: whitespace there means the last word is whole
+    head = desc[:limit - 2]  # one char past the budget: whitespace there means the last word is whole
     boundary = _LAST_WHITESPACE_RE.search(head)  # any whitespace (tab, NBSP, ...) separates words, not just " "
     if not boundary or boundary.start() == 0:  # a single word longer than the budget has no boundary to cut at
-        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+        return desc[:limit - 3] + "..."
     return _CLIP_TRAIL_RE.sub("", head[:boundary.start()]) + "..."
 
 
-def extract_skill_description(frontmatter: dict[str, Any]) -> str:
-    """Extract a system-prompt-length description from parsed frontmatter."""
-    return clip_skill_description(_normalize_skill_description(frontmatter))
+def extract_skill_description(frontmatter: dict[str, Any], limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> str:
+    """Extract a system-prompt-length description from parsed frontmatter (limit None = untruncated)."""
+    return clip_skill_description(_normalize_skill_description(frontmatter), limit)
 
 
-def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any]) -> bool:
+def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any], limit: int | None = SKILL_PROMPT_DESC_LIMIT) -> bool:
     """True when the description will be truncated in the system prompt skill index."""
-    return len(_normalize_skill_description(frontmatter)) > SKILL_PROMPT_DESC_LIMIT
+    return limit is not None and len(_normalize_skill_description(frontmatter)) > limit
 
 
 def iter_skill_index_files(skills_dir: Path, filename: str):
