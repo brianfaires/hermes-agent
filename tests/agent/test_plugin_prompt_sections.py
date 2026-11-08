@@ -7,6 +7,8 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 from agent.system_prompt import build_system_prompt, invalidate_system_prompt
 from hermes_cli import plugins
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
@@ -81,10 +83,30 @@ def test_real_aiagent_freezes_section_within_life_and_rerenders_on_invalidate(mo
     assert "rules render 2" in rebuilt
     assert "rules render 1" not in rebuilt
     assert calls[0]["session_id"] == agent.session_id
+    assert calls[0]["skip_context_files"] is True
     assert calls[1]["session_id"] == agent.session_id
     assert "## Plugin Context: example.rules" in rebuilt
     assert rebuilt.index("## Plugin Context: example.rules") < rebuilt.index("Conversation started:")
     assert "example.rules" not in agent._cached_system_prompt_static
+
+
+@pytest.mark.parametrize("size", [300, 10_000])
+def test_sections_of_a_real_built_prompt_restore_byte_identical(monkeypatch, size):
+    from agent.system_prompt import _restore_plugin_prompt_sections
+
+    content = "HEAD\n" + "x" * (size - len("HEAD\nTAIL")) + "TAIL"
+    manager = PluginManager()
+    manager._discovered = True
+    PluginContext(
+        PluginManifest(name="example-plugin", key="example-plugin", source="user"), manager,
+    ).register_system_prompt_section("example.big", content, position="after_memory", max_chars=size)
+    monkeypatch.setattr(plugins, "_plugin_manager", manager)
+
+    prompt = build_system_prompt(_real_agent())
+
+    assert "Active Hermes profile:" in prompt
+    restored = _restore_plugin_prompt_sections(prompt)
+    assert [(s.id, s.content) for s in restored] == [("example.big", content)]
 
 
 def test_fresh_process_resume_restores_identical_full_prompt_without_callback(tmp_path):
