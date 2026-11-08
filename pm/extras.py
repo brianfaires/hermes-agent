@@ -52,6 +52,7 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "modal": "modal",
     "daytona": "daytona",
     "vercel": "vercel",
+    "scripts": "yaml",
     "google": ("googleapiclient", "google.auth", "google_auth_oauthlib.flow", "google_auth_httplib2"),
     "google-chat": "google.cloud.pubsub_v1",
     "google-meet": ("playwright.sync_api", "websockets"),
@@ -60,7 +61,7 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "web": "fastapi",
     "doc-extract": "anydoc",
     "documents": ("docx", "openpyxl", "pptx", "reportlab", "pypdf"),
-    "documents-pdf": ("pdfplumber", "pypdfium2"),
+    "documents-pdf": ("pdfplumber", "pypdfium2", "pymupdf", "pymupdf4llm", "pandas", "tabulate"),
     "computer-use": "mcp",
     "trace-upload": "huggingface_hub",
     # Pillow resize recovery for vision tools (the `vision` extra is a no-op

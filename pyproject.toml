@@ -390,6 +390,11 @@ documents = [
 documents-pdf = [
   "pdfplumber==0.11.10",
   "pypdfium2==5.14.0",
+  "PyMuPDF==1.28.2",
+  "pymupdf4llm==0.3.4",
+  # Keep Python 3.14 support without pandas 3's additional platform marker split.
+  "pandas==2.3.3",
+  "tabulate==0.10.0",
 ]
 trace-upload = ["huggingface-hub==1.33.0"]
 # Cloud memory providers are opt-in PM extras. They stay outside [all]
@@ -487,6 +492,9 @@ dingtalk = [
   "qrcode==7.4.2",
 ]
 feishu = ["lark-oapi==1.7.5", "qrcode==7.4.2"]
+# Maintained automation and audit scripts use the SafeLoader API.
+# Keep this optional so installations without those scripts stay lean.
+scripts = ["PyYAML==6.0.3"]
 google = [
   # Required by the google-workspace skill (Gmail, Calendar, Drive, Contacts,
   # Sheets, Docs). Declared here so PM environments and independent
@@ -593,7 +601,8 @@ hermes-acp = "acp_adapter.entry:main"
 # build with --all-extras and pass --no-extra for each of these, so their
 # closures never ship. KittenTTS pulls torch, transformers and spaCy through
 # misaki[en]: installed when the user picks it, not preinstalled.
-opt-in-extras = ["kittentts"]
+# Document libraries are installed only for explicitly selected document workflows.
+opt-in-extras = ["kittentts", "documents", "documents-pdf"]
 
 # Per-extra platform gates (settled 2026-09-02): an extra listed here is
 # only installable on platforms matching the marker. pm consults this

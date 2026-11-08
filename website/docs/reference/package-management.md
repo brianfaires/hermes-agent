@@ -205,6 +205,23 @@ download or a missing tool) is never dropped: the update fails before it
 publishes anything, so the next update scans the old venv again and retries
 it. An extra you request yourself still fails the install when it cannot build.
 
+### Document helpers
+
+Install the declared document features before running maintained helpers:
+
+```bash
+hermes pm install --extra documents --extra documents-pdf
+scripts/run-in-hermes-env python /path/to/document-helper.py [args]
+```
+
+`documents` provides Word, Excel, PowerPoint and basic PDF libraries;
+`documents-pdf` adds PDF text extraction and rasterization, including PyMuPDF
+Markdown and table helpers with their pandas/tabulate dependencies. Default `all`
+installs and bundled builds omit both features. Explicit setup uses the existing
+application environment and preserves them as recorded extras. Maintained
+automation and audit scripts that read YAML use the optional `scripts` extra.
+Optional OCR engines and their model downloads are separate setup choices.
+
 ### Lazy-install policy
 
 `security.allow_lazy_installs` controls on-demand installation. Already installed
