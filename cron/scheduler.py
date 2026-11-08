@@ -3055,6 +3055,7 @@ class _RunDelivery:
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
     side_effect_ownership_lost: bool = False
+    output_file: Optional[Path] = None
 
 
 def _save_compose_deliver(
@@ -3071,6 +3072,7 @@ def _save_compose_deliver(
         output_file = (
             None if self_removal_delivery_allowed(job["id"])
             else save_job_output(job["id"], output))
+    d.output_file = output_file
     if verbose and output_file is not None:
         logger.info("Output saved to: %s", output_file)
 
@@ -3382,7 +3384,7 @@ def _run_one_job_body(
             _record_fire_ownership_lost(job, fire_owner, execution_id)
             return True
 
-        from cron.scheduler_bookkeeping import fail_empty_response
+        from cron.scheduler_bookkeeping import fail_empty_response, fire_post_cron_run
         fail_empty_response(d, final_response)
 
         if _fire_claim_ownership_lost():
@@ -3410,6 +3412,7 @@ def _run_one_job_body(
             finish_interrupted_run(job, execution_id, delivery_error)
             return True
 
+        fire_post_cron_run(d, execution_id, final_response)
         from cron.scheduler_bookkeeping import finish_completed_run
         return finish_completed_run(d, fire_owner, execution_id)
 

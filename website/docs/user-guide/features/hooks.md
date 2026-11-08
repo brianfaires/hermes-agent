@@ -444,6 +444,28 @@ other environment data must not silently mutate a session's cached prompt.
 Such a hook needs a concrete consumer and the same frozen/resume-safe semantics
 before it can be added.
 
+### `post_cron_run`
+
+Fires once per completed cron run, after the output is saved and the result delivered (or the delivery decision made), so a plugin can record or mirror the outcome.
+
+```python
+def my_callback(job_id: str, execution_id: str, success: bool, error: str | None,
+                final_response: str, output_file, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `job_id` | `str` | The cron job that ran. |
+| `execution_id` | `str` | This run's execution id. |
+| `success` | `bool` | Final verdict, after the `[CRON_FAILURE]` marker, interruption and empty-response checks. |
+| `error` | `str \| None` | Failure reason when `success` is false. |
+| `final_response` | `str` | The agent's final answer (empty on failure). |
+| `output_file` | `Path \| None` | The saved output file; `None` when the job removed itself. |
+
+**Fires:** on the run's own thread inside the job's owning profile scope, so `get_hermes_home()` is that profile's home. Runs that lose fire-claim ownership, are cancelled, or are interrupted by shutdown do not fire it.
+
+**Return value:** Ignored. A callback that raises is logged and skipped; the run is recorded as usual. Callbacks are bounded by `plugins.hook_callback_timeout`; a hung callback is abandoned and never stalls the scheduler beyond that bound.
+
 ### Shipped plugin-hook catalog
 
 Payload fields below are the exact event-specific fields supplied by each call site. For backward compatibility, `PluginManager` also adds `telemetry_schema_version="hermes.observer.v1"` to every plugin-hook callback. That legacy envelope marker does not mean all hook payloads share one semantic schema; new versioned contracts belong to their concrete event or capability family.
@@ -476,6 +498,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `on_session_reset` | Observer | CLI/TUI session boundary and gateway after the replacement session exists; return ignored. | CLI: `session_id`, `platform`, `reason`; TUI: `session_id`, `platform`; gateway: those plus `reason`, `old_session_id`, `new_session_id` | Session and routing identifiers. |
 | `on_session_delete` | Observer | After a session delete or deliberate archive commits (CLI, TUI, Desktop/dashboard, gateway API, sweeps, prune); return ignored. | `session_id`, `reason`, `profile`, optional `deleted_ids` (full set when more than one row went), `sessions_dir` | Session identifiers only; no message content. |
 | `post_compaction` | Observer | Once per committed compaction, on every path: automatic and manual compaction in the agent loop (CLI, TUI, Desktop, gateway hygiene, overflow recovery), the gateway's `/compress` (`session.mutate compress`), Codex app-server compactions, micro-compaction and proactive tool-result pruning. Not fired for attempts that changed nothing (aborted, blocked, refused). Timeout-bounded; return ignored. | `session_id`, `old_session_id`, `kind`, `reason`, `before_tokens`, `after_tokens`, `messages_removed` | Identifiers and counts only. |
+| `post_cron_run` | Observer | Once per completed cron run, after save and delivery; return ignored. | `job_id`, `execution_id`, `success`, `error`, `final_response`, `output_file` | Full final response and output path. |
 | `agent_loop_stopped` | Observer | Immediately after a real running agent is interrupted — gateway `_interrupt_and_clear_session` or TUI/desktop `session.interrupt`; return ignored. | `session_key`, `platform`, `reason`, `invalidation_reason` | Session/routing identifiers and interruption reasons; no message body. |
 | `on_skill_lifecycle` | Observer | After an authoritative skill-usage state change; return ignored. | `action`, `skill_name`, `provenance`, `task_id`, `session_id`, `use_count`, `reused`, `reuse_after_patch` | Exposes the local skill name and provenance. |
 | `subagent_start` | Observer | Child constructed and about to run; return ignored. | `parent_session_id`, `parent_turn_id`, `parent_subagent_id`, `child_session_id`, `child_subagent_id`, `child_role`, `child_goal` | Child goal may contain user/project content. |
