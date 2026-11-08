@@ -4542,7 +4542,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         slot_cap = _DISCORD_MAX_APP_COMMANDS - 1
         dropped_over_cap = 0
 
-        def _auto_register(name: str, description: str, args_hint: str) -> None:
+        def _auto_register(name: str, description: str, args_hint: str, *, verbatim: bool = False) -> None:
             nonlocal dropped_over_cap
             # Discord command names: lowercase, hyphens OK, max 32 chars.
             discord_name = name.lower()[:32]
@@ -4560,7 +4560,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 description=_truncate_discord_component_text(
                     description or t("platform.discord.command.auto_description_fallback", name=name),
                     _DISCORD_APP_COMMAND_TEXT_LIMIT),
-                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint), prefix="auto_slash_"),
+                callback=self._slash_proxy(name, args, template, None, strip=bool(args_hint) and not verbatim, prefix="auto_slash_"),
             )
             try:
                 tree.add_command(auto_cmd)
@@ -4584,8 +4584,10 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         # Mirror PluginContext.register_command() commands into the native slash picker.
         try:
             from hermes_cli.commands import _iter_plugin_command_entries
+            from hermes_cli.plugins import get_plugin_commands
+            text_mode = {n for n, meta in get_plugin_commands().items() if meta.get("argument_mode") == "text"}
             for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries():
-                _auto_register(plugin_name, plugin_desc, plugin_args_hint)
+                _auto_register(plugin_name, plugin_desc, plugin_args_hint, verbatim=plugin_name in text_mode)
         except Exception as e:
             logger.warning("Discord auto-register from plugin commands failed: %s", e)
         self._register_skill_group(tree)
@@ -6090,7 +6092,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             parent_channel_id = self._get_parent_channel_id(message.channel)
         is_voice_linked_channel = False
         # Save stripped text now: create_thread() can clobber message.content (breaks /command detection).
-        raw_content = message.content.strip()
+        original_content = message.content
+        raw_content = original_content.strip()
         normalized_content = raw_content
         mention_prefix = False
         snapshot_attachments = []
@@ -6282,6 +6285,8 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             timestamp=message.created_at, auto_skill=_skills, channel_prompt=_channel_prompt,
             channel_context=_channel_context,
         )
+        from plugins.platforms.discord.command_text import stash_original_command_text
+        stash_original_command_text(event, original_content, getattr(self._client.user, "id", None))
         if (
             getattr(getattr(message, "author", None), "bot", False)
             and self._is_bot_tag_debounce_continuation(message)

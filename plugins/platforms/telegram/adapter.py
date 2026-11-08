@@ -145,7 +145,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter, ExecApprovalPrompt, SendResult, classify_send_error, unauthorized_action_notice,
     cache_image_from_bytes_async, cache_audio_from_bytes_async, cache_video_from_bytes_async, resolve_proxy_url, SUPPORTED_VIDEO_TYPES,
-    SUPPORTED_DOCUMENT_TYPES, SUPPORTED_IMAGE_DOCUMENT_TYPES, _TEXT_INJECT_EXTENSIONS, utf16_len,
+    SUPPORTED_DOCUMENT_TYPES, SUPPORTED_IMAGE_DOCUMENT_TYPES, _TEXT_INJECT_EXTENSIONS, utf16_len, _append_text,
 )
 
 # Telegram truncates ``answerCallbackQuery`` text at 200 chars; ``BotCommand`` descriptions at 256.
@@ -6491,7 +6491,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         media cached, attribution applied."""
         from plugins.platforms.telegram.telegram_context import group_trigger_text
         event = self._build_message_event(msg, msg_type, update_id=update.update_id)
-        event.text = group_trigger_text(self, msg, event.text)
+        event.text = group_trigger_text(self, msg, event.text, event=event)
         await self._cache_replied_media(msg, event)
         return self._apply_telegram_group_observe_attribution(event)
 
@@ -6573,6 +6573,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if self._should_drop_delayed_delivery():
             self._hold_inbound_event(event, where="text-enqueue")
             return
+        pending = self._pending_text_batches.get(self._text_batch_key(event))
+        if pending is not None and "original_command_text" in pending.metadata:
+            # Cleaned text and the verbatim text a text-mode plugin command reads grow together.
+            pending.metadata["original_command_text"] = _append_text(
+                pending.metadata["original_command_text"], event.metadata.get("original_command_text", event.text or ""))
         super()._enqueue_text_event(event)
         self._accept_update()
 
@@ -6837,7 +6842,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         event = self._build_message_event(msg, self._media_message_type(msg), update_id=update.update_id)
         if msg.caption:
             from plugins.platforms.telegram.telegram_context import group_trigger_text
-            event.text = group_trigger_text(self, msg, expand_link_entities(msg))
+            event.text = group_trigger_text(self, msg, expand_link_entities(msg), event=event)
         # Stickers: _handle_sticker overwrites event.text with its vision description, so observe attribution must run after it.
         if msg.sticker:
             await self._handle_sticker(msg, event)

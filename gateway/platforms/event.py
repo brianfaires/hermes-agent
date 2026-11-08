@@ -163,6 +163,11 @@ class MessageEvent:
         self.media_urls.extend(other.media_urls)
         self.media_types.extend(other.media_types)
 
+    def verbatim_command_text(self) -> str:
+        """The command as typed, for text-mode plugin commands; adapters that clean ``text``
+        (bot mentions, trimming) stash the original in ``metadata`` for them."""
+        return self.metadata.get("original_command_text") or self._command_text()
+
     def _command_text(self) -> str:
         """Return the message text with leading Desktop attachment refs stripped.
 
