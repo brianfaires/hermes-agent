@@ -103,7 +103,10 @@ class GatewayInboundHooksMixin:
                 _new_text = _result.get("text")
                 if isinstance(_new_text, str):
                     from gateway.session_ingress_context import carry_callback
-                    rewritten = dataclasses.replace(event, text=_new_text)
+                    # The stashed original command text predates the rewrite; a plugin must not see it.
+                    rewritten = dataclasses.replace(
+                        event, text=_new_text,
+                        metadata={k: v for k, v in event.metadata.items() if k != "original_command_text"})
                     carry_callback(event, rewritten)
                     event = rewritten
                 break
@@ -286,7 +289,7 @@ class GatewayInboundHooksMixin:
         from hermes_cli.plugin_command_dispatch import invoke_plugin_command, plugin_command_args
         if args is None:
             user_args = plugin_command_args(
-                (event.get_command() or "").replace("_", "-"), event._command_text(), user_args,
+                (event.get_command() or "").replace("_", "-"), event.verbatim_command_text(), user_args,
             )
         from gateway.plugin_messages import bind_live_source
         from gateway.plugin_command_choice import chat_choices

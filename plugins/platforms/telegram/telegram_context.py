@@ -4,6 +4,7 @@ The identity line lives in ``channel_prompt`` and therefore in the cached-agent 
 must be stable for the life of a session (username only — never a per-message fact).
 """
 
+import re
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -82,11 +83,31 @@ def group_reply_expected(adapter: "TelegramAdapter", message: "Message", chat_ty
     return None if "?" in text or spoken else False
 
 
-def group_trigger_text(adapter: "TelegramAdapter", message: "Message", text: Optional[str]) -> Optional[str]:
+def _is_command_text(adapter: "TelegramAdapter", event, text: str) -> bool:
+    """A command, or the continuation of a split command still buffered for this chat."""
+    if text.lstrip().startswith("/"):
+        return True
+    if not adapter._pending_text_batches:
+        return False
+    pending = adapter._pending_text_batches.get(adapter._text_batch_key(event))
+    return pending is not None and pending.is_command()
+
+
+def group_trigger_text(adapter: "TelegramAdapter", message: "Message", text: Optional[str], *, event=None) -> Optional[str]:
     """Strip our own handle only when we are the sole addressee. With other participants named,
     ``@research_bot , @ops_bot are you both listening?`` must not reach us as ``, @ops_bot …``."""
+    if event is not None and text and _is_command_text(adapter, event, text):
+        # Text-mode plugin commands own their payload; the gateway reads it from here.
+        event.metadata["original_command_text"] = text
     if adapter._is_group_chat(message) and mentions_other_participants(adapter, message):
         return text
+    if text and text.lstrip().startswith("/"):
+        # Clean the arguments only: stripping ``@bot`` out of ``/log@bot note`` would glue it to ``/lognote``.
+        head, rest = (text.lstrip().split(maxsplit=1) + [""])[:2]
+        if username := adapter._current_bot_username():
+            head = re.sub(rf"(?i)@{re.escape(username)}$", "", head)
+        rest = adapter._clean_bot_trigger_text(rest)
+        return f"{head} {rest}" if rest else head
     return adapter._clean_bot_trigger_text(text)
 
 
