@@ -13,6 +13,15 @@ def fail_empty_response(d, final_response):
         d.error = EMPTY_RESPONSE_ERROR
 
 
+def fire_post_cron_run(d, execution_id, final_response):
+    """Tell ``post_cron_run`` plugins a run completed (observer; bounded and fail-open in the
+    dispatcher). Runs on the job's thread, so the hook sees the owning profile's scope."""
+    from hermes_cli.plugins import invoke_hook
+    invoke_hook(
+        "post_cron_run", job_id=d.job["id"], execution_id=execution_id, success=d.success,
+        error=d.error, final_response=final_response, output_file=d.output_file)
+
+
 def finish_interrupted_run(job, execution_id, delivery_error):
     """Shutdown already advanced this run; update a failed notice without spending another fire."""
     from cron import scheduler
