@@ -88,3 +88,21 @@ def test_render_fails_open_for_callback_failure_wrong_type_and_aggregate_budget(
     assert "plugin exploded" in caplog.text
     assert "returned dict, not str" in caplog.text
     assert "aggregate" in caplog.text
+
+
+@pytest.mark.parametrize("explicit_budget", [False, True])
+def test_ten_thousand_character_policy_renders_complete_and_refuses_excess(caplog, explicit_budget):
+    manager = PluginManager()
+    ctx = _context(manager)
+    budget = {"max_chars": 10_000} if explicit_budget else {}
+    content = "POLICY HEAD\n" + "x" * (10_000 - len("POLICY HEAD\nMANDATORY TAIL")) + "MANDATORY TAIL"
+    ctx.register_system_prompt_section("example.at-limit", content, **budget)
+    ctx.register_system_prompt_section("example.over-limit", content + "x", **budget)
+    with pytest.raises(ValueError):
+        ctx.register_system_prompt_section("example.invalid-budget", "policy", max_chars=10_001)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+        rendered = manager.render_system_prompt_sections({})
+
+    assert [(item.id, item.content) for item in rendered] == [("example.at-limit", content)]
+    assert "exceeded max_chars" in caplog.text
