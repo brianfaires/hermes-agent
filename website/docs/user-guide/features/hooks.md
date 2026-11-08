@@ -495,7 +495,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `on_session_start` | Observer | First turn of a new session; return ignored. | `session_id`, `model`, `platform` | Identifiers and routing metadata only. |
 | `on_session_end` | Observer | Canonically at each turn finalization; CLI/TUI exits have additional reduced legacy shapes. Return ignored. | Canonical: `session_id`, `task_id`, `turn_id`, `completed`, `failed`, `interrupted`, `turn_exit_reason`, `model`, `platform`; exit paths may add `reason`/`api_request_id` and omit fields. | IDs, model/platform, and outcome; canonical payload has no message body. |
 | `on_session_finalize` | Observer | CLI/TUI/gateway teardown through `finalize_session`; gateway shutdown may finalize without a reset. Return ignored. | Surface-dependent `session_id`, `platform`, optionally `reason`, `old_session_id`, `new_session_id` | Session and routing identifiers. |
-| `on_session_reset` | Observer | CLI/TUI session boundary and gateway after the replacement session exists; return ignored. | CLI: `session_id`, `platform`, `reason`; TUI: `session_id`, `platform`; gateway: those plus `reason`, `old_session_id`, `new_session_id` | Session and routing identifiers. |
+| `on_session_reset` | Observer | CLI/TUI session boundary and gateway after the replacement session exists; return ignored. | CLI: `session_id`, `platform`, `reason`; TUI: `session_id`, `platform`; gateway: those plus `reason`, `old_session_id`, `new_session_id`; command resets also add `session_key`, `message_id`, `command_metadata`, `source` | Session/routing identifiers; command metadata may contain user text. |
 | `on_session_delete` | Observer | After a session delete or deliberate archive commits (CLI, TUI, Desktop/dashboard, gateway API, sweeps, prune); return ignored. | `session_id`, `reason`, `profile`, optional `deleted_ids` (full set when more than one row went), `sessions_dir` | Session identifiers only; no message content. |
 | `post_compaction` | Observer | Once per committed compaction, on every path: automatic and manual compaction in the agent loop (CLI, TUI, Desktop, gateway hygiene, overflow recovery), the gateway's `/compress` (`session.mutate compress`), Codex app-server compactions, micro-compaction and proactive tool-result pruning. Not fired for attempts that changed nothing (aborted, blocked, refused). Timeout-bounded; return ignored. | `session_id`, `old_session_id`, `kind`, `reason`, `before_tokens`, `after_tokens`, `messages_removed` | Identifiers and counts only. |
 | `post_cron_run` | Observer | Once per completed cron run, after save and delivery; return ignored. | `job_id`, `execution_id`, `success`, `error`, `final_response`, `output_file` | Full final response and output path. |
@@ -1107,8 +1107,12 @@ def my_callback(session_id: str, platform: str, **kwargs):
 | `reason` | `str`, optional | Present on CLI and gateway reset paths. |
 | `old_session_id` | `str`, optional | Gateway-only outgoing session ID. |
 | `new_session_id` | `str`, optional | Gateway-only replacement session ID. |
+| `session_key` | `str`, optional | Gateway command resets only (`/new`, `/reset`). |
+| `message_id` | `str`, optional | Gateway command resets only: the command message's ID. |
+| `command_metadata` | `dict`, optional | Gateway command resets only: snapshot of the command event's metadata. |
+| `source` | `dict`, optional | Gateway command resets only: the command's `SessionSource` as a dict. |
 
-**Fires:** CLI supplies `session_id`, `platform`, and `reason`; TUI supplies `session_id` and `platform`; gateway adds `reason`, `old_session_id`, and `new_session_id` after allocating the replacement key. On gateway reset, the order is: create and persist the replacement → `on_session_finalize(old_id)` → `on_session_reset(new_id)` → `on_session_start(new_id)` on the first inbound turn.
+**Fires:** CLI supplies `session_id`, `platform`, and `reason`; TUI supplies `session_id` and `platform`; gateway adds `reason`, `old_session_id`, and `new_session_id` after allocating the replacement key. Gateway command resets also provide `session_key`, `message_id`, `command_metadata`, and `source` under the routed profile scope. On gateway reset, the order is: create and persist the replacement → `on_session_finalize(old_id)` → `on_session_reset(new_id)` → `on_session_start(new_id)` on the first inbound turn.
 
 **Return value:** Ignored.
 
@@ -1336,7 +1340,7 @@ def my_callback(event, gateway, session_store, **kwargs):
 | `gateway` | `GatewayRunner` | The active gateway runner, so plugins can call `gateway.adapters[platform].send(...)` for side-channel replies (owner notifications, etc.). |
 | `session_store` | `SessionStore` | For silent transcript ingestion via `session_store.append_to_transcript(...)`. |
 
-**Fires:** **Internal events skip the hook entirely** (they are system-generated — background-process completions, etc. — and must not be gate-kept by user-facing policy). Otherwise:
+**Fires:** **Internal events skip the hook entirely** (they are system-generated — background-process completions, etc. — and must not be gate-kept by user-facing policy). Under `multiplex_profiles` the hook runs in the routed profile's scope and plugins, not the receiving (launch) profile's. Otherwise:
 
 | Path | When the hook runs |
 |------|--------------------|
