@@ -873,6 +873,17 @@ hermes config set skills.config.myplugin.path ~/myplugin-data
 
 For details on declaring config settings in your own skills, see [Creating Skills — Config Settings](../developer-guide/creating-skills.md#config-settings-configyaml).
 
+### Skill index description length
+
+The system prompt lists every available skill with its description, cut to 60 characters by default (`...` marks a cut). Raise the budget, or show whole descriptions, per profile:
+
+```yaml
+skills:
+  prompt_description_limit: 160   # any integer >= 20, or "full"
+```
+
+The value is read when the system prompt is built, so it applies to new sessions; a running conversation keeps its prompt. Invalid values are reported by `hermes doctor` and fall back to 60. New skills created with `skill_manage` must fit the configured budget; `full` removes that index-budget check while retaining the existing authoring size limits.
+
 ### Auto-loading skills every session
 
 Pin skills so they are fully loaded at the start of every new session, on every surface:

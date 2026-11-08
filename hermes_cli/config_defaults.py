@@ -1432,9 +1432,9 @@ DEFAULT_CONFIG = {
     # and resolved; read-only — creation goes to ~/.hermes/skills/ unless create_dir redirects it.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
-        # Where skill_manage-created skills go (empty = profile-local dir). When set, new skills
-        # land here AND agent-facing instructions name this path; expanded (~, ${VAR}), relative to
-        # HERMES_HOME, scanned alongside the local dir.
+        "prompt_description_limit": 60,  # Index chars per skill (>= 20), or "full"; read at prompt build.
+        # Where skill_manage-created skills go (empty = profile-local dir). When set, new skills land
+        # here AND agent-facing instructions name this path; expanded (~, ${VAR}), relative to HERMES_HOME.
         "create_dir": "",
         # In a git checkout, <root>/.hermes/skills/ and <root>/.agents/skills/ load as the
         # highest-precedence tier — ONLY if the root is in trusted_project_dirs. false = no scan, no
