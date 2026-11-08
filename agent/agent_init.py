@@ -810,6 +810,7 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
             _refused_entries.append((_fb_provider, "no usable credentials"))
             continue
         agent._fallback_activated = True
+        agent._init_fallback_event = (agent.provider, agent.model)  # emitted once session_id exists
         if _fb_provider.strip().lower() == "moa":
             # The chokepoint handed back the preset's aggregator client, which only proves the
             # preset resolves and its aggregator has credentials. A MoA entry means the preset
@@ -2257,6 +2258,13 @@ def init_agent(
     _clamp_compressor_to_ollama_num_ctx(agent)
     _emit_compression_summary(agent, cs)
     _snapshot_primary_runtime(agent)
+    if (previous := vars(agent).pop("_init_fallback_event", None)) is not None:
+        from agent.fallback_events import emit_fallback_activated
+        emit_fallback_activated(old_provider=previous[0], old_model=previous[1],
+                                new_provider=agent.provider, new_model=agent.model,
+                                stage='agent_init', reason='provider_resolution',
+                                session_id=agent.session_id, platform=getattr(agent, 'platform', ''),
+                                api_mode=agent.api_mode)
 
 
 __all__ = ["init_agent"]
