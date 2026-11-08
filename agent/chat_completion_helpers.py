@@ -2103,6 +2103,12 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
             from agent.native_compaction import resolve_native_compaction_capabilities
             agent.runtime_capabilities = resolve_native_compaction_capabilities(
                 model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
+            from agent.fallback_events import emit_fallback_activated
+            emit_fallback_activated(old_provider=old_provider, old_model=old_model,
+                                    new_provider=agent.provider, new_model=agent.model,
+                                    stage='agent_turn', reason=reason,
+                                    session_id=getattr(agent, 'session_id', ''),
+                                    platform=getattr(agent, 'platform', ''), api_mode=agent.api_mode)
             return True
         except Exception as e:
             if fb_provider == "nous":
