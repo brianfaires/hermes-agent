@@ -17,8 +17,8 @@ from gateway.platforms.base import (
 
 
 
-def test_strip_media_directives_handles_glued_known_extension_tags(tmp_path):
-    """Two known-extension tags glued together must each be delivered (#68773)."""
+def test_glued_control_example_is_not_an_executable_directive(tmp_path):
+    """Adjacent tokens must neither merge nor promote a malformed line into delivery."""
     png1 = tmp_path / "a.png"
     png1.write_bytes(b"\x89PNG\r\n\x1a\n")
     png2 = tmp_path / "b.png"
@@ -26,7 +26,6 @@ def test_strip_media_directives_handles_glued_known_extension_tags(tmp_path):
 
     text = f"MEDIA:{png1}MEDIA:{png2}"
     cleaned = _strip_media_tag_directives(text)
-    # Both MEDIA: tokens consumed; the leading MEDIA: prefix is gone.
-    assert "MEDIA:" not in cleaned, f"Greedy merge leaked: {cleaned!r}"
+    assert cleaned == text
 
 

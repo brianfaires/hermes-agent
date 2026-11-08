@@ -1019,11 +1019,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     self._signal_flush(item[1])
 
     @staticmethod
-    # Strip MEDIA:<path> tags before display. Uses the shared anchored MEDIA_TAG_CLEANUP_RE from
-    # gateway/platforms/base.py — only tags whose path ends in a deliverable extension are removed, so an
-    # unknown-extension path stays visible instead of being silently dropped (issue #34517). Streaming and
-    # non-streaming paths share the same regex, so a tag is treated identically whichever path delivered the
-    # text.
+    # Display and delivery share standalone-directive eligibility, preserving literal examples.
     def _clean_for_display(text: str) -> str:
         """Hide MEDIA:<path> / [[audio_as_voice]] directives and markdown/HTML image tags; both are
         delivered post-stream as native attachments.
