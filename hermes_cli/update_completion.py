@@ -337,20 +337,21 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
         if refused is not None:
             raise RuntimeError("could not join the update's checkout lock "
                                f"({refused.reason or f'held by process {refused.pid}'})")
-    from hermes_cli.venv_sync import arm_completion, collect_superseded_generations
+    from hermes_cli.venv_sync import arm_completion, collect_superseded_generations, source_update_extras
 
     # The foreign-owned-venv refusal runs in the parent BEFORE the swap (update_cmd_commit
     # .preflight_refusal); the tail was armed there too, so this re-arm is an idempotent backstop.
     arm_completion(root)
     from hermes_cli.gitlock import convert_treeless_checkout_first
     convert_treeless_checkout_first(root)
+    extras = source_update_extras(root)
     with receipt.worker_context(update_id):
         try:
             # This file runs from the new tree, so its lockfile carries the new
             # pins; tools (incl. bumped uv/python) land before the sync uses them.
             ensure_tools_for_sync()
             # An update never fails because of a plugin: misfits are disabled and reported.
-            pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
+            pm.sync_venv(extras=extras, explicit=True, project_root=root, evict_incompatible_plugins=True)
             collect_superseded_generations(root)
         finally:
             request["pm_receipt"] = receipt.last_for_update(update_id)
