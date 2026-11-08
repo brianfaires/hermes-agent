@@ -40,6 +40,7 @@ class GatewayPluginInjectionMixin:
         self, *, content: str, plugin_id: str, session_key: Optional[str] = None,
         origin: Optional[Mapping[str, Any]] = None, plugin_home: Optional[Path] = None,
         keyless: bool = False, calling_session_key: str = "",
+        expected_session_id: Optional[str] = None,
     ) -> bool:
         """Schedule a plugin-triggered turn on the live gateway loop (thread-safe).
 
@@ -70,8 +71,10 @@ class GatewayPluginInjectionMixin:
             if not self._plugin_session_key_admissible(session_key, plugin_home=plugin_home, plugin_id=plugin_id):
                 return False
             target = f"session={session_key}"
+            pinned = {"expected_session_id": expected_session_id} if expected_session_id is not None else {}
             coro = self._dispatch_plugin_message_injection(
                 session_key=session_key, content=content, plugin_id=plugin_id, plugin_home=plugin_home,
+                **pinned,
             )
         try:
             current_loop = asyncio.get_running_loop()
@@ -187,12 +190,15 @@ class GatewayPluginInjectionMixin:
 
     async def _dispatch_plugin_message_injection(
         self, *, session_key: str, content: str, plugin_id: str, plugin_home: Optional[Path] = None,
+        expected_session_id: Optional[str] = None,
     ) -> bool:
         """Route a plugin-triggered turn through the session's live adapter."""
         if not self._plugin_injection_accepting():
             return False
         entry = await self.async_session_store.lookup_by_session_key(session_key)
         if entry is None or entry.origin is None or not self._plugin_injection_accepting():
+            return False
+        if expected_session_id is not None and entry.session_id != expected_session_id:
             return False
 
         from gateway.session_identity import replace_source
