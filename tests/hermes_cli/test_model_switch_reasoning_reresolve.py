@@ -9,6 +9,8 @@ set reject that with a non-retryable HTTP 400 (#112921, #96012).
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.cli_model_switch_mixin import CLIModelSwitchMixin
 
 _CFG = {
@@ -76,3 +78,26 @@ def test_failed_swap_and_new_session_keep_the_effort_with_the_route():
             cli._resumed, cli._notify_session_boundary = False, lambda *_a, **_k: None
             CLISessionMixin.new_session(cli, silent=True)
         assert cli.reasoning_config == _HIGH
+
+
+@pytest.mark.parametrize("current_provider", ["custom:ark", "custom:spare"])
+def test_new_session_restores_provider_when_model_name_is_unchanged(current_provider):
+    """A same-named model on a spare route must not outlive the session boundary (#48)."""
+    import cli as cli_mod
+    from hermes_cli.cli_session_mixin import CLISessionMixin
+
+    cli = _cli("glm-5.3-flash", _HIGH)
+    cli.provider = cli.requested_provider = current_provider
+    cli.conversation_history, cli.session_id, cli._session_db, cli._pending_title = [], "old", None, None
+    cli._resumed, cli._notify_session_boundary = False, lambda *_a, **_k: None
+    config = {**_CFG, "model": {"provider": "custom:ark", "default": "glm-5.3-flash"}}
+
+    with patch.dict(cli_mod.CLI_CONFIG, config), patch(
+        "hermes_cli.model_switch.switch_model", return_value=_result("glm-5.3-flash")
+    ):
+        CLISessionMixin.new_session(cli, silent=True)
+
+    assert (cli.model, cli.provider, cli.requested_provider) == (
+        "glm-5.3-flash", "custom:ark", "custom:ark"
+    )
+    assert cli.reasoning_config == _HIGH
