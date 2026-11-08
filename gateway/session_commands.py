@@ -188,7 +188,8 @@ def _runner_command(name):
     entry = (_load_gateway_config().get('quick_commands') or {}).get(name)
     if isinstance(entry, dict) and entry.get('type') == 'exec':
         return 'exec', str(entry.get('command') or '')
-    return next((('plugin', registered) for registered in dict.fromkeys((name, name.replace('_', '-')))
+    lowered = name.lower()  # plugin names are lower-case; `/Log` is `/log`, as on the CLI
+    return next((('plugin', registered) for registered in dict.fromkeys((lowered, lowered.replace('_', '-')))
                  if get_plugin_command_handler(registered)), None)
 
 
@@ -471,6 +472,9 @@ async def execute_command(connection, ref, params, *, dispatch=False):
         from gateway.plugin_command_choice import viewer_choices
         with (_profile_runtime_scope(home), _session_workspace(authority.runner, live.source),
               viewer_choices(live, ref.session_id)):
+            from hermes_cli.plugin_command_dispatch import plugin_command_args
+            if runner_command[0] == 'plugin':
+                arg = plugin_command_args(runner_command[1], params.get('command', ''), arg)
             output = await _run_runner_command(authority.runner, live, name, arg, *runner_command)
         return {'type': 'exec', 'output': _text(output)}
     if definition is None:

@@ -63,7 +63,7 @@ export const prepareSubmission = (display: string, tokens: ComposerToken[]) => (
  * `attached_images` and splices them in at submit.
  */
 export const prepareSlashSubmission = (display: string, tokens: ComposerToken[]) => ({
-  command: expandPasteTokens(tokens)(display),
+  command: expandPasteTokens(tokens)(display).trimStart(),
   display
 })
 
@@ -369,13 +369,13 @@ export function useSubmission(opts: UseSubmissionOptions) {
         }
       }
 
-      if (looksLikeSlashCommand(full)) {
+      if (looksLikeSlashCommand(submission.text.trimStart())) {
         const slash = prepareSlashSubmission(full, submissionTokens)
 
         appendMessage({ kind: 'slash', role: 'system', text: slash.display })
         composerActions.pushHistory(toHistory)
 
-        const parsed = parseSlashCommand(full)
+        const parsed = parseSlashCommand(slash.command)
 
         if (parsed.name === 'queue' || parsed.name === 'q') {
           // The catalog advertises list/edit/rm/move/clear. Enqueueing those words
