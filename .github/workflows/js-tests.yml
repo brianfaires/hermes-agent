@@ -73,9 +73,6 @@ jobs:
       - name: Prepare locked Electron runtime before parallel checks
         run: node scripts/build/electron-runtime.mjs --source .
 
-      - name: Build shared Ink package before its consumers
-        run: npm run build:ink --prefix ui-tui
-
       # Every check runs to completion. The step fails only after all of
       # them finish. There are two reasons this is not ``npm run --ws check``.
       #

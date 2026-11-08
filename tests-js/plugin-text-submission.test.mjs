@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
-import { registerHooks } from 'node:module'
-import { test } from 'node:test'
+import { test, vi } from 'vitest'
 
 // Load the actual hook with headless transport/render adapters; no React/Ink installation is required.
 const fixture = {
@@ -15,19 +14,17 @@ const fixture = {
   turnController: {}, getUiState: () => ({ sid: 's', busy: true }), patchUiState: () => {},
   describeShellExecError: () => 'Shell failed'
 }
-globalThis.textHookFixture = fixture
-const adapters = 'data:text/javascript,' + encodeURIComponent(Object.keys(fixture)
-  .map(name => `export const ${name} = globalThis.textHookFixture.${name}`).join('\n'))
-const hooks = registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (context.parentURL?.endsWith('/app/useSubmission.ts')) {
-      return { url: adapters, shortCircuit: true }
-    }
-    return nextResolve(specifier, context)
-  }
-})
+for (const dependency of [
+  'react', '@hermes/shared/slash', '../ui-tui/src/config/timing.js',
+  '../ui-tui/src/domain/attachments.js', '../ui-tui/src/domain/slash.js',
+  '../ui-tui/src/hooks/useQueue.js', '../ui-tui/src/i18n/runtime.js',
+  '../ui-tui/src/lib/rpc.js', '../ui-tui/src/protocol/interpolation.js',
+  '../ui-tui/src/app/createSlashHandler.js', '../ui-tui/src/app/slash/registry.js',
+  '../ui-tui/src/app/submissionCore.js', '../ui-tui/src/app/submissionDestination.js',
+  '../ui-tui/src/app/turnController.js', '../ui-tui/src/app/uiStore.js',
+  '../ui-tui/src/app/userMessages.js'
+]) vi.doMock(dependency, () => fixture)
 const { useSubmission } = await import('../ui-tui/src/app/useSubmission.ts')
-hooks.deregister()
 
 test('pasted multiline /log uses ordinary slash dispatch with complete text', () => {
   const ordinary = [], history = []
