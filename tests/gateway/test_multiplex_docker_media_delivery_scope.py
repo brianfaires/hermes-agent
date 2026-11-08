@@ -79,7 +79,7 @@ async def test_secondary_docker_media_resolves_via_its_own_mounts(tmp_path, monk
     async def routed_handler(event):  # what _make_profile_message_handler does around _handle_message
         event.source.profile = "public"
         async with _async_profile_runtime_scope(root / "profiles" / "public"):
-            return "here MEDIA:/output/pic.png"
+            return "here\nMEDIA:/output/pic.png"
 
     adapter.set_message_handler(routed_handler)
     event = MessageEvent(

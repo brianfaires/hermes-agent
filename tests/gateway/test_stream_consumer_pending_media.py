@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from gateway.platforms.base import BasePlatformAdapter
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 from tests.waiting import async_wait_until
 
@@ -84,9 +85,15 @@ async def test_prose_with_media_colon_streams_before_the_line_ends():
 
 @pytest.mark.asyncio
 async def test_partial_tag_after_punctuation_is_never_shown():
-    # A complete tag has no left boundary ("图片：MEDIA:/…" is stripped), so its prefix after
-    # punctuation must be held too; showing "MED" and then removing it breaks prefix-stable frames.
-    adapter = await _stream(["Report attached.\n", "图片：MED", "IA:/home/u/report.pdf"])
+    # Only a standalone directive line is executable (fork: hermes-shared#60), so the tag goes on its
+    # own line after the punctuated text; its streamed prefix must never be shown and then removed.
+    adapter = await _stream(["Report attached.\n", "图片：\nMED", "IA:/home/u/report.pdf"])
     for text in _shown(adapter):
-        assert "MED" not in text, text
+        assert "MED" not in text and "/home/" not in text, text
     assert any("Report attached." in t for t in _shown(adapter))
+    media, _ = BasePlatformAdapter.extract_media("Report attached.\n图片：\nMEDIA:/home/u/report.pdf")
+    assert media == [("/home/u/report.pdf", False)]
+    # Inline after punctuation it is prose: shown literally, never delivered.
+    inline = "图片：MEDIA:/home/u/report.pdf"
+    assert BasePlatformAdapter.extract_media(inline) == ([], inline)
+    assert GatewayStreamConsumer._clean_for_display(inline) == inline
