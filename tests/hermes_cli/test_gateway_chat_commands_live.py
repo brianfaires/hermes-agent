@@ -24,6 +24,7 @@ import pytest
 from hermes_cli.observability.shared_metrics_consent import OFFER_VERSION
 from tests.gateway.fixtures.local_recovery_probe import Model
 from tests.gateway.test_normal_runtime_boot import control
+from tests.waiting import wait_until
 
 
 @contextlib.contextmanager
@@ -135,7 +136,8 @@ def test_classic_view_title_and_usage_match_main(tmp_path):
         send("second question", "RECOVERY_ACK_second question")
         send("/title View Title", "Session title set: View Title")
         sid = session_id()
-        assert "Title: View Title" in screen()
+        wait_until(lambda: "Title: View Title" in screen(), timeout=10,
+                   what="classic CLI title display")
         assert db("SELECT title FROM sessions WHERE id=?", sid) == [("View Title",)]
         send("/usage", "Session Token Usage")
         active = [r[0] for r in db("SELECT content FROM messages WHERE session_id=? AND active=1 AND role='user'", sid)]
