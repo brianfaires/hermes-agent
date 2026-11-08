@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("aiohttp")
 
-from gateway.platforms.api_server import _resolve_media_to_data_urls
+from gateway.platforms.api_server_media import resolve_media_to_data_urls
 
 # 1x1 transparent PNG
 _PNG_BYTES = base64.b64decode(
@@ -33,29 +33,29 @@ class TestResolveMediaToDataUrls(unittest.TestCase):
 
     def test_media_tag_inlined(self):
         p = self._write_png()
-        out = _resolve_media_to_data_urls(f"Here you go: MEDIA:{p}")
+        out = resolve_media_to_data_urls(f"Here you go:\nMEDIA:{p}")
         self.assertIn("data:image/png;base64,", out)
         self.assertNotIn("MEDIA:", out)
 
-    def test_backtick_wrapped_tag(self):
+    def test_prose_backtick_example_is_not_inlined(self):
         p = self._write_png()
-        out = _resolve_media_to_data_urls(f"See `MEDIA:{p}` above")
-        self.assertIn("data:image/png;base64,", out)
+        out = resolve_media_to_data_urls(f"See `MEDIA:{p}` above")
+        self.assertEqual(out, f"See `MEDIA:{p}` above")
 
     def test_terminal_eos_sentinel_does_not_block_inlining(self):
         """A leaked terminal ``<|eos|>`` glued to the tag (#111046) inlines exactly like the clean
         response; the control token is dropped rather than returned to the HTTP client."""
         p = self._write_png()
-        clean = f"Here you go: MEDIA:{p}"
-        self.assertEqual(_resolve_media_to_data_urls(clean + "<|eos|>"), _resolve_media_to_data_urls(clean))
+        clean = f"Here you go:\nMEDIA:{p}"
+        self.assertEqual(resolve_media_to_data_urls(clean + "<|eos|>"), resolve_media_to_data_urls(clean))
 
     def test_missing_file_left_untouched(self):
         text = "MEDIA:/nonexistent/path/shot.png"
-        self.assertEqual(_resolve_media_to_data_urls(text), text)
+        self.assertEqual(resolve_media_to_data_urls(text), text)
 
     def test_non_image_left_untouched(self):
         text = "MEDIA:/tmp/archive.zip"
-        self.assertEqual(_resolve_media_to_data_urls(text), text)
+        self.assertEqual(resolve_media_to_data_urls(text), text)
 
 
 if __name__ == "__main__":
