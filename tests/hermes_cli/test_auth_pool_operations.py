@@ -73,12 +73,14 @@ def test_refresh_uses_target_grant_and_preserves_sibling(monkeypatch, status):
             assert target.get("last_error_reset_at") is None
             assert target["last_status"] == "ok"
         else:
-            # Manual grants remain in the pool on failure; only singleton-seeded grants are removed
-            # by the quarantine. A transient 503 benches the row ('exhausted'); a terminal 401
-            # invalid_grant marks it 'dead' so it leaves rotation until re-auth instead of
-            # replaying the dead token every TTL.
+            # Terminal rejection needs reauth; transient failures must preserve the grant.
             assert target["last_status"] == ("dead" if status == 401 else "exhausted")
-            assert target["access_token"] == before[1]["access_token"]
+            if status == 401:
+                assert not target.get("access_token")
+                assert not target.get("refresh_token")
+            else:
+                assert target["access_token"] == before[1]["access_token"]
+                assert target["refresh_token"] == before[1]["refresh_token"]
     finally:
         server.shutdown()
         worker.join(timeout=5)
