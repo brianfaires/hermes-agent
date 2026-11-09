@@ -41,6 +41,8 @@ from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import log_delta_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
+from tools.process_registry_output import (
+    command_preview, output_tail, redact_retained, reset_output, retained_output, trim_output, watch_output)
 
 logger = logging.getLogger(__name__)
 
@@ -521,14 +523,7 @@ def _not_found(session_id: str) -> dict:
     return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
 
-def _output_tail(session: "ProcessSession", n: int) -> str:
-    """Last *n* chars of the session output with ANSI sequences stripped."""
-    from tools.ansi_strip import strip_ansi
-
-    return strip_ansi(session.output_buffer[-n:])
-
-
-def _completion_output(session: "ProcessSession") -> dict:
+def _completion_output(session: "ProcessSession", retained: str | None = None) -> dict:
     """``output`` sized by the session's ``completion_output_chars`` plus ``output_cut`` when trimmed.
 
     Shared by the completion notification AND the wait/poll/kill snapshots: a bot in an api_server
@@ -536,7 +531,7 @@ def _completion_output(session: "ProcessSession") -> dict:
     carry the same whole reply and the same cut marker (#115334)."""
     limit = session.completion_output_chars or COMPLETION_OUTPUT_CHARS
     cut = len(session.output_buffer) - limit
-    return {"output": _output_tail(session, limit), **({"output_cut": cut} if cut > 0 else {})}
+    return {"output": output_tail(session, limit, retained), **({"output_cut": cut} if cut > 0 else {})}
 
 
 @dataclass
@@ -561,6 +556,8 @@ class ProcessSession:
     completion_reason: str = "exited"           # exited|killed|lost|failed_start|already_exited
     termination_source: str = ""                # process.kill|kill_all|backend_lost|failed_start
     output_buffer: str = ""                     # Rolling tail (last max_output_chars)
+    _output_pem_open: bool = field(default=False, repr=False)        # eviction state: process_registry_output
+    _output_starts_midline: bool = field(default=False, repr=False)
     max_output_chars: int = MAX_OUTPUT_CHARS
     detached: bool = False                      # Recovered from checkpoint (no pipe)
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
@@ -636,8 +633,7 @@ class ProcessSession:
     def _append_locked(self, text: str) -> None:
         self.output_buffer += text
         self.total_output_chars += len(text)
-        if len(self.output_buffer) > self.max_output_chars:
-            self.output_buffer = self.output_buffer[-self.max_output_chars:]
+        trim_output(self)
 
     def mark_exited(self, exit_code, reason: str = "exited", source: str = "") -> None:
         """Record an exit. A kill that raced the observer already recorded its own
@@ -764,9 +760,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         session._heartbeat_last = now
         with session._lock:
             delta = session.total_output_chars - session._heartbeat_total_at_last
-            output = session.output_buffer[-delta:] if delta > 0 else ""
+            retained = retained_output(session) if delta > 0 else ""
             session._heartbeat_total_at_last = session.total_output_chars
-        if not output:
+        if not (output := output_tail(session, delta, retained)):
             return
         output, omitted = heartbeat_output_tail(output)
         session._heartbeat_seq += 1
@@ -854,9 +850,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             if lifetime_exhausted:
                 session._watch_disabled = True
                 session.notify_on_complete = True
-        output = "\n".join(matched_lines[:20])
-        if len(output) > 2000:
-            output = output[:2000] + "\n...(truncated)"
+        output = watch_output(session, new_text)
         if self._global_watch_admit(now):
             notification = {
                 **self._watch_event_base(session),
@@ -1443,7 +1437,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                         with session._lock:
                             if session.exited:
                                 return
-                            session.output_buffer = ""
+                            reset_output(session)
                     prev_output_bytes = new_size
                 if delta:
                     # A kill that landed after this fetch already published its output
@@ -1452,8 +1446,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                         if session.exited:
                             return
                         session.output_buffer += delta
-                        if len(session.output_buffer) > session.max_output_chars:
-                            session.output_buffer = session.output_buffer[-session.max_output_chars:]
+                        trim_output(session)
                     self._check_watch_patterns(session, delta)
                     self._emit_output(session, delta)
 
@@ -1996,9 +1989,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         self._reconcile_local_exit(session)  # orphaned-pipe reader guard
         # Read with the preview under the lock the reader appends and exits under, so the
         # finalization check describes the output actually returned.
-        with session._lock:
-            output_preview = _output_tail(session, 1000)
-            exited, finalizing = session.exited, self._reader_finalizing(session)
+        with session._lock:  # snapshot under the lock; redaction runs after release
+            retained, exited, finalizing = retained_output(session), session.exited, self._reader_finalizing(session)
+        output_preview = output_tail(session, 1000, retained)
         result = {
             **self._status_head(session), "pid": session.pid,
             "uptime_seconds": int(time.time() - session.started_at), "output_preview": output_preview}
@@ -2016,14 +2009,12 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
 
     def read_log(self, session_id: str, offset: int | None = None, limit: int = 200) -> dict:
         """Read the full output log with optional pagination by lines."""
-        from tools.ansi_strip import strip_ansi
-
         session = self.get(session_id)
         if session is None:
             return _not_found(session_id)
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
-            exited, finalizing = session.exited, self._reader_finalizing(session)
+            retained, exited, finalizing = retained_output(session), session.exited, self._reader_finalizing(session)
+        full_output = redact_retained(session, retained)
         lines = full_output.splitlines()
         total_lines = len(lines)
         # An explicit offset=0 means "start from the first line" — previously it was conflated with the
@@ -2079,7 +2070,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
-                    "status": "interrupted", "command": session.command, "output": _output_tail(session, 1000),
+                    "status": "interrupted", "command": session.command, "output": output_tail(session, 1000),
                     "note": "User sent a new message -- wait interrupted"}
             elif _consume_yield(threading.current_thread().ident):
                 # A steer/redirect landed mid-turn: redirect() asks tool workers to YIELD so
@@ -2087,7 +2078,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 # process is untouched and still notify-tracked; the model should read the
                 # steer text and respond, not re-issue the wait (kimi-code#3697 class).
                 result = {
-                    "status": "interrupted", "command": session.command, "output": _output_tail(session, 1000),
+                    "status": "interrupted", "command": session.command, "output": output_tail(session, 1000),
                     "process_running": True,
                     "note": ("User sent a new message -- wait released; the process is still "
                              "running and you will be notified on exit. Respond to the user now.")}
@@ -2100,7 +2091,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 break
             session._completion_event.wait(timeout=min(1.0, remaining))
         result = {
-            "status": "timeout", "command": session.command, "output": _output_tail(session, 1000),
+            "status": "timeout", "command": session.command, "output": output_tail(session, 1000),
             # Not a failure — models re-issued identical waits after misreading this as an error.
             "process_running": True}
         base_note = (
@@ -2116,11 +2107,11 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         return result
 
     @staticmethod
-    def _exit_snapshot(session: ProcessSession, status: str) -> dict:
+    def _exit_snapshot(session: ProcessSession, status: str, retained: str | None = None) -> dict:
         """Result dict for an exited session: exit metadata + the completion-sized output tail."""
         return {
             "status": status, "command": session.command,
-            **ProcessRegistry._exit_fields(session), **_completion_output(session)}
+            **ProcessRegistry._exit_fields(session), **_completion_output(session, retained)}
 
     def kill_process(
         self, session_id: str, *, source: str = "process.kill", consume_output: bool = True,
@@ -2144,8 +2135,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             # above already handled the main process; this catches stragglers.
             scope_stopped = self._stop_scope(session)
             with session._lock:
-                result = self._exit_snapshot(session, "already_exited")
-                finalizing = self._reader_finalizing(session)
+                retained, finalizing = retained_output(session), self._reader_finalizing(session)
+            result = self._exit_snapshot(session, "already_exited", retained)
             if not scope_stopped:
                 result["scope_stop_failed"] = session.systemd_unit
             # Only suppress the autonomous turn after its output is present in
@@ -2198,13 +2189,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             # Capture output, mark consumed, THEN expose ``exited`` to watcher tasks —
             # closes the delayed-notification race without losing the transcript.
             with session._lock:
-                output = _completion_output(session)
                 if consume_output:
                     self._completion_consumed.add(session_id)
                 session.exited = True
                 session.exit_code = -15  # SIGTERM
                 session.completion_reason = "killed"
                 session.termination_source = source
+                retained = retained_output(session)  # after ``exited``: the kill's output is final
+            output = _completion_output(session, retained)
             # The reader thread can finalise the session while the signal path
             # blocks in the SIGKILL grace window: its ``save_completed_result``
             # then persists this kill as a plain ``exited``. Re-write the receipt
@@ -2254,7 +2246,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             if self._detached_host_fate(session.pid, session.host_start_time) != "running":
                 scope_stopped = self._stop_scope(session)
                 with session._lock:
-                    output = _completion_output(session)
+                    retained = retained_output(session)
+                output = _completion_output(session, retained)
                 if consume_output:
                     self._completion_consumed.add(session_id)
                 # No waitable handle, so this is not a collected exit. Close the
@@ -2353,7 +2346,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         """O(1) running count for status-bar polling; dict ``len()`` is atomic, no lock."""
         return len(self._running)
 
-    def list_sessions(self, task_id: str | None = None, session_key: str | None = None, *, include_retained: bool = False) -> list:
+    def list_sessions(self, task_id: str | None = None, session_key: str | None = None, *, include_retained: bool = False,
+                      preview_chars: int = 200) -> list:
         """Running and recently-finished processes for ``task_id`` and/or ``session_key``;
         cross-task entries sharing the gateway session (a forgotten preview server
         blocking session reset) are flagged ``"session_scoped": true``.
@@ -2387,14 +2381,14 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             self._reconcile_local_exit(s)
             entry = {
                 "session_id": s.id,
-                "command": s.command[:200],
+                "command": command_preview(s.command),
                 "cwd": s.cwd,
                 "pid": s.pid,
                 "owner_task_id": s.owner_task_id,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
                 "uptime_seconds": int(time.time() - s.started_at),
                 "status": "exited" if s.exited else "running",
-                "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                "output_preview": output_tail(s, preview_chars),
             }
             # Flag processes surfaced only because they share the gateway session (not the current task) —
             # these are the long-lived background processes a user may have forgotten about (#29177).

@@ -238,6 +238,20 @@ CLI and non-notifying processes, and preserves the producer's profile context in
 reader threads. Receipt redaction is forced independently of live-output opt-out;
 retention is bounded by age and count.
 
+Terminal output is redacted over its complete text before any preview, tail, log
+page, watch excerpt or truncation window is selected: a cut through a secret
+leaves a fragment no pattern recognises. Foreground captures that overflowed the
+`tool_output.max_bytes` window are re-read from the spill file
+(`tools/environments/base_output_redaction.py`); when it was capped or is
+missing, the output is omitted rather than cut raw. A yield-to-background
+handoff returns and seeds the adopted session with the same redacted window.
+Background readers select from `tools/process_registry_output.py`: they
+snapshot the buffer under the session lock and redact after releasing it.
+Rolling-buffer eviction keeps only non-secret boundary state (an open
+private-key block, a split first line), so the retained capture never starts
+inside a secret; while a process runs, the last token of an unterminated line is held
+until the line ends.
+
 ## Concurrency
 
 Tool calls may execute sequentially or concurrently depending on the tool mix and interaction requirements.

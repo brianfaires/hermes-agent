@@ -88,6 +88,30 @@ def _record():
     return record
 
 
+def test_child_process_accounting_keeps_unread_output_redacted(monkeypatch):
+    from tools import process_registry as pr
+
+    monkeypatch.setattr("agent.redact._redact_enabled", lambda: True)
+    registry = pr.ProcessRegistry()
+    monkeypatch.setattr(pr, "process_registry", registry)
+
+    class Child(_StubChild):
+        def run_conversation(self, user_message, task_id=None, **kwargs):
+            registry._running['proc_running'] = pr.ProcessSession(
+                id='proc_running', command='worker', owner_task_id=task_id, started_at=time.time())
+            registry._finished['proc_unread'] = pr.ProcessSession(
+                id='proc_unread', command='python -m pytest', owner_task_id=task_id,
+                started_at=time.time(), notify_on_complete=True, exited=True, exit_code=1,
+                output_buffer="RuntimeError: {'API_KEY': '" + 'opaque-child-secret-' * 100)
+            return super().run_conversation(user_message, task_id=task_id, **kwargs)
+
+    entry = results._run_child_lifecycle(0, 'summarize the task', Child(['done']), _Parent())
+    assert entry['orphaned_processes'][0]['session_id'] == 'proc_running'
+    unread = entry['unread_completions'][0]
+    assert unread['session_id'] == 'proc_unread'
+    assert 'opaque-child-secret' not in unread['output_tail']
+
+
 def test_old_durable_results_are_redacted_on_read_replay_and_failure_roster():
     record = _record()
     event = {

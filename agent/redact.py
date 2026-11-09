@@ -1174,7 +1174,9 @@ def _redact_python_repr_fields(text: str) -> str:
 
 
 def _redact_python_diagnostic_repr_fields(text: str) -> str:
-    """Mask repr fields only on pytest/error lines in source-preserving output."""
+    """Mask repr fields only on pytest/error lines, including a trailing field left unterminated."""
+    from agent.redact_partial import redact_unterminated_repr_field
+
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
         ending = ""
@@ -1190,7 +1192,7 @@ def _redact_python_diagnostic_repr_fields(text: str) -> str:
         if match is not None:
             lines[index] = (
                 match.group("prefix")
-                + _redact_python_repr_fields(match.group("body"))
+                + redact_unterminated_repr_field(_redact_python_repr_fields(match.group("body")))
                 + ending
             )
     return "".join(lines)
@@ -1768,10 +1770,10 @@ def redact_terminal_output(output: str, command: str | None = None, *, force: bo
         return output
     code_file = not (is_env_dump_command(command) or _command_reads_secret_file(command))
     redacted = redact_sensitive_text(output, force=force, code_file=code_file)
-    # Source-preserving output still gets the Python-repr pass on high-confidence
-    # diagnostic lines (pytest ``E   `` introspection, final exception lines): that is
-    # where {'BRAVE_API_KEY': '…'} leaks, not in source dumps.
-    if code_file and (force or _redact_enabled()) and ":" in redacted and "'" in redacted:
+    # Every command's output gets the Python-repr pass on high-confidence diagnostic lines
+    # (pytest ``E   `` introspection, final exception lines): that is where {'BRAVE_API_KEY': '…'}
+    # leaks, not in source dumps, and env dumps can print a traceback whose field never closed.
+    if (force or _redact_enabled()) and ":" in redacted and ("'" in redacted or '"' in redacted):
         redacted = _redact_python_diagnostic_repr_fields(redacted)
     return redacted
 
