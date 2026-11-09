@@ -141,3 +141,23 @@ def test_plugin_refresh_adopts_peer_rotation_without_spending_token(plugin_profi
     adopted = second._refresh_entry(second.entries()[0], force=True)
     assert (adopted.access_token, adopted.refresh_token) == ("tok-2", "rt-2")
     assert calls == ["rt-1"]
+
+
+def test_peer_rotation_without_refresh_token_is_adopted_not_dropped(plugin_profiles):
+    """A plugin grant whose rotation carries no refresh token stays usable for a stale peer: the
+    shared Codex/xAI retired-grant guard must not turn the peer's fresh access token into None."""
+    calls = []
+
+    def hook(entry):
+        calls.append(entry.refresh_token)
+        return {"access_token": "tok-2", "refresh_token": None}
+
+    _register_hook(hook)
+    first = CredentialPool("example-oauth", [_entry(expires_at_ms=1)])
+    first._persist()
+    second = CredentialPool("example-oauth", [_entry(expires_at_ms=1)])
+
+    first._refresh_entry(first.entries()[0], force=True)
+    adopted = second._refresh_entry(second.entries()[0], force=True)
+    assert adopted is not None and adopted.access_token == "tok-2"
+    assert calls == ["rt-1"]
