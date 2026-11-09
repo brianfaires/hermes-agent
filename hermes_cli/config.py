@@ -1822,7 +1822,7 @@ def _read_raw_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
             return copy.deepcopy(hit) if want_deepcopy else hit
 
         try:
-            data = read_config_doc(config_path) or {}
+            data = {} if (doc := read_config_doc(config_path)) is None else doc  # not `or {}`: [] must fail
         except Exception as e:
             _warn_config_parse_failure(config_path, e)
             return FailedConfigRead(error=e)
