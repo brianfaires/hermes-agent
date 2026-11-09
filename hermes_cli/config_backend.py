@@ -198,14 +198,44 @@ class FileBackend:
         return load_yaml_file_readonly(path)
 
     @staticmethod
+    @contextlib.contextmanager
+    def _mutation_lock(path: Path):
+        """Exclusive cross-process lock over one read-modify-write of *path*. A sibling lock file,
+        because the config is replaced atomically and a lock on its inode would not survive that.
+        Its own file, not ``.config.yaml.lock``: ``plugins_state._locked_plugin_state`` holds that one
+        through a separate handle across a save, and flock would self-deadlock.
+        Reads never take it."""
+        from hermes_constants import mkdir_under_hermes_home
+        mkdir_under_hermes_home(path.parent)
+        lock_path = path.with_name(f".{path.name}.write.lock")
+        if sys.platform == "win32":
+            import msvcrt
+            if not lock_path.exists() or lock_path.stat().st_size == 0:
+                lock_path.write_text(" ", encoding="utf-8")  # msvcrt needs a byte to lock
+            with open(lock_path, "r+", encoding="utf-8") as handle:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            with open(lock_path, "a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # released when the handle closes
+                yield
+
+    @staticmethod
     def write_path(path: Path, changes: Changes) -> None:
         from utils import atomic_roundtrip_yaml_save, atomic_roundtrip_yaml_update
-        if changes.document is not None:
-            atomic_roundtrip_yaml_save(path, changes.document, extra_content_on_create=changes.extra_content_on_create)
-        for key, value in changes.set.items():
-            atomic_roundtrip_yaml_update(path, key, value)
-        for key in changes.unset:
-            atomic_roundtrip_yaml_update(path, key, None)
+        with FileBackend._mutation_lock(path):
+            if changes.document is not None:
+                atomic_roundtrip_yaml_save(
+                    path, changes.document, extra_content_on_create=changes.extra_content_on_create)
+            for key, value in changes.set.items():
+                atomic_roundtrip_yaml_update(path, key, value)
+            for key in changes.unset:
+                atomic_roundtrip_yaml_update(path, key, None)
 
     def config_path(self, home: Path) -> Path:
         return Path(home) / CONFIG_FILENAME
