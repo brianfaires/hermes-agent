@@ -24,6 +24,7 @@ from tools.interrupt import consume_yield, is_interrupted, is_thread_interrupted
 from tools.environments.base_output import (
     ProcessHandle, _finalize_wait_result, _new_output_collector, _start_drain_thread,
 )
+from tools.environments.base_output_redaction import redacted_window
 from tools.environments.base_session_env import (
     _SHELL_ENV_NAME_RE, _SNAP_TMP_SUFFIX, _cwd_marker, _pipe_marker, _snapshot_bootstrap_script, _split_cwd_marker,
     _wrap_command_script,
@@ -557,7 +558,7 @@ class BaseEnvironment(ABC):
                     drain_stop.set()
                     drain_thread.join(timeout=1)
                     try:
-                        handed = yield_handler(proc, output.render())
+                        handed = yield_handler(proc, redacted_window(output))
                     except Exception:
                         logger.warning("yield-to-background handoff failed; continuing to wait", exc_info=True)
                         handed = None
@@ -606,7 +607,7 @@ class BaseEnvironment(ABC):
         result = self._finalize_wait_result(output, rendered, proc.returncode)
         if stdin_errors := getattr(proc, "_hermes_stdin_errors", None):
             result["stdin_error"] = err = str(stdin_errors[0])
-            result["output"] = rendered + f"\n[stdin write failed: {err}]"
+            result["output"] += f"\n[stdin write failed: {err}]"
         return result
 
     _finalize_wait_result = staticmethod(_finalize_wait_result)
@@ -730,7 +731,7 @@ class BaseEnvironment(ABC):
             proc_holder.append(spawned)
             if fenced:  # the hard-exit kill may have stopped waiting for us before we registered
                 self._force_kill_process(spawned)
-            output = _new_output_collector(spawned, bounded_capture)
+            output = _new_output_collector(spawned, bounded_capture, command)
             output_holder.append(output)
             try:
                 return self._wait_for_process(
