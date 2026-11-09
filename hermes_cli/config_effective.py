@@ -27,6 +27,8 @@ from hermes_cli.config_read_errors import _warn_config_parse_failure
 # normal pipeline) when the file is later found mid-edit as broken YAML.
 _LAST_GOOD_USER_RAW: dict[str, dict[str, Any]] = {}
 # path -> (*user_signature, *managed_signature, effective, env_snapshot); see utils.file_signature.
+# Both caches hold only verified mapping roots (recovered results are never stored), so a
+# ``fail_closed`` read may be served from an entry a tolerant read populated.
 _EFFECTIVE_CACHE: dict[str, tuple[Any, ...]] = {}
 
 
@@ -55,9 +57,9 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     here, so ``{}`` sentinels and presence-sensitive bridges keep working. An absent file is an
     empty user layer (the managed layer still applies). Returns a fresh deepcopy.
 
-    Broken YAML: ``fail_closed=True`` raises the parse error (for callers that keep their own
-    last-good state); otherwise the last successfully parsed user file — in-process first, then
-    the newest ``backups/config/*.good.*`` copy — is served through the same pipeline, so a
+    Broken or non-mapping YAML: ``fail_closed=True`` raises (for policy callers that must not
+    act on a misread value); otherwise the last successfully parsed user file — in-process
+    first, then the newest ``backups/config/*.good.*`` copy — is served through the same pipeline, so a
     mid-edit torn write never silently drops user overrides (same contract as ``load_config``).
     Cached on the user + managed file signatures and the values of every referenced env var."""
     from agent.safe_worker_policy import worker_config_snapshot
@@ -87,12 +89,14 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         elif user_sig is not None:
             try:
                 loaded = read_config_doc(config_path)
+                if loaded is not None and not isinstance(loaded, dict):
+                    raise ValueError(f"top-level YAML must be a mapping, got {type(loaded).__name__}")
             except Exception as exc:
                 if fail_closed:
                     raise
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
-                raw = loaded if isinstance(loaded, dict) else {}
+                raw = loaded or {}
                 _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
