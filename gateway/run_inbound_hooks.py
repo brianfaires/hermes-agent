@@ -77,6 +77,8 @@ class GatewayInboundHooksMixin:
         from gateway.session_ingress import executing_admission
         if executing_admission.get():
             return event
+        from gateway.session_reset_followup import capture_reset_proof, carry_reset_proof
+        capture_reset_proof(self, event)
         try:
             from hermes_cli.lifecycle import ainvoke_hook as _ainvoke_hook
             async with self._async_profile_scope_for_source(source):
@@ -106,6 +108,7 @@ class GatewayInboundHooksMixin:
                     from gateway.session_ingress_context import carry_callback
                     rewritten = dataclasses.replace(event, text=_new_text)
                     carry_callback(event, rewritten)
+                    carry_reset_proof(event, rewritten)
                     event = rewritten
                 break
             if _action == "allow":
