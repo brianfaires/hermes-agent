@@ -28,7 +28,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional, Protocol, Union, runtime_checkable
+from typing import Any, Callable, Mapping, Optional, Protocol, Union, runtime_checkable
 
 CONFIG_FILENAME = "config.yaml"
 BACKEND_ENV = "HERMES_CONFIG_BACKEND"
@@ -198,14 +198,61 @@ class FileBackend:
         return load_yaml_file_readonly(path)
 
     @staticmethod
-    def write_path(path: Path, changes: Changes) -> None:
+    @contextlib.contextmanager
+    def _mutation_lock(path: Path):
+        """Exclusive cross-process lock over one read-modify-write of *path*. A sibling lock file,
+        because the config is replaced atomically and a lock on its inode would not survive that.
+        Its own file, not ``.config.yaml.lock``: ``plugins_state._locked_plugin_state`` holds that one
+        through a separate handle across a save, and flock would self-deadlock.
+        Reads never take it."""
+        from hermes_constants import mkdir_under_hermes_home
+        mkdir_under_hermes_home(path.parent)
+        lock_path = path.with_name(f".{path.name}.write.lock")
+        if sys.platform == "win32":
+            import msvcrt
+            if not lock_path.exists() or lock_path.stat().st_size == 0:
+                lock_path.write_text(" ", encoding="utf-8")  # msvcrt needs a byte to lock
+            with open(lock_path, "r+", encoding="utf-8") as handle:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            with open(lock_path, "a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # released when the handle closes
+                yield
+
+    @staticmethod
+    def _apply_changes(path: Path, changes: Changes) -> None:
         from utils import atomic_roundtrip_yaml_save, atomic_roundtrip_yaml_update
         if changes.document is not None:
-            atomic_roundtrip_yaml_save(path, changes.document, extra_content_on_create=changes.extra_content_on_create)
+            atomic_roundtrip_yaml_save(
+                path, changes.document, extra_content_on_create=changes.extra_content_on_create)
         for key, value in changes.set.items():
             atomic_roundtrip_yaml_update(path, key, value)
         for key in changes.unset:
             atomic_roundtrip_yaml_update(path, key, None)
+
+    @staticmethod
+    def write_path(path: Path, changes: Changes) -> None:
+        with FileBackend._mutation_lock(path):
+            FileBackend._apply_changes(path, changes)
+
+    @staticmethod
+    def update_path(path: Path, mutator: Callable[[dict], Optional[dict]]) -> dict:
+        """Read, mutate and write *path* inside ONE hold of the mutation lock, so no other process's
+        write lands between the read and the write. See :func:`update_config_document`."""
+        with FileBackend._mutation_lock(path):
+            try:
+                current = FileBackend.read_path(path)
+            except FileNotFoundError:
+                current = None
+            document = _mutated_document(current, mutator)
+            FileBackend._apply_changes(path, Changes(document=document))
+            return document
 
     def config_path(self, home: Path) -> Path:
         return Path(home) / CONFIG_FILENAME
@@ -473,6 +520,39 @@ def config_destination(config_path: PathLike) -> str:
     the file backend and explicit files, the backend's own name for the user layer otherwise."""
     backend, home = _route(config_path)
     return backend.destination(home)
+
+
+def _mutated_document(current: Any, mutator: Callable[[dict], Optional[dict]]) -> dict:
+    if current is not None and not isinstance(current, dict):
+        raise ConfigValueError("config root must be a mapping")
+    document = {} if current is None else current
+    result = mutator(document)
+    return document if result is None else result
+
+
+def update_config_document(mutator: Callable[[dict], Optional[dict]], *, path: Optional[PathLike] = None) -> dict:
+    """Atomic read-modify-write of a config document; returns the document written.
+
+    ``mutator`` receives the current document (``{}`` when the file is absent or empty) and either
+    edits it in place (returning None) or returns the replacement. Raising aborts with nothing
+    written. The file backend holds its cross-process write lock from the read through the write,
+    so concurrent writers (other processes included) apply one after another instead of losing
+    updates; keep the mutator quick and free of config writes of its own. A remote backend has no
+    such lock: it gets read, mutate, document write, with its own compare-and-swap deciding
+    conflicts. *path* defaults to the active profile's ``config.yaml``."""
+    if path is None:
+        from hermes_constants import get_hermes_home
+        path = Path(get_hermes_home()) / CONFIG_FILENAME
+    backend, home = _route(path)
+    if isinstance(backend, FileBackend):
+        return backend.update_path(backend.config_path(home), mutator)
+    try:
+        current = backend.read_user_doc(home)
+    except FileNotFoundError:
+        current = None
+    document = _mutated_document(current, mutator)
+    backend.write_changes(home, Changes(document=document))
+    return document
 
 
 def write_config_key(config_path: PathLike, key_path: str, value: Any) -> None:

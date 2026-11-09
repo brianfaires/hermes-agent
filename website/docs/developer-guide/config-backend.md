@@ -48,6 +48,13 @@ Related keys that must change together (a model switch's `model.*` keys, the TUI
 toggle) go through `write_config_keys(path, {key: value, ...})`. A remote backend sends them
 as one CAS write, so a lock on any of them refuses all of them.
 
+A writer whose new value depends on the current document (a JSON-Patch over the whole file) uses
+`update_config_document(mutator, path=None)`. The file backend runs the read, the mutator and the
+write under one hold of its cross-process write lock (`.config.yaml.write.lock`, the lock every
+file write takes), so concurrent processes apply their edits in turn instead of losing one. The
+mutator edits the document in place or returns a replacement; raising aborts with nothing written.
+A remote backend has no such lock and falls back to read, mutate, document write under its CAS.
+
 ## Lints
 
 - `scripts/check_config_yaml_writers.py` rejects a direct YAML dump of a config path.
