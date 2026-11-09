@@ -63,6 +63,14 @@ def test_forced_refresh_never_adopts_the_bearer_that_just_failed(tmp_path, monke
     assert posts == ["rt-current"], f"expected exactly one real refresh POST, got {posts}"
 
 
+
+def test_locked_refresh_path_also_compares_against_the_failed_bearer(tmp_path, monkeypatch):
+    """The cross-process locked refresh path carries the sent bearer like the unlocked one."""
+    from agent import credential_pool as cp
+    monkeypatch.setattr(cp, "_SINGLE_USE_REFRESH_PROVIDERS", (*cp._SINGLE_USE_REFRESH_PROVIDERS, "nous"))
+    test_forced_refresh_never_adopts_the_bearer_that_just_failed(tmp_path, monkeypatch)
+
+
 class _Agent:
     provider = "nous"
     api_mode = "chat_completions"
