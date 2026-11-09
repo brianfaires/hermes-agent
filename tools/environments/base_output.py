@@ -48,6 +48,9 @@ class _BoundedOutputCollector:
         self._spill_fh: IO[str] | None = None
         self._spill_chars = 0
         self._spill_capped = False
+        # Set for the foreground terminal capture: its output is redacted before a cut is chosen.
+        self.redaction_command: str | None = None
+        self.render_suffix = ""
 
     def _maybe_spill(self, text: str) -> None:
         """Tee ``text`` to the spill file (opened lazily on first overflow)."""
@@ -88,6 +91,17 @@ class _BoundedOutputCollector:
             self._spill_fh = None
             return str(self._spill_path)
 
+    def flush_spill(self) -> str | None:
+        """Flush the spill file so a reader sees the stream so far; its path, or None."""
+        with self._lock:
+            if self._spill_fh is None or self._spill_capped:
+                return None
+            try:
+                self._spill_fh.flush()
+            except OSError:
+                return None
+            return str(self._spill_path)
+
     @property
     def buffered_chars(self) -> int:
         with self._lock:
@@ -97,6 +111,13 @@ class _BoundedOutputCollector:
     def total_chars(self) -> int:
         with self._lock:
             return self._total_chars
+
+    def unevicted_text(self) -> str | None:
+        """The whole stream when nothing was evicted from the window, else None."""
+        with self._lock:
+            if self._total_chars > self.max_chars:
+                return None
+            return "".join(self._head) + "".join(self._tail)
 
     def append(self, text: str) -> None:
         if not text:
@@ -141,6 +162,7 @@ class _BoundedOutputCollector:
     def render(self, *, suffix: str = "") -> str:
         """Render within ``max_chars``, preserving a required status suffix."""
         with self._lock:
+            self.render_suffix = suffix
             if len(suffix) >= self.max_chars:
                 return suffix[-self.max_chars :]
 
@@ -166,12 +188,13 @@ class _BoundedOutputCollector:
             return head[:head_chars] + notice[:available] + rendered_tail + suffix
 
 
-def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollector:
+def _new_output_collector(proc, bounded_capture: bool, command: str | None = None) -> _BoundedOutputCollector:
     """Build the collector for one ``_wait_for_process`` call. ``bounded_capture`` (foreground
     terminal path only) caps retention at ``tool_output.max_bytes`` and tees overflow to a
     spill file under ``$HERMES_HOME/cache/terminal-output`` (created only on actual overflow;
     spills older than 7 days are pruned opportunistically). Otherwise the collector is
-    effectively unbounded so internal consumers keep full-fidelity output."""
+    effectively unbounded so internal consumers keep full-fidelity output. ``command`` marks the
+    capture for redaction over its complete text before any cut (see base_output_redaction)."""
     if not bounded_capture:
         return _BoundedOutputCollector(_UNBOUNDED_CAPTURE_CHARS)
     try:
@@ -193,13 +216,20 @@ def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollecto
                     pass
     except Exception:
         spill_path = None
-    return _BoundedOutputCollector(capture_limit, spill_path=spill_path)
+    collector = _BoundedOutputCollector(capture_limit, spill_path=spill_path)
+    collector.redaction_command = command
+    return collector
 
 
 def _finalize_wait_result(collector: _BoundedOutputCollector, rendered: str, returncode: int | None) -> dict:
     """Assemble a wait result, attaching spill metadata when overflow occurred."""
     result = {"output": rendered, "returncode": returncode}
     spill = collector.close_spill()
+    if collector.redaction_command is not None:
+        from tools.environments.base_output_redaction import redact_before_selection
+        result["output"], redacted = redact_before_selection(collector, rendered, spill)
+        if spill and redacted is not None:
+            result["redacted_full_output"] = redacted
     if spill:
         result["output_total_chars"] = collector.total_chars
         result["full_output_path"] = spill
