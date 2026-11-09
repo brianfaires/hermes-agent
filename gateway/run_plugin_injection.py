@@ -208,7 +208,12 @@ class GatewayPluginInjectionMixin:
                                                                plugin_home=plugin_home)
         if not self._plugin_messaging_session_owned(session_key, plugin_home=plugin_home, plugin_id=plugin_id):
             return False
-        if not self._plugin_injection_authorized(source, plugin_id=plugin_id, target=f"session={session_key}"):
+        followup = await self._plugin_reset_followup(session_key, entry.session_id, plugin_id=plugin_id)
+        if followup is False:
+            return False
+        if followup is not None:
+            source = followup[0]  # the resetting actor, authorized by the command's own proof
+        elif not self._plugin_injection_authorized(source, plugin_id=plugin_id, target=f"session={session_key}"):
             return False
 
         adapter = self._delivery_adapter_for(source)
@@ -218,7 +223,7 @@ class GatewayPluginInjectionMixin:
         async with self._plugin_injection_scope(source):
             admitted = await self._admit_plugin_injection(
                 adapter, source, session_key=session_key, session_id=entry.session_id,
-                content=content, plugin_id=plugin_id)
+                content=content, plugin_id=plugin_id, reset_envelope=followup and followup[1])
             if admitted is not None:
                 return admitted
             await adapter.handle_message(MessageEvent(
@@ -366,9 +371,21 @@ class GatewayPluginInjectionMixin:
         logger.info("Plugin message injection dispatched: plugin=%s %s session=%s", plugin_id, target, session_key)
         return True
 
+    async def _plugin_reset_followup(self, session_key: str, session_id: str, *, plugin_id: str):
+        """The follow-up a confirmed /new or /reset lends this injection (gateway/session_reset_followup.py):
+        ``(source, envelope)``, ``None`` outside its ``on_session_reset`` hook, ``False`` when refused."""
+        from gateway.session_reset_followup import reset_followup
+        from hermes_state_runtime import RuntimeStoreError
+        try:
+            return await reset_followup(self, session_key, session_id)
+        except RuntimeStoreError as exc:
+            logger.warning("Plugin reset follow-up refused: plugin=%s session=%s (%s)",
+                           plugin_id, session_key, exc.reason)
+            return False
+
     async def _admit_plugin_injection(
         self, adapter, source: SessionSource, *, session_key: str, session_id: str, content: str,
-        plugin_id: str,
+        plugin_id: str, reset_envelope: Optional[dict] = None,
     ) -> Optional[bool]:
         """Under a session authority, commit the plugin turn into the session's durable FIFO as a
         trusted producer admission (the heartbeat / completion seam) instead of running it on the
@@ -387,6 +404,8 @@ class GatewayPluginInjectionMixin:
             allow_gateway_control=False, message_id=identity,
             metadata={"gateway_session_key": session_key, "gateway_session_id": session_id},
         )
+        from gateway.session_reset_followup import lend_envelope
+        lend_envelope(event, reset_envelope)
         try:
             await authority.admit_automation(adapter, event, identity)
         except RuntimeStoreError as exc:
