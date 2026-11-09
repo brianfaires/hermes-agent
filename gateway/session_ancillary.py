@@ -610,16 +610,19 @@ def _owned_locked(registry, keys, owners):
 
 
 def process_snapshot(authority, ref, agent, records):
+    from tools.process_registry_output import command_preview, output_tail, snapshot_output
+
     module = sys.modules.get('tools.process_registry')
     if module is None:
         return []
     registry = module.process_registry
     keys, owners = _ownership(authority, ref, agent, records)
-    # Keep ownership and output together.
+    # Keep ownership and output together; redact after the registry lock is released.
     with registry._lock:
-        return [{'session_id': p.id, 'command': p.command[:200],
-                 'status': 'exited' if p.exited else 'running', 'exit_code': p.exit_code,
-                 # The classic CLI dock's elapsed / exit-age / verdict and its 32k tail view.
-                 'started_epoch': p.started_at, 'exited_at': p.exited_at or None,
-                 'completion_reason': p.completion_reason if p.exited else None,
-                 'output_tail': p.output_buffer[-_PROCESS_TAIL_CHARS:]} for p in _owned_locked(registry, keys, owners)]
+        rows = [(p, {'session_id': p.id, 'status': 'exited' if p.exited else 'running', 'exit_code': p.exit_code,
+                     # The classic CLI dock's elapsed / exit-age / verdict and its 32k tail view.
+                     'started_epoch': p.started_at, 'exited_at': p.exited_at or None,
+                     'completion_reason': p.completion_reason if p.exited else None}, snapshot_output(p))
+                for p in _owned_locked(registry, keys, owners)]
+    return [{**row, 'command': command_preview(p.command), 'output_tail': output_tail(p, _PROCESS_TAIL_CHARS, retained)}
+            for p, row, retained in rows]
