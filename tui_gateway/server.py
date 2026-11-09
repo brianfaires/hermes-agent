@@ -1913,10 +1913,10 @@ def _session_processes(session: dict) -> list:
     from tools.process_registry import process_registry
     key = str(session.get("session_key") or "")
     owned = []
-    for entry in process_registry.list_sessions():
+    for entry in process_registry.list_sessions(preview_chars=4000):  # one redaction feeds both views
         proc = process_registry.get(entry["session_id"])
         if proc is not None and str(getattr(proc, "session_key", "") or "") == key:
-            entry["output_tail"] = (proc.output_buffer or "")[-4000:]  # the 200-char list preview is too thin for the viewer
+            entry["output_tail"], entry["output_preview"] = entry["output_preview"], entry["output_preview"][-200:]
             owned.append(entry)
     return owned
 
