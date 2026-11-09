@@ -8,6 +8,16 @@ description: "How hermes_cli is shaped: slash dispatch, config loaders, the skin
 
 Companion to `hermes_cli/AGENTS.md` (the rules) — this page holds the longer explanations.
 
+## Strict policy reads
+
+Policy consumers such as the disk-cleanup plugin call
+`load_user_config_effective(fail_closed=True)` before acting on settings. A strict read raises on
+broken YAML and on a non-mapping root (`[]`, `false`, a scalar) instead of serving `{}` or the
+last-known-good copy; missing and empty files stay valid empty settings. Strict and tolerant reads
+share one cache safely because only verified mapping roots are ever cached: recovered results are
+never stored, and `read_raw_config()` returns an uncached `FailedConfigRead` for any non-mapping
+root. Tolerant readers keep their last-known-good recovery.
+
 ## Update pipeline
 
 User-facing behaviour (receipts, `--plan`, snapshot modes) is in
