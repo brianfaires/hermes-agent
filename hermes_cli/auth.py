@@ -1962,7 +1962,7 @@ OAUTH_PROVIDER_FLOWS: dict[str, OAuthProviderFlow] = {
         terminal_refresh_codes=_OAUTH_GRANT_DEAD_CODES | _NOUS_AUTH_MISSING_CODES, logout_from_config=True),
     "openai-codex": OAuthProviderFlow(
         "openai-codex", "resolve_codex_runtime_credentials", "get_codex_auth_status",
-        terminal_refresh_codes=_OAUTH_GRANT_DEAD_CODES | {"codex_refresh_failed", "codex_auth_missing_refresh_token"},
+        terminal_refresh_codes=_OAUTH_GRANT_DEAD_CODES | {"codex_refresh_failed", "codex_auth_missing_refresh_token", "token_expired"},
         logout_from_config=True),
     "xai-oauth": OAuthProviderFlow(
         "xai-oauth", "resolve_xai_oauth_runtime_credentials", "get_xai_oauth_auth_status",
