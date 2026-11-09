@@ -473,7 +473,10 @@ def snapshot_automation(authority, adapter, event, identity):
         return snapshot_local_automation(authority, adapter, event, identity, entry)
     from gateway.session_envelope import restore_native
     owner = authority.logical_owner(entry.session_id)
-    envelope = committed_route_envelope(authority, entry)
+    # A reset follow-up borrows its command's proof (gateway/session_reset_followup.py), else the
+    # route's last committed human turn.
+    from gateway.session_reset_followup import lent_envelope
+    envelope = lent_envelope(event) or committed_route_envelope(authority, entry)
     if envelope is None:
         raise RuntimeStoreError('not_found')
     # Persisted origins deliberately omit relay trust. Borrow only an exact

@@ -1564,6 +1564,20 @@ message is dropped. The expected ID requires a session key, rejects `origin`, an
 never falls back to the CLI or TUI input queue. A `True` result means scheduling was
 accepted, not that a turn ran. Calls without the expected ID retain their native routing.
 
+On an authority-backed gateway a plugin turn borrows the connector proof of a human
+message already committed in the session, so a fresh session after `/new` or
+`/reset` has none. The host keeps the reset command's own proof in a private table
+(never on the event or in any hook argument) while confirmation holds the command,
+and lends it to exactly one injection scheduled from that reset's
+`on_session_reset` callback (a task the callback spawns inherits the same
+single-use lease) for the replacement session's ID only. The host rechecks live
+connector ownership and authorization and commits the turn as the resetting
+sender, including in a shared thread whose stored origin names another
+participant. Unlike other plugin injections, this one counts a role grant, but
+only after a fresh connector membership check. Ordinary plugin injections into
+an empty session, a second injection from the same reset, and a follow-up after
+the session rotated again remain refused.
+
 ### `pre_llm_call` context injection
 
 When a `pre_llm_call` callback returns a dict with a `"context"` key (or a plain string), Hermes injects that text into the **current turn's user message**. This is the mechanism for memory plugins, RAG integrations, guardrails, and any plugin that needs to provide the model with additional context.
