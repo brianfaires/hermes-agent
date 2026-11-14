@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import re
 from functools import partial
 from pathlib import Path
@@ -318,6 +319,11 @@ class _Collector:
         if not events:
             return None
         task = self.kb.get_task(conn, sub["task_id"])
+        # The claim already moved the cursor past every claimed event, so an event a plugin
+        # suppresses here is settled: it is never sent or woken, and never re-claimed.
+        events = _unsuppressed_events(events, sub=sub, task=task, board=slug)
+        if not events:
+            return None
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
@@ -351,6 +357,38 @@ class _Collector:
                                    sub.get("task_id"), slug, sub_exc)
         finally:
             conn.close()
+
+
+def _unsuppressed_events(events: list, *, sub: dict, task: Any, board: str) -> list:
+    """Drop events a ``pre_kanban_notify`` plugin suppresses; fail open on any hook error.
+
+    Kwargs passed to the hook: ``event``, ``subscription`` and ``task`` as plain dicts (``task`` may be
+    None), and ``board`` (slug). A result ``{"action": "suppress"}`` drops that event; anything else
+    delivers it. With no registered callback this is a no-op, so delivery matches upstream exactly.
+    """
+    from hermes_cli import plugins as _plugins
+    if not _plugins.has_hook("pre_kanban_notify"):
+        return events
+    task_dict = dataclasses.asdict(task) if dataclasses.is_dataclass(task) else None
+    sub_dict = dict(sub)
+    kept = []
+    for ev in events:
+        try:
+            results = _plugins.invoke_hook(
+                "pre_kanban_notify", event=dataclasses.asdict(ev), subscription=sub_dict,
+                task=task_dict, board=board,
+            )
+        except Exception as exc:
+            logger.warning("kanban notifier: pre_kanban_notify failed for %s; delivering: %s", sub.get("task_id"), exc)
+            results = []
+        if any(isinstance(r, dict) and r.get("action") == "suppress" for r in results or ()):
+            reason = next((r.get("reason") for r in results if isinstance(r, dict) and r.get("reason")), "")
+            logger.info("kanban notifier: plugin suppressed %s event %s for %s on %s/%s%s", ev.kind, ev.id,
+                        sub.get("task_id"), sub.get("platform"), sub.get("chat_id"),
+                        f" ({reason})" if reason else "")
+            continue
+        kept.append(ev)
+    return kept
 
 
 def _notifier_collect(runner: Any, kb: Any, *, notifier_profile: Optional[str], gc_due: bool, gc_retention_days: int) -> list[dict]:

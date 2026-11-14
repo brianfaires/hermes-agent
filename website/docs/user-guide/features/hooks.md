@@ -444,6 +444,28 @@ other environment data must not silently mutate a session's cached prompt.
 Such a hook needs a concrete consumer and the same frozen/resume-safe semantics
 before it can be added.
 
+### `pre_kanban_notify`
+
+Fires in the gateway's kanban notifier, once per claimed subscription event, before the text ping and the wake for that event. A plugin can suppress the delivery, for example to wake an orchestrator only for the events it must act on.
+
+```python
+def my_callback(event: dict, subscription: dict, task: dict | None, board: str, **kwargs):
+    if event["kind"] == "completed" and not tree_finished(board, subscription):
+        return {"action": "suppress", "reason": "child completion"}
+    return None
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `event` | `dict` | The task event: `id`, `task_id`, `kind`, `payload`, `created_at`, `run_id`. |
+| `subscription` | `dict` | The `kanban_notify_subs` row: `task_id`, `platform`, `chat_id`, `thread_id`, `delivery_mode`, ... |
+| `task` | `dict \| None` | The subscribed card's current row, or `None` if it is gone. |
+| `board` | `str` | Board slug. Open it read-only when the decision needs other cards. |
+
+**Fires:** on the notifier's worker thread, after the subscription's cursor has been claimed past the event. A suppressed event is therefore settled: it is never sent, never wakes the subscriber and is not re-claimed on the next tick. It stays on the board, readable as usual.
+
+**Return value:** `{"action": "suppress"}` (optional `reason`, logged) drops that event's delivery; any other value delivers it. A callback that raises or times out (`plugins.hook_callback_timeout`) delivers. With no callback registered, delivery is unchanged.
+
 ### `post_cron_run`
 
 Fires once per completed cron run, after the output is saved and the result delivered (or the delivery decision made), so a plugin can record or mirror the outcome.
@@ -515,6 +537,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `kanban_task_claimed` | Observer | After claim commit, in dispatcher process before worker spawn; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee identifiers. |
 | `kanban_task_completed` | Observer | After completion and cleanup, usually in worker process; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `summary` | Summary may contain project/user content. |
 | `kanban_task_blocked` | Observer | After a blocked transition commits, dependency waits included. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `reason` | Reason may contain project/user content. |
+| `pre_kanban_notify` | Directive/control | In the gateway kanban notifier, once per claimed subscription event, before its ping or wake. Return `{"action": "suppress", "reason": ...}` to drop that delivery; anything else delivers. Timeout-bounded, fail-open. | `event`, `subscription`, `task`, `board` | Card titles, bodies and results; subscriber chat ids. |
 | `on_kanban_worker_spawned` | Observer | After `spawn_fn` returns and the worker PID is persisted; runs inside the dispatch lock, keep callbacks fast. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `workspace_path` | `workspace_path` is a filesystem path and may reveal project layout or usernames. |
 | `on_kanban_worker_exited` | Observer | Tick-derived: after `detect_crashed_workers` reclaims a dead-PID task and the reclaim commits. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `exit_kind`, `exit_code`, `outcome`, `retry_status` | Identifiers and exit metadata only. |
 | `on_kanban_worker_stale_claim` | Observer | After a TTL-expired claim is reclaimed; live-PID extensions don't fire. Return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `worker_pid`, `heartbeat_stale`, `retry_status` | Identifiers and claim metadata only. |
