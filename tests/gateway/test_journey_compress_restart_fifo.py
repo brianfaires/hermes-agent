@@ -194,11 +194,19 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         order = [r['text'] for r in peer.requests if r['model'] == 'original' and r['text'] in FOLLOWERS]
         assert order == list(FOLLOWERS), order
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
+        # Which turns the summary replaced depends on where the token estimate crosses the
+        # threshold (it varies with the system prompt), so read it from the committed lineage.
+        def marker(content):
+            return str(content).split(' ', 1)[0]
+        compacted_at = int(compacting['input_id'].rsplit('-', 1)[1])
+        history = {f'{prefix}PRESSURE_{i}' for i in range(compacted_at) for prefix in ('', 'ACK_')}
+        replaced = history - {marker(content) for _, _, content in before['compacted']}
+        assert replaced and 'PRESSURE_0' not in replaced, (replaced, before['compacted'])
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
             # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
-            turns = [str(m.get('content', '')) for m in json.loads(wire)]
-            assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            turns = {marker(m.get('content', '')) for m in json.loads(wire)}
+            assert 'SUMMARY_RETAINED_FACTS' in wire and not turns & replaced, name
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)
