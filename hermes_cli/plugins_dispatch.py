@@ -51,6 +51,8 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: set[str] = {
     "post_compaction",
     # Fires on the cron run's own thread after delivery: a hung plugin must not stall the ticker.
     "post_cron_run",
+    # Fail-open filter in the kanban notifier tick: a hung plugin must not stall every subscription.
+    "pre_kanban_notify",
 }
 # Hooks whose calls are told apart by another payload field: one session's commands are one
 # sequence, so a still-running callback skips that session's next command, not another session's.
