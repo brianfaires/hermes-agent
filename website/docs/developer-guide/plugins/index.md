@@ -1549,6 +1549,7 @@ Each hook is documented in full on the **[Event Hooks reference](../../user-guid
 | `kanban_task_claimed` | A kanban task is claimed (dispatcher process, before the worker spawns) | `task_id: str, board: str \| None, assignee: str \| None, run_id: int \| None, profile_name: str` | ignored |
 | `kanban_task_completed` | A kanban task completes (worker process) | `task_id, board, assignee, run_id, profile_name, summary: str \| None` | ignored |
 | `kanban_task_blocked` | A kanban task is blocked (worker process) | `task_id, board, assignee, run_id, profile_name, reason: str \| None` | ignored |
+| [`pre_kanban_notify`](../../user-guide/features/hooks.md#pre_kanban_notify) | The gateway kanban notifier is about to ping/wake a subscriber for one claimed event | `event: dict, subscription: dict, task: dict \| None, board: str` | `{"action": "suppress"}` drops that delivery |
 
 Most hooks are fire-and-forget observers — their return values are ignored. The exceptions are `pre_llm_call`, which can inject context into the conversation or block the turn before it reaches the model, and `pre_tool_call`, which can return a block/approve directive.
 

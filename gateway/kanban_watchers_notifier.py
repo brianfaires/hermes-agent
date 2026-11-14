@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import re
 from functools import partial
 from pathlib import Path
@@ -366,13 +367,8 @@ def _unsuppressed_events(events: list, *, sub: dict, task: Any, board: str) -> l
     delivers it. With no registered callback this is a no-op, so delivery matches upstream exactly.
     """
     from hermes_cli import plugins as _plugins
-    try:
-        if not _plugins.has_hook("pre_kanban_notify"):
-            return events
-    except Exception as exc:
-        logger.debug("kanban notifier: pre_kanban_notify probe failed: %s", exc)
+    if not _plugins.has_hook("pre_kanban_notify"):
         return events
-    import dataclasses
     task_dict = dataclasses.asdict(task) if dataclasses.is_dataclass(task) else None
     sub_dict = dict(sub)
     kept = []
