@@ -425,14 +425,19 @@ def _slack_dm_chat_id(pconfig, chat_id):
 
 
 def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
-    """Best-effort mirror of the sent message into the target's gateway session."""
+    """Best-effort mirror of the sent message into the target's gateway session.
+
+    The sending session's user id narrows the lookup only on its own platform;
+    on another platform that id names nobody there and would miss the session."""
     try:
         from gateway.mirror import mirror_to_session
         from gateway.session_context import get_session_env
+        source = get_session_env("HERMES_SESSION_PLATFORM", "cli")
+        same_platform = source.strip().lower() == str(platform_name).strip().lower()
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "") if same_platform else ""
         return bool(mirror_to_session(
             platform_name, chat_id, mirror_text, thread_id=thread_id,
-            source_label=get_session_env("HERMES_SESSION_PLATFORM", "cli"),
-            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None))
+            source_label=source, user_id=user_id or None))
     except Exception:
         return False
 
