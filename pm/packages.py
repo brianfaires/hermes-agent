@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -586,10 +587,35 @@ class Nodejs(_BionicDebArm, BinaryPackage, DebPackage):
 
     deb_package = "nodejs"
 
+    def _termux_package(self, version: str):
+        from pm import termux_libs
+
+        row = termux_libs.index().get(self.deb_package)
+        if row is None or row.name != self.deb_package or not re.fullmatch(
+            re.escape(version) + r"(?:-[0-9]+)?", row.version
+        ):
+            raise InstallError(self.name, f"Termux has no exact Node {version} package")
+        # Only the revision comes from the index; never accept arbitrary paths.
+        expected = (
+            f"{termux_libs.POOL}pool/main/n/nodejs/"
+            f"nodejs_{row.version}_aarch64.deb"
+        )
+        if row.url != expected or not re.fullmatch(r"[0-9a-f]{64}", row.sha256):
+            raise InstallError(self.name, f"invalid Termux Node {version} package provenance")
+        return row
+
+    def known_sha256(self, version: str, url: str) -> Optional[str]:
+        from pm import termux_libs
+
+        if url.startswith(termux_libs.POOL):
+            row = self._termux_package(version)
+            if url == row.url:
+                return row.sha256
+        return None
+
     def fetch_url(self, version: str, target: str) -> str:
         if target == "linux-arm64-bionic":
-            # termux's deb carries a -1 revision after the upstream version
-            return f"https://packages.termux.dev/apt/termux-main/pool/main/n/nodejs/nodejs_{version}-1_aarch64.deb"
+            return self._termux_package(version).url
         plat = _NODE_PLAT[target]
         ext = "zip" if target.startswith("win32") else "tar.xz"
         base = (
