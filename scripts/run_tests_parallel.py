@@ -89,7 +89,7 @@ def _rmtree_force(path: str) -> None:
     shutil.rmtree(path, onerror=_chmod_retry)
 
 def _runner_scratch_root() -> str:
-    """Per-run temp roots live on DISK, never the system temp dir: a full-suite run writes
+    """Per-run temp roots default to DISK: a full-suite run writes
     gigabytes of tmp_path fixtures and /tmp is RAM-backed tmpfs on many Linux hosts. /var/tmp is
     the FHS disk-backed temp root and is used because the alternatives fail tests that assume
     the root's shape: under the Hermes home conftest relocates the basetemp; under a dot-dir
@@ -100,9 +100,15 @@ def _runner_scratch_root() -> str:
     whoever created it first: a root-owned root (a container or system-service run) makes every
     later makedirs/mkdtemp here fail with EPERM for every other user on the host, with no way
     back that does not need root. Keying by uid means no run is blocked by another's leftovers.
+
+    HERMES_TEST_SCRATCH_ROOT optionally supplies an absolute base directory; the per-user
+    child below it owns runner scratch and sweeping, never the supplied base itself.
     """
     name = "hermes-pytest" + (f"-{os.getuid()}" if hasattr(os, "getuid") else "")
-    if os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
+    base = os.environ.get("HERMES_TEST_SCRATCH_ROOT")
+    if base:
+        root = os.path.join(base, name)
+    elif os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
         root = os.path.join(tempfile.gettempdir(), name)
     else:
         root = f"/var/tmp/{name}"  # no-tmp: ok — /var/tmp is disk-backed by FHS, never tmpfs

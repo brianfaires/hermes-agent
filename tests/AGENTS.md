@@ -28,6 +28,14 @@ scripts/run_tests.sh tests/agent/test_foo.py -k test_x  # runner is file-granula
 scripts/run_tests.sh -v --tb=long                       # pytest flags pass through
 ```
 
+For restricted filesystems, set `HERMES_TEST_SCRATCH_ROOT` to an absolute, writable
+base directory. The runner creates its existing `hermes-pytest[-uid]` child there
+and sweeps only that child, never the supplied base. Unset or empty preserves the
+existing default (`/var/tmp` when available on POSIX, otherwise `tempfile.gettempdir()`).
+Keep the base outside the test HOME's `.hermes`; use a short path without hidden
+ancestors for AF_UNIX and hidden-directory search tests. A long or hidden path
+qualifies only focused tests that do not depend on those properties.
+
 - **Flake policy:** a failing FILE is retried once in a fresh subprocess (`--file-retries`;
   `HERMES_TEST_FILE_RETRIES=0` disables); a worker killed by signal or the file timeout is never
   retried (relaunching a runaway doubles the damage). Pass-on-retry is green but printed under `⚠ FLAKY`
