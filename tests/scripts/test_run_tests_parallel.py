@@ -774,6 +774,7 @@ def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runner.os.path, "isdir",
                         lambda path: False if str(path) == "/var/tmp" else real_isdir(path))
 
+    monkeypatch.delenv("HERMES_TEST_SCRATCH_ROOT", raising=False)
     monkeypatch.setattr(runner.os, "getuid", lambda: 1000)
     mine = Path(runner._runner_scratch_root())
     monkeypatch.setattr(runner.os, "getuid", lambda: 0)
