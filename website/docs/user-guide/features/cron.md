@@ -479,8 +479,10 @@ The worker is the gateway's own interpreter running `python -m cron.scheduler`, 
 
 Hermes records each claimed cron attempt in the profile-local
 `~/.hermes/cron/executions.db` before executor or provider dispatch. Attempts
-move through `claimed`, `running`, and one immutable terminal state:
-`completed`, `failed`, or `unknown`. After restart — and before every manual
+move through `claimed`, `running`, and one terminal state:
+`completed`, `failed`, `unknown`, or `cancelled`; skipped occurrences are recorded
+as `missed`. Final verdicts are immutable; a verified receipt can settle an
+`unknown` attempt after its owner exits. After restart — and before every manual
 `hermes cron run` / `/cron run`, so a one-shot invocation with no scheduler
 running heals the ledger too — Hermes marks an abandoned attempt `unknown` only
 when the original PID and process-start fingerprint prove that its owner is
@@ -492,15 +494,28 @@ a worker deadlocked on a lock stops stamping and is released once the bound
 passes. Unknown attempts are audit records and are never automatically rerun.
 
 Inspect recent attempts with `hermes cron runs [job-id] --limit 20` (alias:
-`history`). Terminal history is bounded; active attempts are never pruned. The
-ledger is included in quick backups.
+`history`). Retention keeps the newest 1,000 terminal attempts **plus the latest
+valid scheduled attempt for each job, source, and terminal status**. Scheduled
+pins rank by occurrence time, then the existing finish/claim-time and execution-ID
+order for ties. Manual attempts and rows with null, invalid, or timezone-naive
+occurrences cannot replace those pins. Sources supplied by scheduler providers
+remain separate, as do all five terminal statuses: a newer failure cannot erase
+the retained successful occurrence.
+
+The bound is per identity, not an absolute database-size cap: each distinct
+job/source pair can retain up to five extra rows, often overlapping the newest
+1,000. Historical identity growth can therefore grow the ledger. Active attempts
+are never pruned. Queued delivery can still settle on a retained terminal row
+without changing its execution verdict. The ledger is included in quick backups.
 
 Scheduled attempts also record their exact scheduled instant, separately from
 the time they were claimed. If an old `jobs.json` snapshot re-arms an occurrence
 that the retained ledger records as completed, Hermes skips that replay and
 re-anchors recurring jobs. This works even when the snapshot predates the
 dispatch stamp or the original run started late. Explicit manual runs do not
-consume a scheduled occurrence's identity.
+consume a scheduled occurrence's identity. Keeping scheduled pins extends this
+replay suppression beyond the global 1,000-attempt window for those retained
+completed slots; it does not suppress a different, later scheduled slot.
 
 This is not an exactly-once side-effect guarantee: legacy rows without an
 identity, pruned history, unavailable ledgers, and interrupted attempts cannot

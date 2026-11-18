@@ -234,14 +234,36 @@ def touch_execution_progress(execution_id: str) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """DELETE FROM executions WHERE id IN (
-             SELECT id FROM executions
+    from cron.occurrences import scheduled_instant
+
+    rows = conn.execute(
+        """SELECT id, job_id, source, status, scheduled_instant FROM executions
              WHERE status IN ('completed','failed','unknown','cancelled','missed')
              ORDER BY julianday(finished_at) DESC, finished_at DESC,
-                      julianday(claimed_at) DESC, claimed_at DESC, id DESC LIMIT -1 OFFSET ?
-           )""",
-        (max(0, int(MAX_TERMINAL_EXECUTIONS)),),
+                      julianday(claimed_at) DESC, claimed_at DESC, id DESC"""
+    ).fetchall()
+    limit = max(0, int(MAX_TERMINAL_EXECUTIONS))
+    pins: dict[tuple[str, str, str], tuple[datetime, str]] = {}
+    for row in rows:
+        if row["source"] == "manual":
+            continue
+        try:
+            canonical = scheduled_instant(row["scheduled_instant"])
+        except OverflowError:
+            # An aware ISO value can normalize outside datetime's UTC year range.
+            continue
+        if canonical is None:
+            continue
+        instant = datetime.fromisoformat(canonical)
+        partition = (row["job_id"], row["source"], row["status"])
+        # Rows already follow the original terminal/claim/ID order: keep the first tie.
+        if partition not in pins or instant > pins[partition][0]:
+            pins[partition] = (instant, row["id"])
+    pinned_ids = {execution_id for _, execution_id in pins.values()}
+    # One bound parameter per delete, independent of historical identity growth.
+    conn.executemany(
+        "DELETE FROM executions WHERE id=?",
+        ((row["id"],) for row in rows[limit:] if row["id"] not in pinned_ids),
     )
 
 

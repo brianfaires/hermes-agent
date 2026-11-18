@@ -1,5 +1,6 @@
 """Scheduled evidence survives unrelated traffic in the profile-local native ledger."""
 
+from copy import deepcopy
 from datetime import timedelta
 
 import pytest
@@ -30,14 +31,45 @@ def test_weekly_native_claim_survives_more_than_1000_unrelated_completions(ledge
     snapshot = jobs.load_jobs()
     slot = (now() - timedelta(minutes=2)).isoformat()
     snapshot[0]["next_run_at"] = slot
-    jobs.save_jobs(snapshot)
-    claim = InProcessCronScheduler().claim_fire(weekly["id"])
+    jobs.save_jobs(deepcopy(snapshot))
+    provider = InProcessCronScheduler()
+    claim = provider.claim_fire(weekly["id"])
     assert claim is not None
+    assert provider.claim_fire(weekly["id"]) is None  # refused overlap cannot replace success
     running = ledger.mark_execution_running(claim["execution_id"])
     assert running["scheduled_instant"] == slot
     completed = ledger.finish_execution(running["id"], success=True, delivery_outcome="queued")
 
-    for _ in range(1001):
-        _complete(ledger, "minute-watcher")
+    unrelated = [_complete(ledger, "minute-watcher") for _ in range(1001)]
 
     assert ledger.get_execution(completed["id"]) == completed
+    retained = []
+    before = None
+    while page := ledger.list_executions(limit=500, before_claimed_at=before):
+        retained.extend(row["id"] for row in page)
+        before = page[-1]["claimed_at"]
+    assert set(retained) == {completed["id"], *(row["id"] for row in unrelated[-1000:])}
+
+    # Restore the pre-claim jobs snapshot separately for each real dedup gate.
+    jobs.save_jobs(deepcopy(snapshot))
+    assert jobs.get_due_jobs() == []
+    assert jobs.get_job(weekly["id"])["next_run_at"] != slot
+    jobs.save_jobs(deepcopy(snapshot))
+    assert provider.claim_fire(weekly["id"]) is None
+    assert jobs.get_job(weekly["id"])["next_run_at"] != slot
+
+    jobs.save_jobs(deepcopy(snapshot))
+    manual = provider.claim_fire(weekly["id"], force=True)
+    assert manual is not None
+    assert ledger.get_execution(manual["execution_id"])["scheduled_instant"] is None
+    ledger.finish_execution(manual["execution_id"], success=True)
+    assert ledger.get_execution(completed["id"]) == completed
+
+    later_slot = (now() - timedelta(minutes=1)).isoformat()
+    snapshot[0]["next_run_at"] = later_slot
+    jobs.save_jobs(deepcopy(snapshot))
+    due = jobs.get_due_jobs()
+    assert len(due) == 1 and due[0]["_scheduled_instant"] == later_slot
+    later = provider.claim_fire(weekly["id"])
+    assert later is not None
+    assert ledger.get_execution(later["execution_id"])["scheduled_instant"] == later_slot
