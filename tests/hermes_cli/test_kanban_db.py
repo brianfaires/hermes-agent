@@ -551,6 +551,41 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+@pytest.mark.parametrize("handoff", ["changes_requested", "review_requested"])
+def test_respawn_guard_ignores_failure_text_superseded_by_review_handoff(
+    kanban_home, monkeypatch, handoff,
+):
+    """A failing run's stamped error must not outlive a later review verdict.
+
+    Live case: a spawn failure stamped auth-flavoured text, a reviewer then
+    requested changes, and the card sat in ``ready`` for days as
+    ``blocker_auth`` although nothing about the next spawn involved auth.
+    The same text with the failing run still latest keeps the guard."""
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
+    error = "provider authentication failed"
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="superseded failure", assignee="a")
+        for ended_at, outcome in ((5_000_000, "spawn_failed"), (5_000_100, handoff)):
+            kb.claim_task(conn, tid)
+            run_id = kb.get_task(conn, tid).current_run_id
+            conn.execute(
+                "UPDATE task_runs SET outcome=?, status=?, ended_at=? WHERE id=?",
+                (outcome, outcome, ended_at, run_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+                "last_failure_error=? WHERE id=?",
+                (error, tid),
+            )
+            conn.commit()
+            if outcome == "spawn_failed":
+                assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
+
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
