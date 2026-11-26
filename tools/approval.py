@@ -1335,8 +1335,10 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     approval_callback, is_cli, is_gateway, is_ask = _presence()
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
+    # An explicit ``command_allowlist: [execute_code]`` entry is the operator's standing
+    # trust for this profile; unattended terminal commands already honor their entries.
     for ctx in _unattended_contexts():
-        if ctx.mode() == "deny":
+        if ctx.mode() == "deny" and not _is_permanently_approved(pattern_key):
             return _denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "
                 "subprocess calls that bypass shell-string approval checks). " + ctx.exec_tail,
