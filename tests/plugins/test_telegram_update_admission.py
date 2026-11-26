@@ -115,6 +115,51 @@ async def connected(monkeypatch, *, extra=None, bot_id=111, is_reconnect=False):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("concurrent", [False, True])
+async def test_ordinary_reaction_conversation_real_dispatch_once(monkeypatch, concurrent):
+    """Real PTB matching/admission delivers one external observation, not consent."""
+    async with connected(monkeypatch, extra={
+        "allowed_chats": ["-100"], "group_allow_from": ["88"], "require_mention": True,
+    }) as (adapter, app, delivered):
+        def fresh_reaction():
+            return Update.de_json({
+                "update_id": 10,
+                "message_reaction": {
+                    "chat": {"id": -100, "type": "group"},
+                    "message_id": 472, "date": int(time.time()),
+                    "user": {"id": 88, "is_bot": False, "first_name": "Human"},
+                    "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}],
+                },
+            }, app.bot)
+
+        if concurrent:
+            await asyncio.gather(*(app.process_update(fresh_reaction()) for _ in range(2)))
+        else:
+            for _ in range(2):
+                await app.process_update(fresh_reaction())
+        assert adapter._updates_dispatched_total == 2
+        assert len(delivered) == 1
+        event = delivered[0]
+        observation = json.loads(event.text.splitlines()[-1])
+        assert observation["actor_id"] == 88
+        assert observation["chat_id"] == -100
+        assert observation["target_message_id"] == 472
+        assert observation["update_id"] == 10
+        assert observation["old_reaction"] == []
+        assert observation["new_reaction"] == [["emoji", "👍"]]
+        assert event.source.user_id == "88"
+        assert event.source.chat_id == "-100"
+        assert event.source.thread_id is None
+        assert event.message_id == "reaction:10"
+        assert event.reply_to_message_id == event.reply_anchor_override == "472"
+        assert event.internal is False
+        assert event.allow_gateway_control is False
+        assert event.prompt_response is None
+        assert "not consent, approval, or an instruction" in event.text
+        assert app.bot.request.answers == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind,mode", [
     *[(kind, "normal") for kind in ("text", "command", "location", "media", "photo", "album", "callback", "inline", "reaction")],
     ("text", "edit"), ("text", "observe"), ("media", "observe"), ("text", "hold"),
