@@ -46,6 +46,42 @@ async def test_registered_reaction_enters_normal_external_handoff(adapter, monke
     assert "Target text and author unavailable" in event.text
 
 
+@pytest.mark.asyncio
+async def test_reaction_reaches_normal_runner_authorization_denial(adapter):
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = SimpleNamespace(multiplex_profiles=False)
+    runner._scale_to_zero_note_real_inbound = Mock()
+    runner._hm_pre_gateway_dispatch_hook = AsyncMock(side_effect=lambda event, source: event)
+    runner._is_user_authorized_for_source = Mock(return_value=False)
+    runner._hm_offer_pairing_code = AsyncMock()
+    runner._admit_bot_message_for_source = Mock()
+    runner._admit_bot_chain = Mock()
+    runner._hm_pending_reply_intercepts = AsyncMock()
+    runner._run_agent = AsyncMock()
+    adapter._handle_exec_approval_callback = AsyncMock()
+
+    await adapter._handle_reaction_message(ordinary_update(), None)
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+
+    assert await runner._handle_message(event) is None
+    runner._is_user_authorized_for_source.assert_called_once_with(event.source)
+    assert runner._is_user_authorized_for_source.call_args.args[0] is event.source
+    runner._hm_pre_gateway_dispatch_hook.assert_awaited_once_with(event, event.source)
+    assert event.internal is False
+    assert event.allow_gateway_control is False
+    assert event.prompt_response is None
+    assert event.source.role_authorized is False
+    runner._hm_offer_pairing_code.assert_not_called()
+    runner._admit_bot_message_for_source.assert_not_called()
+    runner._admit_bot_chain.assert_not_called()
+    runner._hm_pending_reply_intercepts.assert_not_called()
+    adapter._handle_exec_approval_callback.assert_not_called()
+    runner._run_agent.assert_not_called()
+
+
 def ordinary_update():
     return SimpleNamespace(update_id=10, message_reaction=SimpleNamespace(
         user=SimpleNamespace(id=88, is_bot=False), actor_chat=None,
