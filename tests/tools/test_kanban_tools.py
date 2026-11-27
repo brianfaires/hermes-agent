@@ -457,6 +457,26 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         )
 
 
+def test_schedule_refresh_uses_shared_kernel(monkeypatch, worker_env):
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    from tools import kanban_tools
+    from tools.registry import registry
+
+    entry = registry.get_entry("kanban_schedule")
+    assert json.loads(entry.handler({"reason": "Original"}))["ok"]
+    # A parked worker no longer owns a live attempt, even if it repeats its reason.
+    assert "error" in json.loads(entry.handler({"reason": "Original"}))
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+    with kbc.connect_closing() as conn:
+        before = kb.list_runs(conn, worker_env)
+    assert json.loads(entry.handler({"task_id": worker_env, "reason": "Replacement"}))["ok"]
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, worker_env).status == "scheduled"
+        assert kb.list_runs(conn, worker_env) == before
+        assert kb.list_events(conn, worker_env)[-1].payload == {"reason": "Replacement"}
+
+
 def test_schedule_rejects_invalid_reason_and_unowned_contexts(monkeypatch, worker_env):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
