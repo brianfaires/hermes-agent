@@ -1223,6 +1223,9 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         # messages. Keep its unmentioned continuation chunks eligible for the
         # existing text batcher during this short, sender-scoped window.
         self._bot_tag_debounce_until: dict[str, float] = {}
+        # Auto-thread a tagged bot message opened, keyed like the debounce window: its
+        # unmentioned continuation chunks join that thread instead of opening their own.
+        self._bot_tag_threads: dict[str, tuple[float, asyncio.Future]] = {}
         self._voice_text_channels: dict[int, int] = {}  # guild_id -> text_channel_id
         self._voice_sources: dict[int, dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: dict[int, asyncio.Task] = {}  # guild_id -> timeout task
@@ -5441,6 +5444,44 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             pass
         return thread
 
+    async def _auto_thread_for_message(self, message: Any) -> tuple[Optional[Any], bool]:
+        """Return ``(thread, reused)`` for an auto-threaded message.
+
+        A bot's long handoff arrives as several Discord messages and only the first carries the
+        tag. An unmentioned continuation chunk from the same bot in the same channel, inside the
+        debounce window, joins the thread its tagged chunk opened (``reused``), so the request
+        stays one thread and one session. Otherwise this creates the thread as usual."""
+        is_bot = getattr(getattr(message, "author", None), "bot", False)
+        key = self._bot_tag_debounce_key(message) if is_bot else None
+        now = time.monotonic()
+        tagged = bool(key) and self._self_is_explicitly_mentioned(message)
+        if key and not tagged:
+            slot = self._bot_tag_threads.get(key)
+            if slot is not None and slot[0] > now:
+                try:
+                    thread = await asyncio.wait_for(
+                        asyncio.shield(slot[1]), timeout=self._bot_tag_window_seconds() + 10.0)
+                except Exception:
+                    thread = None
+                if thread is not None:
+                    self._bot_tag_threads[key] = (time.monotonic() + self._bot_tag_window_seconds(), slot[1])
+                    return thread, True
+            elif slot is not None:
+                self._bot_tag_threads.pop(key, None)
+        future: Optional[asyncio.Future] = None
+        if tagged:
+            future = asyncio.get_running_loop().create_future()
+            self._bot_tag_threads[key] = (now + self._bot_tag_window_seconds(), future)
+        try:
+            thread = await self._auto_create_thread(message)
+        except BaseException:
+            if future is not None and not future.done():
+                future.set_result(None)
+            raise
+        if future is not None and not future.done():
+            future.set_result(thread)
+        return thread, False
+
     async def _auto_create_thread(self, message: DiscordMessage) -> Optional[Any]:
         """Create an auto-thread from a user message; returns the thread or ``None``.
         Primary path and seed-message fallback each retry once after a short backoff (transient errors).
@@ -6155,6 +6196,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                     return False
         # Auto-thread: isolate each @mention in a text channel into its own thread (Slack-style).
         auto_threaded_channel = None
+        auto_thread_reused = False
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
             # Voice-linked and reply exclusions live in the auto-thread gate below, not in skip_thread.
@@ -6164,8 +6206,14 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             auto_thread = self._extra_or_env_flag("auto_thread", "DISCORD_AUTO_THREAD", "true", truthy=True)
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
-                thread = await self._auto_create_thread(message)
-                if thread:
+                thread, reused = await self._auto_thread_for_message(message)
+                if thread and reused:
+                    parent_channel_id = str(message.channel.id)
+                    is_thread = True
+                    thread_id = str(thread.id)
+                    auto_threaded_channel = thread
+                    auto_thread_reused = True
+                elif thread:
                     parent_channel_id = str(message.channel.id)
                     is_thread = True
                     thread_id = str(thread.id)
@@ -6234,11 +6282,11 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
             role_authorized=role_authorized,
-            auto_thread_created=auto_threaded_channel is not None,
+            auto_thread_created=auto_threaded_channel is not None and not auto_thread_reused,
             auto_thread_initial_name=(
                 getattr(auto_threaded_channel, "_hermes_auto_thread_initial_name", None)
                 or self._derive_auto_thread_name(message.content or "")
-            ) if auto_threaded_channel is not None else None,
+            ) if auto_threaded_channel is not None and not auto_thread_reused else None,
         )
         media_urls, media_types, media_text_inlined, pending_text_injection = await self._collect_attachment_media(
             all_attachments)
