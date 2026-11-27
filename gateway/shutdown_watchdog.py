@@ -43,6 +43,12 @@ DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
+# A stall that recovers before the final strike (e.g. a ~40s block that drops a Discord websocket)
+# used to leave no stack anywhere: only the fatal strike dumped. The first missed probe of a stall
+# now dumps all threads here WHILE the loop is still blocked, rate-limited and size-capped.
+_LOOP_STALL_DUMP_RELATIVE = ("logs", "gateway-loop-stall.log")
+DEFAULT_LOOP_STALL_DUMP_MIN_INTERVAL_S = 600.0
+_LOOP_STALL_DUMP_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _coerce_float(value: Any, default: float, floor: float = 0.0) -> float:
@@ -94,6 +100,7 @@ def start_loop_liveness_watchdog(
     (``GatewayRunner._start_loop_liveness_guards``) enforces the ``gateway.loop_watchdog: false``
     opt-out."""
     stop_event = threading.Event()
+    last_stall_dump = [float("-inf")]
 
     def _watchdog() -> None:
         strikes = 0
@@ -120,6 +127,8 @@ def start_loop_liveness_watchdog(
                 return
             strikes += 1
             if strikes < max_strikes:
+                if strikes == 1:
+                    _dump_loop_stall(last_stall_dump, probe_timeout=probe_timeout, max_strikes=max_strikes)
                 continue
             if stop_event.is_set():
                 return
@@ -205,6 +214,42 @@ def get_loop_tick_socket_path(home: Optional[Path] = None, pid: Optional[int] = 
 
 def get_shutdown_watchdog_dump_path(home: Optional[Path] = None) -> Path:
     return _home(home).joinpath(*_WATCHDOG_DUMP_RELATIVE)
+
+
+def get_loop_stall_dump_path(home: Optional[Path] = None) -> Path:
+    return _home(home).joinpath(*_LOOP_STALL_DUMP_RELATIVE)
+
+
+def _dump_loop_stall(last_dump: list, *, probe_timeout: float, max_strikes: int,
+                     min_interval: float = DEFAULT_LOOP_STALL_DUMP_MIN_INTERVAL_S) -> bool:
+    """Dump all thread stacks on a stall's first missed probe; never raises, never exits.
+
+    Runs on the watchdog thread while the loop is still blocked, so the main thread's stack names the
+    blocker. ``last_dump`` is a one-slot monotonic timestamp shared across stalls (rate limit). The
+    file is rotated to ``.1`` past ``_LOOP_STALL_DUMP_MAX_BYTES``. Returns True when a dump was written.
+    """
+    now = time.monotonic()
+    if now - last_dump[0] < min_interval:
+        return False
+    last_dump[0] = now
+    path = get_loop_stall_dump_path()
+    with contextlib.suppress(Exception):
+        logger.warning(
+            "Gateway event loop missed a liveness probe (blocked >%.0fs; restart after %d misses); "
+            "dumping all thread stacks to %s", probe_timeout, max_strikes, path)
+    with contextlib.suppress(OSError):
+        if path.stat().st_size > _LOOP_STALL_DUMP_MAX_BYTES:
+            os.replace(path, path.with_name(path.name + ".1"))
+    header = {"event": "loop_liveness_probe_missed", "pid": os.getpid(),
+              "blocked_at_least_s": probe_timeout, "fired_at": datetime.now(UTC).isoformat()}
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(Exception), open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(header, default=str) + "\n--- faulthandler dump (all threads) ---\n")
+        fh.flush()
+        faulthandler.dump_traceback(file=fh, all_threads=True)
+        fh.write("--- end dump ---\n")
+    return True
 
 
 def write_loop_heartbeat(
