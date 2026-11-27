@@ -174,7 +174,17 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        status = psutil.Process(proc.pid).status()
+        if status != psutil.STATUS_STOPPED:
+            from tests.hermes_cli.windows_process_snapshot import thread_suspend_counts
+
+            print('failed setup child:', {'pid': proc.pid, 'status': status,
+                                          'marker_exists': marker.exists(), 'failure': failure})
+            try:
+                print('kernel thread snapshot:', thread_suspend_counts(proc))
+            except (OSError, AttributeError, ValueError) as exc:
+                print('kernel thread snapshot unavailable:', type(exc).__name__, str(exc))
+        assert status == psutil.STATUS_STOPPED
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

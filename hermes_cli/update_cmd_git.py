@@ -582,7 +582,9 @@ def _probe_fork_bomb(argv: list) -> Optional[bool]:
         result = run_git(argv, ["--version"], timeout=15, **_GIT_TEXT_KW)
     except Exception:
         return None
-    return "fork bomb" in ((result.stdout or "") + (result.stderr or "")).lower()
+    if "fork bomb" in ((result.stdout or "") + (result.stderr or "")).lower():
+        return True
+    return False if result.returncode == 0 else None
 
 
 def _git_is_trampoline(git_cmd: list) -> bool:
@@ -610,6 +612,21 @@ def _portable_git_candidates() -> list:
     candidates = []
     with suppress(Exception):
         candidates += [root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe" for root in (get_default_hermes_root(), Path(get_hermes_home()))]
+    # As in early recovery, installers may have staged the pinned entry without facts.
+    # Only read PM paths here; the broken trampoline must not trigger an installation.
+    with suppress(Exception):
+        import pm
+        from pm import paths
+        from pm.lock import Lockfile
+
+        recorded = pm.installed_package("git", allow_outdated=True)
+        roots = [recorded.path] if recorded is not None else []
+        package, target = pm.get_package("git"), pm.current_target()
+        version = Lockfile(paths.lockfile_path()).version("git")
+        roots.append(paths.store_root() / package.store_entry(version, target))
+        candidates += [root / arch / "libexec" / "git-core" / "git.exe"
+                       for root in dict.fromkeys(roots)
+                       for arch in ("clangarm64", "mingw64", "mingw32")]
     return candidates
 
 
