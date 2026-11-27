@@ -276,6 +276,9 @@ def run(column: str, root: Path) -> SimpleNamespace:
     model = Model(f"CRON-HANDOFF-{secrets.token_hex(4)}")
     with FakeLLMServer(model) as srv, X.cell(
             column, root, srv.base_url, extra={"kanban": {"dispatch_interval_seconds": 3}}) as inst:
+        # The dashboard needs the optional managed toolchain; lazy installs stay disabled.
+        tools = inst.cli("pm", "install", "node", "npm", timeout=600)
+        assert tools.returncode == 0, f"premise: dashboard toolchain provisioning failed:\n{inst.diagnostics(tools)}"
         before = X.start_gateway(inst)
         o.old_pid = before["pid"]
         with X.FileWatch(inst.hermes_home / "gateway.pid") as watch:
