@@ -1058,3 +1058,95 @@ class TestNonConversationalTrackerOffload:
         assert sorted(writes[-1]) == ["1", "2"]
 
 
+
+
+def _tagged_bot_chunks(adapter, channel):
+    bot_user = adapter._client.user
+    bot_user.bot = True
+    tagged = make_message(channel=channel, content=f"<@{bot_user.id}> first chunk", mentions=[bot_user])
+    tagged.author.bot = True
+    second = make_message(channel=channel, content="second chunk")
+    second.id = 124
+    second.author.bot = True
+    return tagged, second
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_bot_chunk_joins_tagged_chunks_auto_thread(adapter, monkeypatch):
+    """A split bot handoff in an auto-thread channel stays one thread and one turn."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    monkeypatch.setenv("DISCORD_ALLOW_BOTS", "mentions")
+    adapter._ready_event.set()
+    adapter._text_batch_delay_seconds = 0.6
+    adapter._text_batch_split_delay_seconds = 2.0
+    channel = FakeTextChannel(channel_id=321)
+    thread = FakeThread(channel_id=456, name="t", parent=channel)
+    adapter._auto_create_thread = AsyncMock(return_value=thread)
+    tagged, second = _tagged_bot_chunks(adapter, channel)
+
+    assert await adapter._dispatch_discord_message(tagged) is True
+    assert await adapter._dispatch_discord_message(second) is True
+    await asyncio.wait_for(asyncio.gather(*adapter._pending_text_batch_tasks.values()), timeout=5.0)
+
+    adapter._auto_create_thread.assert_awaited_once()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "first chunk\nsecond chunk"
+    assert event.source.thread_id == "456"
+
+
+@pytest.mark.asyncio
+async def test_bot_continuation_waits_for_in_flight_auto_thread(adapter, monkeypatch):
+    """Chunk 2 can arrive while chunk 1's thread is still being created; it must not open its own."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    monkeypatch.setenv("DISCORD_ALLOW_BOTS", "mentions")
+    adapter._ready_event.set()
+    adapter._text_batch_delay_seconds = 0.01
+    adapter._text_batch_split_delay_seconds = 0.02
+    channel = FakeTextChannel(channel_id=321)
+    thread = FakeThread(channel_id=456, name="t", parent=channel)
+    release = asyncio.Event()
+
+    async def _slow_create(_message):
+        await release.wait()
+        return thread
+
+    adapter._auto_create_thread = AsyncMock(side_effect=_slow_create)
+    tagged, second = _tagged_bot_chunks(adapter, channel)
+
+    first_task = asyncio.create_task(adapter._dispatch_discord_message(tagged))
+    await asyncio.sleep(0)
+    second_task = asyncio.create_task(adapter._dispatch_discord_message(second))
+    await asyncio.sleep(0)
+    release.set()
+    assert await first_task is True
+    assert await second_task is True
+
+    await asyncio.wait_for(asyncio.gather(*adapter._pending_text_batch_tasks.values()), timeout=5.0)
+
+    adapter._auto_create_thread.assert_awaited_once()
+    events = [call.args[0] for call in adapter.handle_message.await_args_list]
+    assert {event.source.thread_id for event in events} == {"456"}
+    assert "second chunk" in "\n".join(event.text for event in events)
+
+
+@pytest.mark.asyncio
+async def test_late_unmentioned_bot_message_does_not_reuse_expired_thread(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    adapter._text_batch_delay_seconds = 0.01
+    channel = FakeTextChannel(channel_id=321)
+    first_thread = FakeThread(channel_id=456, name="t", parent=channel)
+    adapter._auto_create_thread = AsyncMock(return_value=first_thread)
+    tagged, second = _tagged_bot_chunks(adapter, channel)
+    clock = [1000.0]
+    monkeypatch.setattr(discord_platform, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+
+    thread, reused = await adapter._auto_thread_for_message(tagged)
+    assert (thread, reused) == (first_thread, False)
+    clock[0] += 60.0
+    adapter._auto_create_thread.return_value = FakeThread(channel_id=789, name="u", parent=channel)
+    thread, reused = await adapter._auto_thread_for_message(second)
+    assert reused is False and thread.id == 789
