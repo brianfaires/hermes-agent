@@ -360,3 +360,45 @@ def test_heartbeat_write_does_not_block_the_loop_it_monitors():
     assert ticks >= 5, (
         f'the loop made only {ticks:d} tick(s) while the heartbeat was writing — the write is blocking the loop again'
     )
+
+
+def test_first_missed_probe_dumps_stacks_without_exiting(tmp_path, monkeypatch):
+    # A stall that recovers before the final strike (a ~40s block that drops a Discord websocket)
+    # must still leave the blocked loop's stack behind; only the final strike may exit.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from gateway.shutdown_watchdog import get_loop_stall_dump_path
+
+    exits = []
+    with patch("gateway.shutdown_watchdog._hard_exit", side_effect=exits.append), \
+            patch("gateway.shutdown_watchdog._mark_exited_quietly"):
+        handle = start_loop_liveness_watchdog(
+            MagicMock(spec=asyncio.AbstractEventLoop), probe_interval=0.01, probe_timeout=0.01,
+            max_strikes=1000)
+        path = get_loop_stall_dump_path(tmp_path)
+        deadline = time.monotonic() + 5.0
+        while not (path.exists() and "end dump" in path.read_text(encoding="utf-8")):
+            assert time.monotonic() < deadline, "no stall dump written"
+            time.sleep(0.01)
+        handle.stop()
+        handle.join(timeout=5.0)
+
+    dump = path.read_text(encoding="utf-8")
+    assert '"event": "loop_liveness_probe_missed"' in dump
+    assert "most recent call first" in dump
+    assert dump.count("loop_liveness_probe_missed") == 1  # rate-limited across later misses
+    assert exits == []
+
+
+def test_loop_stall_dump_is_rate_limited_and_rotated(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from gateway import shutdown_watchdog as sw
+
+    last = [float("-inf")]
+    assert sw._dump_loop_stall(last, probe_timeout=10, max_strikes=3)
+    assert not sw._dump_loop_stall(last, probe_timeout=10, max_strikes=3)
+
+    path = sw.get_loop_stall_dump_path(tmp_path)
+    monkeypatch.setattr(sw, "_LOOP_STALL_DUMP_MAX_BYTES", 1)
+    assert sw._dump_loop_stall([float("-inf")], probe_timeout=10, max_strikes=3)
+    assert path.with_name(path.name + ".1").exists()
+    assert path.read_text(encoding="utf-8").count("loop_liveness_probe_missed") == 1
