@@ -230,6 +230,22 @@ class TestSingleQueryExecuteCode:
             assert result["outcome"] == "blocked"
             assert "single_query_mode" in result["message"]
 
+    def test_allowlisted_execute_code_runs_in_single_query_deny(self, monkeypatch):
+        """An explicit ``command_allowlist: [execute_code]`` entry is standing operator
+        trust, like the allowlisted terminal patterns that already pass under deny.
+        Unlisted profiles keep the refusal."""
+        monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+        monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+
+        from unittest.mock import patch as mock_patch
+        with mock_patch("tools.approval_context._get_single_query_approval_mode", return_value="deny"):
+            assert not approval_module.check_execute_code_guard("import os", "local")["approved"]
+            approval_module.approve_permanent("execute_code")
+            assert approval_module.check_execute_code_guard("import os", "local")["approved"]
+
     def test_execute_code_allowed_in_single_query_approve(self, monkeypatch):
         monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")

@@ -67,6 +67,11 @@ _RESPAWN_BLOCKER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Latest-run outcomes whose persisted ``last_failure_error`` is not a diagnosis
+# for the next spawn: a plain crash stores captured worker output (#117097), and
+# a review handoff means the failing run was superseded by a later verdict.
+_STALE_FAILURE_OUTCOMES = frozenset({"crashed", "review_requested", "changes_requested"})
+
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 
@@ -1616,10 +1621,13 @@ def check_respawn_guard(
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
-    # benign commands such as ``claude auth status`` (#117097).
+    # benign commands such as ``claude auth status`` (#117097). A review
+    # handoff that ended after the failure supersedes it: the stamped text
+    # describes an older run, not why this one would fail.
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if (err and latest_outcome not in _STALE_FAILURE_OUTCOMES
+            and _RESPAWN_BLOCKER_RE.search(err)):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -2695,9 +2703,14 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
-    """The profile owner executes; this subprocess only waits for its receipt."""
+    """The profile owner executes; this subprocess only waits for its receipt.
+
+    ``-P``: the worker runs with ``cwd=<workspace>``, and plain ``-m`` would put that cwd
+    ahead of the pinned install tree, so a hermes-agent worktree workspace shadowed
+    ``hermes_cli`` and the worker ran the task branch's source (brianfaires/hermes-agent#257).
+    """
     import sys
-    return [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
+    return [sys.executable, "-P", "-m", "hermes_cli.kanban_worker_client"]
 
 
 def _open_worker_log(task: Task, board: Optional[str]):
