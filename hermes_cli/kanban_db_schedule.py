@@ -8,11 +8,16 @@ import sqlite3
 def schedule_task(
     conn: sqlite3.Connection, task_id: str, *, reason: str | None = None,
     expected_run_id: int | None = None, comment_author: str | None = None,
+    ci_wait: dict | None = None,
 ) -> bool:
     """Refreshes preserve the parked attempt; identical reasons are no-ops."""
     from hermes_cli import kanban_db as kb
 
     with kb.write_txn(conn):
+        binding = None
+        if ci_wait is not None:
+            from hermes_cli.kanban_db_ci import park_binding
+            binding = park_binding(conn, task_id, expected_run_id, ci_wait)
         task = kb.get_task(conn, task_id)
         if task is None or (expected_run_id is not None
                             and task.current_run_id != int(expected_run_id)):
@@ -39,7 +44,10 @@ def schedule_task(
                 conn, task_id, outcome="scheduled", status="scheduled", summary=reason,
                 synthesize=bool(reason),
             )
-        kb._append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
+        payload: dict[str, object] = {"reason": reason}
+        if binding is not None:
+            payload["ci_wait"] = binding
+        kb._append_event(conn, task_id, "scheduled", payload, run_id=run_id)
         if reason and comment_author is not None:
             kb.add_comment(conn, task_id, comment_author, f"SCHEDULED: {reason}")
         return True
