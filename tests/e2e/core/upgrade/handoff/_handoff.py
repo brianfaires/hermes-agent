@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import json
 import os
 import shutil
@@ -119,6 +120,21 @@ class Install:
 
     def update(self, *extra: str, timeout: float = UPDATE_TIMEOUT) -> subprocess.CompletedProcess:
         return self.cli("update", "--yes", "--branch", "main", *extra, timeout=timeout)
+
+    def record_runtime_premise(self, stage: str) -> None:
+        """Trace fixture launch selection without booting or repairing another process."""
+        assert self.host is not None
+        launcher = Path(self.hermes)
+        try:
+            data = launcher.read_bytes()
+            detail = {"target": str(launcher.resolve()), "sha256": hashlib.sha256(data).hexdigest(),
+                      "header": data.decode(errors="replace").splitlines()[:2]}
+        except OSError as exc:
+            detail = {"launcher_error": str(exc)}
+        detail["dependency_facts"] = sorted(str(path.relative_to(self.hermes_home))
+                                            for path in self.hermes_home.glob("installs/*/facts.json"))
+        detail["source_sha"] = self.sha()
+        self.host.transcript.append(f"runtime premise {stage}: {json.dumps(detail)}")
 
     def diagnostics(self, cp: subprocess.CompletedProcess | None = None) -> str:
         """Everything a red cell needs: the command, the log tails, receipts, the process table."""

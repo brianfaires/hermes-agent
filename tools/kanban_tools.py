@@ -866,7 +866,7 @@ def _handle_schedule(args: dict, **kw) -> str:
                "blocker, or kanban_complete so the completion judge can evaluate it.")
         ok = kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
-        _check(ok, f"could not schedule {tid} (unknown id or not in todo/ready/running/blocked)")
+        _check(ok, f"could not schedule {tid} (unknown id, conflicting run/claim, or not in todo/ready/running/blocked/scheduled)")
         return _ok_landed(kb, conn, tid, "scheduled", reason=reason)
 
 

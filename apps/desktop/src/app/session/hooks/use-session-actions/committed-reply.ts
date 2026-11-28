@@ -2,6 +2,8 @@ import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-k
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { isLiveTailReplyId } from '@/lib/spoken-reply'
 
+import { chatPartsEquivalent } from './message-equivalence'
+
 /**
  * True when `next` is a pure forward extension of the previous *answer* text.
  * Empty previous answer never accepts a dump as an extension — that is how the
@@ -48,6 +50,119 @@ export function committedReplyCovers(message: ChatMessage, snapshot: string): bo
 const promptText = (message: ChatMessage | undefined) =>
   message ? textWithoutReferenceLines(chatMessageText(message)).trim() : ''
 
+/** A plain reply at the same durable prompt occurrence, before completion arrives. */
+function pageReplySharingLiveOccurrence(
+  page: ChatMessage[],
+  committedNew: (message: ChatMessage) => boolean,
+  live: ChatMessage,
+  liveMessages: ChatMessage[]
+): number {
+  if (live.role !== 'assistant' || live.hidden || live.error || !isLiveTailReplyId(live.id)) {
+    return -1
+  }
+
+  const liveIndex = liveMessages.indexOf(live)
+  const promptIndex = liveMessages.findLastIndex((row, index) => index < liveIndex && row.role === 'user')
+  const prompt = liveMessages[promptIndex]
+
+  const pagePrompt = page.findIndex(
+    row =>
+      row.role === 'user' &&
+      prompt &&
+      (row.id === prompt.id || (prompt.rowId !== undefined && row.rowId === prompt.rowId))
+  )
+
+  if (pagePrompt < 0) {
+    return -1
+  }
+
+  const end = page.findIndex((row, index) => index > pagePrompt && row.role === 'user')
+  const replies = page.slice(pagePrompt + 1, end < 0 ? undefined : end)
+  const localReplies = liveMessages.slice(promptIndex + 1, liveIndex + 1)
+  const stored = replies[0]
+  const text = chatMessageText(live)
+  const storedText = stored ? chatMessageText(stored) : ''
+
+  // Hidden directives/steering or multiple segments make text pairing ambiguous.
+  // Structural folds retain their existing reconciliation; never discard their parts.
+  if (
+    replies.length !== 1 ||
+    localReplies.length !== 1 ||
+    stored.role !== 'assistant' ||
+    stored.hidden ||
+    stored.error ||
+    !committedNew(stored) ||
+    stored.parts.some(part => part.type !== 'text') ||
+    !text ||
+    !storedText ||
+    !(text.startsWith(storedText) || storedText.startsWith(text))
+  ) {
+    return -1
+  }
+
+  return pagePrompt + 1
+}
+
+/** Keep a paired raw cursor beside its committed row, before any later prompt. */
+function withLiveReplyOccurrence(linked: ChatMessage[], storedId: string, live: ChatMessage): ChatMessage[] {
+  const paired = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
+
+  if (paired.some(row => row.id === live.id)) {
+    return paired
+  }
+
+  const anchor = paired.findIndex(row => row.id === storedId)
+
+  return [...paired.slice(0, anchor + 1), live, ...paired.slice(anchor + 1)]
+}
+
+/** Carry a known local pairing across REST pages that omit display metadata. */
+function preserveLiveReplyOccurrences(
+  page: ChatMessage[],
+  liveMessages: ChatMessage[],
+  baselineById: Map<string, ChatMessage>
+): ChatMessage[] {
+  let linked = page
+
+  for (const stored of page) {
+    const previous = baselineById.get(stored.id)
+    const live = liveMessages.find(row => row.id === previous?.liveReplyId)
+
+    if (!live) {
+      continue
+    }
+
+    const occurrence = liveMessages.filter(row => row.id !== stored.id)
+    const index = pageReplySharingLiveOccurrence(page, row => row.id === stored.id, live, occurrence)
+
+    if (index >= 0) {
+      linked = withLiveReplyOccurrence(linked, page[index].id, live)
+    }
+  }
+
+  return linked
+}
+
+/** Preserve the committed tail and bind its display to the raw live occurrence. */
+export function linkLiveReplyOccurrences(
+  page: ChatMessage[],
+  liveMessages: ChatMessage[],
+  committedNew: (message: ChatMessage) => boolean,
+  baselineById: Map<string, ChatMessage>
+): ChatMessage[] {
+  let linked = preserveLiveReplyOccurrences(page, liveMessages, baselineById)
+
+  for (const live of liveMessages.filter(row => row.pending)) {
+    const index = pageReplySharingLiveOccurrence(page, committedNew, live, liveMessages)
+
+    if (index >= 0) {
+      linked = withLiveReplyOccurrence(linked, page[index].id, live)
+    }
+  }
+
+  return linked
+}
+
 /**
  * Where a transcript page already commits a still-streaming live reply, or -1.
  *
@@ -81,6 +196,23 @@ export function pageReplyCommittingLiveRow(
     return -1
   }
 
+  const storedPrompt = page[pagePrompt]
+
+  if (ownPrompt?.rowId !== undefined && storedPrompt.rowId !== undefined && ownPrompt.rowId !== storedPrompt.rowId) {
+    return -1
+  }
+
+  // Legacy optimistic prompts have no durable id yet. Equal words alone do
+  // not pair a resend: its occurrence among prompts must agree as well.
+  if (
+    ownPrompt?.id !== storedPrompt.id &&
+    ownPrompt?.rowId === undefined &&
+    liveMessages.slice(0, liveMessages.indexOf(live)).filter(row => row.role === 'user').length !==
+      page.slice(0, pagePrompt + 1).filter(row => row.role === 'user').length
+  ) {
+    return -1
+  }
+
   const said = spokenText(live).trim()
 
   return page.findIndex(
@@ -88,6 +220,8 @@ export function pageReplyCommittingLiveRow(
       index > pagePrompt &&
       message.role === 'assistant' &&
       committedNew(message) &&
+      !message.error &&
+      message.parts.every(part => part.type === 'text' || live.parts.some(local => chatPartsEquivalent(part, local))) &&
       Boolean(replyAfterLastTool(message).trim()) &&
       spokenText(message).trim() === said
   )

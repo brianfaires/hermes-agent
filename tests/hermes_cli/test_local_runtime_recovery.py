@@ -520,7 +520,13 @@ def test_retained_endpoint_validates_identity(tmp_path, monkeypatch, damage):
             assert got == {"base_url": state["base_url"], "api_key": state["api_key"]}
             proc.terminate()
             proc.wait(timeout=5)
-            assert endpoint._state_endpoint() is None
+            from tests.hermes_cli.windows_process_snapshot import process_exit_snapshot
+
+            assert endpoint._state_endpoint() is None, {
+                "waited_returncode": proc.returncode,
+                "kernel": process_exit_snapshot(proc.pid),
+                "recorded_create_time": state["create_time"],
+            }
             assert path.exists()
         else:
             assert got is None
