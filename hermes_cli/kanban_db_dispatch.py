@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 from typing import Iterable
-from typing import Iterator
 from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
@@ -1635,6 +1634,8 @@ def check_respawn_guard(
     if lane == "review":
         return None
 
+    from hermes_cli.kanban_db_respawn import rows_since as _rows_since
+
     # 3. Completed run within guard window. Exception: an explicit re-queue
     #    AFTER that success (done→ready drag, re-promotion, unblock, reclaim) is
     #    a deliberate "run it again" — otherwise a manual done→ready would sit
@@ -1651,36 +1652,23 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
+    #    An exact native CI result can authorize one same-owner continuation.
+    pr_comments = [(t, c) for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
+                                          cols=", id, body", unreadable=now)  # duplicate-PR risk: fail closed
                 if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
+    pr_times = [t for t, _ in pr_comments]
     if pr_times:
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, max(pr_times),
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
             return None
+        from hermes_cli.kanban_db_ci import qualifies_ci_resume
+        if qualifies_ci_resume(conn, task_id, [c for _, c in pr_comments]):
+            return None
         return "active_pr"
 
     return None
-
-
-_GUARD_TIME_COLS = {"task_runs": "ended_at", "task_events": "created_at", "task_comments": "created_at"}
-
-
-def _rows_since(conn: sqlite3.Connection, table: str, task_id: str, since: int, where: str = "", *,
-                cols: str = "", strict: bool = False, unreadable: Optional[int] = None) -> Iterator[tuple[int, Any]]:
-    """``(epoch, row)`` for ``task_id``'s ``table`` rows timed at/after ``since`` (after, if ``strict``).
-    SQLite sorts TEXT above every INTEGER, so the indexed range also returns every text stamp (written
-    outside the mutators, #97455); those are decided on their parsed epoch. An unreadable time is
-    dropped (never guards or lifts) unless the caller substitutes ``unreadable``."""
-    col = _GUARD_TIME_COLS[table]
-    sql = f"SELECT {col}{cols} FROM {table} WHERE task_id = ? {where} AND {col} {'>' if strict else '>='} ?"
-    for row in conn.execute(sql, (task_id, since)):
-        t = _kb._to_epoch(row[0])
-        t = unreadable if t is None else t
-        if t is not None and (t > since if strict else t >= since):
-            yield t, row
 
 
 def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:

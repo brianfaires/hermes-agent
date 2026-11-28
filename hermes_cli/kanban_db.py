@@ -2181,6 +2181,9 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_db_ci import ci_claim_guarded
+        if ci_claim_guarded(conn, task_id):
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -3560,6 +3563,8 @@ def unblock_task(
     *,
     expected_scheduled_run_id: Optional[int] = None,
     note: Optional[str] = None,
+    ci_result: Optional[dict] = None,
+    expected_ci_wait: Optional[dict] = None,
 ) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
     when that is where it left off), closing any leaked run first. A fenced CI
@@ -3581,6 +3586,14 @@ def unblock_task(
                 or parked[0] != int(expected_scheduled_run_id)
             ):
                 return False
+        ci_resume = None
+        if expected_ci_wait is not None:
+            from hermes_cli.kanban_db_ci import matches_ci_wait
+            if not matches_ci_wait(conn, task_id, expected_scheduled_run_id, expected_ci_wait):
+                return False
+        if ci_result is not None:
+            from hermes_cli.kanban_db_ci import resume_binding
+            ci_resume = resume_binding(conn, task_id, expected_scheduled_run_id, ci_result)
         resume_status = (
             _resume_status_from_events(conn, task_id)
             if status == "blocked"
@@ -3611,14 +3624,10 @@ def unblock_task(
             return False
         if note:
             add_comment(conn, task_id, "system", note)
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
-        )
+        payload = {"status": new_status, "resume_status": resume_status}
+        if ci_resume is not None:
+            payload["ci_resume"] = ci_resume
+        _append_event(conn, task_id, "unblocked", payload if ci_resume or new_status != "ready" or resume_status != "ready" else None)
         return True
 
 
@@ -3884,35 +3893,6 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
         _delete_task_relations(conn, task_id)
     recompute_ready(conn)
     return True
-
-
-def schedule_task(
-    conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
-) -> bool:
-    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
-    until ``unblock_task`` re-gates it."""
-    with write_txn(conn):
-        params: list[Any] = [task_id]
-        sql = """
-            UPDATE tasks
-               SET status       = 'scheduled',
-                   claim_lock   = NULL,
-                   claim_expires= NULL,
-                   worker_pid   = NULL
-             WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked')
-        """
-        if expected_run_id is not None:
-            sql += " AND current_run_id = ?"
-            params.append(int(expected_run_id))
-        if conn.execute(sql, params).rowcount != 1:
-            return False
-        run_id = _end_or_synthesize_run(
-            conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
-        )
-        _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
-        return True
 
 
 # --- Worker context builder (what a spawned worker sees) ---
@@ -4219,6 +4199,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
+from hermes_cli.kanban_db_scheduling import schedule_task
 from hermes_cli.kanban_db_boards import (
     _default_board_display_name,
     _dir_holds_board,

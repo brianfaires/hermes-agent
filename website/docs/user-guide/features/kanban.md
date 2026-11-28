@@ -1040,6 +1040,23 @@ To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` 
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
 
+An exact native CI continuation is a separate, narrow exception to `active_pr`:
+an observer can pass `ci_wait={repo, ci_run, pr, head_sha}` to
+`kanban_db.schedule_task(..., expected_run_id=...)`, then the same binding plus
+`status="completed"` and `conclusion` to
+`unblock_task(..., expected_scheduled_run_id=..., ci_result=...)`.
+These optional fields are recorded atomically with the existing transitions.
+Only success, the original task attempt and owner, unchanged lifecycle, and the
+same pre-wait PR comments qualify one subsequent claim. Missing/malformed/stale
+proof, a new PR comment, owner/hold changes, failure or a later attempt do not
+grant this exception. Ordinary unblock, prose about CI and legacy observer
+results are not proof. Other dispatch and release gates remain in force.
+CI-origin claims recheck the guard inside the claim transaction. Observers pass
+`expected_ci_wait=...` even for observation errors, so an owner/lifecycle change
+during a query cannot ready another owner's card.
+Authentic native owner/reviewer handoffs retain their separate existing authority;
+an invalidated CI proof does not grant that authority.
+
 ### Drag-to-delete and bulk delete (dashboard)
 
 The dashboard exposes a **trash drop zone** on the kanban page — drag any card into it to delete the task (cascades through `task_events`, child links, and subscriptions). A confirmation prompt protects against accidents. Bulk delete is also reachable via `DELETE /api/plugins/kanban/tasks` with a JSON body `{"ids": ["t_abc", "t_def", ...]}`.
