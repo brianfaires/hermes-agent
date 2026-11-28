@@ -57,7 +57,7 @@ function pageReplySharingLiveOccurrence(
   live: ChatMessage,
   liveMessages: ChatMessage[]
 ): number {
-  if (live.role !== 'assistant' || !live.pending || live.hidden || live.error || !isLiveTailReplyId(live.id)) {
+  if (live.role !== 'assistant' || live.hidden || live.error || !isLiveTailReplyId(live.id)) {
     return -1
   }
 
@@ -103,15 +103,48 @@ function pageReplySharingLiveOccurrence(
   return pagePrompt + 1
 }
 
+/** Carry a known local pairing across REST pages that omit display metadata. */
+function preserveLiveReplyOccurrences(
+  page: ChatMessage[],
+  liveMessages: ChatMessage[],
+  baselineById: Map<string, ChatMessage>
+): ChatMessage[] {
+  let linked = page
+
+  for (const stored of page) {
+    const previous = baselineById.get(stored.id)
+    const live = liveMessages.find(row => row.id === previous?.liveReplyId)
+
+    if (!live) {
+      continue
+    }
+
+    const occurrence = liveMessages.filter(row => row.id !== stored.id)
+    const index = pageReplySharingLiveOccurrence(page, row => row.id === stored.id, live, occurrence)
+
+    if (index >= 0) {
+      linked = linked.map((row, at) => (at === index ? { ...row, liveReplyId: live.id } : row))
+
+      // An unchanged raw row is still the cursor when completion never arrives.
+      if (!linked.some(row => row.id === live.id)) {
+        linked = [...linked.slice(0, index + 1), live, ...linked.slice(index + 1)]
+      }
+    }
+  }
+
+  return linked
+}
+
 /** Preserve the committed tail and bind its display to the raw live occurrence. */
 export function linkLiveReplyOccurrences(
   page: ChatMessage[],
   liveMessages: ChatMessage[],
-  committedNew: (message: ChatMessage) => boolean
+  committedNew: (message: ChatMessage) => boolean,
+  baselineById: Map<string, ChatMessage>
 ): ChatMessage[] {
-  let linked = page
+  let linked = preserveLiveReplyOccurrences(page, liveMessages, baselineById)
 
-  for (const live of liveMessages) {
+  for (const live of liveMessages.filter(row => row.pending)) {
     const index = pageReplySharingLiveOccurrence(page, committedNew, live, liveMessages)
 
     if (index >= 0) {

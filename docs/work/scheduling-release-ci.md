@@ -52,6 +52,16 @@ unresolved; targeted native diagnostics preserve their assertions. N-1 dashboard
 maintenance can publish a PM launcher. Added before/after launcher and dependency-facts receipts
 will distinguish that transition without changing the predecessor or rebuilding dependencies.
 
+Round 5 correction (2026-11-27 Pacific / 2026-11-28 UTC): the two accepted review findings
+have bounded source fixes. The suspension assertion helper converts native snapshot/query cleanup
+OSError into AssertionError with the original cause, so expected setup failure cannot accept it.
+A retained discriminator exercises that exception boundary. Repeated Desktop hydration now carries
+an established local pairing from the same committed ID only while the exact live ID and compatible
+durable prompt occurrence remain. The raw live row survives unchanged refreshes; a hook regression
+rehydrates after a prefix delta and again with lost/late completion. Behavioral execution remains
+unperformed locally; correction artifacts are in `evidence/ci-prerequisites/ROUND5-CORRECTION.md`.
+No broader investigation, review or commit was performed.
+
 Round 5 static Ruff, ESLint, AST, TypeScript syntax, code-health and whitespace checks pass.
 Behavioral tests remain unexecuted locally under the established runner/dependency restrictions.
 Evidence and the uncommitted patch: `evidence/ci-prerequisites/ROUND5.md` and `ROUND5.patch`.

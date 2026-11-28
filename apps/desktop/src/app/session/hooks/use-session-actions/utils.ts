@@ -1427,7 +1427,7 @@ export function overlayConcurrentMessageChanges(
   const baselineById = new Map(baselineMessages.map(message => [message.id, message]))
   const committedNewRow = (message: ChatMessage) => !baselineById.has(message.id) && !isLiveTailRow(message)
 
-  nextMessages = linkLiveReplyOccurrences(nextMessages, currentMessages, committedNewRow)
+  nextMessages = linkLiveReplyOccurrences(nextMessages, currentMessages, committedNewRow, baselineById)
   const nextIndexById = new Map(nextMessages.map((message, index) => [message.id, index]))
   let changed = false
   const overlaid = [...nextMessages]

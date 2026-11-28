@@ -33,6 +33,17 @@ def process_exit_snapshot(pid):
             raise ctypes.WinError(ctypes.get_last_error())
 
 
+def assert_initial_thread_suspended(proc):
+    """Keep query/cleanup errors distinct from the setup failure being injected."""
+    try:
+        threads = thread_suspend_counts(proc)
+    except (OSError, KeyboardInterrupt) as error:
+        raise AssertionError("suspension query failed") from error
+    assert len(threads) == 1, threads
+    assert threads[0]['suspend_count'] == 1, threads
+    assert threads[0]['exit_status'] == 259, threads  # STILL_ACTIVE
+
+
 def thread_suspend_counts(proc):
     import ctypes
     from ctypes import wintypes

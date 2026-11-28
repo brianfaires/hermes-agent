@@ -58,6 +58,58 @@ it('renders one complete reconnect answer through late deltas without advancing 
   expect(answers()).toEqual(['A8 survives the drop and more'])
 })
 
+it.each([false, true])('keeps the established pair across fresh pages (late completion: %s)', completed => {
+  const prompt = row('16-user', 'user', 'across a drop', { rowId: 16 })
+  const live = row('assistant-stream-1', 'assistant', 'A8', { pending: true })
+  const freshPage = () => [prompt, row('17-assistant', 'assistant', 'A8 survives the drop', { rowId: 17 })]
+  const first = overlayConcurrentMessageChanges(freshPage(), [prompt], [prompt, live])
+  const updated = { ...live, parts: appendAssistantTextPart(live.parts, ' survives') }
+  const current = first.map(message => (message.id === live.id ? updated : message))
+  let messages = overlayConcurrentMessageChanges(freshPage(), first, current)
+
+  const { result, rerender } = renderHook(({ messages }) => useRuntimeMessageRepository(messages), {
+    initialProps: { messages }
+  })
+
+  const answers = () => result.current.messages.filter(({ message }) => message.role === 'assistant')
+
+  expect(answers()).toHaveLength(1)
+  expect(answers()[0].message.content).toContainEqual({ type: 'text', text: 'A8 survives the drop' })
+  expect(messages.find(message => message.id === live.id)).toBe(updated)
+  expect(chatMessageText(updated)).toBe('A8 survives')
+
+  const baseline = messages
+  const settled = { ...updated, pending: false, rowId: 17, durableComplete: true }
+
+  if (completed) {
+    messages = messages.map(message => (message.id === live.id ? settled : message))
+  }
+
+  messages = overlayConcurrentMessageChanges(freshPage(), baseline, messages)
+  rerender({ messages })
+  expect(answers()).toHaveLength(1)
+  expect(answers()[0].message.content).toContainEqual({ type: 'text', text: 'A8 survives the drop' })
+  expect(messages.find(message => message.id === live.id)).toBe(completed ? settled : updated)
+  expect(chatMessageText(messages.find(message => message.id === live.id)!)).toBe('A8 survives')
+})
+
+it('keeps a preserved raw cursor before the next prompt across repeated hydration', () => {
+  const prompt = row('16-user', 'user', 'first', { rowId: 16 })
+  const live = row('assistant-stream-1', 'assistant', 'answer', { pending: true })
+  const stored = row('17-assistant', 'assistant', 'answer tail', { rowId: 17, liveReplyId: live.id })
+  const queued = row('18-user', 'user', 'next', { rowId: 18 })
+  const baseline = [prompt, stored, live, queued]
+  const freshPage = () => [prompt, { ...stored, liveReplyId: undefined }, queued]
+  const second = overlayConcurrentMessageChanges(freshPage(), baseline, baseline)
+  const third = overlayConcurrentMessageChanges(freshPage(), second, second)
+
+  expect(second.findIndex(message => message.id === live.id)).toBeLessThan(
+    second.findIndex(message => message.id === queued.id)
+  )
+  expect(projectReconnectReplies(third).map(chatMessageText)).toEqual(['first', 'answer tail', 'next'])
+  expect(third.find(message => message.id === live.id)).toBe(live)
+})
+
 it.each([
   ['same', 'same answer'],
   ['same answer', 'same answer'],
