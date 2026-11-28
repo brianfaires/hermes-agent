@@ -123,11 +123,15 @@ function preserveLiveReplyOccurrences(
     const index = pageReplySharingLiveOccurrence(page, row => row.id === stored.id, live, occurrence)
 
     if (index >= 0) {
-      linked = linked.map((row, at) => (at === index ? { ...row, liveReplyId: live.id } : row))
+      const storedId = page[index].id
+
+      linked = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
 
       // An unchanged raw row is still the cursor when completion never arrives.
       if (!linked.some(row => row.id === live.id)) {
-        linked = [...linked.slice(0, index + 1), live, ...linked.slice(index + 1)]
+        const anchor = linked.findIndex(row => row.id === storedId)
+
+        linked = [...linked.slice(0, anchor + 1), live, ...linked.slice(anchor + 1)]
       }
     }
   }
@@ -148,7 +152,9 @@ export function linkLiveReplyOccurrences(
     const index = pageReplySharingLiveOccurrence(page, committedNew, live, liveMessages)
 
     if (index >= 0) {
-      linked = linked.map((row, at) => (at === index ? { ...row, liveReplyId: live.id } : row))
+      const storedId = page[index].id
+
+      linked = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
     }
   }
 

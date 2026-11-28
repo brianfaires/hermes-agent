@@ -11,6 +11,7 @@ export function projectReconnectReplies(messages: ChatMessage[]): ChatMessage[] 
     const live = stored.liveReplyId ? byId.get(stored.liveReplyId) : undefined
 
     if (
+      stored.role !== 'assistant' ||
       !live ||
       live.hidden ||
       live.role !== 'assistant' ||

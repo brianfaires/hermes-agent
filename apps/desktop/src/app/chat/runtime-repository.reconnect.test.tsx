@@ -110,6 +110,54 @@ it('keeps a preserved raw cursor before the next prompt across repeated hydratio
   expect(third.find(message => message.id === live.id)).toBe(live)
 })
 
+it.each([false, true])('keeps later occurrence identities after insertion (second pair already known: %s)', known => {
+  const firstPrompt = row('16-user', 'user', 'first prompt', { rowId: 16 })
+  const firstLive = row('assistant-stream-1', 'assistant', 'first answer', { pending: true })
+
+  const firstStored = row('17-assistant', 'assistant', 'first answer tail', {
+    rowId: 17,
+    liveReplyId: firstLive.id
+  })
+
+  const secondPrompt = row('18-user', 'user', 'second prompt', { rowId: 18 })
+  const secondLive = row('assistant-stream-2', 'assistant', 'second answer', { pending: true })
+
+  const secondStored = row('19-assistant', 'assistant', 'second answer tail', {
+    rowId: 19,
+    liveReplyId: secondLive.id
+  })
+
+  const baseline = [firstPrompt, firstStored, firstLive, secondPrompt, ...(known ? [secondStored, secondLive] : [])]
+  const current = known ? baseline : [...baseline, secondLive]
+
+  const freshPage = () => [
+    firstPrompt,
+    { ...firstStored, liveReplyId: undefined },
+    secondPrompt,
+    { ...secondStored, liveReplyId: undefined }
+  ]
+
+  const refreshed = overlayConcurrentMessageChanges(freshPage(), baseline, current)
+  const again = overlayConcurrentMessageChanges(freshPage(), refreshed, refreshed)
+
+  expect(projectReconnectReplies(again).map(chatMessageText)).toEqual([
+    'first prompt',
+    'first answer tail',
+    'second prompt',
+    'second answer tail'
+  ])
+  expect(again.find(message => message.id === firstLive.id)).toBe(firstLive)
+  expect(again.find(message => message.id === secondLive.id)).toBe(secondLive)
+  expect(again.find(message => message.id === secondPrompt.id)?.liveReplyId).toBeUndefined()
+})
+
+it('never projects an assistant reply over a user row with stray local metadata', () => {
+  const live = row('assistant-stream-1', 'assistant', 'repeat', { pending: true })
+  const prompt = row('16-user', 'user', 'repeat', { rowId: 16, liveReplyId: live.id })
+
+  expect(projectReconnectReplies([prompt, live])).toEqual([prompt, live])
+})
+
 it.each([
   ['same', 'same answer'],
   ['same answer', 'same answer'],
