@@ -544,12 +544,21 @@ class SlowConnection:
     and chains to that handler when it does."""
     def __init__(self, conn):
         self._conn = conn
+        self._ddl_started = False
         self.set_progress_handler(None, 0)
     def __getattr__(self, name):
         return getattr(self._conn, name)
+    def execute(self, sql, *a):
+        if sql == "BEGIN IMMEDIATE":
+            # Do not amplify macOS durability/schema setup before budget.arm.
+            # Still slow DDL if production forgets to install its deadline handler.
+            self._ddl_started = True
+            print("slowed", flush=True)
+        return self._conn.execute(sql, *a)
     def set_progress_handler(self, handler, n):
         def slow():
-            time.sleep(0.01)
+            if self._ddl_started:
+                time.sleep(0.01)
             return handler() if handler is not None else 0
         return self._conn.set_progress_handler(slow, 5)
     def close(self):
@@ -567,7 +576,6 @@ def slowed(path, *a, **kw):
     conn = original(path, *a, **kw)
     read_only = "mode=ro" in str(path)
     if holding_lock() and (phase == "integrity") == read_only:
-        print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
         return SlowConnection(conn)
     return conn
 

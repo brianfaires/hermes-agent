@@ -27,6 +27,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import hermes_yaml as yaml
+
 from tests.e2e.core._pending_fixes import known_failure, known_gate
 from tests.e2e.core.upgrade import _helpers as H
 from tests.e2e.core.upgrade.handoff import _handoff as X
@@ -274,8 +276,12 @@ def run(column: str, root: Path) -> SimpleNamespace:
     """Boot the fleet, update, let everything settle, and record what the user would see."""
     o = SimpleNamespace(column=column)
     model = Model(f"CRON-HANDOFF-{secrets.token_hex(4)}")
-    with FakeLLMServer(model) as srv, X.cell(
-            column, root, srv.base_url, extra={"kanban": {"dispatch_interval_seconds": 3}}) as inst:
+    extra = {"kanban": {"dispatch_interval_seconds": 3}}
+    if column == "n1":
+        # The legacy venv already carries N-1's dependencies. Its boot maintenance
+        # must not expose a bare PM launcher before the updater migrates them.
+        extra["cli"] = {"expose_on_path": False}
+    with FakeLLMServer(model) as srv, X.cell(column, root, srv.base_url, extra=extra) as inst:
         # The dashboard needs the optional managed toolchain; lazy installs stay disabled.
         inst.record_runtime_premise("before tool preparation")
         tools = inst.cli("pm", "install", "node", "npm", timeout=600)
@@ -283,6 +289,9 @@ def run(column: str, root: Path) -> SimpleNamespace:
         inst.host.transcript.append("tool preparation:\n" + H.describe(tools, 2000))
         inst.record_runtime_premise("after tool preparation")
         before = X.start_gateway(inst)
+        if column == "n1":
+            assert Path(inst.hermes).resolve() == inst.checkout / "venv" / "bin" / "hermes", (
+                "premise: N-1 boot must retain its provisioned legacy entrypoint\n" + inst.diagnostics())
         o.old_pid = before["pid"]
         with X.FileWatch(inst.hermes_home / "gateway.pid") as watch:
             assert X.pid_file_pid(inst) == o.old_pid, f"premise: gateway.pid names the gateway: {watch.render()}"
@@ -316,6 +325,13 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
+            if column == "n1":
+                # Re-enable normal publication BEFORE the real update. Its new
+                # launcher and dependency selection remain part of the handoff.
+                config_path = inst.hermes_home / "config.yaml"
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                config["cli"]["expose_on_path"] = True
+                config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
             o.up = inst.update()
             o.sha_after = inst.sha()
 

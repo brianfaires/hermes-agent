@@ -38,9 +38,11 @@ def swap_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(main_desktop, "_DESKTOP_SWAP_RENAME_RETRY_DELAYS_S", (0.2,))
     script = tmp_path / "foreign_helper.py"
     script.write_text(_HELPER, encoding="utf-8")
+    # No console: CREATE_NO_WINDOW can add a conhost outside the held folder.
+    # Keep the entire venv launcher/worker tree in the consent/exit assertions.
     helper = subprocess.Popen(
         [sys.executable, str(script)], cwd=live_root, stdout=subprocess.PIPE, text=True,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        creationflags=subprocess.DETACHED_PROCESS,
     )
     # The child opens its cwd handle during its own startup: wait for it before asserting the lock.
     assert helper.stdout.readline().strip() == "ready"
@@ -136,7 +138,7 @@ def test_a_partial_close_reports_only_the_holder_still_in_the_way(swap_fixture, 
     _consent, closed_tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
     protected = subprocess.Popen(
         [sys.executable, str(tmp_path / "foreign_helper.py")], cwd=live_root, stdout=subprocess.PIPE,
-        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        text=True, encoding="utf-8", creationflags=subprocess.DETACHED_PROCESS,
     )
     try:
         assert protected.stdout.readline().strip() == "ready"
@@ -172,7 +174,7 @@ def test_a_program_in_a_sibling_unpacked_folder_is_neither_named_nor_closed(swap
     sibling_tree: list = []
     sibling = subprocess.Popen(
         [sys.executable, str(tmp_path / "foreign_helper.py")], cwd=sibling_dir, stdout=subprocess.PIPE,
-        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        text=True, encoding="utf-8", creationflags=subprocess.DETACHED_PROCESS,
     )
     try:
         assert sibling.stdout.readline().strip() == "ready"
