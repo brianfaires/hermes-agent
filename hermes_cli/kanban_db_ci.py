@@ -51,11 +51,33 @@ def park_binding(conn, task_id, run_id, value):
     return {"binding": binding, "task": task_id, "run": run_id, "owner": task.assignee, "comment_id": comment_id}
 
 
-def _unchanged_since_park(conn, task_id, event_id):
-    # Event IDs, not second-granularity clocks: a same-second hold/owner round trip
-    # still invalidates the proof. Unknown transitions fail closed too.
-    return not any(row[0] not in {"commented", "unblocked", "respawn_guarded", "promoted", "linked"}
-                   for row in conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND id > ?", (task_id, event_id)))
+def _parked_worker_finished(conn, task_id, event_id, run_id, row):
+    from hermes_cli import kanban_db as kb
+    if row["run_id"] != run_id:
+        return False
+    bound = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND run_id = ? "
+        "AND kind = 'worker_bound' AND id < ? ORDER BY id DESC LIMIT 1",
+        (task_id, run_id, event_id)).fetchone()
+    identity = kb._json_dict(bound["payload"]) if bound else {}
+    result = kb._json_dict(row["payload"])
+    return (type(result.get("exit_code")) is int and result["exit_code"] == 0
+            and type(result.get("pid")) is int and result["pid"] > 0
+            and isinstance(result.get("claim_lock"), str) and bool(result["claim_lock"])
+            and type(identity.get("pid")) is int
+            and (result["pid"], result["claim_lock"]) == (identity["pid"], identity.get("claim_lock")))
+
+
+def _unchanged_since_park(conn, task_id, event_id, run_id):
+    # Event IDs catch same-second hold/owner round trips. Only the parked
+    # managed worker's successful finalizer is benign; unknown events still deny.
+    for row in conn.execute("SELECT kind, run_id, payload FROM task_events WHERE task_id = ? AND id > ?",
+                            (task_id, event_id)):
+        if row["kind"] in {"commented", "unblocked", "respawn_guarded", "promoted", "linked"}:
+            continue
+        if row["kind"] != "worker_result" or not _parked_worker_finished(conn, task_id, event_id, run_id, row):
+            return False
+    return True
 
 
 def _event(conn, task_id, kind):
@@ -71,7 +93,7 @@ def _resume_wait(conn, task_id, run_id):
     if (not isinstance(wait, dict) or not task or task.status != "scheduled"
             or wait.get("task") != task_id or wait.get("run") != run_id
             or event["run_id"] != run_id or wait.get("owner") != task.assignee
-            or not _run_matches(conn, task, run_id) or not _unchanged_since_park(conn, task_id, event["id"])):
+            or not _run_matches(conn, task, run_id) or not _unchanged_since_park(conn, task_id, event["id"], run_id)):
         raise ValueError("CI result belongs to a stale wait or changed owner/lifecycle")
     return event, wait
 
@@ -113,7 +135,7 @@ def qualifies_ci_resume(conn, task_id, pr_comments):
                 or kb._json_dict(parked["payload"]).get("ci_wait") != wait
                 or wait["task"] != task_id or wait["owner"] != task.assignee
                 or parked["run_id"] != wait["run"] or not _run_matches(conn, task, wait["run"])
-                or not _unchanged_since_park(conn, task_id, parked["id"]) or result["conclusion"] != "success"):
+                or not _unchanged_since_park(conn, task_id, parked["id"], wait["run"]) or result["conclusion"] != "success"):
             return False
         url = f"https://github.com/{binding['repo']}/pull/{binding['pr']}"
         return bool(pr_comments) and all(
