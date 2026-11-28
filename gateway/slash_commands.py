@@ -928,6 +928,9 @@ class GatewaySlashCommandsMixin(
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         args = event.get_command_args().strip().split()
+        if args[:1] == ['proposal']:
+            from gateway.locked_skill_endpoints import handle_native
+            return await handle_native(self, event, args[1:])
         sub = args[0].lower() if args else ""
         gate_off = not wa.write_approval_enabled(wa.SKILLS) and sub not in {"approval", "mode"}
         if gate_off and wa.pending_count(wa.SKILLS) == 0:

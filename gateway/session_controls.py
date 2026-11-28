@@ -279,6 +279,8 @@ class AuthorityConnection:
         handlers['session.control'] = partial(control, self)
         from gateway.session_onboarding import handlers as onboarding_handlers
         handlers.update(onboarding_handlers(self))
+        from gateway.locked_skill_endpoints import handlers as proposal_handlers
+        handlers.update(proposal_handlers(self))
         return handlers
 
     async def dispatch(self, request):

@@ -42133,6 +42133,116 @@
         "title": "SkillInspectInfo",
         "type": "object"
       },
+      "SkillProposalParams": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "enum": [
+              "prepare",
+              "freeze",
+              "show",
+              "apply",
+              "reconcile",
+              "enroll-start",
+              "enroll-finish"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "skill": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Skill"
+          },
+          "destination": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Destination"
+          },
+          "identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Identifier"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pr Url"
+          },
+          "digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Digest"
+          },
+          "attended_confirmation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attended Confirmation"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "SkillProposalParams",
+        "type": "object"
+      },
+      "SkillProposalResult": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "SkillProposalResult",
+        "type": "object"
+      },
       "SkillsAction": {
         "enum": [
           "list",
@@ -49467,6 +49577,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ShellExecResult"
+        }
+      }
+    },
+    {
+      "name": "skills.proposal",
+      "summary": "Native owner only: isolated locked-skill preparation, freeze, inspection, exact approved apply, and separate Git reconciliation. Enrollment finalization requires attended verification. No client approval/receipt/user-ID input; human approval is Telegram ingress only.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SkillProposalParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SkillProposalResult"
         }
       }
     },
