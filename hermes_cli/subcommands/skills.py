@@ -24,6 +24,8 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
         description="Search, install, inspect, audit, configure, and manage skills from skills.sh, well-known agent skill endpoints, GitHub, ClawHub, and other registries.",
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_action")
+    from hermes_cli.locked_skill_cli import build_parser as build_proposal_parser
+    build_proposal_parser(skills_subparsers)
 
     skills_trust = skills_subparsers.add_parser("trust",
         help="Trust a project so its repo-local skills (./.hermes/skills, ./.agents/skills) load")

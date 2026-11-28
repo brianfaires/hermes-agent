@@ -21,7 +21,7 @@ from . import (
     tools_commands,
     tools_mcp_plugins,
 )
-from . import canonical
+from . import canonical, canonical_locked_skills
 from .base import JsonValue, Params, Payload, Result, WireEnum
 from .registry import CANONICAL_METHODS, EVENTS, METHODS, SERVER_REQUESTS
 

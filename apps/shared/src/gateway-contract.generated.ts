@@ -5448,6 +5448,18 @@ export interface CanonicalBotCancelResult {
   status: 'cancelled' | 'stopping' | 'finished'
   receipt_status: string
 }
+export interface SkillProposalParams {
+  operation: 'prepare' | 'freeze' | 'show' | 'apply' | 'reconcile' | 'enroll-start' | 'enroll-finish'
+  skill?: string | null
+  destination?: string | null
+  identifier?: string | null
+  pr_url?: string | null
+  digest?: string | null
+  attended_confirmation?: boolean | null
+}
+export interface SkillProposalResult {
+  result: Record<string, unknown>
+}
 /** ``answers`` rides only on a reconnect replay (locks the server already accepted; null = skipped). */
 export interface ClarifyRequestParams {
   session_id: string
@@ -7010,6 +7022,8 @@ export interface CanonicalRpcMethods {
   'session.steer': { params: CanonicalCorrectionParams; result: CanonicalCorrectionResult }
   /** Ink ``!cmd`` / ``{!cmd}`` on the shared owner: one safe command for a local session, in its frozen launch cwd (``gateway/session_shell.py``). */
   'shell.exec': { params: CanonicalShellExecParams; result: ShellExecResult }
+  /** Native owner only: isolated locked-skill preparation, freeze, inspection, exact approved apply, and separate Git reconciliation. Enrollment finalization requires attended verification. No client approval/receipt/user-ID input; human approval is Telegram ingress only. */
+  'skills.proposal': { params: SkillProposalParams; result: SkillProposalResult }
   /** Adopt a registered execution after verifying the live producer claim. */
   'worker.adopt': { params: WorkerScopeParams; result: WorkerExecution }
   /** Sequence-fenced typed persistence write from an adopted worker. */
@@ -7065,6 +7079,7 @@ export const CANONICAL_RPC_METHODS = [
   'session.stats',
   'session.steer',
   'shell.exec',
+  'skills.proposal',
   'worker.adopt',
   'worker.persist',
   'worker.register'
