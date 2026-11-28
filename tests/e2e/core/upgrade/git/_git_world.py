@@ -3,10 +3,9 @@
 ``World`` is one sandboxed machine (``_install_helpers.new_sandbox``: bwrap, empty fake HOME, the
 git wrapper that reports the official remote URL) whose ``~/.gitconfig`` rewrites the official
 GitHub URL to a loopback ``git http-backend`` origin (``_smart_http``). The install itself comes
-from a real ``scripts/install.sh``: N-1's own copy for an N-1 install (it makes the depth-1
-single-branch clone N-1 users have), HEAD's for a HEAD install (a ``--filter=blob:none`` clone).
+from a real ``scripts/install.sh``: N-1's own copy for an N-1 install, HEAD's for a HEAD install.
 ``preclone`` seeds a checkout the installer then adopts, for the clone shapes users got another
-way (a manual full clone, a ``blob:none`` fallback clone).
+way (a depth-1 clone, a manual full clone, a ``blob:none`` fallback clone).
 
 Everything a cell asserts is user-visible: the exit code and transcript of ``hermes update``, the
 checkout's HEAD / branch / working tree / refs, the update receipt, and whether ``hermes

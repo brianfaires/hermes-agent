@@ -4199,7 +4199,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
-from hermes_cli.kanban_db_scheduling import schedule_task
+from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_boards import (
     _default_board_display_name,
     _dir_holds_board,

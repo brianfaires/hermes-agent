@@ -140,6 +140,23 @@ def test_owner_exit_kills_router_tree_not_external(tmp_path, stop_mode, nested):
                 launcher.wait(timeout=10)
 
 
+@pytest.mark.parametrize('stage', ['capture', 'walk', 'marker cleanup', 'snapshot cleanup'])
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt])
+def test_suspension_query_failure_cannot_satisfy_injected_setup_failure(monkeypatch, stage, error_type):
+    from tests.hermes_cli import windows_process_snapshot as snapshot
+
+    error = error_type(f'native {stage} failed')
+
+    def failed_query(proc):
+        raise error
+
+    monkeypatch.setattr(snapshot, 'thread_suspend_counts', failed_query)
+    with pytest.raises(AssertionError, match='suspension query failed') as caught:
+        with pytest.raises((OSError, KeyboardInterrupt)):
+            snapshot.assert_initial_thread_suspended(object())
+    assert caught.value.__cause__ is error
+
+
 @pytest.mark.platforms("windows")
 @pytest.mark.parametrize('failure', ['assign', 'resume', 'popen', 'configure'])
 def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch, failure):
@@ -173,8 +190,12 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
         monkeypatch.setattr(ctypes, 'WinDLL', failed_config_dll)
 
     def assign(job, proc):
+        from tests.hermes_cli.windows_process_snapshot import assert_initial_thread_suspended
+
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        # psutil reports running for a suspended initial thread on Windows ARM64.
+        # Require kernel proof, not a process-status label or marker absence alone.
+        assert_initial_thread_suspended(proc)
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

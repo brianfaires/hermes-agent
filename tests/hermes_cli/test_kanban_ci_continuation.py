@@ -26,6 +26,28 @@ def scenario(tmp_path, monkeypatch):
         yield conn, task, claimed.current_run_id, binding
 
 
+def test_ci_park_comment_failure_rolls_back_binding_and_attempt(scenario):
+    import sqlite3
+
+    conn, task, run, binding = scenario
+    before = kb.get_task(conn, task)
+    events = kb.list_events(conn, task_id=task)
+    conn.execute("CREATE TRIGGER fail_ci_comment BEFORE INSERT ON task_comments "
+                 "BEGIN SELECT RAISE(ABORT, 'fixture CI comment failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="fixture CI comment failure"):
+        kb.schedule_task(conn, task, reason="Exact CI", expected_run_id=run,
+                         ci_wait=binding, comment_author="default")
+    assert kb.get_task(conn, task) == before
+    assert kb.list_events(conn, task_id=task) == events
+    conn.execute("DROP TRIGGER fail_ci_comment")
+    assert kb.schedule_task(conn, task, reason="Exact CI", expected_run_id=run,
+                            ci_wait=binding, comment_author="default")
+    assert kb.list_comments(conn, task)[-1].body == "SCHEDULED: Exact CI"
+    assert kb.unblock_task(conn, task, expected_scheduled_run_id=run,
+                           ci_result={**binding, "status": "completed", "conclusion": "success"})
+    assert dispatch.check_respawn_guard(conn, task) is None
+
+
 def test_successful_exact_ci_result_allows_one_same_owner_claim(scenario):
     conn, task, run, binding = scenario
     assert kb.schedule_task(conn, task, reason="Native CI wait", expected_run_id=run, ci_wait=binding)

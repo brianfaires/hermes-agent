@@ -63,6 +63,20 @@ def client(kanban_home):
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------
 
+def test_scheduled_reason_refresh_uses_shared_kernel(client):
+    task = client.post("/api/plugins/kanban/tasks", json={"title": "Wait", "assignee": "a"}).json()["task"]
+    url = f"/api/plugins/kanban/tasks/{task['id']}"
+    assert client.patch(url, json={"status": "scheduled", "block_reason": "Original"}).status_code == 200
+    with kbc.connect_closing() as conn:
+        before = kb.get_task(conn, task["id"])
+        runs = kb.list_runs(conn, task["id"])
+    assert client.patch(url, json={"status": "scheduled", "block_reason": "Replacement"}).status_code == 200
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, task["id"]) == before
+        assert kb.list_runs(conn, task["id"]) == runs
+        assert kb.list_events(conn, task["id"])[-1].payload == {"reason": "Replacement"}
+
+
 def test_board_empty(client):
     r = client.get("/api/plugins/kanban/board")
     assert r.status_code == 200

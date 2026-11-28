@@ -61,6 +61,9 @@ export type ChatMessage = {
   queuedTurnStarted?: boolean
   /** Locally recovered output not yet represented by a durable completed reply. */
   recovered?: boolean
+  /** Display-only twin established by a refresh at the same durable prompt.
+   * Keep both raw rows so late deltas still address the original stream. */
+  liveReplyId?: string
   /** Whether hydration reached a final assistant source row, rather than a tool round. */
   durableComplete?: boolean
   /** Exact gateway receipt; whole-turn coverage is never inferred from prose. */

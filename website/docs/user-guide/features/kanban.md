@@ -960,7 +960,7 @@ hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to
 hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
         [--priority N]
 hermes kanban promote <id>...                          # move todo/blocked tasks to ready (recovery)
-hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
+hermes kanban schedule <id> "<reason>" [--ids <id>...] # park until an orchestrator releases it
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>
 hermes kanban unlink <parent_id> <child_id>
@@ -1003,6 +1003,8 @@ hermes kanban gc [--event-retention-days N]            # workspaces + old events
 ```
 
 All commands are also available as a slash command in the interactive CLI and in the messaging gateway (see [`/kanban` slash command](#kanban-slash-command) below).
+
+`schedule` parks a task in Scheduled; the reason is descriptive, not a timer. On an already-Scheduled, unclaimed task, it refreshes the latest scheduled reason while preserving the original parked attempt and all task settings. Repeating the same reason succeeds without adding another event, comment or attempt. CLI scheduling and its `SCHEDULED:` comment commit together: a refused operation or failed comment write does not leave partial success history. A worker whose run has ended cannot refresh the parked task; an orchestrator must do it.
 
 `--max-retries` is a per-task circuit-breaker override for the dispatcher. `--max-retries 1` blocks the task on the first non-successful attempt, while `--max-retries 3` allows two retries and blocks on the third failure. Omit it to use `kanban.failure_limit` from `config.yaml`, then the built-in default.
 
