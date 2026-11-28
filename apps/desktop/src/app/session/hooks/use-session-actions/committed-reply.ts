@@ -103,6 +103,19 @@ function pageReplySharingLiveOccurrence(
   return pagePrompt + 1
 }
 
+/** Keep a paired raw cursor beside its committed row, before any later prompt. */
+function withLiveReplyOccurrence(linked: ChatMessage[], storedId: string, live: ChatMessage): ChatMessage[] {
+  const paired = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
+
+  if (paired.some(row => row.id === live.id)) {
+    return paired
+  }
+
+  const anchor = paired.findIndex(row => row.id === storedId)
+
+  return [...paired.slice(0, anchor + 1), live, ...paired.slice(anchor + 1)]
+}
+
 /** Carry a known local pairing across REST pages that omit display metadata. */
 function preserveLiveReplyOccurrences(
   page: ChatMessage[],
@@ -123,16 +136,7 @@ function preserveLiveReplyOccurrences(
     const index = pageReplySharingLiveOccurrence(page, row => row.id === stored.id, live, occurrence)
 
     if (index >= 0) {
-      const storedId = page[index].id
-
-      linked = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
-
-      // An unchanged raw row is still the cursor when completion never arrives.
-      if (!linked.some(row => row.id === live.id)) {
-        const anchor = linked.findIndex(row => row.id === storedId)
-
-        linked = [...linked.slice(0, anchor + 1), live, ...linked.slice(anchor + 1)]
-      }
+      linked = withLiveReplyOccurrence(linked, page[index].id, live)
     }
   }
 
@@ -152,9 +156,7 @@ export function linkLiveReplyOccurrences(
     const index = pageReplySharingLiveOccurrence(page, committedNew, live, liveMessages)
 
     if (index >= 0) {
-      const storedId = page[index].id
-
-      linked = linked.map(row => (row.id === storedId ? { ...row, liveReplyId: live.id } : row))
+      linked = withLiveReplyOccurrence(linked, page[index].id, live)
     }
   }
 

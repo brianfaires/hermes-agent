@@ -151,6 +151,35 @@ it.each([false, true])('keeps later occurrence identities after insertion (secon
   expect(again.find(message => message.id === secondPrompt.id)?.liveReplyId).toBeUndefined()
 })
 
+it('keeps a newly paired cursor before a later persisted prompt through the next hydration', () => {
+  const firstPrompt = row('16-user', 'user', 'first prompt', { rowId: 16 })
+  const firstLive = row('assistant-stream-1', 'assistant', 'first answer', { pending: true })
+  const firstStored = row('17-assistant', 'assistant', 'first answer tail', { rowId: 17, liveReplyId: firstLive.id })
+  const secondPrompt = row('18-user', 'user', 'second prompt', { rowId: 18 })
+  const earlier = row('assistant-stream-2', 'assistant', 'second', { pending: true })
+  const secondLive = { ...earlier, parts: appendAssistantTextPart(earlier.parts, ' answer') }
+  const secondStored = row('19-assistant', 'assistant', 'second answer tail', { rowId: 19 })
+  const queued = row('20-user', 'user', 'queued prompt', { rowId: 20 })
+  const baseline = [firstPrompt, firstStored, firstLive, secondPrompt, earlier, queued]
+  const current = baseline.map(message => (message.id === earlier.id ? secondLive : message))
+  const freshPage = () => [firstPrompt, { ...firstStored, liveReplyId: undefined }, secondPrompt, secondStored, queued]
+  const refreshed = overlayConcurrentMessageChanges(freshPage(), baseline, current)
+  const again = overlayConcurrentMessageChanges(freshPage(), refreshed, refreshed)
+
+  expect(refreshed.findIndex(message => message.id === secondLive.id)).toBeLessThan(
+    refreshed.findIndex(message => message.id === queued.id)
+  )
+  expect(again.find(message => message.id === secondLive.id)).toBe(secondLive)
+  expect(chatMessageText(secondLive)).toBe('second answer')
+  expect(projectReconnectReplies(again).map(chatMessageText)).toEqual([
+    'first prompt',
+    'first answer tail',
+    'second prompt',
+    'second answer tail',
+    'queued prompt'
+  ])
+})
+
 it('never projects an assistant reply over a user row with stray local metadata', () => {
   const live = row('assistant-stream-1', 'assistant', 'repeat', { pending: true })
   const prompt = row('16-user', 'user', 'repeat', { rowId: 16, liveReplyId: live.id })
