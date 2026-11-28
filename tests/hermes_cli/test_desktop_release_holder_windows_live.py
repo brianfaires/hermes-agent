@@ -76,11 +76,26 @@ def _consent_for_run(desktop_dir: Path, helper, run_id: str) -> tuple[Path, list
     # The venv python.exe may be a launcher with the real interpreter as its child, both inside
     # the folder; the Desktop consents to every process the failure named, so this does too.
     tree = [psutil.Process(helper.pid), *psutil.Process(helper.pid).children(recursive=True)]
+    print("consented fixture tree:", [_process_details(p) for p in tree])
     consent = desktop_dir / "release" / ".close-holders-consent.json"
     seen = [{"pid": p.pid, "start_time": p.create_time(), "exe": p.exe()} for p in tree]
     consent.write_text(json.dumps({"written_at": time.time(), "run_id": run_id,
                                    "exes": [s["exe"] for s in seen], "holders": seen}), encoding="utf-8")
     return consent, tree
+
+
+def _process_details(proc):
+    try:
+        return proc.as_dict(attrs=["pid", "ppid", "name", "exe", "cwd", "create_time"])
+    except psutil.Error as exc:
+        return {"pid": proc.pid, "diagnostic_error": str(exc)}
+
+
+def _survivor_details(tree):
+    from tests.hermes_cli.windows_process_snapshot import process_exit_snapshot
+
+    return [{"process": _process_details(p),
+             "kernel": process_exit_snapshot(p.pid)} for p in tree if p.is_running()]
 
 
 def test_a_consent_given_for_another_run_closes_nothing_and_is_used_up(swap_fixture, monkeypatch):
@@ -108,7 +123,7 @@ def test_consented_retry_closes_exactly_the_holder_and_promotes(swap_fixture, ca
     assert promoted == live_root / "Hermes.exe"
     assert promoted.read_text(encoding="utf-8") == "new"
     assert helper.wait(10) is not None
-    assert not [p.pid for p in tree if p.is_running()]
+    assert not [p.pid for p in tree if p.is_running()], _survivor_details(tree)
     assert not consent.exists(), "a consent covers one retry only"
     assert "Closed with your consent: " in capsys.readouterr().out
 

@@ -1,4 +1,3 @@
-
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
@@ -72,6 +71,7 @@ import type { ClientSessionState } from '../../../types'
 import {
   committedReplyCovers,
   isStrictAnswerTextExtension,
+  linkLiveReplyOccurrences,
   pageReplyCommittingLiveRow,
   replyAfterLastTool
 } from './committed-reply'
@@ -1425,6 +1425,9 @@ export function overlayConcurrentMessageChanges(
   currentMessages: ChatMessage[]
 ): ChatMessage[] {
   const baselineById = new Map(baselineMessages.map(message => [message.id, message]))
+  const committedNewRow = (message: ChatMessage) => !baselineById.has(message.id) && !isLiveTailRow(message)
+
+  nextMessages = linkLiveReplyOccurrences(nextMessages, currentMessages, committedNewRow)
   const nextIndexById = new Map(nextMessages.map((message, index) => [message.id, index]))
   let changed = false
   const overlaid = [...nextMessages]
@@ -1435,11 +1438,7 @@ export function overlayConcurrentMessageChanges(
       message.role === 'assistant' && message.id.startsWith('assistant-stream-') && !baselineById.has(message.id)
   )
 
-  // message.complete settled this stream row while REST was in flight, and
-  // the page already carries the same reply under its committed id (#70209).
-  // Only a row the page newly added counts: one already in the baseline is an
-  // earlier turn's answer (a resent prompt can repeat it word for word). An
-  // errored row carries a failure the committed text cannot show.
+  // Only newly committed rows can represent this live occurrence (#70209).
   const committedOnPage = (current: ChatMessage): boolean => {
     const text = textWithoutReferenceLines(chatMessageText(current)).trim()
     const lastUser = overlaid.findLastIndex(message => message.role === 'user')
@@ -1496,8 +1495,6 @@ export function overlayConcurrentMessageChanges(
       )
     )
   }
-
-  const committedNewRow = (message: ChatMessage) => !baselineById.has(message.id) && !isLiveTailRow(message)
 
   const representedOnPage = (current: ChatMessage): boolean =>
     // The page can still carry the row's older streaming copy by id when it

@@ -35,6 +35,31 @@ def _make_broken_trampoline(tmp_path: Path) -> Path:
     return bat
 
 
+def _runner_git_diagnostics() -> str:
+    """Read the runner's actual layout and probe failures; never provision a Git."""
+    from hermes_cli.update_cmd_git import _portable_git_candidates
+
+    result = subprocess.run(["git", "--exec-path"], capture_output=True, text=True,
+                            timeout=30, check=False)
+    details = [f"git --exec-path: rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"]
+    candidates = _portable_git_candidates()
+    if result.returncode == 0 and Path(result.stdout.strip()).is_absolute():
+        core = Path(result.stdout.strip())
+        candidates = [core / "git.exe", core.parent.parent / "bin" / "git.exe", *candidates]
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file():
+            details.append(f"{candidate}: absent")
+            continue
+        try:
+            probe = subprocess.run([str(candidate), "--version"], capture_output=True,
+                                   text=True, timeout=15, check=False)
+            details.append(f"{candidate}: rc={probe.returncode} stdout={probe.stdout[-500:]!r} "
+                           f"stderr={probe.stderr[-500:]!r}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            details.append(f"{candidate}: {exc}")
+    return "\n".join(details)
+
+
 class TestGitTrampolineLive:
     def test_runner_git_is_not_a_trampoline(self):
         from hermes_cli import update_cmd
@@ -60,7 +85,7 @@ class TestGitTrampolineLive:
         real = update_cmd._locate_real_git()
         # windows-latest ships Git for Windows under Program Files with the
         # canonical git-core layout the locator searches first.
-        assert real is not None, "expected git-core git.exe on windows-latest"
+        assert real is not None, _runner_git_diagnostics()
         assert real.exists()
         assert real.name == "git.exe"
         probe = subprocess.run(
@@ -77,13 +102,13 @@ class TestGitTrampolineLive:
         broken_cmd = [str(bat), "-c", "windows.appendAtomically=false"]
         healed = update_cmd._ensure_non_trampoline_git(broken_cmd)
 
-        assert healed != broken_cmd, "broken trampoline must be swapped"
+        assert healed != broken_cmd, _runner_git_diagnostics()
         assert healed[1:] == broken_cmd[1:], "git config args must survive"
         real = Path(healed[0])
         assert real.exists() and real.name == "git.exe"
         # The healed command must actually work.
         result = subprocess.run(
-            healed[:1] + ["--version"], capture_output=True, text=True, timeout=30,
+            healed + ["--version"], capture_output=True, text=True, timeout=30,
             check=False,
         )
         assert result.returncode == 0

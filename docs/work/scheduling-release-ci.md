@@ -34,12 +34,27 @@ boundary; the attempted namespace preflight was denied and is not bypassed. Desk
 runs with existing dependencies stopped before collection on missing packages. No dependency
 installation/rebuild was performed; no behavioral RED/GREEN is claimed.
 
-Desktop reconnect still needs a correction: concurrent persisted full reply and shorter live row
-can render twice. The live event identity and full committed tail must both survive lost completion
-and late deltas. The retained regression specifies one visible anchored reply without advancing the
-raw stream cursor. Existing lost-completion protections and the full transcript oracle remain.
-ARM64 still retains its original stopped/no-child-execution/job/handle assertions; new diagnostics
-must establish whether the native failure is reporting or containment. No production containment change.
+Round 5 (2026-11-27 Pacific / 2026-11-28 UTC) consumes strict run `46086162428` at
+`50437724e38688f6b91bab0a8da3bd3411829c9e`. Prepared source checkpoint pairs a plain committed
+reply with its live occurrence at the same durable prompt, then projects the longer text through
+the existing renderer. Raw live parts remain the delta cursor. Regressions retain lost completion,
+late deltas, repeated prompt occurrences, steering, queued rows, reasoning, tools and errors.
+Structured committed folds keep their existing reconciliation; uncertain matches remain visible.
+
+ARM64's retained Pss snapshots prove one suspended initial thread (`suspend_count=1`,
+`exit_status=259`) while psutil reports running. The test now requires that kernel proof plus
+the unchanged no-execution, job and handle assertions. Production containment is untouched.
+
+Windows Git discovery, the third holder-tree PID, and the retried endpoint failure remain
+unresolved; targeted native diagnostics preserve their assertions. N-1 dashboard stderr reports
+`no dependency environment is committed for this install`. The pinned predecessor is
+`2415b14ccf13a3d3cf58fc17e7765ddbae3298ad`; the fixture uses a legacy venv, whereas its boot
+maintenance can publish a PM launcher. Added before/after launcher and dependency-facts receipts
+will distinguish that transition without changing the predecessor or rebuilding dependencies.
+
+Round 5 static Ruff, ESLint, AST, TypeScript syntax, code-health and whitespace checks pass.
+Behavioral tests remain unexecuted locally under the established runner/dependency restrictions.
+Evidence and the uncommitted patch: `evidence/ci-prerequisites/ROUND5.md` and `ROUND5.patch`.
 
 ## Next
 Ang owns review and existing-PR publication for authoritative hosted execution. This is a

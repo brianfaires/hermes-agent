@@ -277,8 +277,11 @@ def run(column: str, root: Path) -> SimpleNamespace:
     with FakeLLMServer(model) as srv, X.cell(
             column, root, srv.base_url, extra={"kanban": {"dispatch_interval_seconds": 3}}) as inst:
         # The dashboard needs the optional managed toolchain; lazy installs stay disabled.
+        inst.record_runtime_premise("before tool preparation")
         tools = inst.cli("pm", "install", "node", "npm", timeout=600)
         assert tools.returncode == 0, f"premise: dashboard toolchain provisioning failed:\n{inst.diagnostics(tools)}"
+        inst.host.transcript.append("tool preparation:\n" + H.describe(tools, 2000))
+        inst.record_runtime_premise("after tool preparation")
         before = X.start_gateway(inst)
         o.old_pid = before["pid"]
         with X.FileWatch(inst.hermes_home / "gateway.pid") as watch:
@@ -287,6 +290,7 @@ def run(column: str, root: Path) -> SimpleNamespace:
             assert status == 200 and X.reply_text(body) == REPLY, f"premise: a turn works before: {body}"
 
             o.dash_port = X.free_port()
+            inst.record_runtime_premise("after gateway boot, before dashboard")
             inst.spawn("dashboard", "dashboard", "--no-open", "--host", "127.0.0.1", "--port", str(o.dash_port))
             try:  # the first ``hermes dashboard`` builds the web UI, as it does for the user
                 X.wait_for(lambda: _dashboard_health(o.dash_port), timeout=600, what="the dashboard /api/health")

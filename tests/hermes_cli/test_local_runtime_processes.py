@@ -173,18 +173,15 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
         monkeypatch.setattr(ctypes, 'WinDLL', failed_config_dll)
 
     def assign(job, proc):
-        children.append(proc)
-        status = psutil.Process(proc.pid).status()
-        if status != psutil.STATUS_STOPPED:
-            from tests.hermes_cli.windows_process_snapshot import thread_suspend_counts
+        from tests.hermes_cli.windows_process_snapshot import thread_suspend_counts
 
-            print('failed setup child:', {'pid': proc.pid, 'status': status,
-                                          'marker_exists': marker.exists(), 'failure': failure})
-            try:
-                print('kernel thread snapshot:', thread_suspend_counts(proc))
-            except (OSError, AttributeError, ValueError) as exc:
-                print('kernel thread snapshot unavailable:', type(exc).__name__, str(exc))
-        assert status == psutil.STATUS_STOPPED
+        children.append(proc)
+        # psutil reports running for a suspended initial thread on Windows ARM64.
+        # Require kernel proof, not a process-status label or marker absence alone.
+        threads = thread_suspend_counts(proc)
+        assert len(threads) == 1, threads
+        assert threads[0]['suspend_count'] == 1, threads
+        assert threads[0]['exit_status'] == 259, threads  # STILL_ACTIVE
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

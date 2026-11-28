@@ -22,14 +22,15 @@ const _chatMessageFieldsExhaustive: {
   [K in Exclude<keyof ChatMessage, (typeof COMPARED_FIELDS)[number] | (typeof IGNORED_FIELDS)[number]>]: never
 } = {}
 
+const IDENTITY_FIELDS = ['id', 'rowId', 'liveReplyId'] as const
+
 const COMPARED_FIELDS = [
-  'rowId',
+  ...IDENTITY_FIELDS,
   'persistedTurn',
   'durableComplete',
   'recovered',
   'asyncResult',
   'asyncResultKind',
-  'id',
   'role',
   'pending',
   'error',
@@ -166,8 +167,7 @@ const flagsDiffer = (a: ChatMessage, b: ChatMessage) =>
 
 export function chatMessagesEquivalent(a: ChatMessage, b: ChatMessage): boolean {
   if (
-    a.id !== b.id ||
-    a.rowId !== b.rowId ||
+    IDENTITY_FIELDS.some(field => a[field] !== b[field]) ||
     !persistedTurnsEquivalent(a.persistedTurn, b.persistedTurn) ||
     a.role !== b.role ||
     a.durableComplete !== b.durableComplete ||

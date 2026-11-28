@@ -1,9 +1,36 @@
-"""Query-only diagnostics for a disposable Windows child, never a containment oracle.
+"""Query-only kernel suspension proof for a disposable Windows child.
 
 WinAPI layout and lifetime contracts:
 https://learn.microsoft.com/windows/win32/api/processsnapshot/ns-processsnapshot-pss_thread_entry
 https://learn.microsoft.com/windows/win32/api/processsnapshot/nf-processsnapshot-pssfreesnapshot
 """
+
+
+def process_exit_snapshot(pid):
+    """Diagnostic only: distinguish a live process from delayed process-table removal."""
+    import ctypes
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    api.OpenProcess.restype = wintypes.HANDLE
+    api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    api.WaitForSingleObject.restype = wintypes.DWORD
+    api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    api.GetExitCodeProcess.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    handle = api.OpenProcess(0x100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+    if not handle:
+        return {"pid": pid, "open_error": ctypes.get_last_error()}
+    try:
+        code = wintypes.DWORD()
+        if not api.GetExitCodeProcess(handle, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {"pid": pid, "wait_result": api.WaitForSingleObject(handle, 0), "exit_code": code.value}
+    finally:
+        if not api.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
 
 
 def thread_suspend_counts(proc):
@@ -61,10 +88,12 @@ def thread_suspend_counts(proc):
                            "suspend_count": entry.SuspendCount, "exit_status": entry.ExitStatus})
     finally:
         # The snapshot is held by this process, even though its subject is the child.
-        if walk.value:
-            error = api.PssWalkMarkerFree(walk)
+        try:
+            if walk.value:
+                error = api.PssWalkMarkerFree(walk)
+                if error:
+                    raise ctypes.WinError(error)
+        finally:
+            error = api.PssFreeSnapshot(api.GetCurrentProcess(), snapshot)
             if error:
-                print("PssWalkMarkerFree diagnostic error:", error)
-        error = api.PssFreeSnapshot(api.GetCurrentProcess(), snapshot)
-        if error:
-            print("PssFreeSnapshot diagnostic error:", error)
+                raise ctypes.WinError(error)
